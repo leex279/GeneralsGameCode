@@ -41,15 +41,19 @@ function Test-IsInventoryCandidate {
     )
 
     $extension = $File.Extension.ToLowerInvariant()
-    if ($extension -in @('.mp4', '.webm', '.wav', '.mp3', '.png', '.jpg', '.log', '.html')) {
+    if ($extension -in @('.mp4', '.webm', '.wav', '.mp3', '.png', '.jpg', '.log')) {
         return $true
+    }
+
+    if ($extension -in @('.html', '.py')) {
+        return $File.Name -match '(?i)(replay|autocast|broadcast|report)'
     }
 
     if ($extension -eq '.txt') {
         return $File.Name -match '(?i)(replay|autocast|telemetry|diag|camera)'
     }
 
-    return $extension -eq '.py'
+    return $false
 }
 
 $files = @(
