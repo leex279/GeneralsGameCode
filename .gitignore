@@ -67,3 +67,10 @@ build.ninja
 ## Python
 __pycache__/
 *.pyc
+
+# Replay Analyzer V2 generated diagnostics and archival staging.
+/replay-analyzer-artifacts/
+/autocast_diag.txt
+/replay_parse_dump.ndjson
+/telemetry*.ndjson
+/scripts/replay_analyzer/.coverage
