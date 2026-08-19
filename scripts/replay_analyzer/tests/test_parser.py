@@ -106,7 +106,7 @@ def test_parse_replay_reports_a_neutral_command_warning_for_a_later_partial_type
 
 def test_parse_replay_keeps_prior_command_when_later_command_is_truncated(tmp_path: Path) -> None:
     """Reject losing already trustworthy commands when the subsequent command ends early."""
-    complete = command_bytes(30, 77, 1, [], [])
+    complete = command_bytes(30, 777, 1, [], [])
     partial = command_bytes(60, 78, 2, [(0, 1)], [struct.pack("<i", 5)])[:-1]
     command_stream_offset = len(replay_header_bytes()) + 16
 
@@ -114,7 +114,7 @@ def test_parse_replay_keeps_prior_command_when_later_command_is_truncated(tmp_pa
 
     assert parsed.completion_status == "truncated"
     assert parsed.commands == (
-        ReplayCommand(30, 1, 77, None, (), command_stream_offset, command_stream_offset + len(complete)),
+        ReplayCommand(30, 1, 777, None, (), command_stream_offset, command_stream_offset + len(complete)),
     )
     assert parsed.end_offset == command_stream_offset + len(complete)
 

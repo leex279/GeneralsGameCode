@@ -54,7 +54,7 @@ def test_command_decodes_every_engine_argument_type(
 
 def test_command_accepts_zero_type_runs_without_inventing_arguments() -> None:
     """Reject treating a valid zero-run command as malformed or as an unknown type."""
-    command = parse_command(command_bytes(0, 77, -1, [], []))
+    command = parse_command(command_bytes(0, 777, -1, [], []))
 
     assert command.arguments == ()
     assert command.message_name is None

@@ -37,3 +37,8 @@ strict = true
 explicit_package_bases = true
 mypy_path = ["$MYPY_CONFIG_FILE_DIR/src"]
 files = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "engine: launches the modern Zero Hour executable for authoritative parser parity",
+]
