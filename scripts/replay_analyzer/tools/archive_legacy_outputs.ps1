@@ -22,6 +22,37 @@ function Test-HasProperty([object]$Object, [string]$Name) {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
+function Assert-NoReparsePointAncestor([string]$Path, [string]$Description) {
+    $cursorPath = [IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrWhiteSpace($cursorPath)) {
+        $cursor = Get-Item -LiteralPath $cursorPath -Force -ErrorAction SilentlyContinue
+        if ($null -ne $cursor -and (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            Stop-Archive "$Description may not traverse a reparse point: $cursorPath"
+        }
+
+        $parentPath = [IO.Path]::GetDirectoryName($cursorPath)
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or
+            [string]::Equals($cursorPath, $parentPath, [StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $cursorPath = $parentPath
+    }
+}
+
+function Write-JsonAtomically([string]$Path, [object]$Value) {
+    $parentPath = Split-Path -Parent $Path
+    $temporaryPath = Join-Path $parentPath (".$([IO.Path]::GetFileName($Path)).$([Guid]::NewGuid().ToString('N')).tmp")
+    try {
+        $json = $Value | ConvertTo-Json -Depth 5
+        [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::Move($temporaryPath, $Path)
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 try {
     if (-not (Test-Path -LiteralPath $InventoryPath -PathType Leaf)) {
         Stop-Archive "Invalid inventory schema: inventory file is missing: $InventoryPath"
@@ -62,9 +93,17 @@ try {
     if ([string]::IsNullOrWhiteSpace($destinationRoot)) {
         Stop-Archive "Invalid destination path."
     }
+    if (Test-Path -LiteralPath $destinationRoot -PathType Leaf) {
+        Stop-Archive "Invalid destination path: destination root is a file."
+    }
+    Assert-NoReparsePointAncestor $destinationRoot "Archive destination"
     $manifestPath = Join-Path $destinationRoot "archive-manifest.json"
+    $pendingManifestPath = Join-Path $destinationRoot "archive-pending.json"
     if (Test-Path -LiteralPath $manifestPath) {
         Stop-Archive "Destination manifest already exists: $manifestPath"
+    }
+    if (Test-Path -LiteralPath $pendingManifestPath) {
+        Stop-Archive "Destination pending manifest already exists: $pendingManifestPath"
     }
 
     $sourcePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -145,7 +184,7 @@ try {
             $cursorPath = Split-Path -Parent $cursorPath
         }
 
-        $trackedPath = @(& git -C $repositoryRoot ls-files -- $relativePath)
+        $trackedPath = @(& git --literal-pathspecs -C $repositoryRoot ls-files -- $relativePath)
         if ($LASTEXITCODE -ne 0) {
             Stop-Archive "Unable to query Git tracked state for '$relativePath'."
         }
@@ -185,13 +224,38 @@ try {
         })
     }
 
-    $planned = @($planned | Sort-Object -Property OriginalPath)
+    $plannedByOriginalPath = @{}
+    foreach ($item in $planned) {
+        $plannedByOriginalPath[$item.OriginalPath] = $item
+    }
+    [string[]]$orderedOriginalPaths = @($plannedByOriginalPath.Keys)
+    [Array]::Sort($orderedOriginalPaths, [StringComparer]::Ordinal)
+    $planned = @($orderedOriginalPaths | ForEach-Object { $plannedByOriginalPath[$_] })
+
+    $categoryCounts = @{}
+    foreach ($item in $planned) {
+        if (-not $categoryCounts.ContainsKey($item.Category)) {
+            $categoryCounts[$item.Category] = 0
+        }
+        $categoryCounts[$item.Category]++
+    }
+    [string[]]$orderedCategories = @($categoryCounts.Keys)
+    [Array]::Sort($orderedCategories, [StringComparer]::Ordinal)
+
+    $manifestFiles = @($planned | ForEach-Object {
+        [ordered]@{
+            originalPath = $_.OriginalPath
+            archivedPath = $_.ArchivedPath
+            bytes = $_.Bytes
+            sha256 = $_.Sha256
+        }
+    })
     Write-Output "Archive preflight passed."
     Write-Output "Mode: $(if ($Apply) { 'apply' } else { 'dry-run' })"
     Write-Output "Destination: $destinationRoot"
     Write-Output "Planned files: $($planned.Count)"
-    foreach ($group in @($planned | Group-Object -Property Category | Sort-Object -Property Name)) {
-        Write-Output "Category $($group.Name): $($group.Count)"
+    foreach ($category in $orderedCategories) {
+        Write-Output "Category ${category}: $($categoryCounts[$category])"
     }
     foreach ($item in $planned) {
         Write-Output "PLAN $($item.SourcePath) -> $($item.DestinationPath)"
@@ -201,30 +265,117 @@ try {
         exit 0
     }
 
+    $destinationParentPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $null = $destinationParentPaths.Add($destinationRoot)
     foreach ($item in $planned) {
         $parent = Split-Path -Parent $item.DestinationPath
-        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-            $null = New-Item -ItemType Directory -Path $parent -Force
+        while ($parent.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($parent, $destinationRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            $null = $destinationParentPaths.Add($parent)
+            if ([string]::Equals($parent, $destinationRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $parent = Split-Path -Parent $parent
         }
-        Move-Item -LiteralPath $item.SourcePath -Destination $item.DestinationPath -ErrorAction Stop
+    }
+    $orderedDestinationParentPaths = @($destinationParentPaths | Sort-Object @{ Expression = { $_.Length }; Ascending = $true }, @{ Expression = { $_ }; Ascending = $true })
+    $createdDestinationDirectories = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        foreach ($parent in $orderedDestinationParentPaths) {
+            Assert-NoReparsePointAncestor $parent "Archive destination"
+            if (Test-Path -LiteralPath $parent -PathType Leaf) {
+                Stop-Archive "Archive destination parent is not a directory: $parent"
+            }
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+                $null = New-Item -ItemType Directory -Path $parent -ErrorAction Stop
+                $createdDestinationDirectories.Add($parent)
+                Assert-NoReparsePointAncestor $parent "Archive destination"
+            }
+        }
+    } catch {
+        for ($index = $createdDestinationDirectories.Count - 1; $index -ge 0; --$index) {
+            $createdDirectory = $createdDestinationDirectories[$index]
+            $createdDirectoryChildren = @(Get-ChildItem -LiteralPath $createdDirectory -Force)
+            if (Test-Path -LiteralPath $createdDirectory -PathType Container -and $createdDirectoryChildren.Count -eq 0) {
+                Remove-Item -LiteralPath $createdDirectory -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
     }
 
-    if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
-        $null = New-Item -ItemType Directory -Path $destinationRoot -Force
-    }
-    $manifest = [ordered]@{
+    $pendingManifest = [ordered]@{
         schemaVersion = 1
-        files = @($planned | ForEach-Object {
-            [ordered]@{
-                originalPath = $_.OriginalPath
-                archivedPath = $_.ArchivedPath
-                bytes = $_.Bytes
-                sha256 = $_.Sha256
-            }
-        })
+        state = "pending"
+        files = $manifestFiles
     }
-    $manifestJson = $manifest | ConvertTo-Json -Depth 5
-    [IO.File]::WriteAllText($manifestPath, $manifestJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    # TheSuperHackers @bugfix Leex 19/08/2026 Validate every destination parent before the first move, then persist a recovery record and finalize only after every archived hash is verified. (#TBD)
+    Write-JsonAtomically $pendingManifestPath $pendingManifest
+
+    $completedMoves = New-Object 'System.Collections.Generic.List[object]'
+    $finalManifestWritten = $false
+    try {
+        foreach ($item in $planned) {
+            $parent = Split-Path -Parent $item.DestinationPath
+            Assert-NoReparsePointAncestor $parent "Archive destination"
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+                Stop-Archive "Archive destination parent disappeared during apply: $parent"
+            }
+            if (Test-Path -LiteralPath $item.DestinationPath) {
+                Stop-Archive "Destination collision during apply: $($item.DestinationPath)"
+            }
+            Move-Item -LiteralPath $item.SourcePath -Destination $item.DestinationPath -ErrorAction Stop
+            $completedMoves.Add($item)
+        }
+
+        foreach ($item in $completedMoves) {
+            if (Test-Path -LiteralPath $item.SourcePath) {
+                Stop-Archive "Source remained after archive move: $($item.OriginalPath)"
+            }
+            if (-not (Test-Path -LiteralPath $item.DestinationPath -PathType Leaf)) {
+                Stop-Archive "Archive destination is missing after move: $($item.ArchivedPath)"
+            }
+            if ((Get-Item -LiteralPath $item.DestinationPath).Length -ne $item.Bytes) {
+                Stop-Archive "Archive byte length drift after move: $($item.ArchivedPath)"
+            }
+            $archivedHash = (Get-FileHash -LiteralPath $item.DestinationPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($archivedHash -ne $item.Sha256) {
+                Stop-Archive "Archive SHA-256 drift after move: $($item.ArchivedPath)"
+            }
+        }
+
+        $manifest = [ordered]@{
+            schemaVersion = 1
+            files = $manifestFiles
+        }
+        Write-JsonAtomically $manifestPath $manifest
+        $finalManifestWritten = $true
+        try {
+            Remove-Item -LiteralPath $pendingManifestPath -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Archive manifest finalized, but the pending manifest could not be removed: $pendingManifestPath"
+        }
+    } catch {
+        $applyFailure = $_.Exception.Message
+        if (-not $finalManifestWritten) {
+            $rollbackFailures = New-Object 'System.Collections.Generic.List[string]'
+            for ($index = $completedMoves.Count - 1; $index -ge 0; --$index) {
+                $item = $completedMoves[$index]
+                try {
+                    if (-not (Test-Path -LiteralPath $item.SourcePath) -and
+                        (Test-Path -LiteralPath $item.DestinationPath -PathType Leaf)) {
+                        Move-Item -LiteralPath $item.DestinationPath -Destination $item.SourcePath -ErrorAction Stop
+                    }
+                } catch {
+                    $rollbackFailures.Add("$($item.OriginalPath): $($_.Exception.Message)")
+                }
+            }
+            if ($rollbackFailures.Count -gt 0) {
+                Stop-Archive "Archive apply failed: $applyFailure. Rollback incomplete: $($rollbackFailures -join '; ')"
+            }
+            Stop-Archive "Archive apply failed and moved files were rolled back: $applyFailure"
+        }
+        throw
+    }
     Write-Output "Archived files: $($planned.Count)"
     Write-Output "Manifest: $manifestPath"
 } catch {

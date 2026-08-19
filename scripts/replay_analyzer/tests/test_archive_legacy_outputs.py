@@ -66,6 +66,79 @@ def _invoke(inventory: Path, destination: Path, *, apply: bool = False) -> subpr
     return _run(command, inventory.parent)
 
 
+def _invoke_with_move_failure(
+    inventory: Path, destination: Path, failing_source: Path
+) -> subprocess.CompletedProcess[str]:
+    script = str(ARCHIVE_SCRIPT).replace("'", "''")
+    inventory_path = str(inventory).replace("'", "''")
+    destination_path = str(destination).replace("'", "''")
+    failing_path = str(failing_source).replace("'", "''")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            f"$failurePath = '{failing_path}'; "
+            "function Move-Item { "
+            "param([string]$LiteralPath, [string]$Destination); "
+            'if ($LiteralPath -eq $failurePath) { throw "forced move failure" }; '
+            "Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath -Destination $Destination -ErrorAction Stop "
+            "}; "
+            f"& '{script}' -InventoryPath '{inventory_path}' -Destination '{destination_path}' -Apply; "
+            "exit $LASTEXITCODE"
+        ),
+    ]
+    return _run(command, inventory.parent)
+
+
+def _invoke_with_manifest_finalization_failure(
+    inventory: Path, destination: Path
+) -> subprocess.CompletedProcess[str]:
+    script = str(ARCHIVE_SCRIPT).replace("'", "''")
+    inventory_path = str(inventory).replace("'", "''")
+    destination_path = str(destination).replace("'", "''")
+    manifest_path = str(destination / "archive-manifest.json").replace("'", "''")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            f"$manifestPath = '{manifest_path}'; $global:moveCount = 0; "
+            "function Move-Item { "
+            "param([string]$LiteralPath, [string]$Destination); "
+            "Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath -Destination $Destination -ErrorAction Stop; "
+            "$global:moveCount += 1; "
+            "if ($global:moveCount -eq 1) { [IO.Directory]::CreateDirectory($manifestPath) | Out-Null } "
+            "}; "
+            f"& '{script}' -InventoryPath '{inventory_path}' -Destination '{destination_path}' -Apply; "
+            "exit $LASTEXITCODE"
+        ),
+    ]
+    return _run(command, inventory.parent)
+
+
+def _invoke_in_culture(
+    inventory: Path, destination: Path, culture: str
+) -> subprocess.CompletedProcess[str]:
+    script = str(ARCHIVE_SCRIPT).replace("'", "''")
+    inventory_path = str(inventory).replace("'", "''")
+    destination_path = str(destination).replace("'", "''")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            f"[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]'{culture}'; "
+            f"& '{script}' -InventoryPath '{inventory_path}' -Destination '{destination_path}' -Apply; "
+            "exit $LASTEXITCODE"
+        ),
+    ]
+    return _run(command, inventory.parent)
+
+
 def test_dry_run_prints_every_move_without_creating_or_moving(tmp_path: Path) -> None:
     repository = _make_repository(tmp_path)
     (repository / "clip.mp4").write_bytes(b"video")
@@ -214,3 +287,137 @@ def test_preflight_rejects_destination_collisions(tmp_path: Path, collision: str
     assert "destination" in (result.stdout + result.stderr).lower()
     assert (repository / "clip.mp4").read_bytes() == b"video"
     assert collision_path.read_text(encoding="utf-8") == "collision"
+
+
+def test_currently_tracked_check_treats_inventory_name_as_a_literal_git_pathspec(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    (repository / "clipa.mp4").write_bytes(b"tracked")
+    assert _run(["git", "add", "clipa.mp4"], repository).returncode == 0
+    assert _run(["git", "commit", "--quiet", "-m", "test: Add tracked wildcard match"], repository).returncode == 0
+    literal_name = "clip[ab].mp4"
+    (repository / literal_name).write_bytes(b"untracked")
+    inventory = _write_inventory(repository, [_inventory_entry(repository, literal_name)])
+
+    result = _invoke(inventory, tmp_path / "archive")
+
+    assert result.returncode == 0, result.stderr
+    assert (repository / literal_name).read_bytes() == b"untracked"
+
+
+def test_currently_tracked_check_rejects_a_tracked_literal_metacharacter_name(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    literal_name = "clip[ab].mp4"
+    (repository / literal_name).write_bytes(b"tracked")
+    assert _run(["git", "add", literal_name], repository).returncode == 0
+    assert _run(["git", "commit", "--quiet", "-m", "test: Add tracked literal metacharacters"], repository).returncode == 0
+    inventory = _write_inventory(repository, [_inventory_entry(repository, literal_name)])
+
+    result = _invoke(inventory, tmp_path / "archive", apply=True)
+
+    assert result.returncode != 0
+    assert "currently tracked" in (result.stdout + result.stderr).lower()
+    assert (repository / literal_name).read_bytes() == b"tracked"
+
+
+def test_apply_rolls_back_after_move_failure_and_retains_pending_manifest(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    first = repository / "first.mp4"
+    second = repository / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    inventory = _write_inventory(
+        repository,
+        [_inventory_entry(repository, "first.mp4"), _inventory_entry(repository, "second.mp4")],
+    )
+    destination = tmp_path / "archive"
+
+    result = _invoke_with_move_failure(inventory, destination, second)
+
+    assert result.returncode != 0, result.stderr
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+    pending = json.loads((destination / "archive-pending.json").read_text(encoding="utf-8-sig"))
+    assert [entry["originalPath"] for entry in pending["files"]] == ["first.mp4", "second.mp4"]
+    assert not (destination / "archive-manifest.json").exists()
+
+
+def test_preflight_rejects_later_destination_parent_file_before_pending_or_moves(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    source = repository / "nested" / "clip.mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    inventory = _write_inventory(repository, [_inventory_entry(repository, "nested/clip.mp4")])
+    destination = tmp_path / "archive"
+    blocked_parent = destination / "video" / "nested"
+    blocked_parent.parent.mkdir(parents=True)
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+
+    result = _invoke(inventory, destination, apply=True)
+
+    assert result.returncode != 0
+    assert "destination" in (result.stdout + result.stderr).lower()
+    assert source.read_bytes() == b"video"
+    assert not (destination / "archive-pending.json").exists()
+    assert not (destination / "archive-manifest.json").exists()
+
+
+def test_apply_rolls_back_when_atomic_manifest_finalization_fails(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    first = repository / "first.mp4"
+    second = repository / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    inventory = _write_inventory(
+        repository,
+        [_inventory_entry(repository, "first.mp4"), _inventory_entry(repository, "second.mp4")],
+    )
+    destination = tmp_path / "archive"
+
+    result = _invoke_with_manifest_finalization_failure(inventory, destination)
+
+    assert result.returncode != 0, result.stderr
+    assert first.exists(), result.stderr
+    assert second.exists(), result.stderr
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+    assert (destination / "archive-pending.json").is_file()
+    assert not (destination / "archive-manifest.json").is_file()
+
+
+def test_preflight_rejects_destination_reparse_ancestor_before_any_move(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    (repository / "clip.mp4").write_bytes(b"video")
+    inventory = _write_inventory(repository, [_inventory_entry(repository, "clip.mp4")])
+    target = tmp_path / "reparse-target"
+    target.mkdir()
+    redirect = tmp_path / "reparse-redirect"
+    try:
+        redirect.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        junction = _run(["cmd.exe", "/c", "mklink", "/J", str(redirect), str(target)], tmp_path)
+        if junction.returncode != 0:
+            pytest.skip(f"Cannot create a directory reparse point: {error}; {junction.stderr}")
+
+    result = _invoke(inventory, redirect / "archive", apply=True)
+
+    assert result.returncode != 0
+    assert "reparse" in (result.stdout + result.stderr).lower()
+    assert (repository / "clip.mp4").read_bytes() == b"video"
+    assert not (target / "archive").exists()
+
+
+def test_manifest_uses_ordinal_path_order_independent_of_current_culture(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    (repository / "a.mp4").write_bytes(b"a")
+    (repository / "Z.mp4").write_bytes(b"z")
+    inventory = _write_inventory(
+        repository,
+        [_inventory_entry(repository, "a.mp4"), _inventory_entry(repository, "Z.mp4")],
+    )
+    destination = tmp_path / "archive"
+
+    result = _invoke_in_culture(inventory, destination, "tr-TR")
+
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((destination / "archive-manifest.json").read_text(encoding="utf-8-sig"))
+    assert [entry["originalPath"] for entry in manifest["files"]] == ["Z.mp4", "a.mp4"]
