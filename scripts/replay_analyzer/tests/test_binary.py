@@ -7,6 +7,8 @@ import pytest
 from generals_replay_analyzer.binary import BinaryReader, Coord3D, ICoord2D, IRegion2D
 from generals_replay_analyzer.errors import (
     InvalidMagicError,
+    InvalidSliceRangeError,
+    InvalidStringEncodingError,
     InvalidStringLengthError,
     ReplayParseError,
     TruncatedReplayError,
@@ -18,6 +20,8 @@ from generals_replay_analyzer.errors import (
     ("error_type", "code"),
     [
         (InvalidMagicError, "invalid_magic"),
+        (InvalidSliceRangeError, "invalid_slice_range"),
+        (InvalidStringEncodingError, "invalid_string_encoding"),
         (TruncatedReplayError, "truncated_replay"),
         (UnsupportedArgumentTypeError, "unsupported_argument_type"),
         (InvalidStringLengthError, "invalid_string_length"),
@@ -117,6 +121,39 @@ def test_read_utf16le_uses_an_encoded_byte_length_prefix() -> None:
     assert reader.offset == 10
 
 
+def test_read_ascii_converts_malformed_payload_bytes_to_a_typed_parser_error() -> None:
+    """Reject leaking UnicodeDecodeError beyond the replay parser boundary."""
+    reader = BinaryReader(b"\x01\x00\x00\x00\xff")
+
+    with pytest.raises(InvalidStringEncodingError) as raised:
+        reader.read_ascii()
+
+    assert raised.value.code == "invalid_string_encoding"
+    assert raised.value.offset == 4
+    assert reader.offset == 5
+
+
+@pytest.mark.parametrize(
+    ("replay_bytes", "expected_offset"),
+    [
+        (b"\x01\x00\x00\x00\x00", 5),
+        (b"\x02\x00\x00\x00\x00\xd8", 6),
+    ],
+)
+def test_read_utf16le_converts_odd_or_invalid_payloads_to_a_typed_parser_error(
+    replay_bytes: bytes, expected_offset: int
+) -> None:
+    """Reject exposing codec-specific UTF-16 failures instead of replay parser context."""
+    reader = BinaryReader(replay_bytes)
+
+    with pytest.raises(InvalidStringEncodingError) as raised:
+        reader.read_utf16le()
+
+    assert raised.value.code == "invalid_string_encoding"
+    assert raised.value.offset == 4
+    assert reader.offset == expected_offset
+
+
 def test_read_ascii_rejects_a_length_larger_than_one_mebibyte_at_the_length_field() -> None:
     """Reject allocating unbounded ASCII payloads or reporting their payload offset."""
     reader = BinaryReader(b"\x01\x00\x10\x00")
@@ -154,11 +191,42 @@ def test_slice_rejects_a_range_that_cannot_capture_every_requested_byte() -> Non
     """Reject silently shortening raw evidence when its end offset exceeds replay data."""
     reader = BinaryReader(b"\x10")
 
-    with pytest.raises(TruncatedReplayError) as raised:
+    with pytest.raises(InvalidSliceRangeError) as raised:
         reader.slice(0, 2)
 
+    assert raised.value.code == "invalid_slice_range"
     assert raised.value.offset == 0
     assert reader.offset == 0
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected_offset"),
+    [
+        (-1, 0, 0),
+        (2, 1, 2),
+        (0, 2, 0),
+    ],
+)
+def test_slice_rejects_negative_reversed_and_past_end_bounds(
+    start: int, end: int, expected_offset: int
+) -> None:
+    """Reject Python slice normalization that would alter requested replay evidence bounds."""
+    reader = BinaryReader(b"\x10")
+
+    with pytest.raises(InvalidSliceRangeError) as raised:
+        reader.slice(start, end)
+
+    assert raised.value.code == "invalid_slice_range"
+    assert raised.value.offset == expected_offset
+    assert reader.offset == 0
+
+
+def test_slice_permits_exact_empty_and_full_replay_boundaries() -> None:
+    """Keep valid half-open evidence ranges available at both ends of the replay bytes."""
+    reader = BinaryReader(b"\x10")
+
+    assert reader.slice(0, 1) == b"\x10"
+    assert reader.slice(1, 1) == b""
 
 
 @pytest.mark.parametrize("available_bytes", range(16))
@@ -186,8 +254,11 @@ def test_truncated_string_payload_reports_the_payload_field_offset() -> None:
 
 
 def test_reader_uses_remaining_bytes_from_a_seekable_binary_stream() -> None:
-    """Reject ignoring a seekable stream's current position when constructing a reader."""
+    """Keep reader offsets relative to its current stream-position input window."""
     source = BytesIO(b"X\x34\x12")
     source.seek(1)
+    reader = BinaryReader(source)
 
-    assert BinaryReader(source).read_u16() == 0x1234
+    assert reader.read_u16() == 0x1234
+    assert reader.offset == 2
+    assert source.tell() == 1

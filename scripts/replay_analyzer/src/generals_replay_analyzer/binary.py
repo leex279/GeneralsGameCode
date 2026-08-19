@@ -4,7 +4,12 @@ import struct
 from dataclasses import dataclass
 from typing import BinaryIO, cast
 
-from .errors import InvalidStringLengthError, TruncatedReplayError
+from .errors import (
+    InvalidSliceRangeError,
+    InvalidStringEncodingError,
+    InvalidStringLengthError,
+    TruncatedReplayError,
+)
 
 MAX_ENCODED_STRING_BYTES = 1024 * 1024
 
@@ -36,10 +41,10 @@ class IRegion2D:
 
 # TheSuperHackers @feature Leex 19/08/2026 Centralize bounded replay byte reads before field decoding.
 class BinaryReader:
-    """Read immutable replay bytes while retaining absolute offsets and raw slices."""
+    """Read immutable replay bytes with offsets relative to this reader's input start."""
 
     def __init__(self, source: bytes | BinaryIO) -> None:
-        """Create a reader from bytes or the remaining contents of a seekable binary stream."""
+        """Create a reader from bytes or remaining stream bytes with offsets starting at zero."""
         if isinstance(source, bytes):
             self._data = source
         else:
@@ -69,12 +74,11 @@ class BinaryReader:
 
     def slice(self, start: int, end: int) -> bytes:
         """Return the raw immutable bytes in the half-open ``[start, end)`` range."""
-        if end > len(self._data):
-            available = max(len(self._data) - start, 0)
-            raise TruncatedReplayError(
-                "truncated_replay",
-                start,
-                f"expected {end - start} bytes, found {available}",
+        if start < 0 or end < start or end > len(self._data):
+            raise InvalidSliceRangeError(
+                "invalid_slice_range",
+                max(start, 0),
+                f"range [{start}, {end}) is outside replay bytes [0, {len(self._data)}]",
             )
         return self._data[start:end]
 
@@ -123,14 +127,14 @@ class BinaryReader:
 
     def read_ascii(self) -> str:
         """Read a uint32-length-prefixed ASCII string."""
-        return self._read_string_bytes().decode("ascii")
+        return self._read_decoded_string("ascii")
 
     def read_utf16le(self) -> str:
         """Read a uint32-length-prefixed UTF-16LE string."""
-        return self._read_string_bytes().decode("utf-16-le")
+        return self._read_decoded_string("utf-16-le")
 
-    def _read_string_bytes(self) -> bytes:
-        """Read an encoded string payload after enforcing its byte-length cap."""
+    def _read_decoded_string(self, encoding: str) -> str:
+        """Read and decode a bounded string while preserving payload failure context."""
         length_offset = self._offset
         encoded_length = self.read_u32()
         if encoded_length > MAX_ENCODED_STRING_BYTES:
@@ -139,4 +143,13 @@ class BinaryReader:
                 length_offset,
                 f"encoded string length {encoded_length} exceeds {MAX_ENCODED_STRING_BYTES} bytes",
             )
-        return self.read_exact(encoded_length)
+        payload_offset = self._offset
+        encoded_bytes = self.read_exact(encoded_length)
+        try:
+            return encoded_bytes.decode(encoding)
+        except UnicodeDecodeError as error:
+            raise InvalidStringEncodingError(
+                "invalid_string_encoding",
+                payload_offset,
+                f"invalid {encoding} string payload: {error.reason}",
+            ) from error

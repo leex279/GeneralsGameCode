@@ -21,6 +21,14 @@ class InvalidMagicError(ReplayParseError):
     """Raised when a replay does not begin with its expected signature."""
 
 
+class InvalidSliceRangeError(ReplayParseError):
+    """Raised when a raw evidence slice does not name a valid replay byte range."""
+
+
+class InvalidStringEncodingError(ReplayParseError):
+    """Raised when encoded replay string bytes cannot be decoded by their declared codec."""
+
+
 class TruncatedReplayError(ReplayParseError):
     """Raised when a requested field is not fully present in replay bytes."""
 
