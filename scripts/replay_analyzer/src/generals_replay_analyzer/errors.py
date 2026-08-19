@@ -6,7 +6,7 @@ from dataclasses import dataclass
 # TheSuperHackers @feature Leex 19/08/2026 Preserve machine-readable replay parser failure context.
 @dataclass(eq=False)
 class ReplayParseError(Exception):
-    """Base error containing a stable code and absolute replay byte offset."""
+    """Base error containing a stable code and reader-relative replay byte offset."""
 
     code: str
     offset: int
