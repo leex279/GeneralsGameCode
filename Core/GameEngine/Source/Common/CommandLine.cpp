@@ -32,6 +32,7 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
 #include "Common/ReplayParseDump.h"
+#include "Common/ReplayTelemetry.h"
 #endif
 #include "Common/version.h"
 #include "GameClient/ClientInstance.h"
@@ -39,6 +40,13 @@
 #include "GameClient/GameText.h"
 #include "GameNetwork/NetworkDefs.h"
 #include "WWLib/trim.h"
+
+#if defined(RTS_REPLAY_ANALYZER)
+#include <cctype>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
+#endif
 
 
 
@@ -452,16 +460,90 @@ Int parseReplay(char *args[], int num)
 }
 
 #if defined(RTS_REPLAY_ANALYZER)
+namespace
+{
+	AsciiString s_telemetryTracePath;
+	AsciiString s_telemetryRunId;
+	Int s_telemetryMovementFrames = 15;
+	Bool s_hasTelemetryPath = FALSE;
+	Bool s_hasTelemetryRunId = FALSE;
+	Bool s_hasTelemetryMovementFrames = FALSE;
+
+	void telemetryCommandLineError(const char *message)
+	{
+		fprintf(stderr, "Replay telemetry: %s\n", message);
+		fflush(stderr);
+		exit(1);
+	}
+
+	Bool isAbsoluteAnalyzerPath(const Char *path)
+	{
+		const Bool isDriveAbsolute = path[0] != '\0' && path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+		const Bool isUNCAbsolute = path[0] == '\\' && path[1] == '\\';
+		const Bool isPOSIXAbsolute = path[0] == '/';
+		return isDriveAbsolute || isUNCAbsolute || isPOSIXAbsolute;
+	}
+
+	Bool isCanonicalUuid(const Char *value)
+	{
+		if (strlen(value) != 36)
+		{
+			return FALSE;
+		}
+		for (Int index = 0; index < 36; ++index)
+		{
+			if (index == 8 || index == 13 || index == 18 || index == 23)
+			{
+				if (value[index] != '-')
+				{
+					return FALSE;
+				}
+			}
+			else if (!isxdigit(static_cast<UnsignedByte>(value[index])))
+			{
+				return FALSE;
+			}
+		}
+		return TRUE;
+	}
+
+	void validateReplayTelemetryOptions()
+	{
+		if (!s_hasTelemetryPath)
+		{
+			if (s_hasTelemetryRunId)
+			{
+				telemetryCommandLineError("-telemetry-run-id requires -telemetry");
+			}
+			if (s_hasTelemetryMovementFrames)
+			{
+				telemetryCommandLineError("-telemetry-movement-frames requires -telemetry");
+			}
+			return;
+		}
+		if (!s_hasTelemetryRunId)
+		{
+			telemetryCommandLineError("-telemetry requires a canonical telemetry run ID");
+		}
+		if (!TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+		{
+			telemetryCommandLineError("-telemetry requires exactly one headless replay");
+		}
+		if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+		{
+			telemetryCommandLineError("-telemetry requires sequential replay playback");
+		}
+		ReplayTelemetry::configure(s_telemetryTracePath, s_telemetryRunId, s_telemetryMovementFrames);
+	}
+}
+
 // TheSuperHackers @feature Leex 18/08/2026 Configure a process-local replay parser sink without affecting replay input or simulation state.
 Int parseReplayParseDump(char *args[], int num)
 {
 	if (num > 1)
 	{
 		const Char *path = args[1];
-		const Bool isDriveAbsolute = path[0] != '\0' && path[1] == ':' && (path[2] == '\\' || path[2] == '/');
-		const Bool isUNCAbsolute = path[0] == '\\' && path[1] == '\\';
-		const Bool isPOSIXAbsolute = path[0] == '/';
-		if (!isDriveAbsolute && !isUNCAbsolute && !isPOSIXAbsolute)
+		if (!isAbsoluteAnalyzerPath(path))
 		{
 			printf("Replay parse dump path must be absolute: \"%s\"\n", path);
 			exit(1);
@@ -470,6 +552,62 @@ Int parseReplayParseDump(char *args[], int num)
 		return 2;
 	}
 	return 1;
+}
+
+// TheSuperHackers @feature Leex 18/08/2026 Validate passive telemetry settings before replay playback can begin. (#TBD)
+Int parseReplayTelemetry(char *args[], int num)
+{
+	if (num <= 1)
+	{
+		telemetryCommandLineError("-telemetry requires an absolute output path");
+	}
+	if (s_hasTelemetryPath)
+	{
+		telemetryCommandLineError("-telemetry may only be specified once");
+	}
+	if (!isAbsoluteAnalyzerPath(args[1]))
+	{
+		telemetryCommandLineError("-telemetry output path must be absolute");
+	}
+	s_telemetryTracePath = args[1];
+	s_hasTelemetryPath = TRUE;
+	return 2;
+}
+
+Int parseReplayTelemetryRunId(char *args[], int num)
+{
+	if (num <= 1 || !isCanonicalUuid(args[1]))
+	{
+		telemetryCommandLineError("-telemetry-run-id requires a canonical UUID");
+	}
+	if (s_hasTelemetryRunId)
+	{
+		telemetryCommandLineError("-telemetry-run-id may only be specified once");
+	}
+	s_telemetryRunId = args[1];
+	s_hasTelemetryRunId = TRUE;
+	return 2;
+}
+
+Int parseReplayTelemetryMovementFrames(char *args[], int num)
+{
+	if (num <= 1)
+	{
+		telemetryCommandLineError("-telemetry-movement-frames requires a positive integer");
+	}
+	Char *end = nullptr;
+	const long movementFrames = strtol(args[1], &end, 10);
+	if (end == args[1] || *end != '\0' || movementFrames <= 0 || movementFrames > INT_MAX)
+	{
+		telemetryCommandLineError("-telemetry-movement-frames requires a positive integer");
+	}
+	if (s_hasTelemetryMovementFrames)
+	{
+		telemetryCommandLineError("-telemetry-movement-frames may only be specified once");
+	}
+	s_telemetryMovementFrames = static_cast<Int>(movementFrames);
+	s_hasTelemetryMovementFrames = TRUE;
+	return 2;
 }
 #endif
 
@@ -1164,6 +1302,10 @@ static CommandLineParam paramsForStartup[] =
 #if defined(RTS_REPLAY_ANALYZER)
 	// TheSuperHackers @feature Leex 18/08/2026 Emit an observer-only authoritative replay parse dump to an absolute NDJSON path.
 	{ "-replay-parse-dump", parseReplayParseDump },
+	// TheSuperHackers @feature Leex 18/08/2026 Activate passive replay telemetry only for one validated headless replay. (#TBD)
+	{ "-telemetry", parseReplayTelemetry },
+	{ "-telemetry-run-id", parseReplayTelemetryRunId },
+	{ "-telemetry-movement-frames", parseReplayTelemetryMovementFrames },
 #endif
 
 	// TheSuperHackers @feature helmutbuhler 23/05/2025
@@ -1466,6 +1608,9 @@ void CommandLine::parseCommandLineForStartup()
 	TheWritableGlobalData->m_commandLineData.m_hasParsedCommandLineForStartup = true;
 
 	parseCommandLine(paramsForStartup, ARRAY_SIZE(paramsForStartup));
+#if defined(RTS_REPLAY_ANALYZER)
+	validateReplayTelemetryOptions();
+#endif
 }
 
 void CommandLine::parseCommandLineForEngineInit()

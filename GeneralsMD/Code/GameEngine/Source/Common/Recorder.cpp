@@ -27,6 +27,7 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
 #include "Common/ReplayParseDump.h"
+#include "Common/ReplayTelemetry.h"
 #endif
 #include "Common/file.h"
 #include "Common/FileSystem.h"
@@ -416,6 +417,8 @@ void RecorderClass::init() {
  */
 void RecorderClass::reset() {
 #if defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @feature Leex 18/08/2026 Close an interrupted telemetry trace without affecting replay reset. (#TBD)
+	ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, FALSE);
 	// TheSuperHackers @feature Leex 19/08/2026 A reset is an interrupted observation, even when no replay file remains open.
 	const Int replayEndOffset = m_file != nullptr ? m_file->seek(0, File::CURRENT) : -1;
 	ReplayParseDump::finishReplay(replayEndOffset, FALSE);
@@ -479,6 +482,10 @@ void RecorderClass::updatePlayback() {
 void RecorderClass::stopPlayback() {
 	if (m_file != nullptr) {
 #if defined(RTS_REPLAY_ANALYZER)
+		// TheSuperHackers @feature Leex 18/08/2026 Finish telemetry at the replay source's authoritative termination boundary. (#TBD)
+		const Bool telemetryCleanShutdown = m_replayParseDumpComplete
+			&& m_nextFrame == (UnsignedInt)-1 && !sawCRCMismatch();
+		ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, telemetryCleanShutdown);
 		// TheSuperHackers @feature Leex 18/08/2026 Finish the observer record before the replay source is closed.
 		const Int replayEndOffset = m_file->seek(0, File::CURRENT);
 		ReplayParseDump::finishReplay(replayEndOffset, m_replayParseDumpComplete && m_nextFrame == (UnsignedInt)-1);
@@ -489,6 +496,7 @@ void RecorderClass::stopPlayback() {
 #if defined(RTS_REPLAY_ANALYZER)
 	else
 	{
+		ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, FALSE);
 		// TheSuperHackers @feature Leex 19/08/2026 Do not leave a process-local observer sink open on an early playback close.
 		ReplayParseDump::finishReplay(-1, FALSE);
 	}
@@ -1023,6 +1031,8 @@ Bool RecorderClass::simulateReplay(AsciiString filename)
 #if defined(RTS_REPLAY_ANALYZER)
 void RecorderClass::completeReplayParseDump()
 {
+	// TheSuperHackers @feature Leex 18/08/2026 Stop telemetry at the executed CRC boundary before any diagnostic byte drain. (#TBD)
+	ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, FALSE);
 	if (!ReplayParseDump::isActive() || m_file == nullptr)
 	{
 		return;
@@ -1187,6 +1197,13 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	{
 		return FALSE;
 	}
+#if defined(RTS_REPLAY_ANALYZER)
+	if (ReplayTelemetry::isEnabled())
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Start telemetry only after the replay header has decoded successfully. (#TBD)
+		ReplayTelemetry::begin(header);
+	}
+#endif
 
 #ifdef DEBUG_CRASHING
 	Bool versionStringDiff = header.versionString != TheVersion->getUnicodeVersion();
@@ -1551,6 +1568,10 @@ void RecorderClass::appendNextCommand() {
 	if (type != GameMessage::MSG_BEGIN_NETWORK_MESSAGES && type != GameMessage::MSG_CLEAR_GAME_DATA && !m_doingAnalysis)
 	{
 		TheCommandList->appendMessage(msg);
+#if defined(RTS_REPLAY_ANALYZER)
+		// TheSuperHackers @feature Leex 18/08/2026 Count only replay commands handed to GameLogic before the terminal boundary. (#TBD)
+		ReplayTelemetry::observeExecutedCommand();
+#endif
 	}
 	else
 	{

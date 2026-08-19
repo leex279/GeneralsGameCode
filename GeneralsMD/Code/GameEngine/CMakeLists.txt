@@ -1149,9 +1149,12 @@ endif()
 
 if(NOT IS_VS6_BUILD)
     # TheSuperHackers @feature Leex 18/08/2026 Keep the replay parse observer out of VC6 retail-validation builds.
+    # TheSuperHackers @feature Leex 18/08/2026 Compile passive replay telemetry only in the existing modern analyzer block. (#TBD)
     list(APPEND GAMEENGINE_SRC
         Include/Common/ReplayParseDump.h
+        Include/Common/ReplayTelemetry.h
         Source/Common/ReplayParseDump.cpp
+        Source/Common/ReplayTelemetry.cpp
     )
 endif()
 
