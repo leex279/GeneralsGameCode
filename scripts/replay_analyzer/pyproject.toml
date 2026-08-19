@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Replay analysis tools for Command & Conquer: Generals Zero Hour."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
-dependencies = []
+dependencies = [
+    "jsonschema>=4.25,<5",
+    "pydantic>=2.11,<3",
+]
 
 [project.scripts]
 replay-analyzer = "generals_replay_analyzer.cli:main"
@@ -18,6 +21,7 @@ packages = ["src/generals_replay_analyzer"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "contracts/zero_hour_1_04_message_types.json" = "generals_replay_analyzer/data/zero_hour_1_04_message_types.json"
+"contracts/telemetry-v1.schema.json" = "generals_replay_analyzer/data/telemetry-v1.schema.json"
 
 [dependency-groups]
 dev = [

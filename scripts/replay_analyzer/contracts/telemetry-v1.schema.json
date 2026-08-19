@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesuperhackers.github.io/generals-replay-analyzer/telemetry-v1.schema.json",
+  "title": "Replay Analyzer observed telemetry v1 record",
+  "oneOf": [
+    { "$ref": "#/$defs/manifestRecord" },
+    { "$ref": "#/$defs/observationRecord" },
+    { "$ref": "#/$defs/completeRecord" }
+  ],
+  "$defs": {
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "run_id", "sequence", "frame", "logic_time_seconds", "event_type", "payload"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "run_id": { "type": "string", "format": "uuid" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "frame": { "type": "integer", "minimum": 0 },
+        "logic_time_seconds": { "type": "number", "minimum": 0 },
+        "event_type": { "type": "string" },
+        "payload": { "type": "object" }
+      }
+    },
+    "manifestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine_build", "replay_version", "map_identity", "initial_seed", "exporter_settings"],
+      "properties": {
+        "engine_build": { "type": "string", "minLength": 1 },
+        "replay_version": { "type": "string", "minLength": 1 },
+        "map_identity": { "type": "string", "minLength": 1 },
+        "initial_seed": { "type": "integer" },
+        "exporter_settings": { "type": "object" }
+      }
+    },
+    "versionedPayload": { "type": "object", "additionalProperties": true },
+    "mapAssetReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "completePayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["final_frame", "command_count", "event_counts", "crc_mismatch", "replay_truncated", "clean_shutdown", "writer_error", "trace_sha256", "map_assets"],
+      "properties": {
+        "final_frame": { "type": "integer", "minimum": 0 },
+        "command_count": { "type": "integer", "minimum": 0 },
+        "event_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "crc_mismatch": { "type": "boolean" },
+        "replay_truncated": { "type": "boolean" },
+        "clean_shutdown": { "type": "boolean" },
+        "writer_error": { "type": ["string", "null"] },
+        "trace_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "map_assets": { "type": "array", "items": { "$ref": "#/$defs/mapAssetReference" } }
+      }
+    },
+    "manifestRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        { "properties": { "event_type": { "const": "manifest" }, "payload": { "$ref": "#/$defs/manifestPayload" } } }
+      ]
+    },
+    "observationRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        {
+          "properties": {
+            "event_type": {
+              "enum": ["players_initialized", "object_created", "construction_started", "construction_completed", "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled", "production_completed", "upgrade_queued", "upgrade_cancelled", "upgrade_completed", "science_purchased", "special_power_used", "cash_changed", "supply_collected", "damage_applied", "healing_applied", "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome", "order_issued", "entity_state_changed", "entity_sample"]
+            },
+            "payload": { "$ref": "#/$defs/versionedPayload" }
+          }
+        }
+      ]
+    },
+    "completeRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        { "properties": { "event_type": { "const": "complete" }, "payload": { "$ref": "#/$defs/completePayload" } } }
+      ]
+    }
+  }
+}
