@@ -13,11 +13,11 @@ GAME_OPTIONS = "US=1;M=00Maps/Test;MC=1;MS=2;SD=3;C=100;SR=0;SC=10000;O=N;S=O:O:
 CPP_SAMPLE_PATH = Path(__file__).parent / "fixtures" / "parity" / "tiny_cpp.ndjson"
 
 
-def _write_replay(tmp_path: Path, *, real_value: float = 1.5) -> Path:
+def _write_replay(tmp_path: Path, *, real_value: float = 1.5, message_type: int = 1003) -> Path:
     """Write one command containing every supported argument representation."""
     command = command_bytes(
         30,
-        1003,
+        message_type,
         1,
         [(argument_type, 1) for argument_type in range(11)],
         [
@@ -155,6 +155,21 @@ def test_parity_reports_the_first_mismatch_with_offset_path_and_values(tmp_path:
 
     assert mismatch == ParityMismatch(188, "commands[0].frame", 30, 31)
     assert str(mismatch) == "replay parity mismatch at byte 188: commands[0].frame: Python=30, C++=31"
+
+
+def test_parity_validates_cpp_payload_start_four_bytes_after_python_frame_start(tmp_path: Path) -> None:
+    """Reject a C++ diagnostic payload start that is not immediately after the serialized frame field."""
+    from generals_replay_analyzer.parity import ParityMismatch, compare_replay, load_cpp_dump
+
+    records = _valid_records()
+    records[3]["start_offset"] = 193
+
+    mismatch = compare_replay(
+        parse_replay(_write_replay(tmp_path)),
+        load_cpp_dump(_write_dump(tmp_path, records)),
+    )
+
+    assert mismatch == ParityMismatch(188, "commands[0].start_offset", 192, 193)
 
 
 @pytest.mark.parametrize(
@@ -343,6 +358,20 @@ def test_parity_checks_symbolic_message_name_against_the_cpp_catalog(tmp_path: P
     )
 
 
+def test_parity_accepts_uncataloged_numeric_command_only_as_unknown_message(tmp_path: Path) -> None:
+    """Reject dropping a future numeric command when both parsers preserve it as symbolically unknown."""
+    from generals_replay_analyzer.parity import compare_replay, load_cpp_dump
+
+    records = _valid_records()
+    records[3]["message_type"] = 777
+    records[3]["message_name"] = "UnknownMessage"
+
+    parsed = parse_replay(_write_replay(tmp_path, message_type=777))
+    cpp_dump = load_cpp_dump(_write_dump(tmp_path, records))
+
+    assert compare_replay(parsed, cpp_dump) is None
+
+
 @pytest.mark.parametrize("argument_index", list(range(11)))
 def test_parity_checks_each_argument_type(tmp_path: Path, argument_index: int) -> None:
     """Reject accepting any argument when C++ reports a different serialized type number."""
@@ -392,7 +421,7 @@ def test_parity_checks_argument_count_before_indexing_arguments(tmp_path: Path) 
 
 def test_parity_checks_argument_symbolic_type_name(tmp_path: Path) -> None:
     """Reject a symbolic argument label that disagrees with the serialized type number."""
-    from generals_replay_analyzer.parity import ParityMismatch, compare_replay, load_cpp_dump
+    from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
 
     records = _valid_records()
     arguments = records[3]["arguments"]
@@ -401,17 +430,11 @@ def test_parity_checks_argument_symbolic_type_name(tmp_path: Path) -> None:
     assert isinstance(argument, dict)
     argument["type_name"] = "INTEGER"
 
-    mismatch = compare_replay(
-        parse_replay(_write_replay(tmp_path)),
-        load_cpp_dump(_write_dump(tmp_path, records)),
-    )
-
-    assert mismatch == ParityMismatch(
-        188,
-        "commands[0].arguments[3].type_name",
-        "OBJECT_ID",
-        "INTEGER",
-    )
+    with pytest.raises(
+        CppDumpValidationError,
+        match=r"command.arguments\[3\].type_name does not match type 3",
+    ):
+        load_cpp_dump(_write_dump(tmp_path, records))
 
 
 @pytest.mark.parametrize(
@@ -552,6 +575,38 @@ def test_cpp_dump_rejects_invalid_json_with_its_line_number(tmp_path: Path) -> N
         load_cpp_dump(dump)
 
 
+def test_cpp_dump_rejects_duplicate_root_json_object_members(tmp_path: Path) -> None:
+    """Reject a repeated root member even when both JSON values are identical."""
+    from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
+
+    duplicate = CPP_SAMPLE_PATH.read_text(encoding="utf-8").replace(
+        '{"record":"header"',
+        '{"record":"header","record":"header"',
+        1,
+    )
+    dump = tmp_path / "duplicate-root.ndjson"
+    dump.write_text(duplicate, encoding="utf-8")
+
+    with pytest.raises(CppDumpValidationError, match="duplicate JSON object member 'record' on line 1"):
+        load_cpp_dump(dump)
+
+
+def test_cpp_dump_rejects_duplicate_nested_json_object_members(tmp_path: Path) -> None:
+    """Reject repeated members inside nested argument/header structures, not only at record roots."""
+    from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
+
+    duplicate = CPP_SAMPLE_PATH.read_text(encoding="utf-8").replace(
+        '"system_time":{"year":2026',
+        '"system_time":{"year":2026,"year":2026',
+        1,
+    )
+    dump = tmp_path / "duplicate-nested.ndjson"
+    dump.write_text(duplicate, encoding="utf-8")
+
+    with pytest.raises(CppDumpValidationError, match="duplicate JSON object member 'year' on line 1"):
+        load_cpp_dump(dump)
+
+
 def test_cpp_dump_rejects_unhashable_real_value_as_a_schema_error(tmp_path: Path) -> None:
     """Reject an invalid object-valued Real with a typed dump diagnostic instead of leaking TypeError."""
     from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
@@ -565,6 +620,18 @@ def test_cpp_dump_rejects_unhashable_real_value_as_a_schema_error(tmp_path: Path
 
     with pytest.raises(CppDumpValidationError, match=r"command.arguments\[1\].value must be a JSON number"):
         load_cpp_dump(_write_dump(tmp_path, records))
+
+
+def test_cpp_dump_rejects_numeric_real_that_overflows_to_infinity(tmp_path: Path) -> None:
+    """Reject standard-JSON numeric overflow; non-finite observer values must use explicit string tags."""
+    from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
+
+    overflow = CPP_SAMPLE_PATH.read_text(encoding="utf-8").replace('"value":1.5', '"value":1e400', 1)
+    dump = tmp_path / "overflow-real.ndjson"
+    dump.write_text(overflow, encoding="utf-8")
+
+    with pytest.raises(CppDumpValidationError, match=r"command.arguments\[1\].value must be finite"):
+        load_cpp_dump(dump)
 
 
 @pytest.mark.parametrize(

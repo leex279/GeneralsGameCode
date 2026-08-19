@@ -58,11 +58,14 @@ _CATALOG_KEYS = frozenset({"record", "messages"})
 _CATALOG_ENTRY_KEYS = frozenset({"message_type", "message_name"})
 _MESSAGE_NAME = re.compile(r"MSG_[A-Z0-9_]+$")
 _HEX_BITS = re.compile(r"0x[0-9A-F]+$")
-_ARGUMENT_TYPE_NAMES = frozenset(argument_type.name for argument_type in GameMessageArgumentDataType if argument_type.value < 11)
 
 
 class CppDumpValidationError(ValueError):
     """Raised when engine NDJSON is not complete, ordered, and schema-valid."""
+
+
+class _DuplicateJsonMemberError(ValueError):
+    """Internal signal retaining the repeated member name across json.loads."""
 
 
 @dataclass(frozen=True)
@@ -104,7 +107,16 @@ def load_cpp_dump(path: Path) -> CppReplayDump:
         if not line:
             raise CppDumpValidationError(f"blank NDJSON record on line {line_number}")
         try:
-            decoded = cast(object, json.loads(line, parse_constant=_reject_json_constant))
+            decoded = cast(
+                object,
+                json.loads(
+                    line,
+                    parse_constant=_reject_json_constant,
+                    object_pairs_hook=_unique_json_object,
+                ),
+            )
+        except _DuplicateJsonMemberError as error:
+            raise CppDumpValidationError(f"{error} on line {line_number}") from error
         except (json.JSONDecodeError, ValueError) as error:
             raise CppDumpValidationError(f"invalid JSON on line {line_number}: {error}") from error
         if not isinstance(decoded, dict) or not all(isinstance(key, str) for key in decoded):
@@ -141,6 +153,16 @@ def load_cpp_dump(path: Path) -> CppReplayDump:
 def _reject_json_constant(value: str) -> None:
     """Reject JavaScript NaN/Infinity tokens that are not valid JSON."""
     raise ValueError(f"invalid JSON constant {value}")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Construct one JSON object while rejecting duplicate names at every nesting depth."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonMemberError(f"duplicate JSON object member '{key}'")
+        result[key] = value
+    return result
 
 
 def _validate_header(record: dict[str, object]) -> None:
@@ -256,7 +278,10 @@ def _validate_command(record: dict[str, object], record_number: int, catalog: di
     _require_string(record["message_name"], "command.message_name")
     message_type = cast(int, record["message_type"])
     message_name = cast(str, record["message_name"])
-    if catalog.get(message_type) != message_name:
+    catalog_name = catalog.get(message_type)
+    if (catalog_name is None and message_name != "UnknownMessage") or (
+        catalog_name is not None and catalog_name != message_name
+    ):
         raise CppDumpValidationError(
             f"command record {record_number} message mapping {message_type}:{message_name} is absent from message_catalog"
         )
@@ -282,8 +307,8 @@ def _validate_argument(argument: dict[str, object], index: int) -> None:
     if argument_type is GameMessageArgumentDataType.UNKNOWN:
         raise CppDumpValidationError(f"{path}.type UNKNOWN cannot be authoritative")
     _require_string(argument["type_name"], f"{path}.type_name")
-    if argument["type_name"] not in _ARGUMENT_TYPE_NAMES:
-        raise CppDumpValidationError(f"{path}.type_name is not a recognized observer label")
+    if argument["type_name"] != argument_type.name:
+        raise CppDumpValidationError(f"{path}.type_name does not match type {raw_type}")
 
     value = argument["value"]
     raw_bits = argument["raw_scalar_bits"]
@@ -355,8 +380,12 @@ def _require_bool(value: object, path: str) -> None:
 
 def _require_real(value: object, path: str) -> None:
     """Require a finite JSON number or one of the observer's non-finite string tags."""
-    if type(value) in {int, float}:
+    if type(value) is int:
         return
+    if type(value) is float:
+        if math.isfinite(value):
+            return
+        raise CppDumpValidationError(f"{path} must be finite when encoded as a JSON number")
     if isinstance(value, str) and value in {"nan", "infinity", "-infinity"}:
         return
     raise CppDumpValidationError(f"{path} must be a JSON number or a non-finite Real tag")
@@ -445,9 +474,10 @@ def compare_replay(parsed: ParsedReplay, cpp_dump: CppReplayDump) -> ParityMisma
         command_path = f"commands[{index}]"
         command_fields: tuple[tuple[str, object], ...] = (
             ("frame", python_command.frame),
+            ("start_offset", python_command.start_offset + 4),
             ("end_offset", python_command.end_offset),
             ("message_type", python_command.message_type),
-            ("message_name", python_command.message_name),
+            ("message_name", python_command.message_name or "UnknownMessage"),
             ("player_index", python_command.player_index),
         )
         mismatch = _compare_fields(python_command.start_offset, command_path, command_fields, cpp_command)
