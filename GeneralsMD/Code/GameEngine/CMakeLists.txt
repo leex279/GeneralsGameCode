@@ -1147,10 +1147,22 @@ else()
     )
 endif()
 
+if(NOT IS_VS6_BUILD)
+    # TheSuperHackers @feature Leex 18/08/2026 Keep the replay parse observer out of VC6 retail-validation builds.
+    list(APPEND GAMEENGINE_SRC
+        Include/Common/ReplayParseDump.h
+        Source/Common/ReplayParseDump.cpp
+    )
+endif()
 
 add_library(z_gameengine STATIC)
 
 target_sources(z_gameengine PRIVATE ${GAMEENGINE_SRC})
+
+if(NOT IS_VS6_BUILD)
+    # TheSuperHackers @feature Leex 18/08/2026 Enable the modern-only process-local replay parse observer.
+    target_compile_definitions(z_gameengine PRIVATE RTS_REPLAY_ANALYZER=1)
+endif()
 
 target_include_directories(z_gameengine PUBLIC
     Include

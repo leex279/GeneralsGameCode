@@ -25,6 +25,9 @@
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
 
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayParseDump.h"
+#endif
 #include "Common/file.h"
 #include "Common/FileSystem.h"
 #include "Common/PlayerList.h"
@@ -378,6 +381,9 @@ void RecorderClass::init() {
 	m_wasDesync = FALSE;
 	m_doingAnalysis = FALSE;
 	m_playbackFrameCount = 0;
+#if defined(RTS_REPLAY_ANALYZER)
+	m_replayParseDumpComplete = TRUE;
+#endif
 
 	OptionPreferences optionPref;
 	m_archiveReplays = optionPref.getArchiveReplaysEnabled();
@@ -445,6 +451,11 @@ void RecorderClass::updatePlayback() {
  */
 void RecorderClass::stopPlayback() {
 	if (m_file != nullptr) {
+#if defined(RTS_REPLAY_ANALYZER)
+		// TheSuperHackers @feature Leex 18/08/2026 Finish the observer record before the replay source is closed.
+		const Int replayEndOffset = m_file->seek(0, File::CURRENT);
+		ReplayParseDump::finishReplay(replayEndOffset, m_replayParseDumpComplete && m_nextFrame == (UnsignedInt)-1);
+#endif
 		m_file->close();
 		m_file = nullptr;
 	}
@@ -940,6 +951,15 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 		m_file = nullptr;
 	}
 
+#if defined(RTS_REPLAY_ANALYZER)
+	if (header.forPlayback && ReplayParseDump::isEnabled())
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Emit only successfully decoded headers at their source-file boundary.
+		m_replayParseDumpComplete = TRUE;
+		ReplayParseDump::beginReplay(header, m_file->seek(0, File::CURRENT));
+	}
+#endif
+
 	return TRUE;
 }
 
@@ -1158,6 +1178,7 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	DEBUG_LOG(("Player index is %d, replay CRC interval is %d", m_crcInfo.getLocalPlayer(), REPLAY_CRC_INTERVAL));
 
 	Int difficulty = 0;
+	const Int setupStartOffset = m_file->seek(0, File::CURRENT);
 	m_file->read(&difficulty, sizeof(difficulty));
 
 	m_file->read(&m_originalGameMode, sizeof(m_originalGameMode));
@@ -1167,6 +1188,11 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 
 	Int maxFPS = 0;
 	m_file->read(&maxFPS, sizeof(maxFPS));
+
+#if defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @feature Leex 18/08/2026 Preserve the four serialized setup integers and their measured source range.
+	ReplayParseDump::writeSetup(difficulty, m_originalGameMode, rankPoints, maxFPS, setupStartOffset, m_file->seek(0, File::CURRENT));
+#endif
 
 	DEBUG_LOG(("RecorderClass::playbackFile() - original game was mode %d", m_originalGameMode));
 
@@ -1276,6 +1302,9 @@ void RecorderClass::readNextFrame() {
 	if (bytesRead != sizeof(m_nextFrame)) {
 		DEBUG_LOG(("RecorderClass::readNextFrame - read failed on frame %d", TheGameLogic->getFrame()));
 		m_nextFrame = -1;
+#if defined(RTS_REPLAY_ANALYZER)
+		m_replayParseDumpComplete = m_replayParseDumpComplete && bytesRead == 0;
+#endif
 		stopPlayback();
 	}
 }
@@ -1284,10 +1313,14 @@ void RecorderClass::readNextFrame() {
  * This reads the next command from the replay file and appends it to TheCommandList.
  */
 void RecorderClass::appendNextCommand() {
+	const Int commandStartOffset = m_file->seek(0, File::CURRENT);
 	GameMessage::Type type;
 	Int bytesRead = m_file->read(&type, sizeof(type));
 	if (bytesRead != sizeof(type)) {
 		DEBUG_LOG(("RecorderClass::appendNextCommand - read failed on frame %d", m_nextFrame/*TheGameLogic->getFrame()*/));
+#if defined(RTS_REPLAY_ANALYZER)
+		m_replayParseDumpComplete = FALSE;
+#endif
 		return;
 	}
 
@@ -1362,6 +1395,11 @@ void RecorderClass::appendNextCommand() {
 			}
 		}
 	}
+
+#if defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @feature Leex 18/08/2026 Observe decoded command bytes before ownership can delete the message.
+	ReplayParseDump::writeCommand((Int)m_nextFrame, commandStartOffset, m_file->seek(0, File::CURRENT), *msg);
+#endif
 
 	if (type != GameMessage::MSG_BEGIN_NETWORK_MESSAGES && type != GameMessage::MSG_CLEAR_GAME_DATA && !m_doingAnalysis)
 	{

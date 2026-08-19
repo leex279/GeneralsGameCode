@@ -197,6 +197,9 @@ protected:
 
 	Int m_originalGameMode; // valid in replays
 
+#if defined(RTS_REPLAY_ANALYZER)
+	Bool m_replayParseDumpComplete;
+#endif
 	UnsignedInt m_nextFrame;												///< The Frame that the next message is to be executed on.  This can be -1.
 };
 

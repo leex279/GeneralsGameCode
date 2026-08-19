@@ -30,6 +30,9 @@
 #include "Common/CRCDebug.h"
 #include "Common/LocalFileSystem.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayParseDump.h"
+#endif
 #include "Common/version.h"
 #include "GameClient/ClientInstance.h"
 #include "GameClient/TerrainVisual.h" // for TERRAIN_LOD_MIN definition
@@ -447,6 +450,25 @@ Int parseReplay(char *args[], int num)
 	}
 	return 1;
 }
+
+#if defined(RTS_REPLAY_ANALYZER)
+// TheSuperHackers @feature Leex 18/08/2026 Configure a process-local replay parser sink without affecting replay input or simulation state.
+Int parseReplayParseDump(char *args[], int num)
+{
+	if (num > 1)
+	{
+		const Char *path = args[1];
+		if (path[0] == '\0' || !(path[1] == ':' || (path[0] == '\\' && path[1] == '\\') || path[0] == '/'))
+		{
+			printf("Replay parse dump path must be absolute: \"%s\"\n", path);
+			exit(1);
+		}
+		ReplayParseDump::setOutputPath(AsciiString(path));
+		return 2;
+	}
+	return 1;
+}
+#endif
 
 Int parseJobs(char *args[], int num)
 {
@@ -1135,6 +1157,11 @@ static CommandLineParam paramsForStartup[] =
 	// You can pass this multiple times to play back multiple replays.
 	// You can also include wildcards. The file must be in the replay folder or in a subfolder.
 	{ "-replay", parseReplay },
+
+#if defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @feature Leex 18/08/2026 Emit an observer-only authoritative replay parse dump to an absolute NDJSON path.
+	{ "-replay-parse-dump", parseReplayParseDump },
+#endif
 
 	// TheSuperHackers @feature helmutbuhler 23/05/2025
 	// Simulate each replay in a separate process and use 1..N processes at the same time.
