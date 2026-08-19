@@ -894,8 +894,23 @@ void RecorderClass::writeArgument(GameMessageArgumentDataType type, const GameMe
  */
 Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 {
-	AsciiString filepath = getReplayDir();
-	filepath.concat(header.filename.str());
+	AsciiString filepath;
+#if defined(RTS_REPLAY_ANALYZER)
+	const Char *replayPath = header.filename.str();
+	const Bool isDriveAbsolute = replayPath[0] != '\0' && replayPath[1] == ':' && (replayPath[2] == '\\' || replayPath[2] == '/');
+	const Bool isUNCAbsolute = replayPath[0] == '\\' && replayPath[1] == '\\';
+	const Bool isPOSIXAbsolute = replayPath[0] == '/';
+	// TheSuperHackers @feature Leex 19/08/2026 Allow analyzer playback to open an explicitly absolute replay path. (#TBD)
+	if (isDriveAbsolute || isUNCAbsolute || isPOSIXAbsolute)
+	{
+		filepath = header.filename;
+	}
+	else
+#endif
+	{
+		filepath = getReplayDir();
+		filepath.concat(header.filename.str());
+	}
 
 	// TheSuperHackers @performance More buffered data reduces disk overhead and will improve fast forward playback
 	const UnsignedInt buffersize = header.forPlayback ? replayBufferBytes : File::BUFFERSIZE;

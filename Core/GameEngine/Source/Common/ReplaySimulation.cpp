@@ -23,6 +23,9 @@
 #include "Common/GameEngine.h"
 #include "Common/LocalFileSystem.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayParseDump.h"
+#endif
 #include "Common/WorkerProcess.h"
 #include "GameLogic/GameLogic.h"
 #include "GameClient/GameClient.h"
@@ -97,7 +100,12 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 					fflush(stdout);
 				}
 				TheGameLogic->UPDATE();
-				if (TheRecorder->sawCRCMismatch())
+				Bool stopForCRCMismatch = TheRecorder->sawCRCMismatch();
+#if defined(RTS_REPLAY_ANALYZER)
+				// TheSuperHackers @feature Leex 19/08/2026 Continue parse-dump playback so command bytes remain observable after a simulation CRC mismatch. (#TBD)
+				stopForCRCMismatch = stopForCRCMismatch && !ReplayParseDump::isEnabled();
+#endif
+				if (stopForCRCMismatch)
 				{
 					numErrors++;
 					break;
