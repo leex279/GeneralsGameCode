@@ -74,6 +74,7 @@ def _inspection_document(path: Path, parsed: ParsedReplay, include_commands: boo
         "warnings": [warning.to_dict() for warning in parsed.warnings],
         "header": parsed.header.to_dict(),
         "setup": parsed.setup.to_dict(),
+        "command_stream_offset": parsed.command_stream_offset,
         "command_count": len(parsed.commands),
         "completion_status": parsed.completion_status,
     }

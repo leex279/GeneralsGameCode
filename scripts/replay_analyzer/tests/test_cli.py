@@ -39,6 +39,9 @@ def test_inspect_json_reports_observed_complete_replay_without_commands(capsys: 
         "start_offset": 326,
         "end_offset": 342,
     }
+    assert output["command_stream_offset"] == 342
+    assert output["command_stream_offset"] == output["setup"]["end_offset"]
+    assert output["command_stream_offset"] > output["header"]["header_end_offset"]
     assert output["command_count"] > 0
     assert output["completion_status"] == "complete"
     assert "commands" not in output

@@ -64,7 +64,7 @@ class ParseWarning:
 
 @dataclass(frozen=True)
 class ReplayHeader:
-    """All fields consumed by RecorderClass::readReplayHeader, ending before commands."""
+    """All fields consumed by RecorderClass::readReplayHeader, ending before Recorder setup and commands."""
 
     magic: str
     start_time: int

@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
@@ -54,13 +56,13 @@ class MessageCatalog:
     names_by_id: Mapping[int, str]
 
 
-def _default_catalog_path() -> Path:
-    """Return the repository-local generated artifact used by source checkouts."""
+def _source_checkout_catalog_path() -> Path:
+    """Return the canonical artifact only as an editable-source fallback when wheel data is absent."""
     return Path(__file__).resolve().parents[2] / "contracts" / "zero_hour_1_04_message_types.json"
 
 
 # TheSuperHackers @feature Leex 19/08/2026 Validate provisional generated replay message names before symbolic decoding. (#TBD)
-def load_message_catalog(path: Path) -> MessageCatalog:
+def load_message_catalog(path: Path | Traversable) -> MessageCatalog:
     """Load a schema-complete catalog while retaining duplicate detection from the entry list."""
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -119,8 +121,16 @@ def load_message_catalog(path: Path) -> MessageCatalog:
 
 @cache
 def default_message_catalog() -> MessageCatalog:
-    """Return the process-stable catalog selected for Zero Hour 1.04 inspection."""
-    return load_message_catalog(_default_catalog_path())
+    """Return wheel-packaged catalog data, falling back only for editable source checkouts."""
+    packaged_catalog = resources.files("generals_replay_analyzer").joinpath(
+        "data", "zero_hour_1_04_message_types.json"
+    )
+    if packaged_catalog.is_file():
+        return load_message_catalog(packaged_catalog)
+    source_checkout_catalog = _source_checkout_catalog_path()
+    if source_checkout_catalog.is_file():
+        return load_message_catalog(source_checkout_catalog)
+    raise MessageCatalogValidationError("generated Zero Hour 1.04 message catalog is missing from package data")
 
 
 def message_name_for(message_type: int) -> str | None:
