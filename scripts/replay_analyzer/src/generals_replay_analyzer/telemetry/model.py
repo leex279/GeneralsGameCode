@@ -5,7 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, NonNegativeInt, model_validator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 EVENT_TYPES = (
     "manifest", "players_initialized", "object_created", "construction_started", "construction_completed",
     "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled",
@@ -36,24 +37,108 @@ class PlayerObservation(OpenPayload):
     team_id: int
     faction_template_name: Annotated[str, Field(min_length=1)] | None
     color: NonNegativeInt | None
-    start_position_status: Literal["resolved", "unknown"]
-    start_position: RawPosition | None
-    controller: Literal["human", "ai"]
+    start_position_status: Literal["resolved", "unknown"] | None = None
+    start_position: RawPosition | None = None
+    controller: Literal["human", "ai"] | None = None
     is_human: bool
     is_local_player: bool
 
     @model_validator(mode="after")
     def _require_explicit_resolution_and_controller_state(self) -> "PlayerObservation":
-        if (self.start_position_status == "resolved") != (self.start_position is not None):
+        if self.start_position_status is not None and (
+            (self.start_position_status == "resolved") != (self.start_position is not None)
+        ):
             raise ValueError("start_position must be present exactly when start_position_status is resolved")
-        if (self.controller == "human") != self.is_human:
+        if self.controller is not None and (self.controller == "human") != self.is_human:
             raise ValueError("controller and is_human must describe the same engine slot state")
         return self
 
 
+class PlayerSlotObservation(BaseModel):
+    """One explicit v2 replay slot, whether occupied, unresolved, open, or closed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    slot_index: Annotated[int, Field(ge=0, le=7)]
+    slot_state: Literal["open", "closed", "easy_ai", "medium_ai", "brutal_ai", "human"]
+    occupied: bool
+    resolution_status: Literal["resolved", "unresolved", "not_applicable"]
+    replay_name: Annotated[str, Field(min_length=1)] | None
+    player_index: NonNegativeInt | None
+    team_id: int | None
+    faction_template_name: Annotated[str, Field(min_length=1)] | None
+    color: NonNegativeInt | None
+    start_position_status: Literal["resolved", "unknown", "not_applicable"]
+    start_position: RawPosition | None
+    controller: Literal["human", "ai"] | None
+    is_human: bool
+    is_header_local_slot: bool
+    is_resolved_local_player: bool | None
+
+    @model_validator(mode="after")
+    def _require_coherent_slot_and_resolution_state(self) -> "PlayerSlotObservation":
+        occupied_state = self.slot_state in {"human", "easy_ai", "medium_ai", "brutal_ai"}
+        if self.occupied != occupied_state:
+            raise ValueError("unoccupied slot states cannot be occupied and occupied slot states cannot be empty")
+        if not self.occupied:
+            if (
+                self.resolution_status != "not_applicable"
+                or self.replay_name is not None
+                or self.player_index is not None
+                or self.team_id is not None
+                or self.faction_template_name is not None
+                or self.color is not None
+                or self.start_position_status != "not_applicable"
+                or self.start_position is not None
+                or self.controller is not None
+                or self.is_human
+                or self.is_resolved_local_player is not None
+            ):
+                raise ValueError("unoccupied slot must expose null engine and controller fields")
+            return self
+        expected_controller = "human" if self.slot_state == "human" else "ai"
+        if self.controller != expected_controller or self.is_human != (expected_controller == "human"):
+            raise ValueError("occupied slot controller must agree with its replay slot state")
+        if self.replay_name is None or self.team_id is None:
+            raise ValueError("occupied slot must preserve replay header name and team")
+        if self.resolution_status == "resolved":
+            if self.player_index is None or self.faction_template_name is None or self.is_resolved_local_player is None:
+                raise ValueError("resolved slot must expose its engine player mapping")
+        elif self.resolution_status == "unresolved":
+            if self.player_index is not None or self.faction_template_name is not None or self.is_resolved_local_player is not None:
+                raise ValueError("unresolved slot must not claim resolved engine player fields")
+        else:
+            raise ValueError("occupied slot cannot use not_applicable resolution status")
+        if (self.start_position_status == "resolved") != (self.start_position is not None):
+            raise ValueError("start_position must be present exactly when start_position_status is resolved")
+        if self.start_position_status == "not_applicable":
+            raise ValueError("occupied slot must report resolved or unknown start position")
+        return self
+
+
 class PlayersInitializedPayload(OpenPayload):
-    players: list[PlayerObservation] = Field(min_length=1)
-    game_data_catalog: "GameDataCatalogReference"
+    players: list[PlayerObservation] | None = None
+    header_local_slot_index: int | None = None
+    slots: list[PlayerSlotObservation] | None = None
+    game_data_catalog: "GameDataCatalogReference | MapAssetReference"
+
+    @model_validator(mode="after")
+    def _require_one_ordered_slot_snapshot(self) -> "PlayersInitializedPayload":
+        if self.slots is None:
+            if self.players is None:
+                raise ValueError("players_initialized must contain a v1 players list or v2 slots")
+            return self
+        if self.players is not None:
+            raise ValueError("v2 slots and historical v1 players cannot coexist")
+        if [slot.slot_index for slot in self.slots] != list(range(8)):
+            raise ValueError("slots must be ordered by slot_index 0 through 7")
+        resolved_indexes = [slot.player_index for slot in self.slots if slot.player_index is not None]
+        if len(resolved_indexes) != len(set(resolved_indexes)):
+            raise ValueError("resolved occupied slots must have unique player_index mappings")
+        header_slots = [slot.slot_index for slot in self.slots if slot.is_header_local_slot]
+        expected_header_slots = [] if self.header_local_slot_index is None else [self.header_local_slot_index]
+        if header_slots != expected_header_slots:
+            raise ValueError("header local slot flags must equal header_local_slot_index")
+        return self
 
 
 class ObjectCreatedPayload(OpenPayload):
@@ -202,11 +287,11 @@ class ManifestPayload(BaseModel):
     map_identity: str = Field(min_length=1)
     initial_seed: int
     exporter_settings: dict[str, object]
-    game_data_catalog: "GameDataCatalogReference"
+    game_data_catalog: "GameDataCatalogReference | None" = None
 
     @model_validator(mode="after")
     def _require_catalog_engine_identity(self) -> "ManifestPayload":
-        if self.game_data_catalog.engine_data_identity != self.engine_build:
+        if self.game_data_catalog is not None and self.game_data_catalog.engine_data_identity != self.engine_build:
             raise ValueError("game_data_catalog engine_data_identity must equal engine_build")
         return self
 
@@ -251,7 +336,7 @@ class TelemetryEnvelope(BaseModel):
     """Shared immutable evidence identity and authoritative replay-time coordinates."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     run_id: UUID
     sequence: NonNegativeInt
     frame: NonNegativeInt

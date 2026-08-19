@@ -1,6 +1,6 @@
 #include "PreRTS.h"
 
-#if defined(RTS_REPLAY_ANALYZER)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/ReplayTelemetry.h"
 
@@ -171,6 +171,10 @@ namespace
 	AsciiString s_catalogPath;
 	AsciiString s_catalogSha256;
 	AsciiString s_catalogEngineDataIdentity;
+	AsciiString s_replayVersion;
+	AsciiString s_mapIdentity;
+	Int s_initialSeed = 0;
+	Int s_replayLocalSlotIndex = -1;
 	Int s_movementSampleFrames = 15;
 	unsigned long long s_sequence = 0;
 	unsigned long long s_commandCount = 0;
@@ -179,6 +183,7 @@ namespace
 	Sha256 s_traceDigest;
 	AsciiString s_writerError;
 	Bool s_outputFailed = FALSE;
+	Bool s_initialized = FALSE;
 	Bool s_cleanFinishDeferred = FALSE;
 	Bool s_ownsTempPath = FALSE;
 	UnsignedInt s_tempCounter = 0;
@@ -253,7 +258,7 @@ namespace
 
 	std::string envelope(unsigned long long sequence, UnsignedInt frame, const char *eventType, const std::string &payload)
 	{
-		return "{\"schema_version\":1,\"run_id\":" + jsonString(s_runId)
+		return "{\"schema_version\":2,\"run_id\":" + jsonString(s_runId)
 			+ ",\"sequence\":" + std::to_string(sequence)
 			+ ",\"frame\":" + std::to_string(frame)
 			+ ",\"logic_time_seconds\":" + logicTime(frame)
@@ -334,6 +339,22 @@ namespace
 		s_tempPath.clear();
 	}
 
+	void discardPendingOutput(const char *closeFailureMessage)
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Discard an unpublished v2 transaction when authoritative initialization cannot complete. (#TBD)
+		if (s_output != nullptr)
+		{
+			FILE *output = s_output;
+			s_output = nullptr;
+			if (fclose(output) != 0)
+			{
+				setWriterError("close_failed", closeFailureMessage, TRUE);
+			}
+		}
+		s_initialized = FALSE;
+		discardTemporaryOutput();
+	}
+
 	void publishTemporaryOutput()
 	{
 		if (!s_ownsTempPath || s_tempPath.isEmpty())
@@ -367,6 +388,11 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_catalogPath.clear();
 	s_catalogSha256.clear();
 	s_catalogEngineDataIdentity.clear();
+	s_replayVersion.clear();
+	s_mapIdentity.clear();
+	s_initialSeed = 0;
+	s_replayLocalSlotIndex = -1;
+	s_initialized = FALSE;
 	ReplayGameDataExport::reset();
 }
 
@@ -383,6 +409,11 @@ const AsciiString &ReplayTelemetry::getTracePath()
 const AsciiString &ReplayTelemetry::getEngineDataIdentity()
 {
 	return s_engineDataIdentity;
+}
+
+Int ReplayTelemetry::getReplayLocalSlotIndex()
+{
+	return s_replayLocalSlotIndex;
 }
 
 AsciiString ReplayTelemetry::sha256Hex(const char *data, size_t length)
@@ -445,52 +476,65 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	}
 	setvbuf(s_output, s_outputBuffer, _IOFBF, sizeof(s_outputBuffer));
 
-	AsciiString engineBuild;
-	engineBuild.format("zero-hour-%u-exe-%08X-ini-%08X", TheVersion->getVersionNumber(), TheGlobalData->m_exeCRC,
+	s_engineDataIdentity.format("zero-hour-%u-exe-%08X-ini-%08X", TheVersion->getVersionNumber(), TheGlobalData->m_exeCRC,
 		TheGlobalData->m_iniCRC);
-	s_engineDataIdentity = engineBuild;
-	if (!ReplayGameDataExport::prepareCatalog())
+	s_replayVersion.translate(header.versionString);
+	if (s_replayVersion.isEmpty())
 	{
-		// TheSuperHackers @feature Leex 18/08/2026 Abort the owned trace transaction when its required catalog cannot publish safely. (#TBD)
-		FILE *output = s_output;
-		s_output = nullptr;
-		if (fclose(output) != 0)
-		{
-			setWriterError("close_failed", "could not close telemetry output after catalog failure", TRUE);
-		}
-		discardTemporaryOutput();
-		return;
+		s_replayVersion.format("%u", header.versionNumber);
 	}
-	AsciiString replayVersion;
-	replayVersion.translate(header.versionString);
-	if (replayVersion.isEmpty())
-	{
-		replayVersion.format("%u", header.versionNumber);
-	}
-	AsciiString mapIdentity = header.filename;
-	Int initialSeed = 0;
+	s_mapIdentity = header.filename;
+	s_initialSeed = 0;
+	s_replayLocalSlotIndex = header.localPlayerIndex;
 	if (TheRecorder != nullptr && TheRecorder->getGameInfo() != nullptr)
 	{
-		mapIdentity = TheRecorder->getGameInfo()->getMap();
-		initialSeed = TheRecorder->getGameInfo()->getSeed();
+		s_mapIdentity = TheRecorder->getGameInfo()->getMap();
+		s_initialSeed = TheRecorder->getGameInfo()->getSeed();
 	}
+	// TheSuperHackers @feature Leex 18/08/2026 Keep the trace unpublished until map overrides and replay players are authoritative. (#TBD)
+}
 
-	const std::string payload = "{\"engine_build\":" + jsonString(engineBuild)
-		+ ",\"replay_version\":" + jsonString(replayVersion)
-		+ ",\"map_identity\":" + jsonString(mapIdentity)
-		+ ",\"initial_seed\":" + std::to_string(initialSeed)
-		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames) + "}"
+void ReplayTelemetry::initialize()
+{
+	if (s_output == nullptr || s_initialized)
+	{
+		return;
+	}
+	// TheSuperHackers @feature Leex 18/08/2026 Publish v2 provenance only from the post-map authoritative initialization seam. (#TBD)
+	if (!ReplayGameDataExport::prepareCatalog() || s_outputFailed)
+	{
+		discardPendingOutput("could not close telemetry output after authoritative initialization failure");
+		return;
+	}
+	const Bool audioEnabled = TheGlobalData != nullptr && TheGlobalData->m_audioOn;
+	const std::string payload = "{\"engine_build\":" + jsonString(s_engineDataIdentity)
+		+ ",\"replay_version\":" + jsonString(s_replayVersion)
+		+ ",\"map_identity\":" + jsonString(s_mapIdentity)
+		+ ",\"initial_seed\":" + std::to_string(s_initialSeed)
+		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames)
+		+ ",\"audio_enabled\":" + (audioEnabled ? "true}" : "false}")
 		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonString(s_catalogPath)
 		+ ",\"sha256\":" + jsonString(s_catalogSha256)
 		+ ",\"engine_data_identity\":" + jsonString(s_catalogEngineDataIdentity) + "}}";
 	writeLine(envelope(s_sequence++, 0, "manifest", payload), TRUE);
 	s_eventCounts["manifest"] = 1;
 	flushOutput();
+	if (s_outputFailed)
+	{
+		discardPendingOutput("could not close telemetry output after manifest failure");
+		return;
+	}
+	s_initialized = TRUE;
+	ReplayGameDataExport::emitPlayersInitialized();
+	if (s_outputFailed)
+	{
+		discardPendingOutput("could not close telemetry output after player snapshot failure");
+	}
 }
 
 void ReplayTelemetry::emit(UnsignedInt frame, const char *eventType, const AsciiString &payloadJson)
 {
-	if (s_output == nullptr)
+	if (s_output == nullptr || !s_initialized)
 	{
 		return;
 	}
@@ -504,7 +548,7 @@ void ReplayTelemetry::emit(UnsignedInt frame, const char *eventType, const Ascii
 
 void ReplayTelemetry::observeExecutedCommand()
 {
-	if (s_output != nullptr)
+	if (s_output != nullptr && s_initialized)
 	{
 		++s_commandCount;
 	}
@@ -512,7 +556,7 @@ void ReplayTelemetry::observeExecutedCommand()
 
 void ReplayTelemetry::deferCleanFinish()
 {
-	if (s_output != nullptr)
+	if (s_output != nullptr && s_initialized)
 	{
 		s_cleanFinishDeferred = TRUE;
 	}
@@ -533,6 +577,11 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 	s_cleanFinishDeferred = FALSE;
 	if (s_output == nullptr)
 	{
+		return;
+	}
+	if (!s_initialized)
+	{
+		discardPendingOutput("could not close telemetry output before authoritative initialization");
 		return;
 	}
 
@@ -560,6 +609,7 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 	flushOutput();
 	FILE *output = s_output;
 	s_output = nullptr;
+	s_initialized = FALSE;
 	if (fclose(output) != 0)
 	{
 		setWriterError("close_failed", "could not close telemetry output", TRUE);
@@ -578,8 +628,8 @@ void ReplayTelemetry::fail(const char *code, const char *message)
 {
 	if (isEnabled())
 	{
-		setWriterError(code, message);
+		setWriterError(code, message, TRUE);
 	}
 }
 
-#endif // defined(RTS_REPLAY_ANALYZER)
+#endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

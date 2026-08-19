@@ -26,7 +26,9 @@
 #include <algorithm>
 #include <charconv>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -38,10 +40,13 @@
 namespace
 {
 	Bool s_catalogReady = FALSE;
+	Bool s_playersReady = FALSE;
 	Bool s_playersEmitted = FALSE;
+	Bool s_serializationFailed = FALSE;
 	std::string s_catalogPath;
 	std::string s_catalogSha256;
 	std::string s_engineDataIdentity;
+	std::string s_playersPayload;
 	UnsignedInt s_tempCounter = 0;
 
 	std::string jsonUtf8(const char *value)
@@ -126,13 +131,21 @@ namespace
 
 	std::string jsonReal(Real value)
 	{
+		// TheSuperHackers @feature Leex 18/08/2026 Fail closed before nonfinite engine metadata can enter a JSON transaction. (#TBD)
+		if (!std::isfinite(static_cast<double>(value)))
+		{
+			s_serializationFailed = TRUE;
+			ReplayTelemetry::fail("nonfinite_number", "catalog or player metadata contains a nonfinite number");
+			return "null";
+		}
 		char buffer[64];
 		const std::to_chars_result result = std::to_chars(buffer, buffer + sizeof(buffer), value,
 			std::chars_format::general, std::numeric_limits<Real>::max_digits10);
 		if (result.ec != std::errc())
 		{
+			s_serializationFailed = TRUE;
 			ReplayTelemetry::fail("catalog_format_failed", "could not format a catalog number");
-			return "0";
+			return "null";
 		}
 		return std::string(buffer, result.ptr);
 	}
@@ -223,6 +236,97 @@ namespace
 		return result;
 	}
 
+	const char *weaponSlotName(Int slot)
+	{
+		static const char *const names[] = { "PRIMARY", "SECONDARY", "TERTIARY" };
+		return slot >= 0 && slot < WEAPONSLOT_COUNT ? names[slot] : "UNKNOWN";
+	}
+
+	const char *commandSourceName(Int source)
+	{
+		static const char *const names[] = { "FROM_PLAYER", "FROM_SCRIPT", "FROM_AI", "FROM_DOZER",
+			"DEFAULT_SWITCH_WEAPON" };
+		return source >= 0 && source < COMMAND_SOURCE_TYPE_COUNT ? names[source] : "UNKNOWN";
+	}
+
+	// TheSuperHackers @feature Leex 18/08/2026 Preserve weapon-set conditions and per-slot choice metadata without gameplay allocation. (#TBD)
+	std::string weaponSetsJson(const ThingTemplate *thingTemplate, std::set<std::string> &derivedWeaponNames)
+	{
+		std::string result = "[";
+		Int setOrdinal = 0;
+		for (const WeaponTemplateSet &weaponSet : thingTemplate->getWeaponTemplateSets())
+		{
+			if (setOrdinal != 0)
+			{
+				result.push_back(',');
+			}
+			std::vector<std::string> conditionNames;
+			for (Int condition = 0; condition < WEAPONSET_COUNT; ++condition)
+			{
+				if (weaponSet.testWeaponSetFlag(static_cast<WeaponSetType>(condition)))
+				{
+					const char *name = WeaponSetFlags::getNameFromSingleBit(condition);
+					if (name != nullptr)
+					{
+						conditionNames.emplace_back(name);
+					}
+				}
+			}
+			result += "{\"ordinal\":" + std::to_string(setOrdinal++)
+				+ ",\"condition_mask\":" + std::to_string(weaponSet.friend_getWeaponSetFlags().toUnsignedInt())
+				+ ",\"condition_names\":" + stringArray(conditionNames)
+				+ ",\"shared_reload_time\":" + (weaponSet.isSharedReloadTime() ? "true" : "false")
+				+ ",\"weapon_lock_shared_across_sets\":"
+				+ (weaponSet.isWeaponLockSharedAcrossSets() ? "true" : "false") + ",\"slots\":[";
+			for (Int slot = 0; slot < WEAPONSLOT_COUNT; ++slot)
+			{
+				if (slot != 0)
+				{
+					result.push_back(',');
+				}
+				const WeaponSlotType weaponSlot = static_cast<WeaponSlotType>(slot);
+				const WeaponTemplate *weapon = weaponSet.getNth(weaponSlot);
+				std::string weaponName;
+				if (weapon != nullptr && weapon->getName().isNotEmpty())
+				{
+					weaponName = narrowUtf8(weapon->getName());
+					derivedWeaponNames.insert(weaponName);
+				}
+				const UnsignedInt autoChooseMask = weaponSet.getNthCommandSourceMask(weaponSlot);
+				std::vector<std::string> autoChooseSources;
+				for (Int source = 0; source < COMMAND_SOURCE_TYPE_COUNT; ++source)
+				{
+					if ((autoChooseMask & (1U << source)) != 0)
+					{
+						autoChooseSources.emplace_back(commandSourceName(source));
+					}
+				}
+				std::vector<std::string> preferredAgainst;
+				const KindOfMaskType &preferredMask = weaponSet.getNthPreferredAgainstMask(weaponSlot);
+				for (Int kind = KINDOF_FIRST; kind < KINDOF_COUNT; ++kind)
+				{
+					if (preferredMask.test(kind))
+					{
+						const char *name = KindOfMaskType::getNameFromSingleBit(kind);
+						if (name != nullptr)
+						{
+							preferredAgainst.emplace_back(name);
+						}
+					}
+				}
+				result += "{\"ordinal\":" + std::to_string(slot)
+					+ ",\"slot\":" + jsonUtf8(weaponSlotName(slot))
+					+ ",\"weapon_name\":" + (weaponName.empty() ? "null" : jsonUtf8(weaponName.c_str()))
+					+ ",\"auto_choose_mask\":" + std::to_string(autoChooseMask)
+					+ ",\"auto_choose_sources\":" + stringArray(autoChooseSources)
+					+ ",\"preferred_against_kind_of\":" + stringArray(preferredAgainst) + "}";
+			}
+			result += "]}";
+		}
+		result.push_back(']');
+		return result;
+	}
+
 	std::string buildCatalog()
 	{
 		std::map<std::string, const ThingTemplate *> templates;
@@ -270,19 +374,8 @@ namespace
 			kindJson.push_back(']');
 
 			std::set<std::string> templateWeapons;
-			for (const WeaponTemplateSet &weaponSet : thingTemplate->getWeaponTemplateSets())
-			{
-				for (Int slot = 0; slot < WEAPONSLOT_COUNT; ++slot)
-				{
-					const WeaponTemplate *weapon = weaponSet.getNth(static_cast<WeaponSlotType>(slot));
-					if (weapon != nullptr && weapon->getName().isNotEmpty())
-					{
-						const std::string name = narrowUtf8(weapon->getName());
-						templateWeapons.insert(name);
-						weaponNames.insert(name);
-					}
-				}
-			}
+			const std::string weaponSets = weaponSetsJson(thingTemplate, templateWeapons);
+			weaponNames.insert(templateWeapons.begin(), templateWeapons.end());
 
 			std::string locomotorSetsJson = "[";
 			const AIUpdateModuleData *aiData = findAIUpdateData(thingTemplate);
@@ -330,16 +423,28 @@ namespace
 			if (!templateWeapons.empty()) categoryTags.insert("WEAPON_CAPABLE");
 			if (aiData != nullptr && !aiData->m_locomotorTemplates.empty()) categoryTags.insert("LOCOMOTOR_CAPABLE");
 			const AsciiString &faction = thingTemplate->getDefaultOwningSide();
+			Real configuredBuildTime = thingTemplate->replayAnalyzerGetConfiguredBuildTimeSeconds();
+			const char *nonfiniteInjection = getenv("GENERALS_REPLAY_TELEMETRY_TEST_NONFINITE");
+			if (templateOrdinal == 0 && nonfiniteInjection != nullptr && strcmp(nonfiniteInjection, "catalog") == 0)
+			{
+				configuredBuildTime = std::numeric_limits<Real>::infinity();
+			}
+			const std::string configuredBuildTimeJson = jsonReal(configuredBuildTime);
+			if (s_serializationFailed)
+			{
+				return std::string();
+			}
 			templateJson += "{\"ordinal\":" + std::to_string(templateOrdinal++)
 				+ ",\"name\":" + jsonUtf8(entry.first.c_str())
 				+ ",\"faction\":" + (faction.isEmpty() ? "null" : jsonString(faction))
 				+ ",\"kind_of_flags\":" + kindJson
 				+ ",\"build_cost\":" + std::to_string(thingTemplate->friend_getBuildCost())
-				+ ",\"configured_build_time_seconds\":" + jsonReal(thingTemplate->replayAnalyzerGetConfiguredBuildTimeSeconds())
+				+ ",\"configured_build_time_seconds\":" + configuredBuildTimeJson
 				+ ",\"prerequisites\":" + prerequisitesJson(thingTemplate)
 				+ ",\"locomotor_sets\":" + locomotorSetsJson
 				+ ",\"production_capable\":" + (thingTemplate->isBuildFacility() ? "true" : "false")
-				+ ",\"weapon_names\":" + stringArray(templateWeapons)
+				+ ",\"weapon_sets\":" + weaponSets
+				+ ",\"derived_weapon_names\":" + stringArray(templateWeapons)
 				+ ",\"category_tags\":" + stringArray(categoryTags) + "}";
 		}
 		templateJson.push_back(']');
@@ -388,6 +493,108 @@ namespace
 			+ ",\"sciences\":" + namedRecords(sciences)
 			+ ",\"weapons\":" + namedRecords(weaponNames)
 			+ ",\"locomotors\":" + locomotorJson + "}\n";
+	}
+
+	const char *slotStateName(SlotState state)
+	{
+		switch (state)
+		{
+		case SLOT_OPEN: return "open";
+		case SLOT_CLOSED: return "closed";
+		case SLOT_EASY_AI: return "easy_ai";
+		case SLOT_MED_AI: return "medium_ai";
+		case SLOT_BRUTAL_AI: return "brutal_ai";
+		case SLOT_PLAYER: return "human";
+		default: return nullptr;
+		}
+	}
+
+	// TheSuperHackers @feature Leex 18/08/2026 Record every replay slot with separate header and resolved-player provenance. (#TBD)
+	Bool buildPlayerSlots(std::string &slotsJson)
+	{
+		if (TheRecorder == nullptr || TheRecorder->getGameInfo() == nullptr || ThePlayerList == nullptr)
+		{
+			ReplayTelemetry::fail("players_unavailable", "resolved replay player state is unavailable");
+			return FALSE;
+		}
+		const GameInfo *gameInfo = TheRecorder->getGameInfo();
+		std::set<Int> playerIndexes;
+		Bool injectedPlayerNumber = FALSE;
+		slotsJson = "[";
+		for (Int slotIndex = 0; slotIndex < MAX_SLOTS; ++slotIndex)
+		{
+			if (slotIndex != 0)
+			{
+				slotsJson.push_back(',');
+			}
+			const GameSlot *slot = gameInfo->getConstSlot(slotIndex);
+			if (slot == nullptr || slotStateName(slot->getState()) == nullptr)
+			{
+				ReplayTelemetry::fail("players_unavailable", "one replay slot has no authoritative state");
+				return FALSE;
+			}
+			const Bool occupied = slot->isOccupied();
+			Player *player = occupied ? ThePlayerList->getPlayerFromSlotIndex(slotIndex) : nullptr;
+			if (player != nullptr && !playerIndexes.insert(player->getPlayerIndex()).second)
+			{
+				ReplayTelemetry::fail("players_duplicate_mapping", "occupied replay slots map to one engine player index");
+				return FALSE;
+			}
+			const std::string replayName = occupied ? unicodeUtf8(slot->getName()) : std::string();
+			if (occupied && replayName.empty())
+			{
+				ReplayTelemetry::fail("players_name_unavailable", "occupied replay slot name is unavailable as UTF-8");
+				return FALSE;
+			}
+			const PlayerTemplate *playerTemplate = player != nullptr ? player->getPlayerTemplate() : nullptr;
+			Waypoint *waypoint = nullptr;
+			if (occupied && slot->getStartPos() >= 0 && TheTerrainLogic != nullptr)
+			{
+				AsciiString waypointName;
+				waypointName.format("Player_%d_Start", slot->getStartPos() + 1);
+				waypoint = TheTerrainLogic->getWaypointByName(waypointName);
+			}
+			std::string startPosition = "null";
+			if (waypoint != nullptr)
+			{
+				Coord3D position = *waypoint->getLocation();
+				position.z = TheTerrainLogic->getGroundHeight(position.x, position.y);
+				const char *nonfiniteInjection = getenv("GENERALS_REPLAY_TELEMETRY_TEST_NONFINITE");
+				if (!injectedPlayerNumber && nonfiniteInjection != nullptr && strcmp(nonfiniteInjection, "player") == 0)
+				{
+					position.x = std::numeric_limits<Real>::infinity();
+					injectedPlayerNumber = TRUE;
+				}
+				startPosition = "{\"x\":" + jsonReal(position.x) + ",\"y\":" + jsonReal(position.y)
+					+ ",\"z\":" + jsonReal(position.z) + "}";
+				if (s_serializationFailed)
+				{
+					return FALSE;
+				}
+			}
+			const Bool isHeaderLocalSlot = slotIndex == ReplayTelemetry::getReplayLocalSlotIndex();
+			slotsJson += "{\"slot_index\":" + std::to_string(slotIndex)
+				+ ",\"slot_state\":" + jsonUtf8(slotStateName(slot->getState()))
+				+ ",\"occupied\":" + (occupied ? "true" : "false")
+				+ ",\"resolution_status\":"
+				+ (occupied ? (player != nullptr ? "\"resolved\"" : "\"unresolved\"") : "\"not_applicable\"")
+				+ ",\"replay_name\":" + (occupied ? jsonUtf8(replayName.c_str()) : "null")
+				+ ",\"player_index\":" + (player != nullptr ? std::to_string(player->getPlayerIndex()) : "null")
+				+ ",\"team_id\":" + (occupied ? std::to_string(slot->getTeamNumber()) : "null")
+				+ ",\"faction_template_name\":"
+				+ (playerTemplate != nullptr ? jsonString(playerTemplate->getName()) : "null")
+				+ ",\"color\":" + (occupied && slot->getColor() >= 0 ? std::to_string(slot->getColor()) : "null")
+				+ ",\"start_position_status\":"
+				+ (occupied ? (waypoint != nullptr ? "\"resolved\"" : "\"unknown\"") : "\"not_applicable\"")
+				+ ",\"start_position\":" + startPosition
+				+ ",\"controller\":" + (occupied ? (slot->isHuman() ? "\"human\"" : "\"ai\"") : "null")
+				+ ",\"is_human\":" + (slot->isHuman() ? "true" : "false")
+				+ ",\"is_header_local_slot\":" + (isHeaderLocalSlot ? "true" : "false")
+				+ ",\"is_resolved_local_player\":"
+				+ (player != nullptr ? (player == ThePlayerList->getLocalPlayer() ? "true}" : "false}") : "null}");
+		}
+		slotsJson.push_back(']');
+		return TRUE;
 	}
 
 	Bool fileMatches(const AsciiString &path, const std::string &expected)
@@ -482,15 +689,18 @@ namespace
 void ReplayGameDataExport::reset()
 {
 	s_catalogReady = FALSE;
+	s_playersReady = FALSE;
 	s_playersEmitted = FALSE;
+	s_serializationFailed = FALSE;
 	s_catalogPath.clear();
 	s_catalogSha256.clear();
 	s_engineDataIdentity.clear();
+	s_playersPayload.clear();
 }
 
 Bool ReplayGameDataExport::prepareCatalog()
 {
-	if (s_catalogReady)
+	if (s_catalogReady && s_playersReady)
 	{
 		return TRUE;
 	}
@@ -499,85 +709,41 @@ Bool ReplayGameDataExport::prepareCatalog()
 		ReplayTelemetry::fail("catalog_metadata_unavailable", "loaded engine metadata stores are unavailable");
 		return FALSE;
 	}
+	s_serializationFailed = FALSE;
+	std::string playerSlots;
+	if (!buildPlayerSlots(playerSlots))
+	{
+		return FALSE;
+	}
 	s_engineDataIdentity = ReplayTelemetry::getEngineDataIdentity().str();
 	const std::string catalog = buildCatalog();
-	if (catalog.empty() || !publishCatalog(catalog))
+	if (s_serializationFailed || catalog.empty() || !publishCatalog(catalog))
 	{
 		return FALSE;
 	}
 	s_catalogReady = TRUE;
 	ReplayTelemetry::setGameDataCatalog(AsciiString(s_catalogPath.c_str()), AsciiString(s_catalogSha256.c_str()),
 		AsciiString(s_engineDataIdentity.c_str()));
+	const Int headerLocalSlot = ReplayTelemetry::getReplayLocalSlotIndex();
+	s_playersPayload = "{\"header_local_slot_index\":"
+		+ (headerLocalSlot >= 0 && headerLocalSlot < MAX_SLOTS ? std::to_string(headerLocalSlot) : "null")
+		+ ",\"slots\":" + playerSlots
+		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonUtf8(s_catalogPath.c_str())
+		+ ",\"sha256\":" + jsonUtf8(s_catalogSha256.c_str())
+		+ ",\"engine_data_identity\":" + jsonUtf8(s_engineDataIdentity.c_str()) + "}}";
+	s_playersReady = TRUE;
 	return TRUE;
 }
 
 void ReplayGameDataExport::emitPlayersInitialized()
 {
-	if (s_playersEmitted || !s_catalogReady || !ReplayTelemetry::isEnabled())
+	if (s_playersEmitted || !s_catalogReady || !s_playersReady || !ReplayTelemetry::isEnabled())
 	{
 		return;
 	}
 	s_playersEmitted = TRUE;
-	if (TheRecorder == nullptr || TheRecorder->getGameInfo() == nullptr || ThePlayerList == nullptr)
-	{
-		ReplayTelemetry::fail("players_unavailable", "resolved replay player state is unavailable");
-		return;
-	}
-
-	const GameInfo *gameInfo = TheRecorder->getGameInfo();
-	std::string players = "[";
-	Bool first = TRUE;
-	for (Int slotIndex = 0; slotIndex < MAX_SLOTS; ++slotIndex)
-	{
-		const GameSlot *slot = gameInfo->getConstSlot(slotIndex);
-		Player *player = ThePlayerList->getPlayerFromSlotIndex(slotIndex);
-		if (slot == nullptr || !slot->isOccupied() || player == nullptr)
-		{
-			continue;
-		}
-		if (!first)
-		{
-			players.push_back(',');
-		}
-		first = FALSE;
-		const std::string replayName = unicodeUtf8(slot->getName());
-		const PlayerTemplate *playerTemplate = player->getPlayerTemplate();
-		AsciiString waypointName;
-		waypointName.format("Player_%d_Start", slot->getStartPos() + 1);
-		Waypoint *waypoint = slot->getStartPos() >= 0 && TheTerrainLogic != nullptr
-			? TheTerrainLogic->getWaypointByName(waypointName) : nullptr;
-		std::string startPosition = "null";
-		if (waypoint != nullptr)
-		{
-			Coord3D position = *waypoint->getLocation();
-			position.z = TheTerrainLogic->getGroundHeight(position.x, position.y);
-			startPosition = "{\"x\":" + jsonReal(position.x) + ",\"y\":" + jsonReal(position.y)
-				+ ",\"z\":" + jsonReal(position.z) + "}";
-		}
-		players += "{\"replay_name\":" + (replayName.empty() ? "null" : jsonUtf8(replayName.c_str()))
-			+ ",\"player_index\":" + std::to_string(player->getPlayerIndex())
-			+ ",\"team_id\":" + std::to_string(slot->getTeamNumber())
-			+ ",\"faction_template_name\":"
-			+ (playerTemplate != nullptr ? jsonString(playerTemplate->getName()) : "null")
-			+ ",\"color\":" + (slot->getColor() >= 0 ? std::to_string(slot->getColor()) : "null")
-			+ ",\"start_position_status\":" + (waypoint != nullptr ? "\"resolved\"" : "\"unknown\"")
-			+ ",\"start_position\":" + startPosition
-			+ ",\"controller\":" + (slot->isHuman() ? "\"human\"" : "\"ai\"")
-			+ ",\"is_human\":" + (slot->isHuman() ? "true" : "false")
-			+ ",\"is_local_player\":" + (player == ThePlayerList->getLocalPlayer() ? "true}" : "false}");
-	}
-	players.push_back(']');
-	if (first)
-	{
-		ReplayTelemetry::fail("players_unavailable", "no occupied replay player resolved to an engine player");
-		return;
-	}
-	const std::string payload = "{\"players\":" + players
-		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonUtf8(s_catalogPath.c_str())
-		+ ",\"sha256\":" + jsonUtf8(s_catalogSha256.c_str())
-		+ ",\"engine_data_identity\":" + jsonUtf8(s_engineDataIdentity.c_str()) + "}}";
 	ReplayTelemetry::emit(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, "players_initialized",
-		AsciiString(payload.c_str()));
+		AsciiString(s_playersPayload.c_str()));
 }
 
 #endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

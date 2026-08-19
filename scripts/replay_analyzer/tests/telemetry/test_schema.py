@@ -34,12 +34,6 @@ def _manifest_payload() -> dict[str, object]:
         "map_identity": "maps/test.map",
         "initial_seed": 90210,
         "exporter_settings": {"movement_sample_frames": 15},
-        "game_data_catalog": {
-            "type": "game_data_catalog",
-            "path": f"game-data-catalog-v1-{'a' * 64}.json",
-            "sha256": "a" * 64,
-            "engine_data_identity": "zero-hour-1.04",
-        },
     }
 
 
@@ -99,112 +93,6 @@ def test_reader_returns_validated_observed_records_with_immutable_evidence_ident
     assert records[1].payload.object_id == 248
 
 
-@pytest.mark.parametrize("missing_field", ["type", "path", "sha256", "engine_data_identity"])
-def test_reader_rejects_incomplete_manifest_catalog_identity(tmp_path: Path, missing_field: str) -> None:
-    """Catch a manifest that cannot strictly bind its semantic catalog by type, path, content, and engine data."""
-    trace_path = _complete_trace(tmp_path)
-    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-    records[0]["payload"]["game_data_catalog"].pop(missing_field)
-    invalid_path = _write_trace(tmp_path, records, f"missing-catalog-{missing_field}.ndjson")
-
-    with pytest.raises(
-        TelemetryTraceValidationError,
-        match=rf"record 1 sequence 0 schema path payload\.game_data_catalog\.{missing_field}",
-    ):
-        list(iter_validated_trace(invalid_path))
-
-
-@pytest.mark.parametrize(
-    ("mutate", "diagnostic"),
-    [
-        (
-            lambda reference: reference.__setitem__("path", f"game-data-catalog-v1-{'b' * 64}.json"),
-            "catalog path must embed its sha256 identity",
-        ),
-        (
-            lambda reference: reference.__setitem__("engine_data_identity", "different-engine-data"),
-            "engine_data_identity must equal engine_build",
-        ),
-    ],
-)
-def test_reader_rejects_catalog_references_with_mismatched_identity(
-    tmp_path: Path, mutate: Callable[[dict[str, object]], None], diagnostic: str
-) -> None:
-    """Catch individually valid fields that do not identify one coherent engine-data asset."""
-    trace_path = _complete_trace(tmp_path)
-    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-    reference = records[0]["payload"]["game_data_catalog"]
-    assert isinstance(reference, dict)
-    mutate(reference)
-    invalid_path = _write_trace(tmp_path, records, "mismatched-catalog-identity.ndjson")
-
-    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
-        list(iter_validated_trace(invalid_path))
-
-
-def _players_payload() -> dict[str, object]:
-    """Return one fully explicit unknown-position AI slot with the manifest's asset identity."""
-    return {
-        "players": [
-            {
-                "replay_name": None,
-                "player_index": 1,
-                "team_id": -1,
-                "faction_template_name": None,
-                "color": None,
-                "start_position_status": "unknown",
-                "start_position": None,
-                "controller": "ai",
-                "is_human": False,
-                "is_local_player": True,
-            }
-        ],
-        "game_data_catalog": _manifest_payload()["game_data_catalog"],
-    }
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "diagnostic"),
-    [
-        ("start_position_status", "resolved", r"payload\.players\.0\.start_position"),
-        ("controller", "human", r"payload\.players\.0\.is_human"),
-    ],
-)
-def test_reader_rejects_contradictory_player_resolution_state(
-    tmp_path: Path, field: str, value: object, diagnostic: str
-) -> None:
-    """Catch player records that pretend an unavailable field is resolved or mislabel the controller."""
-    payload = _players_payload()
-    players = payload["players"]
-    assert isinstance(players, list) and isinstance(players[0], dict)
-    players[0][field] = value
-    records = [_record(0, 0, "manifest", _manifest_payload()), _record(1, 0, "players_initialized", payload)]
-    pre_completion = b"".join(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n" for record in records)
-    completion = _complete_payload(hashlib.sha256(pre_completion).hexdigest())
-    completion["final_frame"] = 0
-    records.append(_record(2, 0, "complete", completion))
-
-    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
-        list(iter_validated_trace(_write_trace(tmp_path, records, f"contradictory-player-{field}.ndjson")))
-
-
-def test_reader_rejects_player_catalog_identity_that_differs_from_manifest(tmp_path: Path) -> None:
-    """Catch a player event that silently redirects semantic lookup to a different valid asset identity."""
-    payload = _players_payload()
-    reference = payload["game_data_catalog"]
-    assert isinstance(reference, dict)
-    reference["path"] = f"game-data-catalog-v1-{'b' * 64}.json"
-    reference["sha256"] = "b" * 64
-    records = [_record(0, 0, "manifest", _manifest_payload()), _record(1, 0, "players_initialized", payload)]
-    pre_completion = b"".join(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n" for record in records)
-    completion = _complete_payload(hashlib.sha256(pre_completion).hexdigest())
-    completion["final_frame"] = 0
-    records.append(_record(2, 0, "complete", completion))
-
-    with pytest.raises(TelemetryTraceValidationError, match="game_data_catalog differs from manifest"):
-        list(iter_validated_trace(_write_trace(tmp_path, records, "different-player-catalog.ndjson")))
-
-
 def test_reader_rejects_object_creation_without_authoritative_lifecycle_identity(tmp_path: Path) -> None:
     """Catch a schema regression that permits object observations without their replay-local identity."""
     trace_path = _complete_trace(tmp_path)
@@ -222,18 +110,7 @@ def test_reader_rejects_object_creation_without_authoritative_lifecycle_identity
 @pytest.mark.parametrize(
     ("event_type", "payload", "required_path"),
     [
-        (
-            "players_initialized",
-            {
-                "game_data_catalog": {
-                    "type": "game_data_catalog",
-                    "path": f"game-data-catalog-v1-{'a' * 64}.json",
-                    "sha256": "a" * 64,
-                    "engine_data_identity": "zero-hour-1.04",
-                }
-            },
-            "players",
-        ),
+        ("players_initialized", {"game_data_catalog": {"path": "catalog.json", "sha256": "a" * 64}}, "players"),
         ("cash_changed", {"before": 100, "delta": -10, "after": 90, "track_income": False, "reason": "unknown"}, "player_index"),
         ("damage_applied", {"attacker_object_id": None, "weapon_name": None, "attempted_amount": 1.0, "applied_amount": 1.0, "prior_health": 2.0, "new_health": 1.0, "damage_type": "normal", "death_type": "none", "location": {"x": 0.0, "y": 0.0, "z": 0.0}, "killing_blow": False}, "victim_object_id"),
         ("order_issued", {"message_name": None, "source_player_index": 0, "selected_object_ids": [], "target_object_id": None, "target_location": None, "command_source": "replay"}, "message_type"),

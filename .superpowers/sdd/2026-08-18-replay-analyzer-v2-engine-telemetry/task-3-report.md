@@ -2,9 +2,41 @@
 
 ## Status
 
-PASS for the modern Zero Hour analyzer target. The real pinned replay emits exactly one authoritative `players_initialized` event, the manifest and event bind one deterministic content-addressed catalog, the catalog validates against its versioned JSON Schema, and telemetry remains passive and non-interfering.
+PASS for the modern Zero Hour analyzer target. The real pinned replay emits telemetry v2 only after map overrides and player resolution are complete, with one authoritative eight-slot `players_initialized` event. The manifest and event bind one deterministic content-addressed catalog, the catalog validates against its versioned JSON Schema, and telemetry remains passive and non-interfering.
 
 Task 3 implementation base: `18f4114a5` (`fix(replay): Enable no-audio analyzer playback`). The prerequisite is intentionally separate from the feature commit.
+
+## Fix Round 1: Authority and Contract Migration
+
+Review identified that the first Task 3 implementation prepared the catalog from `ReplayTelemetry::begin`, before `GameLogic::loadMapINI`, solo-map INI `CREATE_OVERRIDES`, and resolved players were authoritative. It also silently omitted open/unresolved replay slots, redefined telemetry v1, flattened weapon sets to a name union, and let the Python reader yield a v2 manifest without proving the referenced catalog.
+
+The correction introduces a two-phase transaction. Header decode exclusively opens a pending trace and stores immutable header facts; it writes no record and creates no catalog. `RecorderClass::initControls` calls `ReplayTelemetry::initialize` only after map/player initialization. That phase builds the eight-slot snapshot first, serializes already-loaded final metadata, publishes the content-addressed catalog, writes and flushes the manifest, and only then emits the single player event. Any failure before initialization closes and removes the owned temporary trace without publishing a final trace.
+
+Telemetry v1 is restored byte-for-byte to the `628e26e84` contract and remains readable, including historical traces with no player event and historical player payloads whose catalog reference lived only on the player event. Telemetry v2 is a new packaged schema: its manifest requires the strict catalog reference and parsed `audio_enabled` provenance; it requires exactly one closed eight-slot player snapshot. The Python reader selects validation by record major version, buffers the complete trace, and for v2 validates the referenced safe relative basename, exact bytes and SHA-256, strict UTF-8/JSON, catalog schema, catalog engine identity, manifest reference, and player reference before returning any iterator record.
+
+Each of all eight replay slots records `slot_index`, replay slot state, occupied/resolution state, nullable resolved engine fields, replay-header local-slot provenance, and separately the resolved local-player-pointer result. Occupied engine player mappings must be unique; open and closed slots are explicit rather than skipped. Synthetic strict fixtures cover human, AI, open, closed, unresolved, duplicate, reordered, and contradictory cases; the pinned replay provides the real two-human resolved case.
+
+Thing templates now retain ordered weapon sets rather than only a flattened name list. Each set records the raw condition mask and stable condition names, shared reload and cross-set lock flags, and all three weapon slots with weapon identity, raw auto-choice mask plus stable command-source names, and preferred-against kind-of names. `derived_weapon_names` is explicitly a derived convenience union; the top-level weapon collection remains explicitly scoped to names referenced by loaded thing templates.
+
+All catalog/player `Real` values pass through a finite-number guard before JSON serialization. A deterministic analyzer-only fault seam proves both metadata and waypoint nonfinite values fail closed with no trace, catalog, or temporary residue. Python JSON parsing rejects non-standard `NaN` and `Infinity` constants in both traces and catalog assets.
+
+No tracked custom-map replay or `.map` fixture exists (`git ls-files "*.rep"` returns only the pinned retail replay and `git ls-files "*.map"` is empty), so the strongest available evidence is the real engine replay plus the static lifecycle assertion that catalog preparation is absent from `begin` and initialization occurs at `initControls`.
+
+### Fix-Round RED Evidence
+
+Tests were introduced before each correction. The recorded RED groups were:
+
+```text
+historical v1 / new v2 selection: 2 failed
+v2 atomic asset validation and exact player event count: 8 failed
+eight-slot ordering/resolution invariants: 5 failed
+structured weapon-set catalog schema: 1 failed
+real-engine lifecycle/catalog/nonfinite/audio/pre-init tests: 6 failed
+installed-wheel old fake/missing catalog smoke: 1 failed
+explicit modern analyzer / non-VC6 translation-unit guard: 1 failed
+```
+
+The real-engine RED proved `prepareCatalog` was still called by `begin`, the emitted manifest remained version 1, the player snapshot skipped unused slots, the catalog still emitted `weapon_names`, injected nonfinite values could publish output, and a pre-initialization replay failure left a published trace. The wheel RED proved the old smoke used a fake v1 catalog reference with no asset.
 
 ## Exact RED Evidence
 
@@ -54,6 +86,7 @@ The fix is limited to `RTS_REPLAY_ANALYZER && !IS_VS6_BUILD`; it does not broade
 - `GeneralsMD/Code/GameEngine/Include/GameLogic/Locomotor.h`
 - `scripts/replay_analyzer/contracts/game-data-catalog-v1.schema.json`
 - `scripts/replay_analyzer/contracts/telemetry-v1.schema.json`
+- `scripts/replay_analyzer/contracts/telemetry-v2.schema.json`
 - `scripts/replay_analyzer/pyproject.toml`
 - `scripts/replay_analyzer/src/generals_replay_analyzer/telemetry/model.py`
 - `scripts/replay_analyzer/src/generals_replay_analyzer/telemetry/reader.py`
@@ -62,18 +95,20 @@ The fix is limited to `RTS_REPLAY_ANALYZER && !IS_VS6_BUILD`; it does not broade
 - `scripts/replay_analyzer/tests/engine/test_game_data_catalog.py`
 - `scripts/replay_analyzer/tests/engine/test_telemetry_envelope.py`
 - `scripts/replay_analyzer/tests/telemetry/test_schema.py`
+- `scripts/replay_analyzer/tests/telemetry/test_game_data_catalog_schema.py`
+- `scripts/replay_analyzer/tests/telemetry/test_telemetry_v2_contract.py`
 - `scripts/replay_analyzer/tests/test_wheel.py`
 - this report
 
-The schema/model/reader extensions keep telemetry major version 1 and make the newly required asset reference strict: type, safe content-addressed basename, SHA-256, and engine-data identity are required; the filename must embed the same SHA; manifest engine identity must equal `engine_build`; and the player event reference must equal the manifest reference. The catalog schema is included in the wheel.
+The schema/model/reader extensions preserve historical telemetry v1 and introduce telemetry v2 for the mandatory catalog/player contract. In v2, type, safe content-addressed basename, SHA-256, and engine-data identity are required; the filename must embed the same SHA; manifest engine identity must equal `engine_build`; and the player event reference must equal the manifest reference. Both telemetry schemas and the catalog schema are included in the wheel.
 
 ## Design and Authoritative Sources
 
-- `ReplayTelemetry::begin` creates its exclusive trace transaction, establishes the engine-data identity from version/executable/INI CRC metadata, prepares the required catalog, and only then writes the manifest. Catalog failure closes and discards the owned trace transaction without affecting replay control flow.
-- `RecorderClass::initControls` is the established post-GameLogic-start seam. At that point replay slots have resolved to `Player` objects, player templates, the local player, map waypoints, and start positions. A process-local guard emits only one player record.
-- Each occupied slot exports its replay name, actual `Player::getPlayerIndex`, replay team number, resolved `PlayerTemplate` name, color or null, waypoint-derived start position or explicit unknown, human/AI controller state, and local-player flag. The schema rejects contradictory resolved/null and controller/boolean combinations.
+- `ReplayTelemetry::begin` creates only its exclusive pending trace transaction and stores decoded replay identity. It emits no observation and performs no catalog discovery. A replay that never reaches initialized state discards that pending transaction.
+- `RecorderClass::initControls` is the established post-GameLogic-start seam. At that point map INIs/final overrides and replay players are resolved. `ReplayTelemetry::initialize` builds player/catalog evidence, writes and flushes the manifest first, and then emits exactly one player record.
+- Every one of `MAX_SLOTS` exports its stable slot index and replay state. Occupied slots additionally expose replay name/team, actual `Player::getPlayerIndex` when resolved, resolved `PlayerTemplate` name, color or null, waypoint-derived start position or explicit unknown, human/AI state, header-local provenance, and resolved-local-player provenance. Open/closed and unresolved fields remain explicit null/not-applicable rather than guessed.
 - The catalog iterates already-loaded `ThingFactory` templates, follows their final overrides, deduplicates by stable template name, and sorts names before assigning ordinals. It does not instantiate a module, `Locomotor`, store, `Object`, or other gameplay state.
-- Template fields come directly from loaded metadata: stable template name, default owning side, `KindOfMaskType` names, raw configured build cost, accurately named raw `configured_build_time_seconds`, resolved prerequisite template/science names, loaded AI module locomotor-set references, `isBuildFacility`, referenced weapon-template names, and category tags derived only from those flags/capabilities.
+- Template fields come directly from loaded metadata: stable template name, default owning side, `KindOfMaskType` names, raw configured build cost, accurately named raw `configured_build_time_seconds`, resolved prerequisite template/science names, loaded AI module locomotor-set references, `isBuildFacility`, structured weapon-set metadata, and category tags derived only from those flags/capabilities.
 - Upgrade and science names come from their loaded stores. Weapon scope is explicitly `referenced_by_thing_templates`; locomotor scope is explicitly `referenced_by_thing_templates`. This avoids claiming global enumeration where the engine exposes no safe iterator.
 - The only new metadata accessors are guarded, inline, const views of configured build time, resolved prerequisite vectors, and loaded locomotor name/surface mask. They expose no mutator and perform no resolution or allocation.
 - No numeric object ID is used as a semantic category. Replay-local IDs remain observation identities in the unchanged later-event contract.
@@ -92,31 +127,33 @@ The file is confined to the configured telemetry output directory. Existing iden
 
 ## GREEN Verification
 
-Focused Task 3 real-engine behavior:
+Focused fix-round real-engine behavior:
 
 ```text
-uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/engine/test_game_data_catalog.py -q
-3 passed in 5.91s
+post-map lifecycle + catalog + two nonfinite paths + noaudio provenance + pre-init cleanup
+6 passed in 8.60s
 ```
 
-The three tests prove:
+The focused tests prove:
 
 - one manifest and exactly one resolved player event from the real pinned replay;
-- strict Task 1 reader validation plus catalog JSON Schema, UTF-8 decode, SHA/path/type/engine identity, stable ordinals, populated semantic collections, and absence of numeric template/object category IDs;
-- byte-identical catalog content and identical content reference across two distinct run IDs/output envelopes;
+- strict version-selected reader validation plus catalog JSON Schema, UTF-8 decode, SHA/path/type/engine identity, stable ordinals, structured weapon sets, populated semantic collections, and absence of numeric template/object category IDs;
+- byte-identical catalog content/reference and identical normalized complete trace records across two distinct run IDs/output envelopes; only `run_id` and the consequent terminal `trace_sha256` are normalized;
 - unrelated collision bytes survive unchanged, no trace is published, and no owned transaction remains.
+- nonfinite catalog/player values and a replay that fails before initialization publish neither trace nor catalog;
+- the parsed manifest records `audio_enabled: false` under `-noaudio`.
 
-Focused strict schema/runtime gate after cross-field hardening:
+Focused telemetry v1/v2 and catalog-schema gate after cross-field hardening:
 
 ```text
-33 passed in 8.09s
+40 passed in 0.40s
 ```
 
 Full final real-engine suite after the final build:
 
 ```text
-uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/engine -q
-24 passed, 1 skipped in 33.78s
+uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests -m engine -q
+28 passed, 1 skipped, 274 deselected in 44.73s
 ```
 
 The skip is the pre-existing Windows symlink-alias case when this host denies symlink creation. Hardlink collision coverage remains green.
@@ -127,30 +164,36 @@ Non-engine and quality gates:
 
 ```text
 uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests -m "not engine" -q
-263 passed, 25 deselected in 21.39s
+274 passed, 29 deselected in 21.31s
 
-uv run --project . ruff check src tests
+uv run --project scripts/replay_analyzer ruff check scripts/replay_analyzer/src scripts/replay_analyzer/tests
 All checks passed!
 
-uv run --project . mypy --strict src
+uv run --project scripts/replay_analyzer mypy --strict scripts/replay_analyzer/src
 Success: no issues found in 15 source files
+
+uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/test_wheel.py -q
+1 passed in 6.59s
 ```
 
 Final modern x86 Release build:
 
 ```text
 cmd.exe /d /c "call C:\PROGRA~2\MICROS~2\2022\BUILDT~1\Common7\Tools\VsDevCmd.bat -arch=x86 -host_arch=x86 >nul && cmake --build build\win32 --target z_generals --config Release -- -j 4"
-[2/4] Building ... ReplayGameDataExport.cpp.obj
-[3/4] Linking ... z_gameengine.lib
-[4/4] Linking ... generalszh.exe
+[4/8] Building ... ReplayTelemetry.cpp.obj
+[6/8] Building ... ReplayGameDataExport.cpp.obj
+[7/8] Linking ... z_gameengine.lib
+[8/8] Linking ... generalszh.exe
 Exit code: 0
 ```
+
+The only build diagnostics were the two pre-existing signed/unsigned C4018 warnings in `ReplaySimulation.cpp` lines 165 and 187.
 
 `git diff --check` passed after the final source and report edits.
 
 ## Real Trace and Non-Interference
 
-The pinned retail replay trace validates through Task 1 `iter_validated_trace` as `manifest`, `players_initialized`, `complete`. It contains two occupied human slots with stable faction templates, colors, resolved map starts, unique engine player indices, and exactly one local player. Completion remains at the existing CRC boundary (frame 108, 16 executed commands), and `event_counts` contains exactly one manifest, one player event, and one complete event.
+The pinned retail replay trace validates through the version-selecting `iter_validated_trace` as `manifest`, `players_initialized`, `complete`. It contains exactly eight ordered slots: two occupied humans with stable faction templates, colors, resolved map starts, unique engine player indices, one header-local slot and one resolved local player, plus six explicit open/closed slots. Completion remains at the existing CRC boundary (frame 108, 16 executed commands), and `event_counts` contains exactly one manifest, one player event, and one complete event.
 
 The existing real-engine non-interference test compares telemetry disabled/enabled runs and remains green: return code, stdout, and stderr are identical. Catalog/export calls return no gameplay value, consult no random or UI state, and cannot modify GameLogic, command execution, CRC decisions, replay termination, or normal diagnostics. Only explicit telemetry/catalog failure diagnostics are added on output failure paths.
 
@@ -186,6 +229,8 @@ MinGW remains an honest environmental cannot-verify. The exporter uses standard 
 - Confirmed the separate no-audio prerequisite uses the mandated `@bugfix` comment dated 20/08/2026.
 - Confirmed no temporary debug probes remain and no base Generals file is modified.
 
-## Commit Subject
+## Commit Subjects
 
 `feat(replay): Export semantic game data catalog`
+
+`fix(replay): Make semantic catalog authoritative`

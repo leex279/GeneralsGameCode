@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(RTS_REPLAY_ANALYZER)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/AsciiString.h"
 #include "Common/Recorder.h"
@@ -15,10 +15,12 @@ public:
 	static Bool isEnabled();
 	static const AsciiString &getTracePath();
 	static const AsciiString &getEngineDataIdentity();
+	static Int getReplayLocalSlotIndex();
 	static AsciiString sha256Hex(const char *data, size_t length);
 	static void setGameDataCatalog(const AsciiString &path, const AsciiString &sha256,
 		const AsciiString &engineDataIdentity);
 	static void begin(const RecorderClass::ReplayHeader &header);
+	static void initialize();
 	static void observeExecutedCommand();
 	static void emit(UnsignedInt frame, const char *eventType, const AsciiString &payloadJson);
 	static void deferCleanFinish();
@@ -27,4 +29,4 @@ public:
 	static void fail(const char *code, const char *message);
 };
 
-#endif // defined(RTS_REPLAY_ANALYZER)
+#endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

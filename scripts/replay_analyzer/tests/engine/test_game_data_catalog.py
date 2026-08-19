@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from generals_replay_analyzer.telemetry.model import ManifestRecord, PlayersInitializedRecord
@@ -33,8 +34,12 @@ def _run_engine(
     trace_path: Path,
     repository_root: Path,
     run_id: str = RUN_ID,
+    environment_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Launch one bounded real replay into a disposable telemetry destination."""
+    environment = _runtime_environment(repository_root)
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
     return subprocess.run(
         [
             str(runtime_executable),
@@ -50,7 +55,7 @@ def _run_engine(
             "15",
         ],
         cwd=runtime_executable.parent,
-        env=_runtime_environment(repository_root),
+        env=environment,
         capture_output=True,
         text=True,
         timeout=120,
@@ -86,6 +91,13 @@ def test_replay_emits_one_resolved_player_event_and_a_strict_catalog_asset(
     completed = _run_engine(zero_hour_runtime_executable, pinned_replay, trace_path, repository_root)
 
     assert trace_path.is_file(), f"returncode={completed.returncode}\n{completed.stdout[-2000:]}{completed.stderr[-2000:]}"
+    raw_manifest = json.loads(trace_path.read_bytes().splitlines()[0])
+    raw_reference = raw_manifest["payload"]["game_data_catalog"]
+    raw_catalog_path = _asset_path(trace_path, str(raw_reference["path"]))
+    raw_catalog_bytes = raw_catalog_path.read_bytes()
+    raw_catalog = json.loads(raw_catalog_bytes.decode("utf-8"))
+    raw_schema = json.loads(CATALOG_SCHEMA.read_text(encoding="utf-8"))
+    Draft202012Validator(raw_schema).validate(raw_catalog)
     records = tuple(iter_validated_trace(trace_path))
     manifests = [record for record in records if isinstance(record, ManifestRecord)]
     player_events = [record for record in records if isinstance(record, PlayersInitializedRecord)]
@@ -118,15 +130,21 @@ def test_replay_emits_one_resolved_player_event_and_a_strict_catalog_asset(
     assert catalog["weapon_scope"] == "referenced_by_thing_templates"
     assert catalog["locomotor_scope"] == "referenced_by_thing_templates"
 
-    players = player_event.payload.players
-    assert {player.replay_name for player in players} == {"leex279", "FOX27"}
-    assert len({player.player_index for player in players}) == len(players)
-    assert sum(player.is_local_player for player in players) == 1
-    assert all(player.faction_template_name for player in players)
-    assert all(player.color is not None for player in players)
-    assert all(player.controller in {"human", "ai"} for player in players)
-    assert all(player.start_position_status == "resolved" for player in players)
-    assert all(player.start_position is not None for player in players)
+    slots = player_event.payload.slots
+    assert slots is not None
+    assert [slot.slot_index for slot in slots] == list(range(8))
+    occupied = [slot for slot in slots if slot.occupied]
+    assert {slot.replay_name for slot in occupied} == {"leex279", "FOX27"}
+    assert len({slot.player_index for slot in occupied}) == len(occupied)
+    assert sum(slot.is_header_local_slot for slot in slots) == 1
+    assert sum(slot.is_resolved_local_player is True for slot in slots) == 1
+    assert all(slot.resolution_status == "resolved" for slot in occupied)
+    assert all(slot.faction_template_name for slot in occupied)
+    assert all(slot.color is not None for slot in occupied)
+    assert all(slot.controller == "human" for slot in occupied)
+    assert all(slot.start_position_status == "resolved" for slot in occupied)
+    assert all(slot.start_position is not None for slot in occupied)
+    assert all(slot.slot_state in {"open", "closed"} for slot in slots if not slot.occupied)
 
     for collection in ("thing_templates", "upgrades", "sciences", "weapons", "locomotors"):
         values = catalog[collection]
@@ -135,7 +153,30 @@ def test_replay_emits_one_resolved_player_event_and_a_strict_catalog_asset(
 
     templates = catalog["thing_templates"]
     assert any(template["kind_of_flags"] for template in templates)
-    assert any(template["weapon_names"] for template in templates)
+    weapon_templates = [template for template in templates if template["weapon_sets"]]
+    assert weapon_templates
+    assert any(len(template["weapon_sets"]) > 1 for template in weapon_templates)
+    assert any(sum(slot["weapon_name"] is not None for slot in weapon_set["slots"]) > 1
+               for template in weapon_templates for weapon_set in template["weapon_sets"])
+    for template in weapon_templates:
+        derived_names = sorted(
+            {
+                slot["weapon_name"]
+                for weapon_set in template["weapon_sets"]
+                for slot in weapon_set["slots"]
+                if slot["weapon_name"] is not None
+            }
+        )
+        assert template["derived_weapon_names"] == derived_names
+        for set_ordinal, weapon_set in enumerate(template["weapon_sets"]):
+            assert weapon_set["ordinal"] == set_ordinal
+            assert [slot["ordinal"] for slot in weapon_set["slots"]] == [0, 1, 2]
+            assert [slot["slot"] for slot in weapon_set["slots"]] == ["PRIMARY", "SECONDARY", "TERTIARY"]
+            assert isinstance(weapon_set["condition_mask"], int)
+            assert isinstance(weapon_set["condition_names"], list)
+            assert all(isinstance(slot["auto_choose_mask"], int) for slot in weapon_set["slots"])
+            assert all(isinstance(slot["auto_choose_sources"], list) for slot in weapon_set["slots"])
+            assert all(isinstance(slot["preferred_against_kind_of"], list) for slot in weapon_set["slots"])
     assert any(template["locomotor_sets"] for template in templates)
     assert any(template["prerequisites"] for template in templates)
     assert any(template["production_capable"] for template in templates)
@@ -155,6 +196,7 @@ def test_catalog_is_byte_deterministic_across_distinct_run_envelopes(
     run_ids = ("323e4567-e89b-12d3-a456-426614174000", "423e4567-e89b-12d3-a456-426614174000")
     references: list[dict[str, object]] = []
     contents: list[bytes] = []
+    normalized_traces: list[list[dict[str, object]]] = []
     for trace, run_id in zip(traces, run_ids, strict=True):
         completed = _run_engine(zero_hour_runtime_executable, pinned_replay, trace, repository_root, run_id)
         assert trace.is_file(), completed.stdout[-2000:] + completed.stderr[-2000:]
@@ -162,9 +204,16 @@ def test_catalog_is_byte_deterministic_across_distinct_run_envelopes(
         reference = manifest.payload.game_data_catalog.model_dump()
         references.append(reference)
         contents.append(_asset_path(trace, str(reference["path"])).read_bytes())
+        trace_records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+        for record in trace_records:
+            record["run_id"] = "<run-id>"
+            if record["event_type"] == "complete":
+                record["payload"]["trace_sha256"] = "<trace-sha256>"
+        normalized_traces.append(trace_records)
 
     assert references[0] == references[1]
     assert contents[0] == contents[1]
+    assert normalized_traces[0] == normalized_traces[1]
 
 
 def test_catalog_publication_never_overwrites_an_unrelated_collision(
@@ -194,4 +243,48 @@ def test_catalog_publication_never_overwrites_an_unrelated_collision(
     assert catalog_path.read_bytes() == collision
     assert not second_trace.exists()
     assert "catalog_collision" in second.stderr
+    assert not tuple(tmp_path.glob("*.tmp.*"))
+
+
+def test_catalog_export_is_deferred_to_the_post_map_player_initialization_seam(repository_root: Path) -> None:
+    """Catch catalog publication before map CREATE_OVERRIDES and resolved players become authoritative."""
+    telemetry_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
+    ).read_text(encoding="utf-8")
+    recorder_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    assert "void ReplayTelemetry::initialize" in telemetry_source
+    begin = telemetry_source.split("void ReplayTelemetry::begin", maxsplit=1)[1].split(
+        "void ReplayTelemetry::initialize", maxsplit=1
+    )[0]
+    init_controls = recorder_source.split("void RecorderClass::initControls", maxsplit=1)[1].split(
+        "RecorderModeType RecorderClass::getMode", maxsplit=1
+    )[0]
+
+    assert "prepareCatalog" not in begin
+    assert "ReplayTelemetry::initialize();" in init_controls
+
+
+@pytest.mark.parametrize("nonfinite_source", ["catalog", "player"])
+def test_nonfinite_engine_numbers_fail_closed_without_publishing_assets(
+    nonfinite_source: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch NaN or Infinity from loaded metadata or waypoints escaping into JSON or content storage."""
+    trace_path = (tmp_path / f"nonfinite-{nonfinite_source}.ndjson").resolve()
+    completed = _run_engine(
+        zero_hour_runtime_executable,
+        pinned_replay,
+        trace_path,
+        repository_root,
+        environment_overrides={"GENERALS_REPLAY_TELEMETRY_TEST_NONFINITE": nonfinite_source},
+    )
+
+    assert not trace_path.exists()
+    assert "nonfinite_number" in completed.stderr
+    assert not tuple(tmp_path.glob("game-data-catalog-v1-*.json"))
     assert not tuple(tmp_path.glob("*.tmp.*"))

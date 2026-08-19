@@ -26,7 +26,6 @@
 
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
-#include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayParseDump.h"
 #include "Common/ReplayTelemetry.h"
 #endif
@@ -1884,8 +1883,8 @@ RecorderModeType RecorderClass::getMode() {
 void RecorderClass::initControls()
 {
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	// TheSuperHackers @feature Leex 18/08/2026 Emit one player snapshot after replay slots resolve to authoritative engine players. (#TBD)
-	ReplayGameDataExport::emitPlayersInitialized();
+	// TheSuperHackers @feature Leex 18/08/2026 Publish the manifest and player snapshot only after map and player initialization. (#TBD)
+	ReplayTelemetry::initialize();
 #endif
 
 	NameKeyType parentReplayControlID = TheNameKeyGenerator->nameToKey( "ReplayControl.wnd:ParentReplayControl" );

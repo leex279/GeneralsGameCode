@@ -1,6 +1,7 @@
 """Real-engine behavior tests for the passive telemetry trace envelope."""
 
 import ctypes
+import json
 import os
 import shutil
 import subprocess
@@ -85,13 +86,21 @@ def _write_crc_free_replay(source: Path, destination: Path) -> int:
 
 
 def test_release_analyzer_honors_noaudio_before_replay_startup(
+    tmp_path: Path,
     repository_root: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
 ) -> None:
-    """Catch a Release analyzer that silently ignores -noaudio and enters the retail Miles device path."""
+    """Catch a Release analyzer that ignores -noaudio even when playback happens not to fault in Miles."""
+    trace_path = (tmp_path / "noaudio-proof.ndjson").resolve()
     completed = _run_engine(
-        _base_command(zero_hour_runtime_executable, pinned_replay),
+        [
+            *_base_command(zero_hour_runtime_executable, pinned_replay),
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+        ],
         zero_hour_runtime_executable.parent,
         repository_root,
     )
@@ -100,6 +109,10 @@ def test_release_analyzer_honors_noaudio_before_replay_startup(
         f"Release analyzer entered the retail Miles access violation despite -noaudio: "
         f"{completed.stdout}{completed.stderr}"
     )
+    manifest = json.loads(trace_path.read_bytes().splitlines()[0])
+    assert manifest["schema_version"] == 2
+    assert manifest["payload"]["exporter_settings"]["audio_enabled"] is False
+    assert isinstance(next(iter(iter_validated_trace(trace_path))), ManifestRecord)
 
 
 def _write_zero_command_replay(source: Path, destination: Path) -> None:
@@ -147,13 +160,16 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert manifest.sequence == 0
     assert manifest.frame == 0
     assert manifest.logic_time_seconds == 0.0
-    assert manifest.payload.exporter_settings == {"movement_sample_frames": 15}
+    assert manifest.schema_version == 2
+    assert manifest.payload.exporter_settings == {"movement_sample_frames": 15, "audio_enabled": False}
     assert manifest.payload.engine_build
     assert manifest.payload.replay_version
     assert manifest.payload.map_identity
     assert players.sequence == 1
     assert players.frame == 0
-    assert players.payload.players
+    assert players.payload.players is None
+    assert players.payload.slots is not None
+    assert [slot.slot_index for slot in players.payload.slots] == list(range(8))
     assert players.payload.game_data_catalog == manifest.payload.game_data_catalog
     assert complete.sequence == 2
     assert complete.payload.final_frame == complete.frame
@@ -441,21 +457,17 @@ def test_temp_candidate_exhaustion_never_removes_unowned_files(
     assert set(tmp_path.iterdir()) == set(candidates)
 
 
-def test_zero_command_replay_settles_nonclean_telemetry_before_process_shutdown(
+def test_replay_failure_before_initialized_phase_discards_pending_telemetry(
     tmp_path: Path,
     repository_root: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
 ) -> None:
-    """Catch first-frame EOF leaving a deferred writer open until subsystem destruction."""
+    """Catch first-frame EOF publishing a v2 trace before authoritative catalog/player initialization."""
     zero_command_replay = tmp_path / "zero-command.rep"
     _write_zero_command_replay(pinned_replay, zero_command_replay)
     trace_path = (tmp_path / "zero-command.ndjson").resolve()
-    hold_path = tmp_path / "hold-after-start-failure"
-    hold_path.write_text("hold\n", encoding="utf-8")
-    environment = _runtime_environment(repository_root)
-    environment["GENERALS_REPLAY_TELEMETRY_TEST_HOLD_AFTER_START_FAILURE"] = str(hold_path)
-    process = subprocess.Popen(
+    completed = _run_engine(
         [
             *_base_command(zero_hour_runtime_executable, zero_command_replay),
             "-telemetry",
@@ -463,38 +475,29 @@ def test_zero_command_replay_settles_nonclean_telemetry_before_process_shutdown(
             "-telemetry-run-id",
             RUN_ID,
         ],
-        cwd=zero_hour_runtime_executable.parent,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        zero_hour_runtime_executable.parent,
+        repository_root,
     )
-    try:
-        deadline = time.monotonic() + 30
-        while not trace_path.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.005)
-        assert trace_path.is_file(), "startup failure did not publish its non-clean completion"
-        time.sleep(0.1)
-        assert process.poll() is None, "telemetry was settled only during process shutdown"
-        records = tuple(iter_validated_trace(trace_path))
-        complete = records[-1]
-        assert isinstance(complete, CompleteRecord)
-        assert complete.payload.final_frame == 0
-        assert complete.payload.command_count == 0
-        assert complete.payload.clean_shutdown is False
-        assert complete.payload.replay_truncated is True
-        assert complete.payload.crc_mismatch is False
-        assert not tuple(tmp_path.glob("zero-command.ndjson.tmp.*"))
-    finally:
-        hold_path.unlink(missing_ok=True)
-        stdout, stderr = process.communicate(timeout=30)
 
-    assert process.returncode != 0
-    assert "Cannot open replay" in stdout
-    assert stderr == ""
+    assert completed.returncode != 0
+    assert "Cannot open replay" in completed.stdout
+    assert not trace_path.exists()
+    assert not tuple(tmp_path.glob("zero-command.ndjson.tmp.*"))
+    assert not tuple(tmp_path.glob("game-data-catalog-v1-*.json"))
 
 
 def test_telemetry_writer_avoids_msvc_only_bounded_formatting() -> None:
     """Catch reintroduction of formatting calls that cannot compile in the supported MinGW analyzer build."""
     source = Path(__file__).resolve().parents[4] / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
     assert "sprintf_s(" not in source.read_text(encoding="utf-8")
+
+
+def test_telemetry_translation_units_explicitly_exclude_vc6() -> None:
+    """Catch analyzer-only APIs relying on an indirect build-definition exclusion from the legacy compiler."""
+    root = Path(__file__).resolve().parents[4]
+    for relative_path in (
+        "GeneralsMD/Code/GameEngine/Include/Common/ReplayTelemetry.h",
+        "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp",
+    ):
+        source = (root / relative_path).read_text(encoding="utf-8")
+        assert "#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)" in source

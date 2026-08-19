@@ -54,10 +54,36 @@
         "names": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
+    "weaponSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "slot", "weapon_name", "auto_choose_mask", "auto_choose_sources", "preferred_against_kind_of"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 2},
+        "slot": {"enum": ["PRIMARY", "SECONDARY", "TERTIARY"]},
+        "weapon_name": {"type": ["string", "null"], "minLength": 1},
+        "auto_choose_mask": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "auto_choose_sources": {"type": "array", "items": {"enum": ["FROM_PLAYER", "FROM_SCRIPT", "FROM_AI", "FROM_DOZER", "DEFAULT_SWITCH_WEAPON"]}},
+        "preferred_against_kind_of": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "weaponSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "condition_mask", "condition_names", "shared_reload_time", "weapon_lock_shared_across_sets", "slots"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0},
+        "condition_mask": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "condition_names": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "shared_reload_time": {"type": "boolean"},
+        "weapon_lock_shared_across_sets": {"type": "boolean"},
+        "slots": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/weaponSlot"}}
+      }
+    },
     "thingTemplate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "name", "faction", "kind_of_flags", "build_cost", "configured_build_time_seconds", "prerequisites", "locomotor_sets", "production_capable", "weapon_names", "category_tags"],
+      "required": ["ordinal", "name", "faction", "kind_of_flags", "build_cost", "configured_build_time_seconds", "prerequisites", "locomotor_sets", "production_capable", "weapon_sets", "derived_weapon_names", "category_tags"],
       "properties": {
         "ordinal": {"type": "integer", "minimum": 0},
         "name": {"type": "string", "minLength": 1},
@@ -68,7 +94,8 @@
         "prerequisites": {"type": "array", "items": {"$ref": "#/$defs/prerequisite"}},
         "locomotor_sets": {"type": "array", "items": {"$ref": "#/$defs/locomotorSet"}},
         "production_capable": {"type": "boolean"},
-        "weapon_names": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "weapon_sets": {"type": "array", "items": {"$ref": "#/$defs/weaponSet"}},
+        "derived_weapon_names": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "category_tags": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
