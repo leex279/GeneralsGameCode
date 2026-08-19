@@ -45,14 +45,7 @@ def parse_game_options(options: str, offset: int) -> ParsedGameOptions:
         if key in values:
             _invalid(offset, f"duplicate game-options token '{key}'")
         if key not in REQUIRED_TOKENS and key not in KNOWN_OPTIONAL_TOKENS:
-            warnings.append(
-                ParseWarning(
-                    code="unknown_optional_token",
-                    message=f"ignored game-options token '{key}'",
-                    token=key,
-                )
-            )
-            continue
+            _invalid(offset, f"unrecognized game-options token '{key}'")
         values[key] = value
 
     missing = REQUIRED_TOKENS.difference(values)

@@ -14,7 +14,7 @@ from generals_replay_analyzer.errors import (
     TruncatedReplayError,
 )
 from generals_replay_analyzer.header import parse_replay_header
-from generals_replay_analyzer.model import ParseWarning, ReplayFlags, ReplayHeader, ReplaySlot
+from generals_replay_analyzer.model import ReplayFlags, ReplayHeader, ReplaySlot
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "zero_hour_1_04"
 FIXTURE_PATH = FIXTURE_DIRECTORY / "leex279_vs_fox27.rep"
@@ -108,16 +108,14 @@ def test_header_parses_explicit_slot_kinds_without_arithmetic_player_mapping() -
     assert header.local_player_index == 0
 
 
-def test_header_keeps_original_options_and_warns_for_unknown_optional_tokens() -> None:
-    """Reject dropping source options or failing closed on an otherwise-valid extension token."""
+def test_header_rejects_unknown_game_options_tokens() -> None:
+    """Reject source-incompatible extension tokens as ParseAsciiStringToGameInfo does."""
     options = _valid_options() + "FUTURE=enabled;"
 
-    header = parse_replay_header(_header_bytes(options=options))
+    with pytest.raises(InvalidGameOptionsError) as raised:
+        parse_replay_header(_header_bytes(options=options))
 
-    assert header.game_options == options
-    assert header.warnings == (
-        ParseWarning(code="unknown_optional_token", message="ignored game-options token 'FUTURE'", token="FUTURE"),
-    )
+    assert raised.value.code == "invalid_game_options"
 
 
 def test_header_rejects_non_genrep_magic_at_the_start() -> None:

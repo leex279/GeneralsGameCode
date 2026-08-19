@@ -7,11 +7,10 @@
     "strata_source_user_token": "e80b96708aa4254945941fd5f81489bb"
   },
   "embedded_name_expectation": {
-    "deferred_to_task": 5,
-    "parse_status": "not_parsed_in_task_3",
+    "parse_status": "parsed_from_gameinfo_slots",
     "expected_player_labels": [
       "leex279",
-      "fox27"
+      "FOX27"
     ]
   },
   "header": {
