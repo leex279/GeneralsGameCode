@@ -138,3 +138,27 @@ class ReplayHeader:
             "slots": [slot.to_dict() for slot in self.slots],
             "warnings": [warning.to_dict() for warning in self.warnings],
         }
+
+
+# TheSuperHackers @feature Leex 19/08/2026 Preserve Recorder setup fields between the replay header and command stream. (#TBD)
+@dataclass(frozen=True)
+class ReplaySetup:
+    """Four source-recorded Int values immediately following ``readReplayHeader`` output."""
+
+    difficulty: int
+    original_game_mode: int
+    rank_points: int
+    max_fps: int
+    start_offset: int
+    end_offset: int
+
+    def to_dict(self) -> dict[str, int]:
+        """Return observed setup values and their exact evidence boundaries for JSON inspection."""
+        return {
+            "difficulty": self.difficulty,
+            "original_game_mode": self.original_game_mode,
+            "rank_points": self.rank_points,
+            "max_fps": self.max_fps,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+        }

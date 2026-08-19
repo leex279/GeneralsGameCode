@@ -5,6 +5,7 @@ from enum import IntEnum
 from typing import TypeAlias
 
 from .binary import BinaryReader, Coord3D, ICoord2D, IRegion2D
+from .contracts import message_name_for
 from .errors import UnsupportedArgumentTypeError
 
 
@@ -60,15 +61,7 @@ class ReplayCommand:
         return self.frame / 30.0
 
 
-_MESSAGE_NAMES = {
-    0: "MSG_INVALID",
-    1: "MSG_FRAME_TICK",
-    1000: "MSG_BEGIN_NETWORK_MESSAGES",
-    1999: "MSG_END_NETWORK_MESSAGES",
-}
-
-
-# TheSuperHackers @feature Leex 19/08/2026 Decode Recorder command runs without inventing stream boundaries.
+# TheSuperHackers @feature Leex 19/08/2026 Decode Recorder command runs with validated generated symbolic names when known. (#TBD)
 def parse_command(source: bytes | BinaryReader) -> ReplayCommand:
     """Decode one complete command from ``source`` and leave a supplied reader at its next frame."""
     reader = BinaryReader(source) if isinstance(source, bytes) else source
@@ -108,7 +101,7 @@ def parse_command(source: bytes | BinaryReader) -> ReplayCommand:
         frame=frame,
         player_index=player_index,
         message_type=message_type,
-        message_name=_MESSAGE_NAMES.get(message_type),
+        message_name=message_name_for(message_type),
         arguments=tuple(arguments),
         start_offset=command_start,
         end_offset=reader.offset,
