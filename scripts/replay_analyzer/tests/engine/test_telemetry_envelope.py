@@ -109,6 +109,24 @@ def _write_crc_free_replay(source: Path, destination: Path) -> int:
     return final_frame
 
 
+def test_release_analyzer_honors_noaudio_before_replay_startup(
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch a Release analyzer that silently ignores -noaudio and enters the retail Miles device path."""
+    completed = _run_engine(
+        _base_command(zero_hour_runtime_executable, pinned_replay),
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 3221225477, (
+        f"Release analyzer entered the retail Miles access violation despite -noaudio: "
+        f"{completed.stdout}{completed.stderr}"
+    )
+
+
 def _write_zero_command_replay(source: Path, destination: Path) -> None:
     """Preserve the real decoded header and setup while ending before the first command frame."""
     parsed = parse_replay(source)

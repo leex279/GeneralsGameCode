@@ -1342,8 +1342,11 @@ static CommandLineParam paramsForEngineInit[] =
 	// TheSuperHackers @feature xezon 03/08/2025 Force full viewport for 'Control Bar Pro' Addons like GenTool did it.
 	{ "-forcefullviewport", parseFullViewport },
 
-#if defined(RTS_DEBUG)
+#if defined(RTS_DEBUG) || (defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD))
+	// TheSuperHackers @bugfix Leex 20/08/2026 Honor the existing no-audio switch in modern replay analyzer builds. (#TBD)
 	{ "-noaudio", parseNoAudio },
+#endif
+#if defined(RTS_DEBUG)
 	{ "-map", parseMapName },
 	{ "-nomusic", parseNoMusic },
 	{ "-novideo", parseNoVideo },
