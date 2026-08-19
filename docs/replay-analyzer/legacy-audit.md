@@ -8,6 +8,10 @@ Python modules below are not validated against that reader, a pinned retail
 fixture, or an in-engine parse dump. They must not be imported by the V2
 package or presented as factual analysis until separately revalidated.
 
+All historical Python prototype source now lives under
+`scripts/replay_analyzer/legacy_prototype/`. No production/package import or
+test import may reach this quarantine.
+
 This audit covers the current replay-specific engine modules, the legacy
 `scripts/replay_analyzer` and `scripts/replay_player` modules, the standalone
 root replay experiment, and repository-root generated replay outputs. Generic
@@ -44,18 +48,18 @@ These files may contain rendering, report, or partial decoding utility worth
 revalidating, but none may make factual claims until it passes the V2 parser
 and engine-parity gates.
 
-- `scripts/replay_analyzer/__init__.py`, `cli.py`, `parser.py`, and
-  `constants.py` — duplicate Python parsing/CLI path without fixture or parity
-  coverage.
-- `scripts/replay_analyzer/autocaster_cli.py`, `camera_director.py`,
-  `commentary.py`, `reporter.py`, `server.py`, `screencast_renderer.py`,
-  `tts_caster.py`, and `html_generator.py` — presentation and casting helpers
-  coupled to legacy prototype data.
-- `scripts/replay_analyzer/spatial.py` — spatial helper that requires a real
-  map export before it can support factual conclusions.
-- `scripts/replay_player/headless_runner.py` and `webgl_generator.py` —
-  experiment runners/renderers that must consume validated telemetry instead
-  of reconstructed state.
+- `scripts/replay_analyzer/legacy_prototype/__init__.py`, `cli.py`, `parser.py`,
+  and `constants.py` — duplicate Python parsing/CLI path without fixture or
+  parity coverage.
+- `scripts/replay_analyzer/legacy_prototype/autocaster_cli.py`,
+  `camera_director.py`, `commentary.py`, `reporter.py`, `server.py`,
+  `screencast_renderer.py`, `tts_caster.py`, and `html_generator.py` —
+  presentation and casting helpers coupled to legacy prototype data.
+- `scripts/replay_analyzer/legacy_prototype/spatial.py` — spatial helper that
+  requires a real map export before it can support factual conclusions.
+- `scripts/replay_analyzer/legacy_prototype/replay_player/headless_runner.py`
+  and `webgl_generator.py` — experiment runners/renderers that must consume
+  validated telemetry instead of reconstructed state.
 - `dump_replay.py` — standalone root decoding experiment with a fixed local
   path and no parity or fixture verification.
 - `Core/GameEngine/Include/GameClient/AutoCameraDirector.h` and
@@ -69,16 +73,17 @@ The following modules contain assumptions, generated world state, procedural
 map data, hard-coded mappings, or heuristic labels. They are explicitly
 **untrusted for factual analysis**.
 
-- `scripts/replay_analyzer/map_loader.py` — procedural/fallback map geography;
+- `scripts/replay_analyzer/legacy_prototype/map_loader.py` —
+  procedural/fallback map geography; untrusted for factual analysis.
+- `scripts/replay_analyzer/legacy_prototype/unit_tracker.py` — inferred unit
+  state and player mapping; untrusted for factual analysis.
+- `scripts/replay_analyzer/legacy_prototype/heuristics.py` — hard-coded
+  strategy/skill rules; untrusted for factual analysis.
+- `scripts/replay_analyzer/legacy_prototype/metrics.py` — metrics derived from
+  unverified assumptions; untrusted for factual analysis.
+- `scripts/replay_analyzer/legacy_prototype/replay_player/simulator.py` —
+  synthetic world reconstruction, entities, movement, combat, and effects;
   untrusted for factual analysis.
-- `scripts/replay_analyzer/unit_tracker.py` — inferred unit state and player
-  mapping; untrusted for factual analysis.
-- `scripts/replay_analyzer/heuristics.py` — hard-coded strategy/skill rules;
-  untrusted for factual analysis.
-- `scripts/replay_analyzer/metrics.py` — metrics derived from unverified
-  assumptions; untrusted for factual analysis.
-- `scripts/replay_player/simulator.py` — synthetic world reconstruction,
-  entities, movement, combat, and effects; untrusted for factual analysis.
 
 ## Generated artifact
 
