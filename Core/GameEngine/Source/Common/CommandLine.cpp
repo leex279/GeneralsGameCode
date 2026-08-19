@@ -42,6 +42,7 @@
 #include "WWLib/trim.h"
 
 #if defined(RTS_REPLAY_ANALYZER)
+#include <cerrno>
 #include <cctype>
 #include <climits>
 #include <cstdlib>
@@ -533,6 +534,11 @@ namespace
 		{
 			telemetryCommandLineError("-telemetry requires sequential replay playback");
 		}
+		// TheSuperHackers @feature Leex 18/08/2026 Reserve telemetry for a new path so replay inputs and prior evidence cannot be overwritten. (#TBD)
+		if (GetFileAttributesA(s_telemetryTracePath.str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			telemetryCommandLineError("-telemetry output path must not already exist");
+		}
 		ReplayTelemetry::configure(s_telemetryTracePath, s_telemetryRunId, s_telemetryMovementFrames);
 	}
 }
@@ -596,8 +602,9 @@ Int parseReplayTelemetryMovementFrames(char *args[], int num)
 		telemetryCommandLineError("-telemetry-movement-frames requires a positive integer");
 	}
 	Char *end = nullptr;
+	errno = 0;
 	const long movementFrames = strtol(args[1], &end, 10);
-	if (end == args[1] || *end != '\0' || movementFrames <= 0 || movementFrames > INT_MAX)
+	if (end == args[1] || *end != '\0' || errno == ERANGE || movementFrames <= 0 || movementFrames > INT_MAX)
 	{
 		telemetryCommandLineError("-telemetry-movement-frames requires a positive integer");
 	}

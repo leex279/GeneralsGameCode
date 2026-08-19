@@ -1,13 +1,16 @@
 """Real-engine behavior tests for the passive telemetry trace envelope."""
 
 import os
+import shutil
 import subprocess
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
+from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
@@ -54,13 +57,17 @@ def _run_engine(
     command: list[str],
     game_directory: Path,
     repository_root: Path,
+    environment_overrides: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Launch the real executable and make an engine hang an explicit test failure."""
+    environment = _runtime_environment(repository_root)
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
     try:
         return subprocess.run(
             command,
             cwd=game_directory,
-            env=_runtime_environment(repository_root),
+            env=environment,
             capture_output=True,
             text=True,
             timeout=120,
@@ -78,6 +85,21 @@ def _base_command(runtime_executable: Path, pinned_replay: Path) -> list[str]:
         "-replay",
         str(pinned_replay),
     ]
+
+
+def _write_crc_free_replay(source: Path, destination: Path) -> int:
+    """Preserve real replay commands while removing comparisons that intentionally fail on the modern build."""
+    parsed = parse_replay(source)
+    source_bytes = source.read_bytes()
+    records = [source_bytes[: parsed.command_stream_offset]]
+    final_frame = 0
+    for command in parsed.commands:
+        if command.message_name == "MSG_LOGIC_CRC":
+            continue
+        records.append(source_bytes[command.start_offset : command.end_offset])
+        final_frame = command.frame
+    destination.write_bytes(b"".join(records))
+    return final_frame
 
 
 def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
@@ -140,6 +162,17 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
         (["-telemetry", "relative.ndjson", "-telemetry-run-id", RUN_ID], "absolute"),
         (["-telemetry", "{trace}", "-telemetry-run-id", "not-a-uuid"], "UUID"),
         (["-telemetry", "{trace}", "-telemetry-run-id", RUN_ID, "-telemetry-movement-frames", "0"], "positive"),
+        (
+            [
+                "-telemetry",
+                "{trace}",
+                "-telemetry-run-id",
+                RUN_ID,
+                "-telemetry-movement-frames",
+                "999999999999999999999999999999999999",
+            ],
+            "positive",
+        ),
         (["-telemetry", "{trace}"], "run ID"),
         (["-telemetry-run-id", RUN_ID], "requires -telemetry"),
         (["-telemetry-movement-frames", "15"], "requires -telemetry"),
@@ -218,3 +251,142 @@ def test_writer_open_failure_is_diagnostic_only_for_replay_execution(
     assert "ReplayTelemetry" in failed_sink.stderr
     assert str(trace_path) in failed_sink.stderr
     assert not trace_path.exists()
+
+
+@pytest.mark.parametrize("alias_kind", ["exact", "hardlink", "symlink"])
+def test_existing_trace_alias_is_rejected_before_replay_without_mutating_input(
+    alias_kind: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch a telemetry destination that can truncate the replay through the same path or file identity."""
+    replay_copy = tmp_path / "disposable-input.rep"
+    shutil.copyfile(pinned_replay, replay_copy)
+    original_bytes = replay_copy.read_bytes()
+    trace_path = replay_copy
+    if alias_kind == "hardlink":
+        trace_path = tmp_path / "input-hardlink.ndjson"
+        os.link(replay_copy, trace_path)
+    elif alias_kind == "symlink":
+        trace_path = tmp_path / "input-symlink.ndjson"
+        try:
+            trace_path.symlink_to(replay_copy)
+        except OSError as error:
+            pytest.skip(f"symlink creation is unavailable on this Windows host: {error}")
+
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay_copy), "-telemetry", str(trace_path), "-telemetry-run-id", RUN_ID],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert "Simulating Replay" not in completed.stdout
+    assert "must not already exist" in completed.stderr
+    assert replay_copy.read_bytes() == original_bytes
+
+
+def test_clean_eof_completion_is_published_after_the_terminal_logic_update(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch completion emitted before terminal-frame commands, systems, and the frame increment execute."""
+    clean_replay = tmp_path / "crc-free.rep"
+    terminal_command_frame = _write_crc_free_replay(pinned_replay, clean_replay)
+    trace_path = (tmp_path / "clean.ndjson").resolve()
+
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, clean_replay), "-telemetry", str(trace_path), "-telemetry-run-id", RUN_ID],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
+    records = tuple(iter_validated_trace(trace_path))
+    complete = records[-1]
+    assert isinstance(complete, CompleteRecord)
+    assert complete.payload.clean_shutdown is True
+    assert complete.payload.crc_mismatch is False
+    assert complete.payload.final_frame == terminal_command_frame + 1
+
+
+def test_late_writer_failure_never_publishes_an_apparently_successful_trace(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch a completion write/flush/close failure publishing a strict-valid trace with writer_error null."""
+    trace_path = (tmp_path / "late-failure.ndjson").resolve()
+    base_command = _base_command(zero_hour_runtime_executable, pinned_replay)
+    baseline = _run_engine(base_command, zero_hour_runtime_executable.parent, repository_root)
+    failed_sink = _run_engine(
+        [*base_command, "-telemetry", str(trace_path), "-telemetry-run-id", RUN_ID],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+        {"GENERALS_REPLAY_TELEMETRY_TEST_FAIL_AFTER_COMPLETE_WRITE": "1"},
+    )
+
+    assert failed_sink.returncode == baseline.returncode
+    assert failed_sink.stdout == baseline.stdout
+    assert "injected_late_failure" in failed_sink.stderr
+    assert not trace_path.exists()
+    assert not tuple(tmp_path.glob("late-failure.ndjson.tmp.*"))
+
+
+def test_destination_created_during_playback_is_not_replaced_at_publish(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch transactional publication that overwrites a destination created after startup validation."""
+    clean_replay = tmp_path / "crc-free-race.rep"
+    _write_crc_free_replay(pinned_replay, clean_replay)
+    trace_path = (tmp_path / "publish-race.ndjson").resolve()
+    collision_bytes = b"created-after-validation\n"
+    command = [
+        *_base_command(zero_hour_runtime_executable, clean_replay),
+        "-telemetry",
+        str(trace_path),
+        "-telemetry-run-id",
+        RUN_ID,
+    ]
+    process = subprocess.Popen(
+        command,
+        cwd=zero_hour_runtime_executable.parent,
+        env=_runtime_environment(repository_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    temporary_paths: tuple[Path, ...] = ()
+    deadline = time.monotonic() + 30
+    while process.poll() is None and time.monotonic() < deadline:
+        temporary_paths = tuple(tmp_path.glob("publish-race.ndjson.tmp.*"))
+        if temporary_paths:
+            break
+        time.sleep(0.005)
+    if not temporary_paths:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)
+        pytest.fail("telemetry writer never exposed its exclusive transaction file")
+
+    trace_path.write_bytes(collision_bytes)
+    stdout, stderr = process.communicate(timeout=120)
+
+    assert process.returncode == 0, stdout[-2000:] + stderr[-2000:]
+    assert trace_path.read_bytes() == collision_bytes
+    assert "publish_failed" in stderr
+    assert not tuple(tmp_path.glob("publish-race.ndjson.tmp.*"))
+
+
+def test_telemetry_writer_avoids_msvc_only_bounded_formatting() -> None:
+    """Catch reintroduction of formatting calls that cannot compile in the supported MinGW analyzer build."""
+    source = Path(__file__).resolve().parents[4] / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
+    assert "sprintf_s(" not in source.read_text(encoding="utf-8")

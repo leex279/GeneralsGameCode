@@ -485,7 +485,15 @@ void RecorderClass::stopPlayback() {
 		// TheSuperHackers @feature Leex 18/08/2026 Finish telemetry at the replay source's authoritative termination boundary. (#TBD)
 		const Bool telemetryCleanShutdown = m_replayParseDumpComplete
 			&& m_nextFrame == (UnsignedInt)-1 && !sawCRCMismatch();
-		ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, telemetryCleanShutdown);
+		if (telemetryCleanShutdown)
+		{
+			// TheSuperHackers @feature Leex 18/08/2026 Defer clean completion until terminal-frame GameLogic work has executed. (#TBD)
+			ReplayTelemetry::deferCleanFinish();
+		}
+		else
+		{
+			ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, FALSE);
+		}
 		// TheSuperHackers @feature Leex 18/08/2026 Finish the observer record before the replay source is closed.
 		const Int replayEndOffset = m_file->seek(0, File::CURRENT);
 		ReplayParseDump::finishReplay(replayEndOffset, m_replayParseDumpComplete && m_nextFrame == (UnsignedInt)-1);

@@ -23,6 +23,9 @@
 #include "Common/GameEngine.h"
 #include "Common/LocalFileSystem.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayTelemetry.h"
+#endif
 #include "Common/WorkerProcess.h"
 #include "GameLogic/GameLogic.h"
 #include "GameClient/GameClient.h"
@@ -97,6 +100,10 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 					fflush(stdout);
 				}
 				TheGameLogic->UPDATE();
+#if defined(RTS_REPLAY_ANALYZER)
+				// TheSuperHackers @feature Leex 18/08/2026 Publish clean EOF only after the terminal GameLogic update has completed. (#TBD)
+				ReplayTelemetry::finishDeferred(TheGameLogic->getFrame());
+#endif
 				Bool stopForCRCMismatch = TheRecorder->sawCRCMismatch();
 				if (stopForCRCMismatch)
 				{

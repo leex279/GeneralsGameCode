@@ -14,6 +14,8 @@ public:
 	static void begin(const RecorderClass::ReplayHeader &header);
 	static void observeExecutedCommand();
 	static void emit(UnsignedInt frame, const char *eventType, const AsciiString &payloadJson);
+	static void deferCleanFinish();
+	static void finishDeferred(UnsignedInt finalFrame);
 	static void finish(UnsignedInt finalFrame, Bool cleanShutdown);
 	static void fail(const char *code, const char *message);
 };

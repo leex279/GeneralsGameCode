@@ -9,7 +9,9 @@
 #include "GameNetwork/GameInfo.h"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -162,6 +164,7 @@ namespace
 
 	FILE *s_output = nullptr;
 	AsciiString s_tracePath;
+	AsciiString s_tempPath;
 	AsciiString s_runId;
 	Int s_movementSampleFrames = 15;
 	unsigned long long s_sequence = 0;
@@ -170,7 +173,12 @@ namespace
 	std::map<std::string, unsigned long long> s_eventCounts;
 	Sha256 s_traceDigest;
 	AsciiString s_writerError;
+	Bool s_outputFailed = FALSE;
+	Bool s_cleanFinishDeferred = FALSE;
+	UnsignedInt s_tempCounter = 0;
 	char s_outputBuffer[64 * 1024];
+
+	void setWriterError(const char *code, const char *message, Bool outputFailure = FALSE);
 
 	std::string jsonString(const char *value)
 	{
@@ -192,8 +200,16 @@ namespace
 				if (character < 0x20)
 				{
 					char escaped[7];
-					sprintf_s(escaped, "\\u%04x", character);
-					result += escaped;
+					const Int escapedLength = snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<UnsignedInt>(character));
+					if (escapedLength == 6)
+					{
+						result.append(escaped, static_cast<size_t>(escapedLength));
+					}
+					else
+					{
+						setWriterError("format_failed", "could not format a JSON escape", TRUE);
+						result += "\\ufffd";
+					}
 				}
 				else if (character < 0x80)
 				{
@@ -220,7 +236,12 @@ namespace
 	std::string logicTime(UnsignedInt frame)
 	{
 		char value[64];
-		sprintf_s(value, "%.17g", static_cast<double>(frame) / 30.0);
+		const Int valueLength = snprintf(value, sizeof(value), "%.17g", static_cast<double>(frame) / 30.0);
+		if (valueLength <= 0 || valueLength >= static_cast<Int>(sizeof(value)))
+		{
+			setWriterError("format_failed", "could not format telemetry logic time", TRUE);
+			return "0";
+		}
 		return value;
 	}
 
@@ -234,8 +255,9 @@ namespace
 			+ ",\"payload\":" + payload + "}\n";
 	}
 
-	void setWriterError(const char *code, const char *message)
+	void setWriterError(const char *code, const char *message, Bool outputFailure)
 	{
+		s_outputFailed = s_outputFailed || outputFailure;
 		AsciiString detail;
 		detail.format("%s: %s", code != nullptr ? code : "unknown", message != nullptr ? message : "unknown error");
 		if (s_writerError.isEmpty())
@@ -259,7 +281,7 @@ namespace
 		}
 		if (written != line.size())
 		{
-			setWriterError("write_failed", "could not write the complete telemetry record");
+			setWriterError("write_failed", "could not write the complete telemetry record", TRUE);
 		}
 	}
 
@@ -267,7 +289,7 @@ namespace
 	{
 		if (s_output != nullptr && fflush(s_output) != 0)
 		{
-			setWriterError("flush_failed", "could not flush telemetry output");
+			setWriterError("flush_failed", "could not flush telemetry output", TRUE);
 		}
 		s_eventsSinceFlush = 0;
 	}
@@ -288,6 +310,34 @@ namespace
 		result.push_back('}');
 		return result;
 	}
+
+	void discardTemporaryOutput()
+	{
+		if (s_tempPath.isNotEmpty())
+		{
+			AsciiString discardedPath = s_tempPath;
+			s_tempPath.clear();
+			errno = 0;
+			if (remove(discardedPath.str()) != 0 && errno != ENOENT)
+			{
+				AsciiString message;
+				message.format("could not remove transaction '%s'", discardedPath.str());
+				setWriterError("cleanup_failed", message.str(), TRUE);
+			}
+		}
+	}
+
+	void publishTemporaryOutput()
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Publish with no replacement so a destination created during playback remains untouched. (#TBD)
+		if (!MoveFileA(s_tempPath.str(), s_tracePath.str()))
+		{
+			setWriterError("publish_failed", "could not exclusively publish telemetry output", TRUE);
+			discardTemporaryOutput();
+			return;
+		}
+		s_tempPath.clear();
+	}
 }
 
 void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString &runId, Int movementSampleFrames)
@@ -299,6 +349,7 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_tracePath = tracePath;
 	s_runId = runId;
 	s_movementSampleFrames = movementSampleFrames;
+	s_cleanFinishDeferred = FALSE;
 }
 
 Bool ReplayTelemetry::isEnabled()
@@ -319,12 +370,25 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	s_eventCounts.clear();
 	s_traceDigest = Sha256();
 	s_writerError.clear();
-	s_output = fopen(s_tracePath.str(), "wb");
+	s_outputFailed = FALSE;
+	s_cleanFinishDeferred = FALSE;
+	s_tempPath.clear();
+	for (Int attempt = 0; attempt < 100 && s_output == nullptr; ++attempt)
+	{
+		s_tempPath.format("%s.tmp.%lu.%u", s_tracePath.str(), static_cast<unsigned long>(GetCurrentProcessId()), ++s_tempCounter);
+		errno = 0;
+		s_output = fopen(s_tempPath.str(), "wbx");
+		if (s_output == nullptr && errno != EEXIST)
+		{
+			break;
+		}
+	}
 	if (s_output == nullptr)
 	{
 		AsciiString message;
-		message.format("could not open '%s' for writing", s_tracePath.str());
-		setWriterError("open_failed", message.str());
+		message.format("could not create a transaction for '%s'", s_tracePath.str());
+		setWriterError("open_failed", message.str(), TRUE);
+		discardTemporaryOutput();
 		return;
 	}
 	setvbuf(s_output, s_outputBuffer, _IOFBF, sizeof(s_outputBuffer));
@@ -378,8 +442,27 @@ void ReplayTelemetry::observeExecutedCommand()
 	}
 }
 
+void ReplayTelemetry::deferCleanFinish()
+{
+	if (s_output != nullptr)
+	{
+		s_cleanFinishDeferred = TRUE;
+	}
+}
+
+void ReplayTelemetry::finishDeferred(UnsignedInt finalFrame)
+{
+	if (s_cleanFinishDeferred)
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Recheck CRC after the terminal logic update before publishing clean completion. (#TBD)
+		const Bool cleanShutdown = TheRecorder == nullptr || !TheRecorder->sawCRCMismatch();
+		finish(finalFrame, cleanShutdown);
+	}
+}
+
 void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 {
+	s_cleanFinishDeferred = FALSE;
 	if (s_output == nullptr)
 	{
 		return;
@@ -400,12 +483,27 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 		+ ",\"trace_sha256\":\"" + s_traceDigest.hexDigest()
 		+ "\",\"map_assets\":[]}";
 	writeLine(envelope(s_sequence++, finalFrame, "complete", payload), FALSE);
-	flushOutput();
-	if (fclose(s_output) != 0)
+	// TheSuperHackers @feature Leex 18/08/2026 Exercise late transaction failure without feeding the result into replay execution. (#TBD)
+	const char *injectedFailure = getenv("GENERALS_REPLAY_TELEMETRY_TEST_FAIL_AFTER_COMPLETE_WRITE");
+	if (injectedFailure != nullptr && strcmp(injectedFailure, "1") == 0)
 	{
-		setWriterError("close_failed", "could not close telemetry output");
+		setWriterError("injected_late_failure", "failure injected after completion write", TRUE);
 	}
+	flushOutput();
+	FILE *output = s_output;
 	s_output = nullptr;
+	if (fclose(output) != 0)
+	{
+		setWriterError("close_failed", "could not close telemetry output", TRUE);
+	}
+	if (s_outputFailed)
+	{
+		discardTemporaryOutput();
+	}
+	else
+	{
+		publishTemporaryOutput();
+	}
 }
 
 void ReplayTelemetry::fail(const char *code, const char *message)
