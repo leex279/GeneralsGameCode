@@ -1,0 +1,18 @@
+{
+  "fixture_filename": "leex279_vs_fox27.rep",
+  "sha256": "EA085767BFA11D2CFC167D9007173CE2EB29B5F557702FFD042E2E9A1A8F6BB8",
+  "source_provenance": {
+    "original_filename": "match_3133811_user_e80b96708aa4254945941fd5f81489bb_replay.rep",
+    "strata_match_id": "3133811",
+    "strata_source_user_token": "e80b96708aa4254945941fd5f81489bb"
+  },
+  "embedded_name_expectation": {
+    "deferred_to_task": 5,
+    "parse_status": "not_parsed_in_task_3",
+    "expected_player_labels": [
+      "leex279",
+      "fox27"
+    ]
+  },
+  "testing_purpose": "Checksum-pinned Zero Hour 1.04 replay bytes for provenance and later embedded-name parsing tests."
+}
