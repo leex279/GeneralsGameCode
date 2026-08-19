@@ -12,15 +12,19 @@ def _import_targets(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             targets.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            targets.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            base = "." * node.level + (node.module or "")
+            if base:
+                targets.add(base)
+            separator = "" if not base or base.endswith(".") else "."
+            targets.update(f"{base}{separator}{alias.name}" for alias in node.names)
         elif (
             isinstance(node, ast.Call)
             and node.args
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
             and (
-                (isinstance(node.func, ast.Name) and node.func.id == "__import__")
+                (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "import_module"})
                 or (
                     isinstance(node.func, ast.Attribute)
                     and isinstance(node.func.value, ast.Name)
@@ -31,6 +35,23 @@ def _import_targets(path: Path) -> set[str]:
         ):
             targets.add(node.args[0].value)
     return targets
+
+
+def test_import_target_scan_covers_from_and_dynamic_imports(tmp_path: Path) -> None:
+    source = tmp_path / "imports.py"
+    source.write_text(
+        "from .. import legacy_prototype\n"
+        "from scripts.replay_analyzer import legacy_prototype as prototype\n"
+        "from importlib import import_module\n"
+        'import_module("dynamic.legacy_prototype")\n',
+        encoding="utf-8",
+    )
+
+    targets = _import_targets(source)
+
+    assert "..legacy_prototype" in targets
+    assert "dynamic.legacy_prototype" in targets
+    assert "scripts.replay_analyzer.legacy_prototype" in targets
 
 
 def test_prototype_is_quarantined_outside_package_and_test_import_graph() -> None:
