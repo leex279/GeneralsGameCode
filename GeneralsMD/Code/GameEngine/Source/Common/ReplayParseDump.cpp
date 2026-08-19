@@ -304,7 +304,7 @@ Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, Int
 	if (s_output == nullptr)
 	{
 		// TheSuperHackers @feature Leex 19/08/2026 Report sink failures without changing replay parsing or simulation control flow.
-		fprintf(stderr, "ReplayParseDump: could not open '%s' for writing\\n", s_outputPath.str());
+		fprintf(stderr, "ReplayParseDump: could not open '%s' for writing\n", s_outputPath.str());
 		return FALSE;
 	}
 	s_incomplete = FALSE;
