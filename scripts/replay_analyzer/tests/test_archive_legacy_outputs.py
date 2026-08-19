@@ -92,6 +92,34 @@ def _invoke_with_move_failure(
     return _run(command, inventory.parent)
 
 
+def _invoke_with_move_failure_after_source_recreation(
+    inventory: Path, destination: Path, recreated_source: Path, failing_source: Path
+) -> subprocess.CompletedProcess[str]:
+    script = str(ARCHIVE_SCRIPT).replace("'", "''")
+    inventory_path = str(inventory).replace("'", "''")
+    destination_path = str(destination).replace("'", "''")
+    recreated_path = str(recreated_source).replace("'", "''")
+    failing_path = str(failing_source).replace("'", "''")
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            f"$recreatedPath = '{recreated_path}'; $failurePath = '{failing_path}'; "
+            "function Move-Item { "
+            "param([string]$LiteralPath, [string]$Destination); "
+            'if ($LiteralPath -eq $failurePath) { throw "forced move failure" }; '
+            "Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath -Destination $Destination -ErrorAction Stop; "
+            "if ($LiteralPath -eq $recreatedPath) { [IO.File]::WriteAllBytes($recreatedPath, [Text.Encoding]::UTF8.GetBytes('replacement')) } "
+            "}; "
+            f"& '{script}' -InventoryPath '{inventory_path}' -Destination '{destination_path}' -Apply; "
+            "exit $LASTEXITCODE"
+        ),
+    ]
+    return _run(command, inventory.parent)
+
+
 def _invoke_with_manifest_finalization_failure(
     inventory: Path, destination: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -338,6 +366,30 @@ def test_apply_rolls_back_after_move_failure_and_retains_pending_manifest(tmp_pa
     assert second.read_bytes() == b"second"
     pending = json.loads((destination / "archive-pending.json").read_text(encoding="utf-8-sig"))
     assert [entry["originalPath"] for entry in pending["files"]] == ["first.mp4", "second.mp4"]
+    assert not (destination / "archive-manifest.json").exists()
+
+
+def test_rollback_reports_recreated_source_and_keeps_original_recoverable(tmp_path: Path) -> None:
+    repository = _make_repository(tmp_path)
+    first = repository / "first.mp4"
+    second = repository / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    inventory = _write_inventory(
+        repository,
+        [_inventory_entry(repository, "first.mp4"), _inventory_entry(repository, "second.mp4")],
+    )
+    destination = tmp_path / "archive"
+
+    result = _invoke_with_move_failure_after_source_recreation(inventory, destination, first, second)
+
+    assert result.returncode != 0
+    assert "rollback incomplete" in (result.stdout + result.stderr).lower()
+    assert "source path already exists" in (result.stdout + result.stderr).lower()
+    assert first.read_bytes() == b"replacement"
+    assert second.read_bytes() == b"second"
+    assert (destination / "video" / "first.mp4").read_bytes() == b"first"
+    assert (destination / "archive-pending.json").is_file()
     assert not (destination / "archive-manifest.json").exists()
 
 

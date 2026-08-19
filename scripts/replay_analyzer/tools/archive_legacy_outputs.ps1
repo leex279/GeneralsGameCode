@@ -361,10 +361,15 @@ try {
             for ($index = $completedMoves.Count - 1; $index -ge 0; --$index) {
                 $item = $completedMoves[$index]
                 try {
-                    if (-not (Test-Path -LiteralPath $item.SourcePath) -and
-                        (Test-Path -LiteralPath $item.DestinationPath -PathType Leaf)) {
-                        Move-Item -LiteralPath $item.DestinationPath -Destination $item.SourcePath -ErrorAction Stop
+                    if (Test-Path -LiteralPath $item.SourcePath) {
+                        $rollbackFailures.Add("$($item.OriginalPath): source path already exists; archived original retained at $($item.ArchivedPath)")
+                        continue
                     }
+                    if (-not (Test-Path -LiteralPath $item.DestinationPath -PathType Leaf)) {
+                        $rollbackFailures.Add("$($item.OriginalPath): archived original is missing from $($item.ArchivedPath)")
+                        continue
+                    }
+                    Move-Item -LiteralPath $item.DestinationPath -Destination $item.SourcePath -ErrorAction Stop
                 } catch {
                     $rollbackFailures.Add("$($item.OriginalPath): $($_.Exception.Message)")
                 }
