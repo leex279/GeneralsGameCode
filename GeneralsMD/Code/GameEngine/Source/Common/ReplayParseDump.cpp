@@ -5,12 +5,14 @@
 #include "Common/ReplayParseDump.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 
 namespace
 {
 	FILE *s_output = nullptr;
 	AsciiString s_outputPath;
+	Bool s_incomplete = FALSE;
 
 	void writeRaw(const char *text)
 	{
@@ -126,9 +128,13 @@ namespace
 			}
 			if (codePoint >= 0xD800 && codePoint <= 0xDFFF)
 			{
-				codePoint = 0xFFFD;
+				// TheSuperHackers @feature Leex 19/08/2026 Preserve malformed UTF-16 as JSON escapes instead of emitting invalid UTF-8.
+				fprintf(s_output, "\\u%04X", codePoint);
 			}
-			writeJsonCodePoint(codePoint);
+			else
+			{
+				writeJsonCodePoint(codePoint);
+			}
 		}
 		fputc('"', s_output);
 	}
@@ -155,7 +161,32 @@ namespace
 
 	void writeRealDecimal(Real value)
 	{
-		fprintf(s_output, "%.9g", value);
+		// TheSuperHackers @feature Leex 19/08/2026 Keep non-finite replay scalars valid JSON while their IEEE bits remain authoritative.
+		if (std::isfinite(value))
+		{
+			fprintf(s_output, "%.9g", value);
+		}
+		else if (std::isnan(value))
+		{
+			writeRaw("\"nan\"");
+		}
+		else
+		{
+			writeRaw(value < 0 ? "\"-infinity\"" : "\"infinity\"");
+		}
+	}
+
+	void writeWideChar(WideChar value)
+	{
+		const UnsignedInt codePoint = (UnsignedInt)value;
+		if (codePoint >= 0xD800 && codePoint <= 0xDFFF)
+		{
+			fprintf(s_output, "\\u%04X", codePoint);
+		}
+		else
+		{
+			writeJsonCodePoint(codePoint);
+		}
 	}
 
 	void writeArgument(GameMessageArgumentDataType type, const GameMessageArgumentType &argument)
@@ -226,7 +257,7 @@ namespace
 			break;
 		case ARGUMENTDATATYPE_WIDECHAR:
 			writeRaw("\"");
-			writeJsonCodePoint((UnsignedInt)argument.wChar);
+			writeWideChar(argument.wChar);
 			writeRaw("\",\"raw_scalar_bits\":");
 			fprintf(s_output, "\"0x%04X\"", (UnsignedInt)argument.wChar);
 			break;
@@ -242,8 +273,7 @@ void ReplayParseDump::setOutputPath(const AsciiString &path)
 {
 	if (s_output != nullptr)
 	{
-		fclose(s_output);
-		s_output = nullptr;
+		finishReplay(-1, FALSE);
 	}
 	s_outputPath = path;
 }
@@ -253,12 +283,17 @@ Bool ReplayParseDump::isEnabled()
 	return s_output != nullptr || s_outputPath.isNotEmpty();
 }
 
+void ReplayParseDump::markIncomplete()
+{
+	// TheSuperHackers @feature Leex 19/08/2026 A truncated observer read can never become complete at a later clean EOF.
+	s_incomplete = TRUE;
+}
+
 Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, Int endOffset)
 {
 	if (s_output != nullptr)
 	{
-		fclose(s_output);
-		s_output = nullptr;
+		finishReplay(-1, FALSE);
 	}
 	if (s_outputPath.isEmpty())
 	{
@@ -268,8 +303,11 @@ Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, Int
 	s_output = fopen(s_outputPath.str(), "wb");
 	if (s_output == nullptr)
 	{
+		// TheSuperHackers @feature Leex 19/08/2026 Report sink failures without changing replay parsing or simulation control flow.
+		fprintf(stderr, "ReplayParseDump: could not open '%s' for writing\\n", s_outputPath.str());
 		return FALSE;
 	}
+	s_incomplete = FALSE;
 
 	writeRaw("{\"record\":\"header\",\"filename\":");
 	writeEscapedAscii(header.filename);
@@ -335,15 +373,22 @@ void ReplayParseDump::writeMessageCatalog()
 	}
 
 	writeRaw("{\"record\":\"message_catalog\",\"messages\":[");
+	Bool firstMessage = TRUE;
 	for (Int i = (Int)GameMessage::MSG_INVALID; i < (Int)GameMessage::MSG_COUNT; ++i)
 	{
-		if (i != (Int)GameMessage::MSG_INVALID)
+		const GameMessage::Type type = (GameMessage::Type)i;
+		AsciiString name = GameMessage::getCommandTypeAsString(type);
+		// TheSuperHackers @feature Leex 19/08/2026 Numeric enum gaps must not become fictitious catalog entries.
+		if (name.compareNoCase("UnknownMessage") == 0)
+		{
+			continue;
+		}
+		if (!firstMessage)
 		{
 			writeRaw(",");
 		}
-		const GameMessage::Type type = (GameMessage::Type)i;
+		firstMessage = FALSE;
 		fprintf(s_output, "{\"message_type\":%d,\"message_name\":", i);
-		AsciiString name = GameMessage::getCommandTypeAsString(type);
 		writeEscapedAscii(name);
 		writeRaw("}");
 	}
@@ -354,7 +399,7 @@ void ReplayParseDump::finishReplay(Int endOffset, Bool complete)
 {
 	if (s_output != nullptr)
 	{
-		fprintf(s_output, "{\"record\":\"complete\",\"end_offset\":%d,\"complete\":%s}\n", endOffset, complete ? "true" : "false");
+		fprintf(s_output, "{\"record\":\"complete\",\"end_offset\":%d,\"complete\":%s}\n", endOffset, complete && !s_incomplete ? "true" : "false");
 		fclose(s_output);
 		s_output = nullptr;
 	}
