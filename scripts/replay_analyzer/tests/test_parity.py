@@ -71,6 +71,34 @@ def _valid_records(*, cpp_real_value: float = 1.5, real_bits: str = "0x3FC00000"
             "game_options": GAME_OPTIONS,
             "local_player_index": 0,
             "header_end_offset": 172,
+            "map": "Maps/Test",
+            "map_contents_mask": 0,
+            "map_crc": 1,
+            "map_size": 2,
+            "seed": 3,
+            "crc_interval": 100,
+            "use_stats": 1,
+            "superweapon_restriction": 0,
+            "starting_cash": 10000,
+            "old_factions_only": False,
+            "slots": [
+                {
+                    "index": index,
+                    "kind": "open",
+                    "name": None,
+                    "ip": None,
+                    "port": None,
+                    "accepted": None,
+                    "has_map": None,
+                    "color": None,
+                    "player_template": None,
+                    "start_position": None,
+                    "team": None,
+                    "nat_behavior": None,
+                    "ai_difficulty": None,
+                }
+                for index in range(8)
+            ],
         },
         {
             "record": "message_catalog",
@@ -213,6 +241,16 @@ def test_parity_validates_cpp_payload_start_four_bytes_after_python_frame_start(
         ("game_options", GAME_OPTIONS, GAME_OPTIONS.replace("US=1", "US=2")),
         ("local_player_index", 0, 1),
         ("header_end_offset", 172, 171),
+        ("map", "Maps/Test", "Maps/Other"),
+        ("map_contents_mask", 0, 1),
+        ("map_crc", 1, 2),
+        ("map_size", 2, 3),
+        ("seed", 3, 4),
+        ("crc_interval", 100, 30),
+        ("use_stats", 1, 0),
+        ("superweapon_restriction", 0, 1),
+        ("starting_cash", 10000, 5000),
+        ("old_factions_only", False, True),
     ],
 )
 def test_parity_checks_every_cplusplus_header_value(
@@ -230,6 +268,24 @@ def test_parity_checks_every_cplusplus_header_value(
     )
 
     assert mismatch == ParityMismatch(0, f"header.{field}", python_value, cpp_value)
+
+
+def test_parity_checks_engine_parsed_slot_semantics(tmp_path: Path) -> None:
+    """Reject raw game-options equality when the engine and Python disagree on a parsed slot."""
+    from generals_replay_analyzer.parity import ParityMismatch, compare_replay, load_cpp_dump
+
+    records = _valid_records()
+    slots = records[0]["slots"]
+    assert isinstance(slots, list)
+    assert isinstance(slots[0], dict)
+    slots[0]["kind"] = "closed"
+
+    mismatch = compare_replay(
+        parse_replay(_write_replay(tmp_path)),
+        load_cpp_dump(_write_dump(tmp_path, records)),
+    )
+
+    assert mismatch == ParityMismatch(0, "header.slots[0].kind", "open", "closed")
 
 
 @pytest.mark.parametrize(
@@ -559,6 +615,40 @@ def test_cpp_dump_rejects_malformed_order_missing_data_shapes_and_partial_output
 
     records = _valid_records()
     cast(Callable[[list[dict[str, object]]], object], mutate)(records)
+
+    with pytest.raises(CppDumpValidationError, match=expected_message):
+        load_cpp_dump(_write_dump(tmp_path, records))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_message"),
+    [
+        (lambda slots: slots.pop(), "header.slots must contain exactly eight"),
+        (lambda slots: slots[0].__setitem__("index", 1), "must preserve its serialized slot position"),
+        (lambda slots: slots[0].__setitem__("kind", "spectator"), "kind is unsupported"),
+        (lambda slots: slots[0].__setitem__("name", "invented"), "name must be null for an open slot"),
+        (lambda slots: slots[0].update(kind="human"), "name must be a string"),
+        (
+            lambda slots: slots[0].update(
+                kind="ai", color=0, player_template=0, start_position=0, team=0, ai_difficulty="impossible"
+            ),
+            "ai_difficulty must be easy, medium, or brutal",
+        ),
+    ],
+)
+def test_cpp_dump_rejects_malformed_engine_parsed_slots(
+    tmp_path: Path, mutate: object, expected_message: str
+) -> None:
+    """Reject malformed slot semantics before they can certify Python player identity parsing."""
+    from collections.abc import Callable
+    from typing import cast
+
+    from generals_replay_analyzer.parity import CppDumpValidationError, load_cpp_dump
+
+    records = _valid_records()
+    slots = records[0]["slots"]
+    assert isinstance(slots, list)
+    cast(Callable[[list[dict[str, object]]], object], mutate)(slots)
 
     with pytest.raises(CppDumpValidationError, match=expected_message):
         load_cpp_dump(_write_dump(tmp_path, records))

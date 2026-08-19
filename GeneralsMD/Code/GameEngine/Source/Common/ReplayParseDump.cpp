@@ -3,6 +3,8 @@
 #if defined(RTS_REPLAY_ANALYZER)
 
 #include "Common/ReplayParseDump.h"
+#include "Common/GameState.h"
+#include "GameNetwork/GameInfo.h"
 
 #include <cstdio>
 #include <cmath>
@@ -137,6 +139,70 @@ namespace
 			}
 		}
 		fputc('"', s_output);
+	}
+
+	void writeEmptySlotFields()
+	{
+		writeRaw(",\"name\":null,\"ip\":null,\"port\":null,\"accepted\":null,\"has_map\":null,\"color\":null,\"player_template\":null,\"start_position\":null,\"team\":null,\"nat_behavior\":null,\"ai_difficulty\":null}");
+	}
+
+	void writeParsedSlot(const GameSlot *slot, Int index)
+	{
+		fprintf(s_output, "{\"index\":%d,\"kind\":", index);
+		if (slot == nullptr)
+		{
+			writeRaw("\"missing\"");
+			writeEmptySlotFields();
+			return;
+		}
+
+		switch (slot->getState())
+		{
+		case SLOT_PLAYER:
+			writeRaw("\"human\",\"name\":");
+			writeEscapedUnicode(slot->getName());
+			fprintf(s_output, ",\"ip\":%u,\"port\":%u,\"accepted\":%s,\"has_map\":%s,\"color\":%d,\"player_template\":%d,\"start_position\":%d,\"team\":%d,\"nat_behavior\":%d,\"ai_difficulty\":null}", slot->getIP(), slot->getPort(), slot->isAccepted() ? "true" : "false", slot->hasMap() ? "true" : "false", slot->getColor(), slot->getPlayerTemplate(), slot->getStartPos(), slot->getTeamNumber(), (Int)slot->getNATBehavior());
+			break;
+		case SLOT_EASY_AI:
+		case SLOT_MED_AI:
+		case SLOT_BRUTAL_AI:
+			writeRaw("\"ai\",\"name\":null,\"ip\":null,\"port\":null,\"accepted\":null,\"has_map\":null,");
+			fprintf(s_output, "\"color\":%d,\"player_template\":%d,\"start_position\":%d,\"team\":%d,\"nat_behavior\":null,\"ai_difficulty\":\"%s\"}", slot->getColor(), slot->getPlayerTemplate(), slot->getStartPos(), slot->getTeamNumber(), slot->getState() == SLOT_EASY_AI ? "easy" : (slot->getState() == SLOT_MED_AI ? "medium" : "brutal"));
+			break;
+		case SLOT_OPEN:
+			writeRaw("\"open\"");
+			writeEmptySlotFields();
+			break;
+		case SLOT_CLOSED:
+			writeRaw("\"closed\"");
+			writeEmptySlotFields();
+			break;
+		default:
+			writeRaw("\"unknown\"");
+			writeEmptySlotFields();
+			break;
+		}
+	}
+
+	AsciiString portableMapDirectory(const GameInfo &gameInfo)
+	{
+		AsciiString mapName = TheGameState->realMapPathToPortableMapPath(gameInfo.getMap());
+		AsciiString portableDirectory;
+		if (!mapName.isEmpty())
+		{
+			AsciiString token;
+			mapName.nextToken(&token, "\\/");
+			while (mapName.find('\\') != nullptr)
+			{
+				if (!portableDirectory.isEmpty())
+				{
+					portableDirectory.concat('/');
+				}
+				portableDirectory.concat(token);
+				mapName.nextToken(&token, "\\/");
+			}
+		}
+		return portableDirectory;
 	}
 
 	const char *argumentTypeName(GameMessageArgumentDataType type)
@@ -283,13 +349,18 @@ Bool ReplayParseDump::isEnabled()
 	return s_output != nullptr || s_outputPath.isNotEmpty();
 }
 
+Bool ReplayParseDump::isActive()
+{
+	return s_output != nullptr;
+}
+
 void ReplayParseDump::markIncomplete()
 {
 	// TheSuperHackers @feature Leex 19/08/2026 A truncated observer read can never become complete at a later clean EOF.
 	s_incomplete = TRUE;
 }
 
-Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, Int endOffset)
+Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, const GameInfo &gameInfo, Int endOffset)
 {
 	if (s_output != nullptr)
 	{
@@ -329,7 +400,18 @@ Bool ReplayParseDump::beginReplay(const RecorderClass::ReplayHeader &header, Int
 	writeEscapedUnicode(header.versionTimeString);
 	fprintf(s_output, ",\"version_number\":%u,\"exe_crc\":%u,\"ini_crc\":%u,\"game_options\":", header.versionNumber, header.exeCRC, header.iniCRC);
 	writeEscapedAscii(header.gameOptions);
-	fprintf(s_output, ",\"local_player_index\":%d,\"header_end_offset\":%d}\n", header.localPlayerIndex, endOffset);
+	fprintf(s_output, ",\"local_player_index\":%d,\"header_end_offset\":%d,\"map\":", header.localPlayerIndex, endOffset);
+	writeEscapedAscii(portableMapDirectory(gameInfo));
+	fprintf(s_output, ",\"map_contents_mask\":%d,\"map_crc\":%u,\"map_size\":%u,\"seed\":%d,\"crc_interval\":%d,\"use_stats\":%d,\"superweapon_restriction\":%u,\"starting_cash\":%u,\"old_factions_only\":%s,\"slots\":[", gameInfo.getMapContentsMask(), gameInfo.getMapCRC(), gameInfo.getMapSize(), gameInfo.getSeed(), gameInfo.getCRCInterval(), gameInfo.getUseStats(), gameInfo.getSuperweaponRestriction(), gameInfo.getStartingCash().countMoney(), gameInfo.oldFactionsOnly() ? "true" : "false");
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+	{
+		if (i != 0)
+		{
+			writeRaw(",");
+		}
+		writeParsedSlot(gameInfo.getConstSlot(i), i);
+	}
+	writeRaw("]}\n");
 	writeMessageCatalog();
 	return TRUE;
 }

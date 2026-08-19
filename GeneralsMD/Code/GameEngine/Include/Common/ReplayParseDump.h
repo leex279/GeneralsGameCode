@@ -6,6 +6,8 @@
 #include "Common/MessageStream.h"
 #include "Common/Recorder.h"
 
+class GameInfo;
+
 /**
  * Process-local observer for the serialized replay stream. It deliberately owns no simulation state.
  */
@@ -14,8 +16,9 @@ class ReplayParseDump
 public:
 	static void setOutputPath(const AsciiString &path);
 	static Bool isEnabled();
+	static Bool isActive();
 	static void markIncomplete();
-	static Bool beginReplay(const RecorderClass::ReplayHeader &header, Int endOffset);
+	static Bool beginReplay(const RecorderClass::ReplayHeader &header, const GameInfo &gameInfo, Int endOffset);
 	static void writeSetup(Int difficulty, Int originalGameMode, Int rankPoints, Int maxFPS, Int startOffset, Int endOffset);
 	static void writeCommand(Int frame, Int startOffset, Int endOffset, const GameMessage &message);
 	static void writeMessageCatalog();

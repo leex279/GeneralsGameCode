@@ -32,10 +32,38 @@ _HEADER_KEYS = frozenset(
         "game_options",
         "local_player_index",
         "header_end_offset",
+        "map",
+        "map_contents_mask",
+        "map_crc",
+        "map_size",
+        "seed",
+        "crc_interval",
+        "use_stats",
+        "superweapon_restriction",
+        "starting_cash",
+        "old_factions_only",
+        "slots",
     }
 )
 _SYSTEM_TIME_KEYS = frozenset(
     {"year", "month", "day_of_week", "day", "hour", "minute", "second", "milliseconds"}
+)
+_SLOT_KEYS = frozenset(
+    {
+        "index",
+        "kind",
+        "name",
+        "ip",
+        "port",
+        "accepted",
+        "has_map",
+        "color",
+        "player_template",
+        "start_position",
+        "team",
+        "nat_behavior",
+        "ai_difficulty",
+    }
 )
 _SETUP_KEYS = frozenset(
     {"record", "difficulty", "original_game_mode", "rank_points", "max_fps", "start_offset", "end_offset"}
@@ -168,9 +196,9 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _validate_header(record: dict[str, object]) -> None:
     """Validate the exact observer header schema and primitive types."""
     _require_exact_keys(record, _HEADER_KEYS, "header")
-    for key in ("filename", "replay_name", "version_string", "version_time_string", "game_options"):
+    for key in ("filename", "replay_name", "version_string", "version_time_string", "game_options", "map"):
         _require_string(record[key], f"header.{key}")
-    for key in ("for_playback", "desync_game", "quit_early"):
+    for key in ("for_playback", "desync_game", "quit_early", "old_factions_only"):
         _require_bool(record[key], f"header.{key}")
     for key in (
         "start_time",
@@ -181,6 +209,14 @@ def _validate_header(record: dict[str, object]) -> None:
         "ini_crc",
         "local_player_index",
         "header_end_offset",
+        "map_contents_mask",
+        "map_crc",
+        "map_size",
+        "seed",
+        "crc_interval",
+        "use_stats",
+        "superweapon_restriction",
+        "starting_cash",
     ):
         _require_int(record[key], f"header.{key}")
     disconnects = record["player_disconnects"]
@@ -191,6 +227,50 @@ def _validate_header(record: dict[str, object]) -> None:
         raise CppDumpValidationError("header.system_time must contain exactly the eight SYSTEMTIME fields")
     for key, value in system_time.items():
         _require_int(value, f"header.system_time.{key}")
+    slots = record["slots"]
+    if not isinstance(slots, list) or len(slots) != 8:
+        raise CppDumpValidationError("header.slots must contain exactly eight parsed GameInfo slots")
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, dict):
+            raise CppDumpValidationError(f"header.slots[{index}] must be an object")
+        _validate_slot(cast(dict[str, object], slot), index)
+
+
+def _validate_slot(slot: dict[str, object], index: int) -> None:
+    """Validate one engine-parsed GameInfo slot without accepting invented fields."""
+    path = f"header.slots[{index}]"
+    _require_exact_keys(slot, _SLOT_KEYS, path)
+    _require_int(slot["index"], f"{path}.index")
+    if slot["index"] != index:
+        raise CppDumpValidationError(f"{path}.index must preserve its serialized slot position")
+    _require_string(slot["kind"], f"{path}.kind")
+    kind = cast(str, slot["kind"])
+    detail_keys = _SLOT_KEYS - {"index", "kind"}
+    if kind == "human":
+        _require_string(slot["name"], f"{path}.name")
+        for key in ("ip", "port", "color", "player_template", "start_position", "team", "nat_behavior"):
+            _require_int(slot[key], f"{path}.{key}")
+        for key in ("accepted", "has_map"):
+            _require_bool(slot[key], f"{path}.{key}")
+        if slot["ai_difficulty"] is not None:
+            raise CppDumpValidationError(f"{path}.ai_difficulty must be null for a human slot")
+        return
+    if kind == "ai":
+        for key in ("color", "player_template", "start_position", "team"):
+            _require_int(slot[key], f"{path}.{key}")
+        _require_string(slot["ai_difficulty"], f"{path}.ai_difficulty")
+        if slot["ai_difficulty"] not in {"easy", "medium", "brutal"}:
+            raise CppDumpValidationError(f"{path}.ai_difficulty must be easy, medium, or brutal")
+        for key in ("name", "ip", "port", "accepted", "has_map", "nat_behavior"):
+            if slot[key] is not None:
+                raise CppDumpValidationError(f"{path}.{key} must be null for an AI slot")
+        return
+    if kind not in {"open", "closed"}:
+        raise CppDumpValidationError(f"{path}.kind is unsupported: {kind}")
+    article = "an" if kind == "open" else "a"
+    for key in detail_keys:
+        if slot[key] is not None:
+            raise CppDumpValidationError(f"{path}.{key} must be null for {article} {kind} slot")
 
 
 def _validate_catalog(record: dict[str, object]) -> dict[int, str]:
@@ -450,10 +530,25 @@ def compare_replay(parsed: ParsedReplay, cpp_dump: CppReplayDump) -> ParityMisma
         ("game_options", header.game_options),
         ("local_player_index", header.local_player_index),
         ("header_end_offset", header.header_end_offset),
+        ("map", header.map),
+        ("map_contents_mask", header.map_contents_mask),
+        ("map_crc", header.map_crc),
+        ("map_size", header.map_size),
+        ("seed", header.seed),
+        ("crc_interval", header.crc_interval),
+        ("use_stats", header.use_stats),
+        ("superweapon_restriction", header.superweapon_restriction),
+        ("starting_cash", header.starting_cash),
+        ("old_factions_only", header.old_factions_only),
     )
     mismatch = _compare_fields(0, "header", header_fields, cpp_dump.header)
     if mismatch is not None:
         return mismatch
+    cpp_slots = cast(list[dict[str, object]], cpp_dump.header["slots"])
+    for index, slot in enumerate(header.slots):
+        mismatch = _compare_fields(0, f"header.slots[{index}]", tuple(slot.to_dict().items()), cpp_slots[index])
+        if mismatch is not None:
+            return mismatch
 
     setup_fields = tuple(parsed.setup.to_dict().items())
     mismatch = _compare_fields(parsed.setup.start_offset, "setup", setup_fields, cpp_dump.setup)

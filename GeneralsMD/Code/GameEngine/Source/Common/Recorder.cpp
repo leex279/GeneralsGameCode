@@ -1005,7 +1005,7 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	{
 		// TheSuperHackers @feature Leex 18/08/2026 Emit only successfully decoded headers at their source-file boundary.
 		m_replayParseDumpComplete = TRUE;
-		ReplayParseDump::beginReplay(header, m_file->seek(0, File::CURRENT));
+		ReplayParseDump::beginReplay(header, m_gameInfo, m_file->seek(0, File::CURRENT));
 	}
 #endif
 
@@ -1019,6 +1019,29 @@ Bool RecorderClass::simulateReplay(AsciiString filename)
 		m_mode = RECORDERMODETYPE_SIMULATION_PLAYBACK;
 	return success;
 }
+
+#if defined(RTS_REPLAY_ANALYZER)
+void RecorderClass::completeReplayParseDump()
+{
+	if (!ReplayParseDump::isActive() || m_file == nullptr)
+	{
+		return;
+	}
+
+	// TheSuperHackers @bugfix Leex 19/08/2026 Finish diagnostic byte observation after a replay error without executing more simulation frames. (#TBD)
+	const Bool wasDoingAnalysis = m_doingAnalysis;
+	m_doingAnalysis = TRUE;
+	while (m_file != nullptr && m_nextFrame != (UnsignedInt)-1)
+	{
+		appendNextCommand();
+		if (m_file != nullptr)
+		{
+			readNextFrame();
+		}
+	}
+	m_doingAnalysis = wasDoingAnalysis;
+}
+#endif
 
 #if defined(RTS_DEBUG)
 Bool RecorderClass::analyzeReplay( AsciiString filename )
