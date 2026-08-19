@@ -14,5 +14,56 @@
       "fox27"
     ]
   },
+  "header": {
+    "magic": "GENREP",
+    "start_time": 1785594093,
+    "end_time": 1785595033,
+    "frame_count": 56003,
+    "flags": {
+      "desync_game": false,
+      "quit_early": false,
+      "player_disconnects": [false, false, false, false, false, false, false, false]
+    },
+    "replay_name": "Last Replay",
+    "system_time": {
+      "year": 2026,
+      "month": 8,
+      "day_of_week": 6,
+      "day": 1,
+      "hour": 16,
+      "minute": 21,
+      "second": 33,
+      "milliseconds": 547
+    },
+    "version_string": "Version 1.04",
+    "version_time_string": "Jun 20 2026 23:29:03",
+    "version_number": 65540,
+    "exe_crc": 1222014563,
+    "ini_crc": 4272612339,
+    "game_options": "US=1;M=00userdata/maps/[rank] sand scorpion;MC=FFFE2DB4;MS=164094;SD=1145615673;C=100;SR=0;SC=10000;O=N;S=Hleex279,0,0,TT,-1,7,-1,-1,1:HFOX27,1,0,FT,-1,4,-1,-1,1:X:X:X:X:X:X:;",
+    "local_player_index": 0,
+    "header_end_offset": 326,
+    "map": "userdata/maps/[rank] sand scorpion",
+    "map_contents_mask": 0,
+    "map_crc": 4294847924,
+    "map_size": 164094,
+    "seed": 1145615673,
+    "crc_interval": 100,
+    "use_stats": 1,
+    "superweapon_restriction": 0,
+    "starting_cash": 10000,
+    "old_factions_only": false,
+    "slots": [
+      {"index": 0, "kind": "human", "name": "leex279", "ip": 0, "port": 0, "accepted": true, "has_map": true, "color": -1, "player_template": 7, "start_position": -1, "team": -1, "nat_behavior": 1, "ai_difficulty": null},
+      {"index": 1, "kind": "human", "name": "FOX27", "ip": 1, "port": 0, "accepted": false, "has_map": true, "color": -1, "player_template": 4, "start_position": -1, "team": -1, "nat_behavior": 1, "ai_difficulty": null},
+      {"index": 2, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null},
+      {"index": 3, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null},
+      {"index": 4, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null},
+      {"index": 5, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null},
+      {"index": 6, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null},
+      {"index": 7, "kind": "closed", "name": null, "ip": null, "port": null, "accepted": null, "has_map": null, "color": null, "player_template": null, "start_position": null, "team": null, "nat_behavior": null, "ai_difficulty": null}
+    ],
+    "warnings": []
+  },
   "testing_purpose": "Checksum-pinned Zero Hour 1.04 replay bytes for provenance and later embedded-name parsing tests."
 }

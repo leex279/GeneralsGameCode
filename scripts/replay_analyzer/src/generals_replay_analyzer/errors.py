@@ -39,3 +39,11 @@ class UnsupportedArgumentTypeError(ReplayParseError):
 
 class InvalidStringLengthError(ReplayParseError):
     """Raised when an encoded replay string exceeds the safety limit."""
+
+
+class InvalidGameOptionsError(ReplayParseError):
+    """Raised when the engine's serialized game-options grammar is malformed."""
+
+
+class InvalidLocalPlayerIndexError(ReplayParseError):
+    """Raised when the replay local-slot string is outside the engine's slot range."""
