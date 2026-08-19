@@ -26,6 +26,7 @@
 
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayParseDump.h"
 #include "Common/ReplayTelemetry.h"
 #endif
@@ -1882,6 +1883,11 @@ RecorderModeType RecorderClass::getMode() {
 ///< Show or Hide the Replay controls
 void RecorderClass::initControls()
 {
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 18/08/2026 Emit one player snapshot after replay slots resolve to authoritative engine players. (#TBD)
+	ReplayGameDataExport::emitPlayersInitialized();
+#endif
+
 	NameKeyType parentReplayControlID = TheNameKeyGenerator->nameToKey( "ReplayControl.wnd:ParentReplayControl" );
 	GameWindow *parentReplayControl = TheWindowManager->winGetWindowFromId( nullptr, parentReplayControlID );
 

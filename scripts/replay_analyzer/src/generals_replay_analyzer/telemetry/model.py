@@ -31,18 +31,29 @@ class RawPosition(OpenPayload):
 
 
 class PlayerObservation(OpenPayload):
-    replay_name: str = Field(min_length=1)
+    replay_name: Annotated[str, Field(min_length=1)] | None
     player_index: NonNegativeInt
     team_id: int
-    faction_template_name: str = Field(min_length=1)
-    color: NonNegativeInt
+    faction_template_name: Annotated[str, Field(min_length=1)] | None
+    color: NonNegativeInt | None
+    start_position_status: Literal["resolved", "unknown"]
+    start_position: RawPosition | None
+    controller: Literal["human", "ai"]
     is_human: bool
     is_local_player: bool
+
+    @model_validator(mode="after")
+    def _require_explicit_resolution_and_controller_state(self) -> "PlayerObservation":
+        if (self.start_position_status == "resolved") != (self.start_position is not None):
+            raise ValueError("start_position must be present exactly when start_position_status is resolved")
+        if (self.controller == "human") != self.is_human:
+            raise ValueError("controller and is_human must describe the same engine slot state")
+        return self
 
 
 class PlayersInitializedPayload(OpenPayload):
     players: list[PlayerObservation] = Field(min_length=1)
-    game_data_catalog: "MapAssetReference"
+    game_data_catalog: "GameDataCatalogReference"
 
 
 class ObjectCreatedPayload(OpenPayload):
@@ -191,6 +202,13 @@ class ManifestPayload(BaseModel):
     map_identity: str = Field(min_length=1)
     initial_seed: int
     exporter_settings: dict[str, object]
+    game_data_catalog: "GameDataCatalogReference"
+
+    @model_validator(mode="after")
+    def _require_catalog_engine_identity(self) -> "ManifestPayload":
+        if self.game_data_catalog.engine_data_identity != self.engine_build:
+            raise ValueError("game_data_catalog engine_data_identity must equal engine_build")
+        return self
 
 
 class MapAssetReference(BaseModel):
@@ -199,6 +217,22 @@ class MapAssetReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GameDataCatalogReference(BaseModel):
+    """Strict content identity for the semantic engine-data catalog."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["game_data_catalog"]
+    path: str = Field(pattern=r"^game-data-catalog-v1-[0-9a-f]{64}\.json$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    engine_data_identity: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _require_content_addressed_path(self) -> "GameDataCatalogReference":
+        if self.path != f"game-data-catalog-v1-{self.sha256}.json":
+            raise ValueError("catalog path must embed its sha256 identity")
+        return self
 
 
 class CompletePayload(OpenPayload):

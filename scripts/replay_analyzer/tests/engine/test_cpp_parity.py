@@ -30,13 +30,13 @@ def _runtime_environment(repository_root: Path) -> dict[str, str]:
 def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
     tmp_path: Path,
     repository_root: Path,
-    zero_hour_executable: Path,
+    zero_hour_runtime_executable: Path,
     pinned_replay: Path,
 ) -> None:
     """Fail honestly unless a complete real C++ dump matches Python and its packaged message catalog."""
     dump_path = (tmp_path / "cpp.ndjson").resolve()
     base_command = [
-        str(zero_hour_executable),
+        str(zero_hour_runtime_executable),
         "-headless",
         "-noaudio",
         "-replay",
@@ -56,7 +56,7 @@ def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
     try:
         baseline = subprocess.run(
             base_command,
-            cwd=tmp_path,
+            cwd=zero_hour_runtime_executable.parent,
             env=_runtime_environment(repository_root),
             capture_output=True,
             text=True,
@@ -65,7 +65,7 @@ def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
         )
         completed = subprocess.run(
             command,
-            cwd=tmp_path,
+            cwd=zero_hour_runtime_executable.parent,
             env=_runtime_environment(repository_root),
             capture_output=True,
             text=True,
@@ -74,7 +74,7 @@ def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
         )
         failed_sink = subprocess.run(
             failed_sink_command,
-            cwd=tmp_path,
+            cwd=zero_hour_runtime_executable.parent,
             env=_runtime_environment(repository_root),
             capture_output=True,
             text=True,

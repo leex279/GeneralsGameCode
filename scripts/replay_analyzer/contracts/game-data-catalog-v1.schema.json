@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesuperhackers.github.io/generals-replay-analyzer/game-data-catalog-v1.schema.json",
+  "title": "Zero Hour semantic game data catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "engine_data_identity", "weapon_scope", "locomotor_scope", "thing_templates", "upgrades", "sciences", "weapons", "locomotors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "type": {"const": "game_data_catalog"},
+    "engine_data_identity": {"type": "string", "minLength": 1},
+    "weapon_scope": {"const": "referenced_by_thing_templates"},
+    "locomotor_scope": {"const": "referenced_by_thing_templates"},
+    "thing_templates": {"type": "array", "items": {"$ref": "#/$defs/thingTemplate"}},
+    "upgrades": {"type": "array", "items": {"$ref": "#/$defs/namedRecord"}},
+    "sciences": {"type": "array", "items": {"$ref": "#/$defs/namedRecord"}},
+    "weapons": {"type": "array", "items": {"$ref": "#/$defs/namedRecord"}},
+    "locomotors": {"type": "array", "items": {"$ref": "#/$defs/locomotor"}}
+  },
+  "$defs": {
+    "namedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "name"],
+      "properties": {"ordinal": {"type": "integer", "minimum": 0}, "name": {"type": "string", "minLength": 1}}
+    },
+    "kindOfFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "name"],
+      "properties": {"ordinal": {"type": "integer", "minimum": 0}, "name": {"type": "string", "minLength": 1}}
+    },
+    "unitPrerequisite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "or_with_previous"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "or_with_previous": {"type": "boolean"}}
+    },
+    "prerequisite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["units", "sciences"],
+      "properties": {
+        "units": {"type": "array", "items": {"$ref": "#/$defs/unitPrerequisite"}},
+        "sciences": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "locomotorSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["set", "names"],
+      "properties": {
+        "set": {"type": "string", "minLength": 1},
+        "names": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "thingTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "name", "faction", "kind_of_flags", "build_cost", "configured_build_time_seconds", "prerequisites", "locomotor_sets", "production_capable", "weapon_names", "category_tags"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0},
+        "name": {"type": "string", "minLength": 1},
+        "faction": {"type": ["string", "null"], "minLength": 1},
+        "kind_of_flags": {"type": "array", "items": {"$ref": "#/$defs/kindOfFlag"}},
+        "build_cost": {"type": "integer", "minimum": 0},
+        "configured_build_time_seconds": {"type": "number", "minimum": 0},
+        "prerequisites": {"type": "array", "items": {"$ref": "#/$defs/prerequisite"}},
+        "locomotor_sets": {"type": "array", "items": {"$ref": "#/$defs/locomotorSet"}},
+        "production_capable": {"type": "boolean"},
+        "weapon_names": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "category_tags": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "locomotor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "name", "surface_capabilities"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0},
+        "name": {"type": "string", "minLength": 1},
+        "surface_capabilities": {"type": "array", "items": {"enum": ["GROUND", "WATER", "CLIFF", "AIR", "RUBBLE"]}}
+      }
+    }
+  }
+}

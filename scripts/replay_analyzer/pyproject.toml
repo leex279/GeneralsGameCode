@@ -22,6 +22,7 @@ packages = ["src/generals_replay_analyzer"]
 [tool.hatch.build.targets.wheel.force-include]
 "contracts/zero_hour_1_04_message_types.json" = "generals_replay_analyzer/data/zero_hour_1_04_message_types.json"
 "contracts/telemetry-v1.schema.json" = "generals_replay_analyzer/data/telemetry-v1.schema.json"
+"contracts/game-data-catalog-v1.schema.json" = "generals_replay_analyzer/data/game-data-catalog-v1.schema.json"
 
 [dependency-groups]
 dev = [

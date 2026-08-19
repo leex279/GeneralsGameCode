@@ -5,14 +5,14 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 
 from generals_replay_analyzer.parser import parse_replay
-from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord
+from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord, PlayersInitializedRecord
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
 RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -27,31 +27,6 @@ def _runtime_environment(repository_root: Path) -> dict[str, str]:
     )
     environment["PATH"] = os.pathsep.join([*(str(path.resolve()) for path in dependency_directories), environment["PATH"]])
     return environment
-
-
-@pytest.fixture(scope="module")
-def zero_hour_runtime_executable(zero_hour_executable: Path) -> Iterator[Path]:
-    """Run the build with retail data without copying or replacing any installed executable."""
-    override = os.environ.get("GENERALS_REPLAY_ANALYZER_GAME_DIR")
-    game_directory = (
-        Path(override)
-        if override
-        else Path(r"C:\Program Files (x86)\Steam\steamapps\common\Command & Conquer Generals - Zero Hour")
-    )
-    if not game_directory.is_dir():
-        pytest.skip(f"Zero Hour game data directory is absent: {game_directory}")
-
-    runtime_executable = game_directory / f"generalszh_replay_analyzer_{os.getpid()}_{uuid4().hex}.exe"
-    if runtime_executable.exists():
-        pytest.fail(f"refusing to replace existing runtime executable: {runtime_executable}")
-    os.link(zero_hour_executable, runtime_executable)
-    try:
-        yield runtime_executable
-    finally:
-        if runtime_executable.exists():
-            if not os.path.samefile(zero_hour_executable, runtime_executable):
-                pytest.fail(f"refusing to remove a runtime path that is no longer the test hardlink: {runtime_executable}")
-            runtime_executable.unlink()
 
 
 def _run_engine(
@@ -163,9 +138,10 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert trace_path.is_file(), "telemetry-enabled playback did not create its configured trace"
 
     records = tuple(iter_validated_trace(trace_path))
-    assert len(records) == 2
-    manifest, complete = records
+    assert len(records) == 3
+    manifest, players, complete = records
     assert isinstance(manifest, ManifestRecord)
+    assert isinstance(players, PlayersInitializedRecord)
     assert isinstance(complete, CompleteRecord)
     assert manifest.run_id == UUID(RUN_ID)
     assert manifest.sequence == 0
@@ -175,11 +151,15 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert manifest.payload.engine_build
     assert manifest.payload.replay_version
     assert manifest.payload.map_identity
-    assert complete.sequence == 1
+    assert players.sequence == 1
+    assert players.frame == 0
+    assert players.payload.players
+    assert players.payload.game_data_catalog == manifest.payload.game_data_catalog
+    assert complete.sequence == 2
     assert complete.payload.final_frame == complete.frame
     assert complete.logic_time_seconds == complete.frame / 30.0
     assert complete.payload.command_count > 0
-    assert complete.payload.event_counts == {"manifest": 1, "complete": 1}
+    assert complete.payload.event_counts == {"manifest": 1, "players_initialized": 1, "complete": 1}
     assert complete.payload.crc_mismatch == (completed.returncode != 0)
     assert complete.payload.replay_truncated is False
     assert complete.payload.clean_shutdown == (completed.returncode == 0)

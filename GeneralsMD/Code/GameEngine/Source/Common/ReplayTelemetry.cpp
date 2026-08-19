@@ -5,6 +5,7 @@
 #include "Common/ReplayTelemetry.h"
 
 #include "Common/GlobalData.h"
+#include "Common/ReplayGameDataExport.h"
 #include "Common/version.h"
 #include "GameNetwork/GameInfo.h"
 
@@ -166,6 +167,10 @@ namespace
 	AsciiString s_tracePath;
 	AsciiString s_tempPath;
 	AsciiString s_runId;
+	AsciiString s_engineDataIdentity;
+	AsciiString s_catalogPath;
+	AsciiString s_catalogSha256;
+	AsciiString s_catalogEngineDataIdentity;
 	Int s_movementSampleFrames = 15;
 	unsigned long long s_sequence = 0;
 	unsigned long long s_commandCount = 0;
@@ -358,11 +363,42 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_runId = runId;
 	s_movementSampleFrames = movementSampleFrames;
 	s_cleanFinishDeferred = FALSE;
+	s_engineDataIdentity.clear();
+	s_catalogPath.clear();
+	s_catalogSha256.clear();
+	s_catalogEngineDataIdentity.clear();
+	ReplayGameDataExport::reset();
 }
 
 Bool ReplayTelemetry::isEnabled()
 {
 	return s_tracePath.isNotEmpty();
+}
+
+const AsciiString &ReplayTelemetry::getTracePath()
+{
+	return s_tracePath;
+}
+
+const AsciiString &ReplayTelemetry::getEngineDataIdentity()
+{
+	return s_engineDataIdentity;
+}
+
+AsciiString ReplayTelemetry::sha256Hex(const char *data, size_t length)
+{
+	Sha256 digest;
+	digest.update(data, length);
+	return AsciiString(digest.hexDigest().c_str());
+}
+
+void ReplayTelemetry::setGameDataCatalog(const AsciiString &path, const AsciiString &sha256,
+	const AsciiString &engineDataIdentity)
+{
+	// TheSuperHackers @feature Leex 18/08/2026 Bind the manifest to one validated content-addressed engine-data asset. (#TBD)
+	s_catalogPath = path;
+	s_catalogSha256 = sha256;
+	s_catalogEngineDataIdentity = engineDataIdentity;
 }
 
 void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
@@ -412,6 +448,19 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	AsciiString engineBuild;
 	engineBuild.format("zero-hour-%u-exe-%08X-ini-%08X", TheVersion->getVersionNumber(), TheGlobalData->m_exeCRC,
 		TheGlobalData->m_iniCRC);
+	s_engineDataIdentity = engineBuild;
+	if (!ReplayGameDataExport::prepareCatalog())
+	{
+		// TheSuperHackers @feature Leex 18/08/2026 Abort the owned trace transaction when its required catalog cannot publish safely. (#TBD)
+		FILE *output = s_output;
+		s_output = nullptr;
+		if (fclose(output) != 0)
+		{
+			setWriterError("close_failed", "could not close telemetry output after catalog failure", TRUE);
+		}
+		discardTemporaryOutput();
+		return;
+	}
 	AsciiString replayVersion;
 	replayVersion.translate(header.versionString);
 	if (replayVersion.isEmpty())
@@ -430,7 +479,10 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 		+ ",\"replay_version\":" + jsonString(replayVersion)
 		+ ",\"map_identity\":" + jsonString(mapIdentity)
 		+ ",\"initial_seed\":" + std::to_string(initialSeed)
-		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames) + "}}";
+		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames) + "}"
+		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonString(s_catalogPath)
+		+ ",\"sha256\":" + jsonString(s_catalogSha256)
+		+ ",\"engine_data_identity\":" + jsonString(s_catalogEngineDataIdentity) + "}}";
 	writeLine(envelope(s_sequence++, 0, "manifest", payload), TRUE);
 	s_eventCounts["manifest"] = 1;
 	flushOutput();

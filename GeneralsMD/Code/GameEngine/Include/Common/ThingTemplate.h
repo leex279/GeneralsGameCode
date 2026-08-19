@@ -581,6 +581,11 @@ public:
 	/// Used only by Skirmish AI. Everyone else should call calcCostToBuild.
 	Int friend_getBuildCost() const { return m_buildCost; }
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 18/08/2026 Expose raw configured build time without player-dependent simulation resolution. (#TBD)
+	Real replayAnalyzerGetConfiguredBuildTimeSeconds() const { return m_buildTime; }
+#endif
+
 	const AsciiString& getDefaultOwningSide() const { return m_defaultOwningSide; }
 
 	/// get us the table to parse the fields for thing templates

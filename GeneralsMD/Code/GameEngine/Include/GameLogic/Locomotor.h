@@ -139,6 +139,12 @@ public:
 
 	void validate();
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 18/08/2026 Expose immutable loaded locomotor identity and surface metadata to the replay catalog. (#TBD)
+	const AsciiString &replayAnalyzerGetName() const { return m_name; }
+	LocomotorSurfaceTypeMask replayAnalyzerGetSurfaces() const { return m_surfaces; }
+#endif
+
 protected:
 
 

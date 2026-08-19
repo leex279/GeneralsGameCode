@@ -96,6 +96,15 @@ public:
 
 	Int getAllPossibleBuildFacilityTemplates(const ThingTemplate* tmpls[], Int maxtmpls) const;
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 18/08/2026 Expose loaded prerequisite metadata to the passive modern replay catalog. (#TBD)
+	Int replayAnalyzerGetUnitCount() const { return static_cast<Int>(m_prereqUnits.size()); }
+	const ThingTemplate *replayAnalyzerGetUnitTemplate(Int index) const { return m_prereqUnits[index].unit; }
+	Bool replayAnalyzerIsUnitOrWithPrevious(Int index) const { return (m_prereqUnits[index].flags & UNIT_OR_WITH_PREV) != 0; }
+	Int replayAnalyzerGetScienceCount() const { return static_cast<Int>(m_prereqSciences.size()); }
+	ScienceType replayAnalyzerGetScience(Int index) const { return m_prereqSciences[index]; }
+#endif
+
 private:
 
 	enum

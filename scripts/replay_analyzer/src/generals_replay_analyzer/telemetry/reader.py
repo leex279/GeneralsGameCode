@@ -10,7 +10,13 @@ from typing import cast
 from jsonschema import Draft202012Validator, FormatChecker  # type: ignore[import-untyped]
 from pydantic import TypeAdapter, ValidationError
 
-from generals_replay_analyzer.telemetry.model import SCHEMA_VERSION, CompleteRecord, TelemetryRecord
+from generals_replay_analyzer.telemetry.model import (
+    SCHEMA_VERSION,
+    CompleteRecord,
+    ManifestRecord,
+    PlayersInitializedRecord,
+    TelemetryRecord,
+)
 
 _RECORD_ADAPTER: TypeAdapter[TelemetryRecord] = TypeAdapter(TelemetryRecord)
 
@@ -67,7 +73,7 @@ def _error(path: Path, line_number: int, sequence: object, detail: str) -> Telem
 def _validation_path(error_path: object, message: str, prefix: str) -> str:
     """Return the concrete field path for a leaf JSON Schema validation error."""
     components = [str(component) for component in cast(tuple[object, ...], error_path)]
-    if not components and " is a required property" in message:
+    if " is a required property" in message:
         missing = message.split("'", maxsplit=2)[1]
         components.append(missing)
     return ".".join([prefix, *components]) if components else prefix
@@ -114,6 +120,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
 
     prior_sequence: int | None = None
     expected_run_id: object | None = None
+    expected_catalog: object | None = None
     complete_seen = False
     digest = hashlib.sha256()
     records_seen = 0
@@ -170,6 +177,11 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 validated.sequence,
                 f"is not greater than previous sequence {prior_sequence}",
             )
+
+        if isinstance(validated, ManifestRecord):
+            expected_catalog = validated.payload.game_data_catalog
+        elif isinstance(validated, PlayersInitializedRecord) and validated.payload.game_data_catalog != expected_catalog:
+            raise _error(path, line_number, validated.sequence, "game_data_catalog differs from manifest")
 
         records_seen += 1
         prior_sequence = validated.sequence
