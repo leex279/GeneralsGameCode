@@ -2,88 +2,72 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thesuperhackers.github.io/generals-replay-analyzer/telemetry-v1.schema.json",
   "title": "Replay Analyzer observed telemetry v1 record",
-  "oneOf": [
-    { "$ref": "#/$defs/manifestRecord" },
-    { "$ref": "#/$defs/observationRecord" },
-    { "$ref": "#/$defs/completeRecord" }
-  ],
+  "oneOf": [{"$ref": "#/$defs/manifestRecord"}, {"$ref": "#/$defs/observationRecord"}, {"$ref": "#/$defs/completeRecord"}],
   "$defs": {
-    "envelope": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema_version", "run_id", "sequence", "frame", "logic_time_seconds", "event_type", "payload"],
-      "properties": {
-        "schema_version": { "const": 1 },
-        "run_id": { "type": "string", "format": "uuid" },
-        "sequence": { "type": "integer", "minimum": 0 },
-        "frame": { "type": "integer", "minimum": 0 },
-        "logic_time_seconds": { "type": "number", "minimum": 0 },
-        "event_type": { "type": "string" },
-        "payload": { "type": "object" }
-      }
+    "envelope": {"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "sequence", "frame", "logic_time_seconds", "event_type", "payload"], "properties": {"schema_version": {"const": 1}, "run_id": {"type": "string", "format": "uuid"}, "sequence": {"type": "integer", "minimum": 0}, "frame": {"type": "integer", "minimum": 0}, "logic_time_seconds": {"type": "number", "minimum": 0}, "event_type": {"type": "string"}, "payload": {"type": "object"}}},
+    "rawPosition": {"type": "object", "additionalProperties": true, "required": ["x", "y", "z"], "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}},
+    "assetReference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "manifestPayload": {"type": "object", "additionalProperties": false, "required": ["engine_build", "replay_version", "map_identity", "initial_seed", "exporter_settings"], "properties": {"engine_build": {"type": "string", "minLength": 1}, "replay_version": {"type": "string", "minLength": 1}, "map_identity": {"type": "string", "minLength": 1}, "initial_seed": {"type": "integer"}, "exporter_settings": {"type": "object"}}},
+    "completePayload": {"type": "object", "additionalProperties": true, "required": ["final_frame", "command_count", "event_counts", "crc_mismatch", "replay_truncated", "clean_shutdown", "writer_error", "trace_sha256", "map_assets"], "properties": {"final_frame": {"type": "integer", "minimum": 0}, "command_count": {"type": "integer", "minimum": 0}, "event_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}, "crc_mismatch": {"type": "boolean"}, "replay_truncated": {"type": "boolean"}, "clean_shutdown": {"type": "boolean"}, "writer_error": {"type": ["string", "null"]}, "trace_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "map_assets": {"type": "array", "items": {"$ref": "#/$defs/assetReference"}}}},
+    "eventPayloads": {
+      "players_initialized": {"type": "object", "additionalProperties": true, "required": ["players", "game_data_catalog"], "properties": {"players": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": true, "required": ["replay_name", "player_index", "team_id", "faction_template_name", "color", "is_human", "is_local_player"], "properties": {"replay_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}, "team_id": {"type": "integer"}, "faction_template_name": {"type": "string", "minLength": 1}, "color": {"type": "integer", "minimum": 0}, "is_human": {"type": "boolean"}, "is_local_player": {"type": "boolean"}}}}, "game_data_catalog": {"$ref": "#/$defs/assetReference"}}},
+      "object_created": {"type": "object", "additionalProperties": true, "required": ["object_id", "template_name", "owner_player_index", "team_id", "position", "orientation", "kind_of_flags", "creation_source"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "template_name": {"type": "string", "minLength": 1}, "owner_player_index": {"type": "integer", "minimum": 0}, "team_id": {"type": "integer"}, "position": {"$ref": "#/$defs/rawPosition"}, "orientation": {"type": "number"}, "kind_of_flags": {"type": "array", "items": {"type": "string"}}, "creation_source": {"type": "string", "minLength": 1}}},
+      "construction_started": {"type": "object", "additionalProperties": true, "required": ["object_id", "owner_player_index"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "owner_player_index": {"type": "integer", "minimum": 0}}},
+      "construction_completed": {"type": "object", "additionalProperties": true, "required": ["object_id", "owner_player_index"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "owner_player_index": {"type": "integer", "minimum": 0}}},
+      "owner_changed": {"type": "object", "additionalProperties": true, "required": ["object_id", "previous_owner_player_index", "new_owner_player_index"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "previous_owner_player_index": {"type": "integer", "minimum": 0}, "new_owner_player_index": {"type": "integer", "minimum": 0}}},
+      "sold": {"type": "object", "additionalProperties": true, "required": ["object_id", "owner_player_index"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "owner_player_index": {"type": "integer", "minimum": 0}}},
+      "object_destroyed": {"type": "object", "additionalProperties": true, "required": ["object_id", "owner_player_index"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "owner_player_index": {"type": "integer", "minimum": 0}}},
+      "production_queued": {"type": "object", "additionalProperties": true, "required": ["production_id", "producer_object_id", "player_index", "template_name"], "properties": {"production_id": {"type": "integer", "minimum": 0}, "producer_object_id": {"type": "integer", "minimum": 0}, "player_index": {"type": "integer", "minimum": 0}, "template_name": {"type": "string", "minLength": 1}}},
+      "production_cancelled": {"type": "object", "additionalProperties": true, "required": ["production_id", "producer_object_id", "player_index", "template_name"], "properties": {"production_id": {"type": "integer", "minimum": 0}, "producer_object_id": {"type": "integer", "minimum": 0}, "player_index": {"type": "integer", "minimum": 0}, "template_name": {"type": "string", "minLength": 1}}},
+      "production_completed": {"type": "object", "additionalProperties": true, "required": ["production_id", "producer_object_id", "player_index", "template_name"], "properties": {"production_id": {"type": "integer", "minimum": 0}, "producer_object_id": {"type": "integer", "minimum": 0}, "player_index": {"type": "integer", "minimum": 0}, "template_name": {"type": "string", "minLength": 1}}},
+      "upgrade_queued": {"type": "object", "additionalProperties": true, "required": ["upgrade_name", "player_index"], "properties": {"upgrade_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}}},
+      "upgrade_cancelled": {"type": "object", "additionalProperties": true, "required": ["upgrade_name", "player_index"], "properties": {"upgrade_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}}},
+      "upgrade_completed": {"type": "object", "additionalProperties": true, "required": ["upgrade_name", "player_index"], "properties": {"upgrade_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}}},
+      "science_purchased": {"type": "object", "additionalProperties": true, "required": ["science_name", "player_index"], "properties": {"science_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}}},
+      "special_power_used": {"type": "object", "additionalProperties": true, "required": ["special_power_name", "player_index"], "properties": {"special_power_name": {"type": "string", "minLength": 1}, "player_index": {"type": "integer", "minimum": 0}}},
+      "cash_changed": {"type": "object", "additionalProperties": true, "required": ["player_index", "before", "delta", "after", "track_income", "reason"], "properties": {"player_index": {"type": "integer", "minimum": 0}, "before": {"type": "integer"}, "delta": {"type": "integer"}, "after": {"type": "integer"}, "track_income": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1}}},
+      "supply_collected": {"type": "object", "additionalProperties": true, "required": ["collector_object_id", "source_object_id", "player_index", "amount", "location"], "properties": {"collector_object_id": {"type": "integer", "minimum": 0}, "source_object_id": {"type": "integer", "minimum": 0}, "player_index": {"type": "integer", "minimum": 0}, "amount": {"type": "number", "minimum": 0}, "location": {"$ref": "#/$defs/rawPosition"}}},
+      "damage_applied": {"type": "object", "additionalProperties": true, "required": ["victim_object_id", "attacker_object_id", "weapon_name", "attempted_amount", "applied_amount", "prior_health", "new_health", "damage_type", "death_type", "location", "killing_blow"], "properties": {"victim_object_id": {"type": "integer", "minimum": 0}, "attacker_object_id": {"type": ["integer", "null"], "minimum": 0}, "weapon_name": {"type": ["string", "null"]}, "attempted_amount": {"type": "number", "minimum": 0}, "applied_amount": {"type": "number", "minimum": 0}, "prior_health": {"type": "number", "minimum": 0}, "new_health": {"type": "number", "minimum": 0}, "damage_type": {"type": "string", "minLength": 1}, "death_type": {"type": "string", "minLength": 1}, "location": {"$ref": "#/$defs/rawPosition"}, "killing_blow": {"type": "boolean"}}},
+      "healing_applied": {"type": "object", "additionalProperties": true, "required": ["target_object_id", "applied_amount", "prior_health", "new_health"], "properties": {"target_object_id": {"type": "integer", "minimum": 0}, "applied_amount": {"type": "number", "minimum": 0}, "prior_health": {"type": "number", "minimum": 0}, "new_health": {"type": "number", "minimum": 0}}},
+      "veterancy_changed": {"type": "object", "additionalProperties": true, "required": ["object_id", "previous_level", "new_level"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "previous_level": {"type": "integer"}, "new_level": {"type": "integer"}}},
+      "player_defeated": {"type": "object", "additionalProperties": true, "required": ["player_index"], "properties": {"player_index": {"type": "integer", "minimum": 0}}},
+      "player_surrendered": {"type": "object", "additionalProperties": true, "required": ["player_index"], "properties": {"player_index": {"type": "integer", "minimum": 0}}},
+      "player_disconnected": {"type": "object", "additionalProperties": true, "required": ["player_index"], "properties": {"player_index": {"type": "integer", "minimum": 0}}},
+      "match_outcome": {"type": "object", "additionalProperties": true, "required": ["outcome", "winner_player_index"], "properties": {"outcome": {"type": "string", "minLength": 1}, "winner_player_index": {"type": ["integer", "null"], "minimum": 0}}},
+      "order_issued": {"type": "object", "additionalProperties": true, "required": ["message_type", "message_name", "source_player_index", "selected_object_ids", "target_object_id", "target_location", "command_source"], "properties": {"message_type": {"type": "integer"}, "message_name": {"type": ["string", "null"]}, "source_player_index": {"type": "integer", "minimum": 0}, "selected_object_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "target_object_id": {"type": ["integer", "null"], "minimum": 0}, "target_location": {"anyOf": [{"$ref": "#/$defs/rawPosition"}, {"type": "null"}]}, "command_source": {"type": "string", "minLength": 1}}},
+      "entity_state_changed": {"type": "object", "additionalProperties": true, "required": ["object_id", "previous_state", "current_state"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "previous_state": {"type": "string", "minLength": 1}, "current_state": {"type": "string", "minLength": 1}}},
+      "entity_sample": {"type": "object", "additionalProperties": true, "required": ["object_id", "position", "orientation", "layer", "speed", "current_state"], "properties": {"object_id": {"type": "integer", "minimum": 0}, "position": {"$ref": "#/$defs/rawPosition"}, "orientation": {"type": "number"}, "layer": {"type": "integer"}, "speed": {"type": "number", "minimum": 0}, "current_state": {"type": "string", "minLength": 1}}}
     },
-    "manifestPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["engine_build", "replay_version", "map_identity", "initial_seed", "exporter_settings"],
-      "properties": {
-        "engine_build": { "type": "string", "minLength": 1 },
-        "replay_version": { "type": "string", "minLength": 1 },
-        "map_identity": { "type": "string", "minLength": 1 },
-        "initial_seed": { "type": "integer" },
-        "exporter_settings": { "type": "object" }
-      }
-    },
-    "versionedPayload": { "type": "object", "additionalProperties": true },
-    "mapAssetReference": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "sha256"],
-      "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-      }
-    },
-    "completePayload": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": ["final_frame", "command_count", "event_counts", "crc_mismatch", "replay_truncated", "clean_shutdown", "writer_error", "trace_sha256", "map_assets"],
-      "properties": {
-        "final_frame": { "type": "integer", "minimum": 0 },
-        "command_count": { "type": "integer", "minimum": 0 },
-        "event_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
-        "crc_mismatch": { "type": "boolean" },
-        "replay_truncated": { "type": "boolean" },
-        "clean_shutdown": { "type": "boolean" },
-        "writer_error": { "type": ["string", "null"] },
-        "trace_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "map_assets": { "type": "array", "items": { "$ref": "#/$defs/mapAssetReference" } }
-      }
-    },
-    "manifestRecord": {
-      "allOf": [
-        { "$ref": "#/$defs/envelope" },
-        { "properties": { "event_type": { "const": "manifest" }, "payload": { "$ref": "#/$defs/manifestPayload" } } }
-      ]
-    },
-    "observationRecord": {
-      "allOf": [
-        { "$ref": "#/$defs/envelope" },
-        {
-          "properties": {
-            "event_type": {
-              "enum": ["players_initialized", "object_created", "construction_started", "construction_completed", "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled", "production_completed", "upgrade_queued", "upgrade_cancelled", "upgrade_completed", "science_purchased", "special_power_used", "cash_changed", "supply_collected", "damage_applied", "healing_applied", "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome", "order_issued", "entity_state_changed", "entity_sample"]
-            },
-            "payload": { "$ref": "#/$defs/versionedPayload" }
-          }
-        }
-      ]
-    },
-    "completeRecord": {
-      "allOf": [
-        { "$ref": "#/$defs/envelope" },
-        { "properties": { "event_type": { "const": "complete" }, "payload": { "$ref": "#/$defs/completePayload" } } }
-      ]
-    }
+    "manifestRecord": {"allOf": [{"$ref": "#/$defs/envelope"}, {"properties": {"event_type": {"const": "manifest"}, "payload": {"$ref": "#/$defs/manifestPayload"}}}]},
+    "observationRecord": {"allOf": [{"$ref": "#/$defs/envelope"}, {"oneOf": [
+      {"properties": {"event_type": {"const": "players_initialized"}, "payload": {"$ref": "#/$defs/eventPayloads/players_initialized"}}},
+      {"properties": {"event_type": {"const": "object_created"}, "payload": {"$ref": "#/$defs/eventPayloads/object_created"}}},
+      {"properties": {"event_type": {"const": "construction_started"}, "payload": {"$ref": "#/$defs/eventPayloads/construction_started"}}},
+      {"properties": {"event_type": {"const": "construction_completed"}, "payload": {"$ref": "#/$defs/eventPayloads/construction_completed"}}},
+      {"properties": {"event_type": {"const": "owner_changed"}, "payload": {"$ref": "#/$defs/eventPayloads/owner_changed"}}},
+      {"properties": {"event_type": {"const": "sold"}, "payload": {"$ref": "#/$defs/eventPayloads/sold"}}},
+      {"properties": {"event_type": {"const": "object_destroyed"}, "payload": {"$ref": "#/$defs/eventPayloads/object_destroyed"}}},
+      {"properties": {"event_type": {"const": "production_queued"}, "payload": {"$ref": "#/$defs/eventPayloads/production_queued"}}},
+      {"properties": {"event_type": {"const": "production_cancelled"}, "payload": {"$ref": "#/$defs/eventPayloads/production_cancelled"}}},
+      {"properties": {"event_type": {"const": "production_completed"}, "payload": {"$ref": "#/$defs/eventPayloads/production_completed"}}},
+      {"properties": {"event_type": {"const": "upgrade_queued"}, "payload": {"$ref": "#/$defs/eventPayloads/upgrade_queued"}}},
+      {"properties": {"event_type": {"const": "upgrade_cancelled"}, "payload": {"$ref": "#/$defs/eventPayloads/upgrade_cancelled"}}},
+      {"properties": {"event_type": {"const": "upgrade_completed"}, "payload": {"$ref": "#/$defs/eventPayloads/upgrade_completed"}}},
+      {"properties": {"event_type": {"const": "science_purchased"}, "payload": {"$ref": "#/$defs/eventPayloads/science_purchased"}}},
+      {"properties": {"event_type": {"const": "special_power_used"}, "payload": {"$ref": "#/$defs/eventPayloads/special_power_used"}}},
+      {"properties": {"event_type": {"const": "cash_changed"}, "payload": {"$ref": "#/$defs/eventPayloads/cash_changed"}}},
+      {"properties": {"event_type": {"const": "supply_collected"}, "payload": {"$ref": "#/$defs/eventPayloads/supply_collected"}}},
+      {"properties": {"event_type": {"const": "damage_applied"}, "payload": {"$ref": "#/$defs/eventPayloads/damage_applied"}}},
+      {"properties": {"event_type": {"const": "healing_applied"}, "payload": {"$ref": "#/$defs/eventPayloads/healing_applied"}}},
+      {"properties": {"event_type": {"const": "veterancy_changed"}, "payload": {"$ref": "#/$defs/eventPayloads/veterancy_changed"}}},
+      {"properties": {"event_type": {"const": "player_defeated"}, "payload": {"$ref": "#/$defs/eventPayloads/player_defeated"}}},
+      {"properties": {"event_type": {"const": "player_surrendered"}, "payload": {"$ref": "#/$defs/eventPayloads/player_surrendered"}}},
+      {"properties": {"event_type": {"const": "player_disconnected"}, "payload": {"$ref": "#/$defs/eventPayloads/player_disconnected"}}},
+      {"properties": {"event_type": {"const": "match_outcome"}, "payload": {"$ref": "#/$defs/eventPayloads/match_outcome"}}},
+      {"properties": {"event_type": {"const": "order_issued"}, "payload": {"$ref": "#/$defs/eventPayloads/order_issued"}}},
+      {"properties": {"event_type": {"const": "entity_state_changed"}, "payload": {"$ref": "#/$defs/eventPayloads/entity_state_changed"}}},
+      {"properties": {"event_type": {"const": "entity_sample"}, "payload": {"$ref": "#/$defs/eventPayloads/entity_sample"}}}
+    ]}]},
+    "completeRecord": {"allOf": [{"$ref": "#/$defs/envelope"}, {"properties": {"event_type": {"const": "complete"}, "payload": {"$ref": "#/$defs/completePayload"}}}]}
   }
 }
