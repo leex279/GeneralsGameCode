@@ -1317,6 +1317,10 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	// readNextFrame() closes m_file via stopPlayback() if the first frame cannot be read.
 	if(m_file == nullptr)
 	{
+#if defined(RTS_REPLAY_ANALYZER)
+		// TheSuperHackers @feature Leex 18/08/2026 Settle telemetry immediately when playback fails before entering GameLogic update. (#TBD)
+		ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0, FALSE);
+#endif
 		return FALSE;
 	}
 

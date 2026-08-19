@@ -175,6 +175,7 @@ namespace
 	AsciiString s_writerError;
 	Bool s_outputFailed = FALSE;
 	Bool s_cleanFinishDeferred = FALSE;
+	Bool s_ownsTempPath = FALSE;
 	UnsignedInt s_tempCounter = 0;
 	char s_outputBuffer[64 * 1024];
 
@@ -313,10 +314,9 @@ namespace
 
 	void discardTemporaryOutput()
 	{
-		if (s_tempPath.isNotEmpty())
+		if (s_ownsTempPath && s_tempPath.isNotEmpty())
 		{
 			AsciiString discardedPath = s_tempPath;
-			s_tempPath.clear();
 			errno = 0;
 			if (remove(discardedPath.str()) != 0 && errno != ENOENT)
 			{
@@ -325,10 +325,17 @@ namespace
 				setWriterError("cleanup_failed", message.str(), TRUE);
 			}
 		}
+		s_ownsTempPath = FALSE;
+		s_tempPath.clear();
 	}
 
 	void publishTemporaryOutput()
 	{
+		if (!s_ownsTempPath || s_tempPath.isEmpty())
+		{
+			setWriterError("publish_failed", "telemetry transaction is not owned by this writer", TRUE);
+			return;
+		}
 		// TheSuperHackers @feature Leex 18/08/2026 Publish with no replacement so a destination created during playback remains untouched. (#TBD)
 		if (!MoveFileA(s_tempPath.str(), s_tracePath.str()))
 		{
@@ -336,6 +343,7 @@ namespace
 			discardTemporaryOutput();
 			return;
 		}
+		s_ownsTempPath = FALSE;
 		s_tempPath.clear();
 	}
 }
@@ -372,12 +380,20 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	s_writerError.clear();
 	s_outputFailed = FALSE;
 	s_cleanFinishDeferred = FALSE;
+	s_ownsTempPath = FALSE;
 	s_tempPath.clear();
 	for (Int attempt = 0; attempt < 100 && s_output == nullptr; ++attempt)
 	{
-		s_tempPath.format("%s.tmp.%lu.%u", s_tracePath.str(), static_cast<unsigned long>(GetCurrentProcessId()), ++s_tempCounter);
+		AsciiString candidatePath;
+		candidatePath.format("%s.tmp.%lu.%u", s_tracePath.str(), static_cast<unsigned long>(GetCurrentProcessId()), ++s_tempCounter);
 		errno = 0;
-		s_output = fopen(s_tempPath.str(), "wbx");
+		s_output = fopen(candidatePath.str(), "wbx");
+		if (s_output != nullptr)
+		{
+			// TheSuperHackers @feature Leex 18/08/2026 Own cleanup only after this writer successfully creates the exclusive transaction. (#TBD)
+			s_tempPath = candidatePath;
+			s_ownsTempPath = TRUE;
+		}
 		if (s_output == nullptr && errno != EEXIST)
 		{
 			break;

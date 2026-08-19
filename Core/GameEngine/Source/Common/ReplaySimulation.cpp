@@ -123,6 +123,14 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 		}
 		else
 		{
+#if defined(RTS_REPLAY_ANALYZER)
+			// TheSuperHackers @feature Leex 18/08/2026 Let engine tests inspect startup-failure telemetry before process shutdown. (#TBD)
+			const char *testHoldPath = getenv("GENERALS_REPLAY_TELEMETRY_TEST_HOLD_AFTER_START_FAILURE");
+			while (testHoldPath != nullptr && GetFileAttributesA(testHoldPath) != INVALID_FILE_ATTRIBUTES)
+			{
+				Sleep(1);
+			}
+#endif
 			printf("Cannot open replay\n");
 			numErrors++;
 		}

@@ -1,5 +1,6 @@
 """Real-engine behavior tests for the passive telemetry trace envelope."""
 
+import ctypes
 import os
 import shutil
 import subprocess
@@ -87,6 +88,12 @@ def _base_command(runtime_executable: Path, pinned_replay: Path) -> list[str]:
     ]
 
 
+def _resume_suspended_process(process: subprocess.Popen[str]) -> int:
+    """Resume a Windows child through the native handle that subprocess exposes privately."""
+    process_handle = process._handle  # type: ignore[attr-defined]
+    return int(ctypes.windll.ntdll.NtResumeProcess(int(process_handle)))
+
+
 def _write_crc_free_replay(source: Path, destination: Path) -> int:
     """Preserve real replay commands while removing comparisons that intentionally fail on the modern build."""
     parsed = parse_replay(source)
@@ -100,6 +107,12 @@ def _write_crc_free_replay(source: Path, destination: Path) -> int:
         final_frame = command.frame
     destination.write_bytes(b"".join(records))
     return final_frame
+
+
+def _write_zero_command_replay(source: Path, destination: Path) -> None:
+    """Preserve the real decoded header and setup while ending before the first command frame."""
+    parsed = parse_replay(source)
+    destination.write_bytes(source.read_bytes()[: parsed.command_stream_offset])
 
 
 def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
@@ -384,6 +397,103 @@ def test_destination_created_during_playback_is_not_replaced_at_publish(
     assert trace_path.read_bytes() == collision_bytes
     assert "publish_failed" in stderr
     assert not tuple(tmp_path.glob("publish-race.ndjson.tmp.*"))
+
+
+def test_temp_candidate_exhaustion_never_removes_unowned_files(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch cleanup that deletes the last pre-existing candidate after every exclusive create returns EEXIST."""
+    trace_path = (tmp_path / "exhausted.ndjson").resolve()
+    base_command = _base_command(zero_hour_runtime_executable, pinned_replay)
+    baseline = _run_engine(base_command, zero_hour_runtime_executable.parent, repository_root)
+    process = subprocess.Popen(
+        [*base_command, "-telemetry", str(trace_path), "-telemetry-run-id", RUN_ID],
+        cwd=zero_hour_runtime_executable.parent,
+        env=_runtime_environment(repository_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=0x00000004,
+    )
+    resumed = False
+    candidates = tuple(Path(f"{trace_path}.tmp.{process.pid}.{index}") for index in range(1, 101))
+    sentinels = {candidate: f"unowned-{index}\n".encode() for index, candidate in enumerate(candidates, start=1)}
+    try:
+        for candidate, sentinel in sentinels.items():
+            candidate.write_bytes(sentinel)
+        resume_status = _resume_suspended_process(process)
+        assert resume_status == 0
+        resumed = True
+        stdout, stderr = process.communicate(timeout=120)
+    finally:
+        if process.poll() is None:
+            if not resumed:
+                _resume_suspended_process(process)
+            process.kill()
+            process.communicate(timeout=10)
+
+    assert process.returncode == baseline.returncode
+    assert stdout == baseline.stdout
+    assert "open_failed" in stderr
+    assert not trace_path.exists()
+    assert {candidate: candidate.read_bytes() for candidate in candidates} == sentinels
+    assert set(tmp_path.iterdir()) == set(candidates)
+
+
+def test_zero_command_replay_settles_nonclean_telemetry_before_process_shutdown(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch first-frame EOF leaving a deferred writer open until subsystem destruction."""
+    zero_command_replay = tmp_path / "zero-command.rep"
+    _write_zero_command_replay(pinned_replay, zero_command_replay)
+    trace_path = (tmp_path / "zero-command.ndjson").resolve()
+    hold_path = tmp_path / "hold-after-start-failure"
+    hold_path.write_text("hold\n", encoding="utf-8")
+    environment = _runtime_environment(repository_root)
+    environment["GENERALS_REPLAY_TELEMETRY_TEST_HOLD_AFTER_START_FAILURE"] = str(hold_path)
+    process = subprocess.Popen(
+        [
+            *_base_command(zero_hour_runtime_executable, zero_command_replay),
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+        ],
+        cwd=zero_hour_runtime_executable.parent,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not trace_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert trace_path.is_file(), "startup failure did not publish its non-clean completion"
+        time.sleep(0.1)
+        assert process.poll() is None, "telemetry was settled only during process shutdown"
+        records = tuple(iter_validated_trace(trace_path))
+        complete = records[-1]
+        assert isinstance(complete, CompleteRecord)
+        assert complete.payload.final_frame == 0
+        assert complete.payload.command_count == 0
+        assert complete.payload.clean_shutdown is False
+        assert complete.payload.replay_truncated is True
+        assert complete.payload.crc_mismatch is False
+        assert not tuple(tmp_path.glob("zero-command.ndjson.tmp.*"))
+    finally:
+        hold_path.unlink(missing_ok=True)
+        stdout, stderr = process.communicate(timeout=30)
+
+    assert process.returncode != 0
+    assert "Cannot open replay" in stdout
+    assert stderr == ""
 
 
 def test_telemetry_writer_avoids_msvc_only_bounded_formatting() -> None:
