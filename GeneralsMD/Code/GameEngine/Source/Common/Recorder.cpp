@@ -74,6 +74,28 @@ static const UnsignedInt desyncOffset = frameCountOffset + sizeof(UnsignedInt);
 static const UnsignedInt quitEarlyOffset = desyncOffset + sizeof(Bool);
 static const UnsignedInt disconOffset = quitEarlyOffset + sizeof(Bool);
 
+#if defined(RTS_REPLAY_ANALYZER)
+static Int replayParseDumpArgumentSize(GameMessageArgumentDataType type)
+{
+	// TheSuperHackers @feature Leex 19/08/2026 Validate observer payload widths from compiled replay argument types only.
+	switch (type)
+	{
+		case ARGUMENTDATATYPE_INTEGER: return sizeof(Int);
+		case ARGUMENTDATATYPE_REAL: return sizeof(Real);
+		case ARGUMENTDATATYPE_BOOLEAN: return sizeof(Bool);
+		case ARGUMENTDATATYPE_OBJECTID: return sizeof(ObjectID);
+		case ARGUMENTDATATYPE_DRAWABLEID: return sizeof(DrawableID);
+		case ARGUMENTDATATYPE_TEAMID: return sizeof(UnsignedInt);
+		case ARGUMENTDATATYPE_LOCATION: return sizeof(Coord3D);
+		case ARGUMENTDATATYPE_PIXEL: return sizeof(ICoord2D);
+		case ARGUMENTDATATYPE_PIXELREGION: return sizeof(IRegion2D);
+		case ARGUMENTDATATYPE_TIMESTAMP: return sizeof(UnsignedInt);
+		case ARGUMENTDATATYPE_WIDECHAR: return sizeof(WideChar);
+		default: return -1;
+	}
+}
+#endif
+
 static void writeAtOffset(File* file, Int offset, const void* data, Int dataSize)
 {
 	UnsignedInt fileSize = file->size();
@@ -393,6 +415,11 @@ void RecorderClass::init() {
  * Reset the recorder to the "initialized state."
  */
 void RecorderClass::reset() {
+#if defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @feature Leex 19/08/2026 A reset is an interrupted observation, even when no replay file remains open.
+	const Int replayEndOffset = m_file != nullptr ? m_file->seek(0, File::CURRENT) : -1;
+	ReplayParseDump::finishReplay(replayEndOffset, FALSE);
+#endif
 	if (m_file != nullptr) {
 		m_file->close();
 		m_file = nullptr;
@@ -459,6 +486,13 @@ void RecorderClass::stopPlayback() {
 		m_file->close();
 		m_file = nullptr;
 	}
+#if defined(RTS_REPLAY_ANALYZER)
+	else
+	{
+		// TheSuperHackers @feature Leex 19/08/2026 Do not leave a process-local observer sink open on an early playback close.
+		ReplayParseDump::finishReplay(-1, FALSE);
+	}
+#endif
 	m_fileName.clear();
 
 	if (!m_doingAnalysis)
@@ -1179,19 +1213,34 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 
 	Int difficulty = 0;
 	const Int setupStartOffset = m_file->seek(0, File::CURRENT);
-	m_file->read(&difficulty, sizeof(difficulty));
+	const Int difficultyBytesRead = m_file->read(&difficulty, sizeof(difficulty));
 
-	m_file->read(&m_originalGameMode, sizeof(m_originalGameMode));
+	const Int originalGameModeBytesRead = m_file->read(&m_originalGameMode, sizeof(m_originalGameMode));
 
 	Int rankPoints = 0;
-	m_file->read(&rankPoints, sizeof(rankPoints));
+	const Int rankPointsBytesRead = m_file->read(&rankPoints, sizeof(rankPoints));
 
 	Int maxFPS = 0;
-	m_file->read(&maxFPS, sizeof(maxFPS));
+	const Int maxFPSBytesRead = m_file->read(&maxFPS, sizeof(maxFPS));
 
 #if defined(RTS_REPLAY_ANALYZER)
 	// TheSuperHackers @feature Leex 18/08/2026 Preserve the four serialized setup integers and their measured source range.
-	ReplayParseDump::writeSetup(difficulty, m_originalGameMode, rankPoints, maxFPS, setupStartOffset, m_file->seek(0, File::CURRENT));
+	const Int setupEndOffset = m_file->seek(0, File::CURRENT);
+	const Bool setupComplete = difficultyBytesRead == sizeof(difficulty)
+		&& originalGameModeBytesRead == sizeof(m_originalGameMode)
+		&& rankPointsBytesRead == sizeof(rankPoints)
+		&& maxFPSBytesRead == sizeof(maxFPS)
+		&& setupEndOffset == setupStartOffset + sizeof(difficulty) + sizeof(m_originalGameMode) + sizeof(rankPoints) + sizeof(maxFPS);
+	if (setupComplete)
+	{
+		ReplayParseDump::writeSetup(difficulty, m_originalGameMode, rankPoints, maxFPS, setupStartOffset, setupEndOffset);
+	}
+	else
+	{
+		// TheSuperHackers @feature Leex 19/08/2026 Never emit a partially read setup block as an authoritative record.
+		m_replayParseDumpComplete = FALSE;
+		ReplayParseDump::markIncomplete();
+	}
 #endif
 
 	DEBUG_LOG(("RecorderClass::playbackFile() - original game was mode %d", m_originalGameMode));
@@ -1320,10 +1369,14 @@ void RecorderClass::appendNextCommand() {
 		DEBUG_LOG(("RecorderClass::appendNextCommand - read failed on frame %d", m_nextFrame/*TheGameLogic->getFrame()*/));
 #if defined(RTS_REPLAY_ANALYZER)
 		m_replayParseDumpComplete = FALSE;
+		ReplayParseDump::markIncomplete();
 #endif
 		return;
 	}
 
+#if defined(RTS_REPLAY_ANALYZER)
+	Bool replayParseDumpCommandComplete = commandStartOffset >= 0;
+#endif
 	GameMessage *msg = newInstance(GameMessage)(type);
 
 #ifdef DEBUG_LOGGING
@@ -1339,7 +1392,10 @@ void RecorderClass::appendNextCommand() {
 #endif // DEBUG_LOGGING
 
 	Int playerIndex = -1;
-	m_file->read(&playerIndex, sizeof(playerIndex));
+#if defined(RTS_REPLAY_ANALYZER)
+	const Int playerIndexBytesRead =
+#endif
+		m_file->read(&playerIndex, sizeof(playerIndex));
 	msg->friend_setPlayerIndex(playerIndex);
 
 	// don't debug log this if we're debugging sync errors, as it will cause diff problems between a game and it's replay...
@@ -1358,14 +1414,36 @@ void RecorderClass::appendNextCommand() {
 
 	UnsignedByte numTypes = 0;
 	Int totalArgs = 0;
-	m_file->read(&numTypes, sizeof(numTypes));
+#if defined(RTS_REPLAY_ANALYZER)
+	const Int numTypesBytesRead =
+#endif
+		m_file->read(&numTypes, sizeof(numTypes));
+#if defined(RTS_REPLAY_ANALYZER)
+	if (playerIndexBytesRead != sizeof(playerIndex) || numTypesBytesRead != sizeof(numTypes))
+	{
+		replayParseDumpCommandComplete = FALSE;
+	}
+#endif
 
 	GameMessageParser *parser = newInstance(GameMessageParser)();
 	for (UnsignedByte i = 0; i < numTypes; ++i) {
 		UnsignedByte type = (UnsignedByte)ARGUMENTDATATYPE_UNKNOWN;
-		m_file->read(&type, sizeof(type));
+#if defined(RTS_REPLAY_ANALYZER)
+		const Int argumentTypeBytesRead =
+#endif
+			m_file->read(&type, sizeof(type));
 		UnsignedByte numArgs = 0;
-		m_file->read(&numArgs, sizeof(numArgs));
+#if defined(RTS_REPLAY_ANALYZER)
+		const Int argumentCountBytesRead =
+#endif
+			m_file->read(&numArgs, sizeof(numArgs));
+#if defined(RTS_REPLAY_ANALYZER)
+		if (argumentTypeBytesRead != sizeof(type) || argumentCountBytesRead != sizeof(numArgs)
+			|| replayParseDumpArgumentSize((GameMessageArgumentDataType)type) < 0)
+		{
+			replayParseDumpCommandComplete = FALSE;
+		}
+#endif
 		parser->addArgType((GameMessageArgumentDataType)type, numArgs);
 		totalArgs += numArgs;
 	}
@@ -1377,13 +1455,34 @@ void RecorderClass::appendNextCommand() {
 		lasttype = parserArgType->getType();
 		argsLeftForType = parserArgType->getArgCount();
 	}
+#if defined(RTS_REPLAY_ANALYZER)
+	if (totalArgs > 0 && parserArgType == nullptr)
+	{
+		replayParseDumpCommandComplete = FALSE;
+	}
+#endif
 	for (Int j = 0; j < totalArgs; ++j) {
+#if defined(RTS_REPLAY_ANALYZER)
+		const Int argumentStartOffset = m_file->seek(0, File::CURRENT);
+		const Int argumentSize = replayParseDumpArgumentSize(lasttype);
+#endif
 		readArgument(lasttype, msg);
+#if defined(RTS_REPLAY_ANALYZER)
+		const Int argumentEndOffset = m_file->seek(0, File::CURRENT);
+		if (argumentSize < 0 || argumentStartOffset < 0 || argumentEndOffset != argumentStartOffset + argumentSize)
+		{
+			replayParseDumpCommandComplete = FALSE;
+		}
+#endif
 
 		--argsLeftForType;
 		if (argsLeftForType == 0) {
 			DEBUG_ASSERTCRASH(parserArgType != nullptr, ("parserArgType was null when it shouldn't have been."));
 			if (parserArgType == nullptr) {
+#if defined(RTS_REPLAY_ANALYZER)
+				m_replayParseDumpComplete = FALSE;
+				ReplayParseDump::markIncomplete();
+#endif
 				return;
 			}
 
@@ -1398,7 +1497,17 @@ void RecorderClass::appendNextCommand() {
 
 #if defined(RTS_REPLAY_ANALYZER)
 	// TheSuperHackers @feature Leex 18/08/2026 Observe decoded command bytes before ownership can delete the message.
-	ReplayParseDump::writeCommand((Int)m_nextFrame, commandStartOffset, m_file->seek(0, File::CURRENT), *msg);
+	const Int commandEndOffset = m_file->seek(0, File::CURRENT);
+	if (replayParseDumpCommandComplete && commandEndOffset >= commandStartOffset && msg->getArgumentCount() == totalArgs)
+	{
+		ReplayParseDump::writeCommand((Int)m_nextFrame, commandStartOffset, commandEndOffset, *msg);
+	}
+	else
+	{
+		// TheSuperHackers @feature Leex 19/08/2026 Suppress incomplete commands while leaving legacy replay execution untouched.
+		m_replayParseDumpComplete = FALSE;
+		ReplayParseDump::markIncomplete();
+	}
 #endif
 
 	if (type != GameMessage::MSG_BEGIN_NETWORK_MESSAGES && type != GameMessage::MSG_CLEAR_GAME_DATA && !m_doingAnalysis)

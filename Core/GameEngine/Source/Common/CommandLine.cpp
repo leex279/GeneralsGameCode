@@ -458,7 +458,10 @@ Int parseReplayParseDump(char *args[], int num)
 	if (num > 1)
 	{
 		const Char *path = args[1];
-		if (path[0] == '\0' || !(path[1] == ':' || (path[0] == '\\' && path[1] == '\\') || path[0] == '/'))
+		const Bool isDriveAbsolute = path[0] != '\0' && path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+		const Bool isUNCAbsolute = path[0] == '\\' && path[1] == '\\';
+		const Bool isPOSIXAbsolute = path[0] == '/';
+		if (!isDriveAbsolute && !isUNCAbsolute && !isPOSIXAbsolute)
 		{
 			printf("Replay parse dump path must be absolute: \"%s\"\n", path);
 			exit(1);
