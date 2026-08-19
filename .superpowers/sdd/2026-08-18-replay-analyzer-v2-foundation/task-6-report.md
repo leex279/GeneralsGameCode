@@ -71,3 +71,42 @@ All checks passed!
 Success: no issues found in 9 source files
 90 passed in 0.12s
 ```
+
+## Review fix: WideChar surrogate preservation and neutral EOF diagnostics
+
+The review found two incorrect assumptions in the initial parser. A replay
+`WideChar` is a single Windows UTF-16 code unit, so a structurally valid lone
+surrogate must be retained rather than rejected by Python's strict decoder.
+The decoder now uses UTF-16LE `surrogatepass`; `b"\x00\xd8"` produces the typed
+value `"\ud800"` and retains the exact two raw bytes.
+
+The command parser also no longer infers a failing read phase from an offset
+window. That heuristic mislabeled partial message/player metadata and a later
+type run after a complete first run. Partial next-frame data remains explicitly
+identified; all EOFs after a complete four-byte frame are accurately described
+as `truncated command at offset ...`.
+
+### RED
+
+```powershell
+uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/test_commands.py scripts/replay_analyzer/tests/test_parser.py -q
+```
+
+```text
+6 failed, 22 passed
+UnicodeDecodeError: 'utf-16-le' codec can't decode bytes in position 0-1
+truncated command type-run count at offset ...
+truncated command payload at offset ...
+```
+
+The failing tests cover a lone surrogate, partial message type, partial player
+index, and a partial second type run after a complete first run.
+
+### GREEN and final verification
+
+```text
+28 passed in 0.07s
+All checks passed!
+Success: no issues found in 9 source files
+94 passed in 0.11s
+```

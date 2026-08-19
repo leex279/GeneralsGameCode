@@ -52,21 +52,12 @@ def parse_replay(path: Path) -> ParsedReplay:
                 warnings,
                 trustworthy_offset,
                 error.offset,
-                _truncation_message(error, next_frame_offset),
+                f"truncated command at offset {error.offset}",
             )
         commands.append(command)
         trustworthy_offset = command.end_offset
 
     return ParsedReplay(header, tuple(commands), tuple(warnings), trustworthy_offset, "complete")
-
-
-def _truncation_message(error: TruncatedReplayError, command_start: int) -> str:
-    """Describe whether a failed command read reached metadata or a typed payload."""
-    if error.offset <= command_start + 12:
-        return f"truncated command type-run count at offset {error.offset}"
-    if error.offset <= command_start + 14:
-        return f"truncated command type run at offset {error.offset}"
-    return f"truncated command payload at offset {error.offset}"
 
 
 def _truncated_result(

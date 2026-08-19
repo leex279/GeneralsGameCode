@@ -30,6 +30,7 @@ from generals_replay_analyzer.errors import UnsupportedArgumentTypeError
         (8, struct.pack("<iiii", 1, 2, 3, 4), IRegion2D(ICoord2D(1, 2), ICoord2D(3, 4))),
         (9, struct.pack("<I", 123456), 123456),
         (10, "Z".encode("utf-16-le"), "Z"),
+        (10, b"\x00\xd8", "\ud800"),
     ],
 )
 def test_command_decodes_every_engine_argument_type(

@@ -42,8 +42,10 @@ def test_parse_replay_returns_complete_commands_with_header_relative_offsets(tmp
         (b"\x01", "next frame"),
         (b"\x01\x02", "next frame"),
         (b"\x01\x02\x03", "next frame"),
-        (command_bytes(30, 77, 1, [], [])[:-1], "type-run count"),
-        (command_bytes(30, 77, 1, [(0, 1)], [struct.pack("<i", 5)])[:-2], "payload"),
+        (struct.pack("<I", 30) + b"\x4d\0", "truncated command at offset"),
+        (struct.pack("<Ii", 30, 77) + b"\x01", "truncated command at offset"),
+        (command_bytes(30, 77, 1, [], [])[:-1], "truncated command at offset"),
+        (command_bytes(30, 77, 1, [(0, 1)], [struct.pack("<i", 5)])[:-2], "truncated command at offset"),
     ],
 )
 def test_parse_replay_marks_incomplete_command_streams_truncated_without_resynchronizing(
@@ -59,6 +61,16 @@ def test_parse_replay_marks_incomplete_command_streams_truncated_without_resynch
     assert parsed.end_offset == header_size
     assert len(parsed.warnings) == 1
     assert expected_message in parsed.warnings[0].message
+
+
+def test_parse_replay_reports_a_neutral_command_warning_for_a_later_partial_type_run(tmp_path: Path) -> None:
+    """Reject calling a second metadata run a payload after the first run has already been read."""
+    partial_second_run = struct.pack("<IiiB", 30, 77, 1, 2) + b"\0\x01\x01"
+
+    parsed = parse_replay(_write_replay(tmp_path, partial_second_run))
+
+    assert parsed.completion_status == "truncated"
+    assert parsed.warnings[0].message == f"truncated command at offset {len(replay_header_bytes()) + 16}"
 
 
 def test_parse_replay_keeps_prior_command_when_later_command_is_truncated(tmp_path: Path) -> None:

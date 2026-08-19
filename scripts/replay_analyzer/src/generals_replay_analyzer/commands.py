@@ -138,7 +138,7 @@ def _read_argument(reader: BinaryReader, argument_type: GameMessageArgumentDataT
     elif argument_type is GameMessageArgumentDataType.TIMESTAMP:
         value = reader.read_u32()
     elif argument_type is GameMessageArgumentDataType.WIDE_CHAR:
-        value = reader.read_exact(2).decode("utf-16-le")
+        value = reader.read_exact(2).decode("utf-16-le", errors="surrogatepass")
     else:
         raise UnsupportedArgumentTypeError(
             "unsupported_argument_type",
