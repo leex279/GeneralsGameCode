@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import cast
@@ -31,10 +32,12 @@ class TelemetryTraceValidationError(ValueError):
 def _schema(version: int) -> dict[str, object]:
     """Load the same schema file from installed package data or an editable checkout."""
     filename = f"telemetry-v{version}.schema.json"
+    source = Path(__file__).resolve().parents[3] / "contracts" / filename
+    if source.is_file():
+        return cast(dict[str, object], json.loads(source.read_text(encoding="utf-8")))
     packaged = resources.files("generals_replay_analyzer").joinpath("data", filename)
     if packaged.is_file():
         return cast(dict[str, object], json.loads(packaged.read_text(encoding="utf-8")))
-    source = Path(__file__).resolve().parents[3] / "contracts" / filename
     return cast(dict[str, object], json.loads(source.read_text(encoding="utf-8")))
 
 
@@ -55,6 +58,36 @@ _DEFINITIONS = {
 }
 _FORMAT_CHECKER = FormatChecker()
 _CATALOG_VALIDATOR = Draft202012Validator(_catalog_schema(), format_checker=_FORMAT_CHECKER)
+
+
+@dataclass
+class _EntityLifecycleState:
+    """Trace-local object identity and irreversible lifecycle state."""
+
+    template_name: str
+    owner_player_index: int | None
+    team_id: int | None
+    construction_state: str
+    sold: bool = False
+    destroyed: bool = False
+
+
+_OBJECT_REFERENCE_FIELDS: dict[str, tuple[str, ...]] = {
+    "construction_started": ("object_id", "producer_object_id", "builder_object_id"),
+    "construction_completed": ("object_id", "producer_object_id", "builder_object_id"),
+    "owner_changed": ("object_id",),
+    "sold": ("object_id",),
+    "object_destroyed": ("object_id",),
+    "production_queued": ("producer_object_id",),
+    "production_cancelled": ("producer_object_id",),
+    "production_completed": ("producer_object_id",),
+    "supply_collected": ("collector_object_id", "source_object_id"),
+    "damage_applied": ("victim_object_id", "attacker_object_id"),
+    "healing_applied": ("target_object_id",),
+    "veterancy_changed": ("object_id",),
+    "entity_state_changed": ("object_id",),
+    "entity_sample": ("object_id",),
+}
 
 
 def _dereference_schema(value: object, definitions: dict[str, object]) -> object:
@@ -194,6 +227,165 @@ def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, eng
         )
 
 
+def _referenced_object_ids(event_type: str, payload: Mapping[str, object]) -> Iterator[int]:
+    """Yield only fields whose schema semantics are entity identities, never category or production IDs."""
+    for field in _OBJECT_REFERENCE_FIELDS.get(event_type, ()):
+        value = payload.get(field)
+        if isinstance(value, int):
+            yield value
+    if event_type == "object_created":
+        context = payload.get("creation_context")
+        if isinstance(context, Mapping):
+            producer = context.get("producer_object_id")
+            if isinstance(producer, int):
+                yield producer
+    elif event_type == "order_issued":
+        selected = payload.get("selected_object_ids")
+        if isinstance(selected, list):
+            yield from (value for value in selected if isinstance(value, int))
+        target = payload.get("target_object_id")
+        if isinstance(target, int):
+            yield target
+
+
+def _validate_object_reference(
+    path: Path,
+    line_number: int,
+    sequence: int,
+    event_type: str,
+    object_id: int,
+    entities: dict[int, _EntityLifecycleState],
+) -> None:
+    state = entities.get(object_id)
+    if state is None:
+        raise _error(
+            path,
+            line_number,
+            sequence,
+            f"event {event_type} references object_id {object_id} before object_created",
+        )
+    if state.destroyed:
+        raise _error(
+            path,
+            line_number,
+            sequence,
+            f"event {event_type} references object_id {object_id} after object_destroyed",
+        )
+
+
+def _validate_v2_entity_lifecycle(
+    path: Path,
+    line_number: int,
+    record: TelemetryRecord,
+    entities: dict[int, _EntityLifecycleState],
+    sold_ids: set[int],
+    destroyed_ids: set[int],
+    players_initialized_count: int,
+) -> None:
+    """Validate entity identity and irreversible transitions before any buffered record can escape."""
+    event_type = record.event_type
+    if event_type in {"manifest", "players_initialized", "complete"}:
+        return
+    payload = cast(dict[str, object], record.payload.model_dump())
+    if event_type == "object_destroyed" and payload.get("object_id") in destroyed_ids:
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            f"duplicate object_destroyed for object_id {payload['object_id']}",
+        )
+    references = tuple(_referenced_object_ids(event_type, payload))
+    if (event_type == "object_created" or references) and players_initialized_count != 1:
+        raise _error(path, line_number, record.sequence, f"event {event_type} must follow players_initialized")
+
+    for object_id in references:
+        _validate_object_reference(path, line_number, record.sequence, event_type, object_id, entities)
+
+    if event_type == "object_created":
+        object_id = cast(int, payload["object_id"])
+        if object_id in entities:
+            raise _error(path, line_number, record.sequence, f"duplicate object_created for object_id {object_id}")
+        initial_status = cast(list[str], payload["initial_status"])
+        entities[object_id] = _EntityLifecycleState(
+            template_name=cast(str, payload["template_name"]),
+            owner_player_index=cast(int | None, payload["owner_player_index"]),
+            team_id=cast(int | None, payload["team_id"]),
+            construction_state="not_present" if "UNDER_CONSTRUCTION" in initial_status else "complete",
+        )
+        return
+
+    direct_object_id = payload.get("object_id")
+    if not isinstance(direct_object_id, int):
+        return
+    state = entities[direct_object_id]
+    direct_template = payload.get("template_name")
+    if isinstance(direct_template, str) and direct_template != state.template_name:
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            f"object_id {direct_object_id} template identity changed from {state.template_name} to {direct_template}",
+        )
+    if event_type in {
+        "construction_started",
+        "construction_completed",
+        "sold",
+        "object_destroyed",
+    } and (payload["owner_player_index"] != state.owner_player_index or payload["team_id"] != state.team_id):
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            f"{event_type} owner/team differs from object state",
+        )
+
+    if event_type == "construction_started":
+        previous = cast(str, payload["previous_state"])
+        if previous != state.construction_state:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"construction_started previous_state {previous} differs from {state.construction_state}",
+            )
+        state.construction_state = "under_construction"
+    elif event_type == "construction_completed":
+        if state.construction_state != "under_construction":
+            raise _error(path, line_number, record.sequence, "construction_completed requires construction_started")
+        state.construction_state = "complete"
+    elif event_type == "owner_changed":
+        if (
+            payload["previous_owner_player_index"] != state.owner_player_index
+            or payload["previous_team_id"] != state.team_id
+        ):
+            raise _error(path, line_number, record.sequence, "owner_changed previous owner/team differs from object state")
+        state.owner_player_index = cast(int | None, payload["new_owner_player_index"])
+        state.team_id = cast(int | None, payload["new_team_id"])
+    elif event_type == "sold":
+        if direct_object_id in sold_ids:
+            raise _error(path, line_number, record.sequence, f"duplicate sold for object_id {direct_object_id}")
+        sold_ids.add(direct_object_id)
+        state.sold = True
+    elif event_type == "object_destroyed":
+        if direct_object_id in destroyed_ids:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"duplicate object_destroyed for object_id {direct_object_id}",
+            )
+        expected_previous = "sold" if state.sold else "alive"
+        if payload["previous_state"] != expected_previous:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"object_destroyed previous_state must be {expected_previous}",
+            )
+        destroyed_ids.add(direct_object_id)
+        state.destroyed = True
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Validate immutable observed telemetry before later import stages consume it. (#TBD)
 def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     """Return an iterator only after the complete trace is validated as immutable evidence."""
@@ -218,6 +410,9 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     digest = hashlib.sha256()
     records_seen = 0
     validated_records: list[TelemetryRecord] = []
+    entity_lifecycles: dict[int, _EntityLifecycleState] = {}
+    sold_object_ids: set[int] = set()
+    destroyed_object_ids: set[int] = set()
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
         try:
@@ -245,6 +440,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         version = record.get("schema_version")
         if type(version) is int and version not in SUPPORTED_SCHEMA_VERSIONS:
             raise _error(path, line_number, sequence, f"schema_version {version} has unsupported major version")
+        if expected_schema_version is not None and type(version) is int and version != expected_schema_version:
+            raise _error(path, line_number, sequence, "schema_version differs from manifest")
         selected_version = version if type(version) is int and version in SUPPORTED_SCHEMA_VERSIONS else SCHEMA_VERSION
         schema_error = _schema_error(record, selected_version)
         if schema_error is not None:
@@ -290,6 +487,17 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             if expected_schema_version == 2 and validated.payload.game_data_catalog != expected_catalog:
                 raise _error(path, line_number, validated.sequence, "game_data_catalog differs from manifest")
 
+        if expected_schema_version == 2:
+            _validate_v2_entity_lifecycle(
+                path,
+                line_number,
+                validated,
+                entity_lifecycles,
+                sold_object_ids,
+                destroyed_object_ids,
+                players_initialized_count,
+            )
+
         records_seen += 1
         prior_sequence = validated.sequence
         actual_event_counts[validated.event_type] = actual_event_counts.get(validated.event_type, 0) + 1
@@ -320,5 +528,15 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             )
         if expected_catalog is None or expected_engine_build is None:
             raise TelemetryTraceValidationError(f"trace '{path}': v2 manifest catalog identity is unavailable")
+        missing_construction = sorted(
+            object_id
+            for object_id, state in entity_lifecycles.items()
+            if state.construction_state == "not_present"
+        )
+        if missing_construction:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': object_id {missing_construction[0]} initial UNDER_CONSTRUCTION status is missing "
+                "construction_started"
+            )
         _validate_catalog_asset(path, expected_catalog, expected_engine_build)
     return tuple(validated_records)

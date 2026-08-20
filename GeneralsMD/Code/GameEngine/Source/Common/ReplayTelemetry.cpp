@@ -6,6 +6,7 @@
 
 #include "Common/GlobalData.h"
 #include "Common/ReplayGameDataExport.h"
+#include "Common/ReplayEntityLifecycle.h"
 #include "Common/version.h"
 #include "GameNetwork/GameInfo.h"
 
@@ -394,11 +395,18 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_replayLocalSlotIndex = -1;
 	s_initialized = FALSE;
 	ReplayGameDataExport::reset();
+	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local entity snapshots whenever telemetry is reconfigured. (#TBD)
+	ReplayEntityLifecycle::reset();
 }
 
 Bool ReplayTelemetry::isEnabled()
 {
 	return s_tracePath.isNotEmpty();
+}
+
+Bool ReplayTelemetry::isInitialized()
+{
+	return s_initialized;
 }
 
 const AsciiString &ReplayTelemetry::getTracePath()
@@ -526,6 +534,8 @@ void ReplayTelemetry::initialize()
 	}
 	s_initialized = TRUE;
 	ReplayGameDataExport::emitPlayersInitialized();
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve manifest-first ordering while flushing pre-initialization entity snapshots. (#TBD)
+	ReplayEntityLifecycle::initialize();
 	if (s_outputFailed)
 	{
 		discardPendingOutput("could not close telemetry output after player snapshot failure");

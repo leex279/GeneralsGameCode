@@ -151,8 +151,8 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert trace_path.is_file(), "telemetry-enabled playback did not create its configured trace"
 
     records = tuple(iter_validated_trace(trace_path))
-    assert len(records) == 3
-    manifest, players, complete = records
+    assert len(records) >= 3
+    manifest, players, complete = records[0], records[1], records[-1]
     assert isinstance(manifest, ManifestRecord)
     assert isinstance(players, PlayersInitializedRecord)
     assert isinstance(complete, CompleteRecord)
@@ -171,11 +171,14 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert players.payload.slots is not None
     assert [slot.slot_index for slot in players.payload.slots] == list(range(8))
     assert players.payload.game_data_catalog == manifest.payload.game_data_catalog
-    assert complete.sequence == 2
+    assert complete.sequence == len(records) - 1
     assert complete.payload.final_frame == complete.frame
     assert complete.logic_time_seconds == complete.frame / 30.0
     assert complete.payload.command_count > 0
-    assert complete.payload.event_counts == {"manifest": 1, "players_initialized": 1, "complete": 1}
+    expected_event_counts: dict[str, int] = {}
+    for record in records:
+        expected_event_counts[record.event_type] = expected_event_counts.get(record.event_type, 0) + 1
+    assert complete.payload.event_counts == expected_event_counts
     assert complete.payload.crc_mismatch == (completed.returncode != 0)
     assert complete.payload.replay_truncated is False
     assert complete.payload.clean_shutdown == (completed.returncode == 0)

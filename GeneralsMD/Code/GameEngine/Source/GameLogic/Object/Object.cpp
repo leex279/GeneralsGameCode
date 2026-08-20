@@ -40,6 +40,9 @@
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/Radar.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEntityLifecycle.h"
+#endif
 #include "Common/SpecialPower.h"
 #include "Common/Team.h"
 #include "Common/ThingFactory.h"
@@ -930,6 +933,10 @@ void Object::setOrRestoreTeam( Team* team, Bool restoring )
 
 	// Switch //////////////////////////
 	m_team = team;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Observe owner and team identity exactly when the authoritative object team changes. (#TBD)
+	ReplayEntityLifecycle::observeTeamChanged(this, oldTeam, team);
+#endif
 
 	// After Switch //////////////////////////
 	if (m_team)
@@ -1048,6 +1055,12 @@ void Object::setStatus( ObjectStatusMaskType objectStatus, Bool set )
 
 	if (m_status != oldStatus)
 	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Observe construction and sale only from authoritative status-bit transitions. (#TBD)
+		ReplayEntityLifecycle::observeStatusChanged(this,
+			oldStatus.test(OBJECT_STATUS_UNDER_CONSTRUCTION), m_status.test(OBJECT_STATUS_UNDER_CONSTRUCTION),
+			oldStatus.test(OBJECT_STATUS_SOLD), m_status.test(OBJECT_STATUS_SOLD));
+#endif
 		if( set && objectStatus.test( OBJECT_STATUS_REPULSOR ) && m_repulsorHelper != nullptr )
 		{
 			// Damaged repulsable civilians scare (repulse) other civs, but only
@@ -1870,6 +1883,10 @@ void Object::reactToTransformChange(const Matrix3D* oldMtx, const Coord3D* oldPo
 
 	Bool posDiff = isPosDifferent(oldPos, getPosition());
 	Bool angDiff = isAngleDifferent(oldAngle, getOrientation());
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Copy the first authoritative placement and current orientation without retaining an Object pointer. (#TBD)
+	ReplayEntityLifecycle::observeTransform(this, posDiff);
+#endif
 
 	if (posDiff || angDiff)
 	{

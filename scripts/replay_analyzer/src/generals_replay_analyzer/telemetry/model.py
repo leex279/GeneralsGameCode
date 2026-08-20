@@ -144,38 +144,73 @@ class PlayersInitializedPayload(OpenPayload):
 class ObjectCreatedPayload(OpenPayload):
     object_id: NonNegativeInt
     template_name: str = Field(min_length=1)
-    owner_player_index: NonNegativeInt
-    team_id: int
-    position: RawPosition
+    owner_player_index: NonNegativeInt | None
+    team_id: int | None
+    position_status: Literal["placed", "unplaced"] | None = None
+    position: RawPosition | None
     orientation: float
     kind_of_flags: list[str]
+    initial_status: list[str] | None = None
     creation_source: str = Field(min_length=1)
+    creation_context: "ObjectCreationContext | None" = None
+
+    @model_validator(mode="after")
+    def _require_explicit_placement_state(self) -> "ObjectCreatedPayload":
+        if self.position_status == "placed" and self.position is None:
+            raise ValueError("placed creation must contain an observed position")
+        if self.position_status == "unplaced" and self.position is not None:
+            raise ValueError("unplaced creation must not fabricate a position")
+        return self
 
 
-class ConstructionStartedPayload(OpenPayload):
+class ObjectCreationContext(OpenPayload):
+    registration_frame: NonNegativeInt
+    producer_object_id: Annotated[int, Field(gt=0)] | None
+    producer_player_index: NonNegativeInt | None
+
+
+class ConstructionPayload(OpenPayload):
     object_id: NonNegativeInt
-    owner_player_index: NonNegativeInt
+    owner_player_index: NonNegativeInt | None
+    team_id: int | None = None
+    producer_object_id: Annotated[int, Field(gt=0)] | None = None
+    builder_object_id: Annotated[int, Field(gt=0)] | None = None
+    responsible_player_index: NonNegativeInt | None = None
 
 
-class ConstructionCompletedPayload(OpenPayload):
-    object_id: NonNegativeInt
-    owner_player_index: NonNegativeInt
+class ConstructionStartedPayload(ConstructionPayload):
+    previous_state: Literal["not_present", "complete"] | None = None
+    new_state: Literal["under_construction"] | None = None
+
+
+class ConstructionCompletedPayload(ConstructionPayload):
+    previous_state: Literal["under_construction"] | None = None
+    new_state: Literal["complete"] | None = None
 
 
 class OwnerChangedPayload(OpenPayload):
     object_id: NonNegativeInt
-    previous_owner_player_index: NonNegativeInt
-    new_owner_player_index: NonNegativeInt
+    previous_owner_player_index: NonNegativeInt | None
+    new_owner_player_index: NonNegativeInt | None
+    previous_team_id: int | None = None
+    new_team_id: int | None = None
 
 
 class SoldPayload(OpenPayload):
     object_id: NonNegativeInt
-    owner_player_index: NonNegativeInt
+    previous_state: Literal["available"] | None = None
+    new_state: Literal["sold"] | None = None
+    owner_player_index: NonNegativeInt | None
+    team_id: int | None = None
 
 
 class ObjectDestroyedPayload(OpenPayload):
     object_id: NonNegativeInt
-    owner_player_index: NonNegativeInt
+    previous_state: Literal["alive", "sold"] | None = None
+    new_state: Literal["destroyed"] | None = None
+    owner_player_index: NonNegativeInt | None
+    team_id: int | None = None
+    destruction_source: Literal["destroy_object"] | None = None
 
 
 class ProductionPayload(OpenPayload):
@@ -359,34 +394,106 @@ class PlayersInitializedRecord(TelemetryEnvelope):
     payload: PlayersInitializedPayload
 
 
+def _require_v2_payload_fields(payload: BaseModel, field_names: set[str]) -> None:
+    missing = sorted(field_names - payload.model_fields_set)
+    if missing:
+        raise ValueError(f"v2 lifecycle payload is missing required fields: {', '.join(missing)}")
+
+
 class ObjectCreatedRecord(TelemetryEnvelope):
     event_type: Literal["object_created"]
     payload: ObjectCreatedPayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_creation(self) -> "ObjectCreatedRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(self.payload, {"position_status", "initial_status", "creation_context"})
+            if self.payload.object_id == 0:
+                raise ValueError("v2 object_id must be greater than zero")
+            if self.payload.creation_source not in {"map_loaded", "starting_object", "player_production", "unknown"}:
+                raise ValueError("v2 creation_source must be an authoritative source enum")
+            for names in (self.payload.kind_of_flags, self.payload.initial_status or []):
+                if any(not name for name in names) or len(names) != len(set(names)):
+                    raise ValueError("v2 kind/status names must each be unique and nonempty")
+        return self
 
 
 class ConstructionStartedRecord(TelemetryEnvelope):
     event_type: Literal["construction_started"]
     payload: ConstructionStartedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_transition(self) -> "ConstructionStartedRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(
+                self.payload,
+                {
+                    "previous_state",
+                    "new_state",
+                    "team_id",
+                    "producer_object_id",
+                    "builder_object_id",
+                    "responsible_player_index",
+                },
+            )
+        return self
+
 
 class ConstructionCompletedRecord(TelemetryEnvelope):
     event_type: Literal["construction_completed"]
     payload: ConstructionCompletedPayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_transition(self) -> "ConstructionCompletedRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(
+                self.payload,
+                {
+                    "previous_state",
+                    "new_state",
+                    "team_id",
+                    "producer_object_id",
+                    "builder_object_id",
+                    "responsible_player_index",
+                },
+            )
+        return self
 
 
 class OwnerChangedRecord(TelemetryEnvelope):
     event_type: Literal["owner_changed"]
     payload: OwnerChangedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_transition(self) -> "OwnerChangedRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(self.payload, {"previous_team_id", "new_team_id"})
+        return self
+
 
 class SoldRecord(TelemetryEnvelope):
     event_type: Literal["sold"]
     payload: SoldPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_transition(self) -> "SoldRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(self.payload, {"previous_state", "new_state", "team_id"})
+        return self
+
 
 class ObjectDestroyedRecord(TelemetryEnvelope):
     event_type: Literal["object_destroyed"]
     payload: ObjectDestroyedPayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_transition(self) -> "ObjectDestroyedRecord":
+        if self.schema_version == 2:
+            _require_v2_payload_fields(
+                self.payload,
+                {"previous_state", "new_state", "team_id", "destruction_source"},
+            )
+        return self
 
 
 class ProductionQueuedRecord(TelemetryEnvelope):

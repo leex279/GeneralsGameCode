@@ -13,6 +13,7 @@ class ReplayTelemetry
 public:
 	static void configure(const AsciiString &tracePath, const AsciiString &runId, Int movementSampleFrames);
 	static Bool isEnabled();
+	static Bool isInitialized();
 	static const AsciiString &getTracePath();
 	static const AsciiString &getEngineDataIdentity();
 	static Int getReplayLocalSlotIndex();

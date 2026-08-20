@@ -36,6 +36,9 @@
 #include "Common/GameState.h"
 #include "Common/Player.h"
 #include "Common/Radar.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEntityLifecycle.h"
+#endif
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
 #include "Common/Upgrade.h"
@@ -812,8 +815,18 @@ UpdateSleepTime ProductionUpdate::update()
 						//
 						if( d->m_numDoorAnimations == 0 || door == nullptr || door->m_doorWaitOpenFrame != 0 )
 						{
-							Object *newObj = TheThingFactory->newObject( production->m_objectToProduce,
-																	creationBuilding->getControllingPlayer()->getDefaultTeam() );
+							Object *newObj;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+							{
+								// TheSuperHackers @feature Leex 20/08/2026 Tag factory output from the authoritative production creation call site. (#TBD)
+								ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_PLAYER_PRODUCTION);
+								newObj = TheThingFactory->newObject( production->m_objectToProduce,
+									creationBuilding->getControllingPlayer()->getDefaultTeam() );
+							}
+#else
+							newObj = TheThingFactory->newObject( production->m_objectToProduce,
+								creationBuilding->getControllingPlayer()->getDefaultTeam() );
+#endif
 
 							newObj->setProducer(creationBuilding);
 

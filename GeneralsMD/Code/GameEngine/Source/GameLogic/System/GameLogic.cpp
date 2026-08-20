@@ -51,6 +51,9 @@
 #include "Common/Radar.h"
 #include "Common/RandomValue.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEntityLifecycle.h"
+#endif
 #include "Common/StatsCollector.h"
 #include "Common/ThingFactory.h"
 #include "Common/Team.h"
@@ -417,6 +420,10 @@ void GameLogic::init()
 //-------------------------------------------------------------------------------------------------
 void GameLogic::reset()
 {
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Clear trace-local entity identity before destroying objects from the prior game. (#TBD)
+	ReplayEntityLifecycle::reset();
+#endif
 	m_thingTemplateBuildableOverrides.clear();
 	m_controlBarOverrides.clear();
 
@@ -503,7 +510,16 @@ static Object * placeObjectAtPosition(Int slotNum, AsciiString objectTemplateNam
 
 	DEBUG_ASSERTCRASH(btt, ("TheThingFactory didn't find a template in placeObjectAtPosition()") );
 
-	Object *obj = TheThingFactory->newObject( btt, pPlayer->getDefaultTeam() );
+	Object *obj;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Tag the direct starting-object creation call site without owner or template inference. (#TBD)
+		ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_STARTING_OBJECT);
+		obj = TheThingFactory->newObject( btt, pPlayer->getDefaultTeam() );
+	}
+#else
+	obj = TheThingFactory->newObject( btt, pPlayer->getDefaultTeam() );
+#endif
 	DEBUG_ASSERTCRASH(obj, ("TheThingFactory didn't give me a valid Object for player %d's (%ls) starting building",
 		slotNum, pTemplate->getDisplayName().str()));
 	if (obj)
@@ -1758,7 +1774,16 @@ void GameLogic::tryStartNewGame( Bool loadingSaveGame )
 
 		Team *team = ThePlayerList->getNeutralPlayer()->getDefaultTeam();
 		// create new object in the world
-		Object *obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+		Object *obj;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		{
+			// TheSuperHackers @feature Leex 20/08/2026 Tag bridge registration from the authoritative map-load creation phase. (#TBD)
+			ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);
+			obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+		}
+#else
+		obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+#endif
 		if( obj )
 		{
 			Coord3D pos = *pMapObj->getLocation();
@@ -1932,7 +1957,16 @@ void GameLogic::tryStartNewGame( Bool loadingSaveGame )
 			Team *team = ThePlayerList->validateTeam(originalOwner);
 
 			// create new object in the world
-			Object *obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+			Object *obj;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			{
+				// TheSuperHackers @feature Leex 20/08/2026 Tag ordinary object registration from the authoritative map-load creation phase. (#TBD)
+				ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);
+				obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+			}
+#else
+			obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+#endif
 			if( obj )
 			{
 				if(pMapObj->getFlag(FLAG_DRAWS_IN_MIRROR) || obj->isKindOf(KINDOF_CAN_CAST_REFLECTIONS))
@@ -3907,6 +3941,10 @@ void GameLogic::update()
 	//
 
 	// destroy all pending objects
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Finalize same-frame placements before irreversible deletion and later telemetry references. (#TBD)
+	ReplayEntityLifecycle::flushPendingCreations();
+#endif
 	processDestroyList();
 
 	// reset the command list, destroying all messages
@@ -4058,6 +4096,11 @@ void GameLogic::registerObject( Object *obj )
 		}
 	}
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Snapshot the authoritative registered identity without retaining the Object pointer. (#TBD)
+	ReplayEntityLifecycle::observeRegistered(obj);
+#endif
+
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -4104,6 +4147,10 @@ void GameLogic::destroyObject( Object *obj )
 
 	// mark object as destroyed
 	obj->setStatus( MAKE_OBJECT_STATUS_MASK( OBJECT_STATUS_DESTROYED ) );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Observe destruction at the unique irreversible GameLogic lifecycle seam. (#TBD)
+	ReplayEntityLifecycle::observeDestroyed(obj);
+#endif
 
 	// We desperately need to stop here, or else the destructor of the statemachine will try to do
 	// stopping logic, which uses virtual functions and deleted modules, which will crash us.
