@@ -197,6 +197,35 @@ def test_reader_reports_missing_completion_field_and_bad_completion_hash(tmp_pat
         list(iter_validated_trace(bad_hash_path))
 
 
+@pytest.mark.parametrize(
+    ("mutate_counts", "case_name"),
+    [
+        (lambda counts: counts.pop("object_created"), "missing"),
+        (lambda counts: counts.__setitem__("object_created", 2), "wrong"),
+        (lambda counts: counts.__setitem__("unknown_event", 1), "extra"),
+        (lambda counts: counts.__setitem__("unused_event", 0), "zero"),
+    ],
+)
+def test_v1_reader_recomputes_exact_completion_event_counts_before_exposing_records(
+    tmp_path: Path,
+    mutate_counts: Callable[[dict[str, int]], object],
+    case_name: str,
+) -> None:
+    """Catch a hash-valid terminal payload that lies about missing, wrong, extra, or zero-count records."""
+    trace_path = _complete_trace(tmp_path)
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    counts = records[-1]["payload"]["event_counts"]
+    assert isinstance(counts, dict)
+    mutate_counts(counts)
+    tampered = _write_trace(tmp_path, records, f"v1-{case_name}-event-count.ndjson")
+
+    with pytest.raises(
+        TelemetryTraceValidationError,
+        match=r"record 3 sequence 2 schema path payload\.event_counts",
+    ):
+        next(iter_validated_trace(tampered))
+
+
 def test_reader_exposes_no_early_records_when_terminal_validation_fails(tmp_path: Path) -> None:
     """Catch streaming validation that leaks a manifest before an incomplete trace is known to be unusable evidence."""
     trace_path = _complete_trace(tmp_path)

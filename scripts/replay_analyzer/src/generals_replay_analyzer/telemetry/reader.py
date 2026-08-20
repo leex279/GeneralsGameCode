@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from collections.abc import Iterator, Mapping
 from importlib import resources
 from pathlib import Path
@@ -144,6 +145,14 @@ def _reject_nonstandard_constant(value: str) -> object:
     raise ValueError(f"non-standard numeric constant {value}")
 
 
+def _parse_finite_float(value: str) -> float:
+    """Decode one legal JSON float only when its Python representation remains finite."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"nonfinite number {value}")
+    return parsed
+
+
 def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, engine_build: str) -> None:
     """Resolve and validate the exact content-bound v2 catalog before records escape."""
     catalog_path_text = reference.path
@@ -167,7 +176,11 @@ def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, eng
     except UnicodeDecodeError as error:
         raise TelemetryTraceValidationError(f"trace '{path}': catalog contains invalid UTF-8: {error}") from error
     try:
-        catalog = json.loads(catalog_text, parse_constant=_reject_nonstandard_constant)
+        catalog = json.loads(
+            catalog_text,
+            parse_constant=_reject_nonstandard_constant,
+            parse_float=_parse_finite_float,
+        )
     except json.JSONDecodeError as error:
         raise TelemetryTraceValidationError(f"trace '{path}': catalog contains invalid JSON: {error.msg}") from error
     except ValueError as error:
@@ -200,6 +213,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     expected_catalog: GameDataCatalogReference | None = None
     expected_engine_build: str | None = None
     players_initialized_count = 0
+    actual_event_counts: dict[str, int] = {}
     complete_seen = False
     digest = hashlib.sha256()
     records_seen = 0
@@ -214,7 +228,11 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         if not content:
             raise _error(path, line_number, "unknown", "blank lines are not allowed")
         try:
-            decoded = json.loads(content, parse_constant=_reject_nonstandard_constant)
+            decoded = json.loads(
+                content,
+                parse_constant=_reject_nonstandard_constant,
+                parse_float=_parse_finite_float,
+            )
         except json.JSONDecodeError as error:
             raise _error(path, line_number, "unknown", f"invalid JSON: {error.msg}") from error
         except ValueError as error:
@@ -274,9 +292,17 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
 
         records_seen += 1
         prior_sequence = validated.sequence
+        actual_event_counts[validated.event_type] = actual_event_counts.get(validated.event_type, 0) + 1
         if isinstance(validated, CompleteRecord):
             if validated.payload.trace_sha256 != digest.hexdigest():
                 raise _error(path, line_number, validated.sequence, "complete trace_sha256 does not match prior trace bytes")
+            if validated.payload.event_counts != actual_event_counts:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    "schema path payload.event_counts: must exactly equal counts recomputed from buffered records",
+                )
             complete_seen = True
         else:
             digest.update(raw_line)

@@ -38,6 +38,36 @@ explicit modern analyzer / non-VC6 translation-unit guard: 1 failed
 
 The real-engine RED proved `prepareCatalog` was still called by `begin`, the emitted manifest remained version 1, the player snapshot skipped unused slots, the catalog still emitted `weapon_names`, injected nonfinite values could publish output, and a pre-initialization replay failure left a published trace. The wheel RED proved the old smoke used a fake v1 catalog reference with no asset.
 
+## Fix Round 2: Terminal Totals and Exponent Overflow
+
+Two remaining atomic-reader findings were reproduced before implementation:
+
+```text
+v1 missing/wrong/extra/zero event-count maps: 4 failed
+v2 missing/wrong/extra/zero event-count maps: 4 failed
+player start-position exponent overflow 1e999/-1e999: 2 failed
+hash-valid catalog build-time exponent overflow 1e999: 1 failed
+11 failed in 0.41s
+```
+
+The count fixtures modify only the terminal `event_counts` map, so the existing pre-completion `trace_sha256` remains valid. The writer source defines the authoritative semantics: increment every emitted event, set manifest to one, increment `complete` before serializing its payload, and serialize only keys that occurred. The reader now independently recomputes those exact positive totals from every buffered validated record, including `manifest` and `complete`, and requires exact key/value equality. Missing, wrong, unknown/extra, and zero-only keys all fail at `complete.payload.event_counts` before an iterator can expose the manifest. The real-engine suite passes unchanged, proving no C++ count mismatch.
+
+Python's JSON decoder invokes `parse_float` for legal exponent syntax and silently converts `1e999` to infinity; `parse_constant` covers only literal `NaN`/`Infinity`. Trace and catalog decoding now share a finite `parse_float` hook that rejects positive and negative exponent overflow before JSON Schema or Pydantic. Existing literal-constant rejection remains. Focused acceptances cover `1e308`, `-1e308`, and underflowing `1e-999`, so valid finite/underflowed JSON numbers remain readable.
+
+Fix-round-2 verification:
+
+```text
+focused count/overflow/boundary tests: 16 passed in 0.58s
+complete telemetry contracts: 56 passed in 0.71s
+installed wheel: 1 passed in 6.75s
+all non-engine: 290 passed, 29 deselected in 20.06s
+all real engine: 28 passed, 1 skipped, 290 deselected in 44.15s
+Ruff: All checks passed
+strict mypy: Success, 15 source files
+```
+
+No C++ file changed in fix round 2, so the modern x86 build was explicitly not rerun. The unchanged executable is the same modern Release artifact exercised by all 28 passing real-engine tests. VC6/MinGW status is likewise unchanged and irrelevant to this Python-only delta.
+
 ## Exact RED Evidence
 
 The real-engine integration test was written before the exporter and run against the rebuilt Task 2 implementation:
@@ -234,3 +264,5 @@ MinGW remains an honest environmental cannot-verify. The exporter uses standard 
 `feat(replay): Export semantic game data catalog`
 
 `fix(replay): Make semantic catalog authoritative`
+
+`fix(replay): Verify telemetry evidence totals`

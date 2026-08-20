@@ -93,6 +93,40 @@ def _write_catalog(directory: Path) -> dict[str, object]:
     return _write_catalog_value(directory, _catalog())
 
 
+def _write_catalog_with_numeric_token(directory: Path, token: str) -> dict[str, object]:
+    """Write a hash-valid catalog whose configured build time uses one literal JSON exponent token."""
+    catalog = _catalog()
+    catalog["thing_templates"] = [
+        {
+            "ordinal": 0,
+            "name": "NumericBoundaryTemplate",
+            "faction": None,
+            "kind_of_flags": [],
+            "build_cost": 0,
+            "configured_build_time_seconds": 1.0,
+            "prerequisites": [],
+            "locomotor_sets": [],
+            "production_capable": False,
+            "weapon_sets": [],
+            "derived_weapon_names": [],
+            "category_tags": [],
+        }
+    ]
+    catalog_bytes = json.dumps(catalog, separators=(",", ":")).encode("utf-8") + b"\n"
+    marker = b'"configured_build_time_seconds":1.0'
+    assert marker in catalog_bytes
+    catalog_bytes = catalog_bytes.replace(marker, b'"configured_build_time_seconds":' + token.encode("ascii"))
+    sha256 = hashlib.sha256(catalog_bytes).hexdigest()
+    name = f"game-data-catalog-v1-{sha256}.json"
+    (directory / name).write_bytes(catalog_bytes)
+    return {
+        "type": "game_data_catalog",
+        "path": name,
+        "sha256": sha256,
+        "engine_data_identity": ENGINE_IDENTITY,
+    }
+
+
 def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
     return {
         "engine_build": ENGINE_IDENTITY,
@@ -176,6 +210,27 @@ def _write_v2_trace(
     records.extend(_record(2, index, "players_initialized", payload) for index, payload in enumerate(payloads, start=1))
     records.append(_completion(2, records))
     return _write_records(directory / name, records)
+
+
+def _write_v2_trace_with_player_numeric_token(directory: Path, token: str, name: str) -> Path:
+    """Write a digest-valid v2 trace with one literal exponent token in the resolved start position."""
+    reference = _write_catalog(directory)
+    records = [
+        _record(2, 0, "manifest", _v2_manifest(reference)),
+        _record(2, 1, "players_initialized", _v2_players(reference)),
+    ]
+    manifest_line = json.dumps(records[0], separators=(",", ":")).encode("utf-8") + b"\n"
+    player_line = json.dumps(records[1], separators=(",", ":")).encode("utf-8") + b"\n"
+    marker = b'"x":1.0'
+    assert marker in player_line
+    player_line = player_line.replace(marker, b'"x":' + token.encode("ascii"), 1)
+    prior = manifest_line + player_line
+    completion = _completion(2, records)
+    completion["payload"]["trace_sha256"] = hashlib.sha256(prior).hexdigest()
+    completion_line = json.dumps(completion, separators=(",", ":")).encode("utf-8") + b"\n"
+    trace = directory / name
+    trace.write_bytes(prior + completion_line)
+    return trace
 
 
 def test_reader_preserves_historical_v1_without_catalog_or_players(tmp_path: Path) -> None:
@@ -332,6 +387,36 @@ def test_v2_reader_requires_exactly_one_players_initialized_event(tmp_path: Path
 
 
 @pytest.mark.parametrize(
+    ("mutate_counts", "case_name"),
+    [
+        (lambda counts: counts.pop("players_initialized"), "missing"),
+        (lambda counts: counts.__setitem__("players_initialized", 2), "wrong"),
+        (lambda counts: counts.__setitem__("unknown_event", 1), "extra"),
+        (lambda counts: counts.__setitem__("unused_event", 0), "zero"),
+    ],
+)
+def test_v2_reader_recomputes_exact_completion_event_counts_before_exposing_records(
+    tmp_path: Path,
+    mutate_counts: Callable[[dict[str, int]], object],
+    case_name: str,
+) -> None:
+    """Catch a valid-digest completion record whose event totals do not exactly describe the buffered trace."""
+    reference = _write_catalog(tmp_path)
+    trace = _write_v2_trace(tmp_path, reference)
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    counts = records[-1]["payload"]["event_counts"]
+    assert isinstance(counts, dict)
+    mutate_counts(counts)
+    tampered = _write_records(tmp_path / f"v2-{case_name}-event-count.ndjson", records)
+
+    with pytest.raises(
+        TelemetryTraceValidationError,
+        match=r"record 3 sequence 2 schema path payload\.event_counts",
+    ):
+        next(iter_validated_trace(tampered))
+
+
+@pytest.mark.parametrize(
     ("catalog", "diagnostic"),
     [
         ({"schema_version": 1}, "catalog schema"),
@@ -395,3 +480,44 @@ def test_reader_rejects_nonstandard_nonfinite_json_constants_in_trace_and_catalo
 
     with pytest.raises(TelemetryTraceValidationError, match="non-standard numeric constant Infinity"):
         tuple(iter_validated_trace(catalog_trace))
+
+
+@pytest.mark.parametrize("token", ["1e999", "-1e999"])
+def test_reader_rejects_exponent_overflow_in_trace_numbers_before_exposing_records(
+    tmp_path: Path, token: str
+) -> None:
+    """Catch valid JSON exponent syntax overflowing Python float to positive or negative infinity."""
+    trace = _write_v2_trace_with_player_numeric_token(tmp_path, token, f"overflow-{token[0]}.ndjson")
+
+    with pytest.raises(TelemetryTraceValidationError, match=rf"record 2 sequence unknown nonfinite number {token}"):
+        next(iter_validated_trace(trace))
+
+
+def test_reader_rejects_exponent_overflow_in_hash_valid_catalog_numbers(tmp_path: Path) -> None:
+    """Catch a hash-valid schema-shaped catalog whose valid JSON exponent overflows to infinity."""
+    reference = _write_catalog_with_numeric_token(tmp_path, "1e999")
+    trace = _write_v2_trace(tmp_path, reference, name="catalog-overflow.ndjson")
+
+    with pytest.raises(TelemetryTraceValidationError, match=r"catalog nonfinite number 1e999"):
+        next(iter_validated_trace(trace))
+
+
+@pytest.mark.parametrize("token", ["1e308", "-1e308", "1e-999"])
+def test_reader_accepts_finite_trace_exponent_boundaries(tmp_path: Path, token: str) -> None:
+    """Keep valid finite large, negative, and underflowing exponent numbers readable."""
+    trace = _write_v2_trace_with_player_numeric_token(tmp_path, token, f"finite-{token.replace('-', 'm')}.ndjson")
+
+    assert [record.event_type for record in iter_validated_trace(trace)] == [
+        "manifest",
+        "players_initialized",
+        "complete",
+    ]
+
+
+@pytest.mark.parametrize("token", ["1e308", "1e-999"])
+def test_reader_accepts_finite_catalog_exponent_boundaries(tmp_path: Path, token: str) -> None:
+    """Keep finite catalog exponent values valid at large and underflowing magnitudes."""
+    reference = _write_catalog_with_numeric_token(tmp_path, token)
+    trace = _write_v2_trace(tmp_path, reference, name=f"finite-catalog-{token.replace('-', 'm')}.ndjson")
+
+    assert len(tuple(iter_validated_trace(trace))) == 3
