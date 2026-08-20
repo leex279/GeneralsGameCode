@@ -901,7 +901,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         if schema_error is not None:
             raise _error(path, line_number, sequence, schema_error)
         try:
-            validated = _RECORD_ADAPTER.validate_python(record)
+            validated = _RECORD_ADAPTER.validate_python(record, context={"schema_version": selected_version})
         except ValidationError as error:
             first_error = error.errors()[0]
             message = str(first_error["msg"])

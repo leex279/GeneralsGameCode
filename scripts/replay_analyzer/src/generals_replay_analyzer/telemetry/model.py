@@ -3,13 +3,20 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, NonNegativeInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    NonNegativeInt,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 UINT32_MAX = 4_294_967_295
-UInt32 = Annotated[int, Field(ge=0, le=UINT32_MAX)]
-PositiveUInt32 = Annotated[int, Field(gt=0, le=UINT32_MAX)]
 EVENT_TYPES = (
     "manifest", "players_initialized", "object_created", "construction_started", "construction_completed",
     "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled",
@@ -18,6 +25,15 @@ EVENT_TYPES = (
     "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome",
     "order_issued", "entity_state_changed", "entity_sample", "complete",
 )
+
+
+def _validation_schema_version(info: ValidationInfo) -> int:
+    """Default direct model use to current v2 while honoring a reader-selected historical schema."""
+    if isinstance(info.context, dict):
+        version = info.context.get("schema_version")
+        if type(version) is int and version in SUPPORTED_SCHEMA_VERSIONS:
+            return version
+    return SCHEMA_VERSION
 
 
 class OpenPayload(BaseModel):
@@ -269,11 +285,18 @@ class SpecialPowerUsedPayload(OpenPayload):
 
 class CashChangedPayload(OpenPayload):
     player_index: NonNegativeInt
-    before: UInt32
+    before: int
     delta: int
-    after: UInt32
+    after: int
     track_income: bool
     reason: str = Field(min_length=1)
+
+    @field_validator("before", "after")
+    @classmethod
+    def _require_current_uint32_range(cls, value: int, info: ValidationInfo) -> int:
+        if _validation_schema_version(info) == SCHEMA_VERSION and not 0 <= value <= UINT32_MAX:
+            raise ValueError(f"v2 cash value must be between 0 and {UINT32_MAX}")
+        return value
 
 
 class SupplyCollectedPayload(OpenPayload):
@@ -282,8 +305,17 @@ class SupplyCollectedPayload(OpenPayload):
     source_status: Literal["resolved", "unknown", "mixed"] | None = None
     dropoff_object_id: NonNegativeInt | None = None
     player_index: NonNegativeInt
-    amount: PositiveUInt32
+    amount: Annotated[int | float, Field(ge=0)]
     location: RawPosition
+
+    @field_validator("amount")
+    @classmethod
+    def _require_schema_specific_amount(cls, value: float, info: ValidationInfo) -> float:
+        if _validation_schema_version(info) == 1:
+            return float(value)
+        if type(value) is not int or not 0 < value <= UINT32_MAX:
+            raise ValueError(f"v2 supply amount must be an integer between 1 and {UINT32_MAX}")
+        return value
 
 
 class DamageAppliedPayload(OpenPayload):
@@ -395,7 +427,14 @@ class FinalCashBalance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     player_index: NonNegativeInt
     has_money: bool
-    balance: UInt32 | None
+    balance: NonNegativeInt | None
+
+    @field_validator("balance")
+    @classmethod
+    def _require_current_uint32_range(cls, value: int | None, info: ValidationInfo) -> int | None:
+        if value is not None and _validation_schema_version(info) == SCHEMA_VERSION and value > UINT32_MAX:
+            raise ValueError(f"v2 final balance must be at most {UINT32_MAX}")
+        return value
 
     @model_validator(mode="after")
     def _require_balance_presence(self) -> "FinalCashBalance":

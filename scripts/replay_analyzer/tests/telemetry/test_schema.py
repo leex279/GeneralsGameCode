@@ -12,6 +12,7 @@ from generals_replay_analyzer.telemetry.model import EVENT_TYPES
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
+UINT32_MAX = 4_294_967_295
 
 
 def _record(sequence: int, frame: int, event_type: str, payload: dict[str, object]) -> dict[str, object]:
@@ -83,6 +84,26 @@ def _complete_trace(tmp_path: Path) -> Path:
     return _write_trace(tmp_path, records)
 
 
+def _v1_single_event_trace(
+    tmp_path: Path,
+    event_type: str,
+    payload: dict[str, object],
+    name: str,
+) -> Path:
+    records = [
+        _record(0, 0, "manifest", _manifest_payload()),
+        _record(1, 0, event_type, payload),
+    ]
+    pre_completion = b"".join(
+        json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n" for record in records
+    )
+    completion = _complete_payload(hashlib.sha256(pre_completion).hexdigest())
+    completion["final_frame"] = 0
+    completion["event_counts"] = {"manifest": 1, event_type: 1, "complete": 1}
+    records.append(_record(2, 0, "complete", completion))
+    return _write_trace(tmp_path, records, name)
+
+
 def test_reader_returns_validated_observed_records_with_immutable_evidence_identity(tmp_path: Path) -> None:
     """Catch a reader change that drops the envelope needed to identify an observed event."""
     records = list(iter_validated_trace(_complete_trace(tmp_path)))
@@ -91,6 +112,51 @@ def test_reader_returns_validated_observed_records_with_immutable_evidence_ident
     assert records[1].run_id == UUID(RUN_ID)
     assert records[1].event_type == "object_created"
     assert records[1].payload.object_id == 248
+
+
+def test_v1_reader_preserves_schema_valid_unbounded_cash_and_absent_final_balances(tmp_path: Path) -> None:
+    trace = _v1_single_event_trace(
+        tmp_path,
+        "cash_changed",
+        {
+            "player_index": 0,
+            "before": UINT32_MAX + 1,
+            "delta": 1,
+            "after": UINT32_MAX + 2,
+            "track_income": False,
+            "reason": "unknown",
+        },
+        "v1-unbounded-cash.ndjson",
+    )
+
+    records = tuple(iter_validated_trace(trace))
+    assert records[1].payload.before == 4_294_967_296
+    assert records[1].payload.after == 4_294_967_297
+    assert records[-1].payload.final_cash_balances is None
+    assert "final_cash_balances" not in records[-1].payload.model_fields_set
+
+
+@pytest.mark.parametrize("amount", [4_294_967_296, 0.5, 0])
+def test_v1_reader_preserves_schema_valid_nonnegative_numeric_supply_amounts(
+    tmp_path: Path,
+    amount: float,
+) -> None:
+    trace = _v1_single_event_trace(
+        tmp_path,
+        "supply_collected",
+        {
+            "collector_object_id": 20,
+            "source_object_id": 30,
+            "player_index": 0,
+            "amount": amount,
+            "location": {"x": 40.0, "y": 2.0, "z": 0.0},
+        },
+        f"v1-supply-{amount}.ndjson",
+    )
+
+    records = tuple(iter_validated_trace(trace))
+    assert records[1].payload.amount == float(amount)
+    assert type(records[1].payload.amount) is float
 
 
 def test_reader_rejects_object_creation_without_authoritative_lifecycle_identity(tmp_path: Path) -> None:

@@ -66,8 +66,10 @@ Telemetry v2 now strictly defines the Task 5 payloads, closed cash reasons, fini
 resolved/null source status, stable queue identity, and non-empty ordered `final_cash_balances`. Every writer-backed
 cash `before`/`after`, positive supply `amount`, and present final `balance` is bounded to the engine's exact
 `uint32_t` range (`0..4_294_967_295`) in both the JSON Schema and Pydantic model before modular supply validation.
-Historical v1 remains readable because its schema is unchanged and the shared model keeps the new completion field
-optional while the v2 schema and reader require it.
+The reader passes the already schema-checked record version into nested Pydantic validation: direct/current model use
+and v2 remain uint32-strict, while frozen v1 retains its original unbounded cash integers, nonnegative numeric supply
+amounts represented as floats, and absent terminal-balance semantics. The canonical v1 schema is byte-unchanged
+(SHA-256 `BFAA0279A9BAA9264121709063F0DD763C534333926CBC2846DD4E4D56761350`).
 
 Before any record is returned, the atomic reader validates:
 
@@ -131,6 +133,13 @@ that happened to satisfy modular arithmetic. After adding exact model/schema max
 and the exact `UINT32_MAX + 1` wrap from max cash to zero. The wheel smoke test also proves the installed v2 schema is
 byte-identical to the canonical contract.
 
+The fourth corrective review round captured **4 failed** before production changes: shared v2 Pydantic constraints
+rejected frozen-v1-valid cash values above `UINT32_MAX` and supply amounts `4_294_967_296`, `0.5`, and `0`. After
+making nested model validation explicitly record-version aware, the same v1 selection was **4 passed** and the v2
+uint32/oversize/wrap selection remained **12 passed**. The combined v1 schema, Task 5, and installed-wheel contracts
+were **108 passed**. Wheel inspection now proves both installed telemetry schemas are byte-identical to their canonical
+files.
+
 ## Replay evidence
 
 Tracked replay fixture:
@@ -183,7 +192,7 @@ runtime behavior is covered by compiled authoritative seams plus strict syntheti
 Final commands and results (the Python commands were run from `scripts/replay_analyzer/`):
 
 - `uv run --project . pytest -m "not engine and not ollama" -q`
-  - **399 passed, 44 deselected**
+  - **403 passed, 44 deselected**
 - `uv run --project . pytest tests/engine -q`
   - **43 passed, 1 skipped**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
@@ -194,7 +203,7 @@ Final commands and results (the Python commands were run from `scripts/replay_an
 - x86 VS 2022 `VsDevCmd` environment plus
   `cmake --build build/win32 --target z_generals --config Release -- -j 4`
   - **passed and linked `generalszh.exe`** in the preceding corrective commit; not rerun in round 2 because the writer
-    and all C++ sources are byte-unchanged; not rerun in round 3 for the same source-grounded reason
+    and all C++ sources are byte-unchanged; not rerun in rounds 3 or 4 for the same source-grounded reason
 
 The engine suite includes telemetry-on versus telemetry-off return/stdout/stderr equality, natural normalized double
 run determinism, final cash folding, CRC-stop behavior, and passive open/late/publish writer-failure paths. Existing
@@ -224,5 +233,9 @@ authoritative C++ writer remains unchanged after source inspection confirmed its
 The third corrective round changes only the canonical v2 JSON Schema, shared Pydantic money types, focused contract
 and wheel tests, and this report. The wheel force-includes the canonical schema verbatim; no separately maintained
 packaged schema can drift. The v1 JSON Schema, reader logic, writer, and all C++ sources remain unchanged.
+
+The fourth corrective round changes only the shared Pydantic model, the reader's explicit validation context, focused
+v1 compatibility and wheel tests, and this report. Neither canonical telemetry schema changed; the wheel test compares
+both packaged schemas byte-for-byte with their canonical files. The writer and all C++ sources remain unchanged.
 
 The five inherited stat-only worktree paths were not edited or staged.

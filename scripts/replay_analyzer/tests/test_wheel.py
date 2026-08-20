@@ -28,7 +28,9 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
     wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
+        packaged_v1_schema = archive.read("generals_replay_analyzer/data/telemetry-v1.schema.json")
         packaged_v2_schema = archive.read("generals_replay_analyzer/data/telemetry-v2.schema.json")
+    assert packaged_v1_schema == (PROJECT_ROOT / "contracts" / "telemetry-v1.schema.json").read_bytes()
     assert packaged_v2_schema == (PROJECT_ROOT / "contracts" / "telemetry-v2.schema.json").read_bytes()
 
     environment_directory = tmp_path / "wheel-environment"
