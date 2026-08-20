@@ -198,7 +198,12 @@ def _v2_players(reference: dict[str, object]) -> dict[str, object]:
                 "is_resolved_local_player": None,
             }
         )
-    return {"header_local_slot_index": 0, "slots": slots, "game_data_catalog": reference}
+    return {
+        "header_local_slot_index": 0,
+        "slots": slots,
+        "engine_player_indices": [0],
+        "game_data_catalog": reference,
+    }
 
 
 def _write_v2_trace(

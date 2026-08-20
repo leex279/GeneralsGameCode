@@ -597,6 +597,47 @@ namespace
 		return TRUE;
 	}
 
+	// TheSuperHackers @feature Leex 20/08/2026 Freeze the complete engine player-index domain independently of replay slots. (#TBD)
+	Bool buildEnginePlayerIndices(std::string &playerIndicesJson)
+	{
+		if (ThePlayerList == nullptr)
+		{
+			ReplayTelemetry::fail("players_unavailable", "full engine player state is unavailable");
+			return FALSE;
+		}
+		std::set<Int> playerIndices;
+		for (Int index = 0; index < ThePlayerList->getPlayerCount(); ++index)
+		{
+			Player *player = ThePlayerList->getNthPlayer(index);
+			if (player == nullptr)
+			{
+				continue;
+			}
+			const Int playerIndex = player->getPlayerIndex();
+			if (playerIndex < 0 || !playerIndices.insert(playerIndex).second)
+			{
+				ReplayTelemetry::fail("players_duplicate_index", "full engine player state has an invalid player index");
+				return FALSE;
+			}
+		}
+		if (playerIndices.empty())
+		{
+			ReplayTelemetry::fail("players_unavailable", "full engine player state contains no players");
+			return FALSE;
+		}
+		playerIndicesJson = "[";
+		for (auto iterator = playerIndices.begin(); iterator != playerIndices.end(); ++iterator)
+		{
+			if (iterator != playerIndices.begin())
+			{
+				playerIndicesJson.push_back(',');
+			}
+			playerIndicesJson += std::to_string(*iterator);
+		}
+		playerIndicesJson.push_back(']');
+		return TRUE;
+	}
+
 	Bool fileMatches(const AsciiString &path, const std::string &expected)
 	{
 		FILE *input = fopen(path.str(), "rb");
@@ -715,6 +756,11 @@ Bool ReplayGameDataExport::prepareCatalog()
 	{
 		return FALSE;
 	}
+	std::string enginePlayerIndices;
+	if (!buildEnginePlayerIndices(enginePlayerIndices))
+	{
+		return FALSE;
+	}
 	s_engineDataIdentity = ReplayTelemetry::getEngineDataIdentity().str();
 	const std::string catalog = buildCatalog();
 	if (s_serializationFailed || catalog.empty() || !publishCatalog(catalog))
@@ -728,6 +774,7 @@ Bool ReplayGameDataExport::prepareCatalog()
 	s_playersPayload = "{\"header_local_slot_index\":"
 		+ (headerLocalSlot >= 0 && headerLocalSlot < MAX_SLOTS ? std::to_string(headerLocalSlot) : "null")
 		+ ",\"slots\":" + playerSlots
+		+ ",\"engine_player_indices\":" + enginePlayerIndices
 		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonUtf8(s_catalogPath.c_str())
 		+ ",\"sha256\":" + jsonUtf8(s_catalogSha256.c_str())
 		+ ",\"engine_data_identity\":" + jsonUtf8(s_engineDataIdentity.c_str()) + "}}";

@@ -108,7 +108,12 @@ def _players(reference: dict[str, object]) -> dict[str, object]:
                 "is_resolved_local_player": None,
             }
         )
-    return {"header_local_slot_index": 0, "slots": slots, "game_data_catalog": reference}
+    return {
+        "header_local_slot_index": 0,
+        "slots": slots,
+        "engine_player_indices": [0],
+        "game_data_catalog": reference,
+    }
 
 
 def _object_created(object_id: int, template_name: str) -> dict[str, object]:
@@ -246,8 +251,26 @@ def test_reader_accepts_structurally_distinct_authoritative_economy_and_producti
     assert events["upgrade_queued"].payload.upgrade_queue_id == 1
     assert events["science_purchased"].payload.purchase_cost_points == 1
     assert events["special_power_used"].payload.source_object_id == 10
+    assert type(events["supply_collected"].payload.amount) is int
     assert events["supply_collected"].sequence < events["cash_changed"].sequence
     assert records[-1].payload.final_cash_balances[0].balance == 4700
+
+
+def test_reader_preserves_full_player_domain_with_zero_cash_and_no_money_entries(tmp_path: Path) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    players = next(record for record in records if record["event_type"] == "players_initialized")
+    players["payload"]["engine_player_indices"] = [0, 4, 9]
+    balances = [
+        {"player_index": 0, "has_money": True, "balance": 4700},
+        {"player_index": 4, "has_money": True, "balance": 0},
+        {"player_index": 9, "has_money": False, "balance": None},
+    ]
+    domain_trace = _finish(tmp_path / "full-player-domain.ndjson", records, balances)
+
+    validated = tuple(iter_validated_trace(domain_trace))
+    assert validated[1].payload.engine_player_indices == [0, 4, 9]
+    assert [entry.player_index for entry in validated[-1].payload.final_cash_balances] == [0, 4, 9]
 
 
 @pytest.mark.parametrize(
@@ -335,6 +358,290 @@ def test_reader_reconciles_cash_chains_with_ordered_terminal_engine_balances(
 
     with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
         next(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize(
+    ("domain", "balances"),
+    [
+        ([0, 4], [{"player_index": 0, "has_money": True, "balance": 4700}]),
+        (
+            [0],
+            [
+                {"player_index": 0, "has_money": True, "balance": 4700},
+                {"player_index": 4, "has_money": False, "balance": None},
+            ],
+        ),
+    ],
+)
+def test_reader_requires_terminal_balances_to_equal_the_initialized_player_domain(
+    tmp_path: Path,
+    domain: list[int],
+    balances: list[dict[str, object]],
+) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    players = next(record for record in records if record["event_type"] == "players_initialized")
+    players["payload"]["engine_player_indices"] = domain
+    damaged = _finish(tmp_path / f"bad-domain-{len(domain)}-{len(balances)}.ndjson", records, balances)
+
+    with pytest.raises(TelemetryTraceValidationError, match="exactly equal engine_player_indices"):
+        next(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "production_queued",
+        "production_completed",
+        "upgrade_queued",
+        "upgrade_cancelled",
+        "science_purchased",
+        "special_power_used",
+        "cash_changed",
+        "supply_collected",
+    ],
+)
+def test_reader_requires_task_player_indices_in_the_initialized_engine_domain(
+    tmp_path: Path, event_type: str
+) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    target = next(record for record in records if record["event_type"] == event_type)
+    target["payload"]["player_index"] = 99
+    if event_type == "supply_collected":
+        paired_cash = records[records.index(target) + 1]
+        paired_cash["payload"]["player_index"] = 99
+    damaged = _finish(
+        tmp_path / f"bad-player-domain-{event_type}.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": 4700}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="engine player domain"):
+        next(iter_validated_trace(damaged))
+
+
+def _owner_changed(object_id: int, new_owner: int | None) -> dict[str, object]:
+    return {
+        "object_id": object_id,
+        "previous_owner_player_index": 0,
+        "new_owner_player_index": new_owner,
+        "previous_team_id": 0,
+        "new_team_id": new_owner,
+    }
+
+
+def _destroyed(object_id: int) -> dict[str, object]:
+    return {
+        "object_id": object_id,
+        "previous_state": "alive",
+        "new_state": "destroyed",
+        "owner_player_index": 0,
+        "team_id": 0,
+        "destruction_source": "destroy_object",
+    }
+
+
+def _insert_before_event(
+    records: list[dict[str, object]],
+    event_type: str,
+    inserted_event_type: str,
+    payload: dict[str, object],
+) -> None:
+    target = next(record for record in records if record["event_type"] == event_type)
+    target_index = records.index(target)
+    records.insert(
+        target_index,
+        _record(0, inserted_event_type, payload, frame=int(target["frame"])),
+    )
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+
+
+@pytest.mark.parametrize(
+    ("event_type", "subject_object_id"),
+    [
+        ("production_queued", 10),
+        ("production_completed", 10),
+        ("upgrade_queued", 10),
+        ("upgrade_cancelled", 10),
+        ("special_power_used", 10),
+        ("supply_collected", 20),
+        ("supply_collected", 40),
+    ],
+)
+def test_reader_requires_live_current_subjects_for_task_events(
+    tmp_path: Path,
+    event_type: str,
+    subject_object_id: int,
+) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    _insert_before_event(records, event_type, "object_destroyed", _destroyed(subject_object_id))
+    damaged = _finish(
+        tmp_path / f"destroyed-{event_type}-{subject_object_id}.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": 4700}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="after object_destroyed"):
+        tuple(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize(
+    ("event_type", "subject_object_id"),
+    [
+        ("production_queued", 10),
+        ("production_completed", 10),
+        ("upgrade_queued", 10),
+        ("upgrade_cancelled", 10),
+        ("special_power_used", 10),
+        ("supply_collected", 20),
+        ("supply_collected", 40),
+    ],
+)
+def test_reader_requires_task_subject_owner_to_equal_event_player(
+    tmp_path: Path,
+    event_type: str,
+    subject_object_id: int,
+) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    players = next(record for record in records if record["event_type"] == "players_initialized")
+    players["payload"]["engine_player_indices"] = [0, 4]
+    _insert_before_event(records, event_type, "owner_changed", _owner_changed(subject_object_id, 4))
+    damaged = _finish(
+        tmp_path / f"wrong-owner-{event_type}-{subject_object_id}.ndjson",
+        records,
+        [
+            {"player_index": 0, "has_money": True, "balance": 4700},
+            {"player_index": 4, "has_money": False, "balance": None},
+        ],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="current owner"):
+        tuple(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize("event_type", ["production_queued", "special_power_used"])
+def test_reader_requires_owned_producer_and_special_power_source(
+    tmp_path: Path,
+    event_type: str,
+) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    _insert_before_event(records, event_type, "owner_changed", _owner_changed(10, None))
+    damaged = _finish(
+        tmp_path / f"unowned-{event_type}.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": 4700}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="non-null current owner"):
+        tuple(iter_validated_trace(damaged))
+
+
+def test_reader_rejects_resolved_supply_source_equal_to_dropoff(tmp_path: Path) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    supply = next(record for record in records if record["event_type"] == "supply_collected")
+    supply["payload"]["source_object_id"] = supply["payload"]["dropoff_object_id"]
+    damaged = _finish(
+        tmp_path / "same-supply-source-dropoff.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": 4700}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="source_object_id must differ from dropoff_object_id"):
+        tuple(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_cash",
+        "intervening",
+        "wrong_sequence",
+        "wrong_frame",
+        "wrong_player",
+        "wrong_amount",
+        "wrong_reason",
+        "negative_delta",
+        "zero_delta",
+    ],
+)
+def test_reader_requires_atomic_supply_income_cash_pair(tmp_path: Path, damage: str) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    supply = next(record for record in records if record["event_type"] == "supply_collected")
+    supply_index = records.index(supply)
+    cash = records[supply_index + 1]
+    balances = [{"player_index": 0, "has_money": True, "balance": 4700}]
+    if damage == "missing_cash":
+        records.pop(supply_index + 1)
+        balances[0]["balance"] = 4100
+    elif damage == "intervening":
+        records.insert(
+            supply_index + 1,
+            _record(
+                0,
+                "special_power_used",
+                {
+                    "special_power_name": "SuperweaponSpySatellite",
+                    "player_index": 0,
+                    "source_object_id": 10,
+                    "target_object_id": None,
+                    "target_location": None,
+                },
+                frame=15,
+            ),
+        )
+    elif damage == "wrong_frame":
+        cash["frame"] = 16
+        cash["logic_time_seconds"] = 16 / 30.0
+    elif damage == "wrong_player":
+        players = next(record for record in records if record["event_type"] == "players_initialized")
+        players["payload"]["engine_player_indices"] = [0, 4]
+        cash["payload"].update({"player_index": 4, "before": 0, "delta": 600, "after": 600})
+        balances = [
+            {"player_index": 0, "has_money": True, "balance": 4100},
+            {"player_index": 4, "has_money": True, "balance": 600},
+        ]
+    elif damage == "wrong_amount":
+        supply["payload"]["amount"] = 599
+    elif damage == "wrong_reason":
+        cash["payload"]["reason"] = "unknown"
+    elif damage == "negative_delta":
+        cash["payload"].update({"delta": -600, "after": 3500})
+        balances[0]["balance"] = 3500
+    elif damage == "zero_delta":
+        cash["payload"].update({"delta": 0, "after": 4100})
+        balances[0]["balance"] = 4100
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+    if damage == "wrong_sequence":
+        cash["sequence"] = int(supply["sequence"]) + 2
+    damaged = _finish(tmp_path / f"bad-supply-pair-{damage}.ndjson", records, balances)
+
+    with pytest.raises(TelemetryTraceValidationError, match="supply_collected cash pair"):
+        tuple(iter_validated_trace(damaged))
+
+
+def test_reader_rejects_orphan_supply_income_cash_event(tmp_path: Path) -> None:
+    trace = _valid_trace(tmp_path, "source.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    supply = next(record for record in records if record["event_type"] == "supply_collected")
+    records.remove(supply)
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+    damaged = _finish(
+        tmp_path / "orphan-supply-income.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": 4700}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="orphan supply_income"):
+        tuple(iter_validated_trace(damaged))
 
 
 @pytest.mark.parametrize(

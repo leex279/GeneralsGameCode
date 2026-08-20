@@ -91,6 +91,16 @@ class _QueueState:
     terminal: str | None = None
 
 
+@dataclass(frozen=True)
+class _PendingSupplyCashPair:
+    """Authoritative supply handoff awaiting its immediately following cash observation."""
+
+    sequence: int
+    frame: int
+    player_index: int
+    amount: int
+
+
 class _ReferenceRequirement(Enum):
     """Distinguish current-state subjects from immutable historical provenance."""
 
@@ -112,12 +122,12 @@ _OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
     "owner_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "sold": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "object_destroyed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
-    "production_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
-    "production_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
-    "production_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
-    "upgrade_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
-    "upgrade_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
-    "upgrade_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "production_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "production_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "production_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "upgrade_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "upgrade_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "upgrade_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "science_purchased": {"source_object_id": _ReferenceRequirement.REQUIRES_CREATION},
     "special_power_used": {
         "source_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
@@ -126,7 +136,7 @@ _OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
     "supply_collected": {
         "collector_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
         "source_object_id": _ReferenceRequirement.REQUIRES_CREATION,
-        "dropoff_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+        "dropoff_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
     },
     "damage_applied": {
         "victim_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
@@ -539,6 +549,33 @@ def _validate_queue_transition(
     state.terminal = terminal
 
 
+def _require_current_owner(
+    path: Path,
+    line_number: int,
+    sequence: int,
+    event_type: str,
+    field: str,
+    object_id: int,
+    player_index: int,
+    entities: Mapping[int, _EntityLifecycleState],
+) -> None:
+    state = entities[object_id]
+    if state.owner_player_index is None:
+        raise _error(
+            path,
+            line_number,
+            sequence,
+            f"event {event_type} {field} must have a non-null current owner",
+        )
+    if state.owner_player_index != player_index:
+        raise _error(
+            path,
+            line_number,
+            sequence,
+            f"event {event_type} player_index differs from {field} current owner",
+        )
+
+
 def _validate_v2_economy_production(
     path: Path,
     line_number: int,
@@ -547,6 +584,8 @@ def _validate_v2_economy_production(
     production_queues: dict[int, _QueueState],
     upgrade_queues: dict[int, _QueueState],
     cash_after_by_player: dict[int, int],
+    engine_player_indices: frozenset[int],
+    entities: Mapping[int, _EntityLifecycleState],
 ) -> None:
     """Validate task-specific state transitions without exposing partial records."""
     event_type = record.event_type
@@ -555,7 +594,26 @@ def _validate_v2_economy_production(
     if players_initialized_count != 1:
         raise _error(path, line_number, record.sequence, f"event {event_type} must follow players_initialized")
     payload = cast(dict[str, object], record.payload.model_dump())
+    player_index = cast(int, payload["player_index"])
+    if player_index not in engine_player_indices:
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            f"event {event_type} player_index {player_index} is outside the initialized engine player domain",
+        )
     if event_type.startswith("production_"):
+        producer_object_id = cast(int, payload["producer_object_id"])
+        _require_current_owner(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            "producer_object_id",
+            producer_object_id,
+            player_index,
+            entities,
+        )
         if event_type == "production_queued" and payload["queued_frame"] != record.frame:
             raise _error(path, line_number, record.sequence, "production queued_frame must equal envelope frame")
         if event_type != "production_queued" and payload["terminal_frame"] != record.frame:
@@ -572,6 +630,17 @@ def _validate_v2_economy_production(
             "production",
         )
     elif event_type.startswith("upgrade_"):
+        producer_object_id = cast(int, payload["producer_object_id"])
+        _require_current_owner(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            "producer_object_id",
+            producer_object_id,
+            player_index,
+            entities,
+        )
         if event_type == "upgrade_queued" and payload["queued_frame"] != record.frame:
             raise _error(path, line_number, record.sequence, "upgrade queued_frame must equal envelope frame")
         if event_type != "upgrade_queued" and payload["terminal_frame"] != record.frame:
@@ -604,12 +673,103 @@ def _validate_v2_economy_production(
         after = cast(int, payload["points_after"])
         if before - cost != after:
             raise _error(path, line_number, record.sequence, "science point transition does not match purchase cost")
+    elif event_type == "special_power_used":
+        source_object_id = cast(int, payload["source_object_id"])
+        _require_current_owner(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            "source_object_id",
+            source_object_id,
+            player_index,
+            entities,
+        )
+    elif event_type == "supply_collected":
+        collector_object_id = cast(int, payload["collector_object_id"])
+        dropoff_object_id = cast(int, payload["dropoff_object_id"])
+        _require_current_owner(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            "collector_object_id",
+            collector_object_id,
+            player_index,
+            entities,
+        )
+        _require_current_owner(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            "dropoff_object_id",
+            dropoff_object_id,
+            player_index,
+            entities,
+        )
+        supply_source_object_id = cast(int | None, payload["source_object_id"])
+        if supply_source_object_id is not None and supply_source_object_id == dropoff_object_id:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "supply_collected source_object_id must differ from dropoff_object_id",
+            )
+
+
+def _validate_v2_supply_cash_pair(
+    path: Path,
+    line_number: int,
+    record: TelemetryRecord,
+    pending: _PendingSupplyCashPair | None,
+) -> _PendingSupplyCashPair | None:
+    event_type = record.event_type
+    payload = cast(dict[str, object], record.payload.model_dump())
+    if pending is not None:
+        if event_type != "cash_changed":
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "supply_collected cash pair must be the immediately following record",
+            )
+        delta = cast(int, payload["delta"])
+        if (
+            record.sequence != pending.sequence + 1
+            or record.frame != pending.frame
+            or payload["player_index"] != pending.player_index
+            or delta != pending.amount
+            or delta <= 0
+            or payload["reason"] != "supply_income"
+        ):
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "supply_collected cash pair has inconsistent sequence, frame, player, amount, or reason",
+            )
+        return None
+    if event_type == "cash_changed" and payload["reason"] == "supply_income":
+        raise _error(path, line_number, record.sequence, "orphan supply_income cash_changed event")
+    if event_type == "supply_collected":
+        amount = cast(int, payload["amount"])
+        if amount <= 0:
+            raise _error(path, line_number, record.sequence, "supply_collected cash pair requires positive amount")
+        return _PendingSupplyCashPair(
+            sequence=record.sequence,
+            frame=record.frame,
+            player_index=cast(int, payload["player_index"]),
+            amount=amount,
+        )
+    return None
 
 
 def _validate_v2_final_cash_balances(
     path: Path,
     complete: CompleteRecord,
     cash_after_by_player: Mapping[int, int],
+    engine_player_indices: frozenset[int],
 ) -> None:
     balances = complete.payload.final_cash_balances
     if not balances:
@@ -628,6 +788,10 @@ def _validate_v2_final_cash_balances(
             )
         previous_index = player_index
         by_player[player_index] = balance
+    if list(by_player) != sorted(engine_player_indices):
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': final cash balance player indices must be exactly equal engine_player_indices"
+        )
     for player_index, last_after in cash_after_by_player.items():
         final_balance = by_player.get(player_index)
         if final_balance is None or not final_balance.has_money or final_balance.balance != last_after:
@@ -681,6 +845,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     production_queues: dict[int, _QueueState] = {}
     upgrade_queues: dict[int, _QueueState] = {}
     cash_after_by_player: dict[int, int] = {}
+    engine_player_indices: frozenset[int] | None = None
+    pending_supply_cash_pair: _PendingSupplyCashPair | None = None
     complete_record: CompleteRecord | None = None
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
@@ -755,8 +921,13 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             players_initialized_count += 1
             if expected_schema_version == 2 and validated.payload.game_data_catalog != expected_catalog:
                 raise _error(path, line_number, validated.sequence, "game_data_catalog differs from manifest")
+            if expected_schema_version == 2:
+                assert validated.payload.engine_player_indices is not None
+                engine_player_indices = frozenset(validated.payload.engine_player_indices)
 
         if expected_schema_version == 2:
+            if engine_player_indices is None:
+                engine_player_indices = frozenset()
             _validate_v2_entity_lifecycle(
                 path,
                 line_number,
@@ -774,6 +945,14 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 production_queues,
                 upgrade_queues,
                 cash_after_by_player,
+                engine_player_indices,
+                entity_lifecycles,
+            )
+            pending_supply_cash_pair = _validate_v2_supply_cash_pair(
+                path,
+                line_number,
+                validated,
+                pending_supply_cash_pair,
             )
 
         records_seen += 1
@@ -818,7 +997,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 "construction_started"
             )
         assert complete_record is not None
-        _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player)
+        assert engine_player_indices is not None
+        _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player, engine_player_indices)
         catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
         _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
     return tuple(validated_records)

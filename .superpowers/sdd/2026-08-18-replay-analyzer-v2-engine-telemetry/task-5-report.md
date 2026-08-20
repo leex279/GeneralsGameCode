@@ -24,12 +24,13 @@ returns, or authoritative Money arithmetic. All instrumentation is guarded by
 | Unit queued | `ProductionUpdate::queueCreateUnit`, after queue insertion | Trace-global production ID, producer-local engine ID, producer/player, stable thing-template name, queue position/frame, authoritative cost and quantity. |
 | Unit cancelled/completed | `ProductionUpdate::cancelUnitCreate` / successful final-quantity branch in `update`, after queue removal | The immutable queued identity and one mutually exclusive terminal frame/state. |
 | Upgrade queued/cancelled/completed | Corresponding `ProductionUpdate` queue/removal/grant paths | Separate trace-global upgrade queue ID, producer/player, stable upgrade name, queue position/frame, cost and terminal state. |
-| Science purchased | `Player::attemptToPurchaseScience`, after point deduction and `addScience` | Stable science name, player, exact point cost and before/after points. Initial grants and scripts do not pass this seam. No source object exists at this player-owned transition, so it is explicit null. |
+| Science purchased | `Player::attemptToPurchaseScience`, after point deduction and `addScience` | Stable science name, player, exact point cost and before/after points. Initial grants do not pass this seam; `ScriptActions::doPlayerPurchaseScience` uses a one-call suppression scope so successful script actions are excluded without suppressing genuine purchases. No source object exists at this player-owned transition, so it is explicit null. |
 | Special power used | `SpecialPowerModule::triggerSpecialPower` | The common committed trigger for immediate and deferred powers, before recharge. Immediate object-targeted dispatch carries the already-resolved target transiently; deferred paths report only the finite location they expose. Intent, readiness and grant paths are not labelled as use. |
 | Cash changed | `Money::withdraw`, `deposit`, and `setStartingCash`, after the engine mutation | Owned player, unsigned engine before/after, wide signed delta, `track_income`, and one closed reason. Zero changes are not emitted. |
 | Supply pickup provenance | Successful `SupplyWarehouseDockUpdate::action` box transfer | Copied collector and warehouse object IDs for each actually acquired box. |
 | Supply collected | `SupplyCenterDockUpdate::action`, at positive-value handoff | Collector, resolved/mixed/unknown source, receiving dropoff, player, exact raw positive value and finite raw collector location. The supply event is emitted before the same-value deposit. |
-| Final balances | `ReplayTelemetry::finish`, transiently reading `PlayerList` | Every engine player ordered by player index, with explicit `has_money` and balance/null state. |
+| Engine player domain | `ReplayGameDataExport::prepareCatalog`, independently reading `PlayerList` | An immutable sorted `engine_player_indices` snapshot on `players_initialized`, including neutral/civilian/map players independently of the eight replay slots. |
+| Final balances | `ReplayTelemetry::finish`, transiently reading `PlayerList` | Every engine player ordered by player index, with explicit `has_money` and balance/null state; its index set must exactly equal the initialized domain. |
 
 The receiving Supply Center is serialized only as `dropoff_object_id`; it is never mislabelled as the resource source.
 Source status is `resolved` only when the successful pickup count and one warehouse identity match, `mixed` for a
@@ -68,10 +69,14 @@ Before any record is returned, the atomic reader validates:
 - distinct unit-production and upgrade identity domains;
 - exact cash `before + delta == after` and per-player before/after continuity;
 - closed reason values and terminal balance equality for every observed cash chain;
-- ordered, duplicate-free final balances, including explicit players with no Money or no changes;
+- an immutable full engine-player domain, membership of every Task 5 event player, and final balances with exactly the
+  same ordered indices, including explicit zero-cash/no-change and no-Money players;
 - exact science point subtraction and catalog membership for thing templates, upgrades and sciences;
 - legal finite JSON numbers, positive supply amounts and coherent source status; and
-- Task 4 field-specific creation/liveness policy for producer, source, collector, dropoff and special-power target IDs.
+- live currently owned producer/special-power source identities; live collector and dropoff identities owned by the
+  receiving player; creation-only historical warehouse provenance; and resolved supply source distinct from dropoff;
+- every supply handoff immediately followed in record and sequence order by a same-frame, same-player, same-positive-
+  amount `supply_income` cash change, with orphan supply-income cash events rejected.
 
 Catalog or state validation failure discards the buffered trace; no partially validated records escape.
 
@@ -89,9 +94,20 @@ Two later strictness regressions were also captured RED before their fixes:
   **339 passed, 1 failed, 42 deselected**; after representing a player with no Money explicitly, the rerun was
   **340 passed, 42 deselected**.
 
-The final focused Task 5 contract file is **19 passed** and the real-engine Task 5 file is **5 passed**. The latter
+The corrective review round added four source-grounded RED groups before implementation:
+
+- the exact script science call path lacked suppression: **1 failed**, then **1 passed**;
+- the immutable engine-player domain was absent from schema and engine source: **2 failed**, then the focused domain
+  matrix was **12 passed**;
+- event-specific liveness/ownership and atomic supply-cash pairing: **21 failed, 6 passed**, then **27 passed**;
+- the model widened raw integral supply amounts to floats: **1 failed**, then **1 passed** after using a positive
+  integer model matching engine/schema evidence.
+
+The final focused real-engine Task 5 file is **7 passed**. It
 asserts exact observed fixture availability, cash reasons,
 supply-before-cash adjacency, resolved source provenance, queue/terminal subset identity, and final-balance folding.
+It also proves completion balance indices exactly equal the initialized full-player domain and that resolved replay
+slots are a strict subset of that domain on the natural fixture.
 
 ## Replay evidence
 
@@ -129,7 +145,7 @@ Mechanics-only Task 5 availability is exactly:
 
 - unit production: **23 queued, 0 cancelled, 23 completed**;
 - upgrades: **0 queued, 0 cancelled, 0 completed**;
-- sciences: **2** (`SCIENCE_SpyDrone`, `SCIENCE_ScudLauncher`);
+- genuine player-purchase observations after script suppression: **2** (`SCIENCE_SpyDrone`, `SCIENCE_ScudLauncher`);
 - committed special powers: **1** (`SpecialPowerSpyDrone`);
 - supply handoffs: **794**, all source-resolved and each immediately followed by its matching same-frame deposit;
 - cash changes: **864**.
@@ -142,18 +158,19 @@ runtime behavior is covered by compiled authoritative seams plus strict syntheti
 
 ## Verification
 
-Final commands and results:
+Final commands and results (the Python commands were run from `scripts/replay_analyzer/`):
 
-- `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests -m "not engine" -q`
-  - **340 passed, 42 deselected**
-- `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/engine -q`
-  - **41 passed, 1 skipped**
+- `uv run --project . pytest -m "not engine and not ollama" -q`
+  - **377 passed, 44 deselected**
+- `uv run --project . pytest tests/engine -q`
+  - **43 passed, 1 skipped**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
-- `uv run --project scripts/replay_analyzer ruff check scripts/replay_analyzer/src scripts/replay_analyzer/tests`
+- `uv run --project . ruff check src tests`
   - **passed**
-- configured strict `uv run --project scripts/replay_analyzer mypy`
+- configured strict `uv run --project . mypy`
   - **passed, 15 source files**
-- x86 VS 2022 environment plus `cmake --build build/win32 --target z_generals --config Release -- -j 4`
+- x86 VS 2022 `VsDevCmd` environment plus
+  `cmake --build build/win32 --target z_generals --config Release -- -j 4`
   - **passed and linked `generalszh.exe`**
 
 The engine suite includes telemetry-on versus telemetry-off return/stdout/stderr equality, natural normalized double
@@ -161,16 +178,17 @@ run determinism, final cash folding, CRC-stop behavior, and passive open/late/pu
 compiler warnings are unchanged surrounding legacy signedness/enum warnings; no Task 5 compilation error or new
 diagnostic was introduced.
 
-VC6 and MinGW could not be built on this host. Their cached configurations report
-`CMAKE_CXX_COMPILER-NOTFOUND` and `CMAKE_MAKE_PROGRAM-NOTFOUND`. Legacy signatures and member layout remain behind the
-modern guard, and static tests verify that the helper is excluded from VC6 and retains no engine pointer.
+VC6 and MinGW could not be built on this host. `Get-Command` finds neither compiler; the VC6 cache reports
+`CMAKE_CXX_COMPILER-NOTFOUND`, while the MinGW caches either report `CMAKE_MAKE_PROGRAM-NOTFOUND` or contain no
+configured C++ compiler entry. Legacy signatures and member layout remain behind the modern guard, and static tests
+verify that the helper is excluded from VC6 and retains no engine pointer.
 
 ## Minimal scope extensions
 
 Source inspection proved the original four-file brief insufficient. The implementation therefore adds the focused
 modern-only `ReplayEconomy` helper and minimally extends:
 
-- `ReplayTelemetry` completion/initialization and `GameLogic` reset;
+- `ReplayTelemetry` completion/initialization, the independent `PlayerList` domain snapshot, and `GameLogic` reset;
 - `Money.h` ownership tracking;
 - the authoritative warehouse pickup, science purchase and committed special-power seams;
 - the unit/upgrade/construction/sell/script reason call sites;

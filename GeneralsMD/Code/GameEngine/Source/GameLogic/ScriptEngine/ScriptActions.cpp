@@ -6105,6 +6105,10 @@ void ScriptActions::doPlayerPurchaseScience(const AsciiString& playerName, const
 	ScienceType science = TheScienceStore->getScienceFromInternalName(scienceName);
 	if (science == SCIENCE_INVALID)
 		return;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Suppress only this script-owned committed science purchase. (#TBD)
+	ReplaySciencePurchaseSuppressionScope replayScienceSuppression;
+#endif
 	pPlayer->attemptToPurchaseScience(science);
 }
 

@@ -53,7 +53,18 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "map_assets": [],
     }
     if version == 2:
-        payload["final_cash_balances"] = [{"player_index": 0, "has_money": True, "balance": 0}]
+        cash_after = [
+            record["payload"]["after"]
+            for record in prior_records
+            if record["event_type"] == "cash_changed"
+        ]
+        payload["final_cash_balances"] = [
+            {
+                "player_index": 0,
+                "has_money": True,
+                "balance": cash_after[-1] if cash_after else 0,
+            }
+        ]
     return _record(
         version,
         len(prior_records),
@@ -134,7 +145,12 @@ def _v2_players(reference: dict[str, object]) -> dict[str, object]:
                 "is_resolved_local_player": True if occupied else None,
             }
         )
-    return {"header_local_slot_index": 0, "slots": slots, "game_data_catalog": reference}
+    return {
+        "header_local_slot_index": 0,
+        "slots": slots,
+        "engine_player_indices": [0],
+        "game_data_catalog": reference,
+    }
 
 
 def _creation(
@@ -585,21 +601,6 @@ def _destroyed_provenance_events() -> list[tuple[str, dict[str, object]]]:
             },
         ),
         (
-            "production_queued",
-            {
-                "production_id": 7,
-                "engine_production_id": 7,
-                "producer_object_id": 101,
-                "player_index": 0,
-                "template_name": "AmericaVehicleHumvee",
-                "queue_position": 0,
-                "queued_frame": 0,
-                "cost": 0,
-                "quantity": 1,
-                "state": "queued",
-            },
-        ),
-        (
             "construction_started",
             {
                 "object_id": 202,
@@ -621,10 +622,24 @@ def test_v2_accepts_destroyed_objects_as_historical_provenance(
     if event == "construction_started":
         current["initial_status"] = ["UNDER_CONSTRUCTION"]
     events = [*_destroyed_provenance_events(), ("object_created", current), (event, payload)]
+    if event == "supply_collected":
+        events.append(
+            (
+                "cash_changed",
+                {
+                    "player_index": 0,
+                    "before": 0,
+                    "delta": 75,
+                    "after": 75,
+                    "track_income": True,
+                    "reason": "supply_income",
+                },
+            )
+        )
 
     records = tuple(iter_validated_trace(_trace(tmp_path, events, f"historical-{event}.ndjson")))
 
-    assert records[-2].event_type == event
+    assert event in [record.event_type for record in records[2:-1]]
 
 
 @pytest.mark.parametrize(

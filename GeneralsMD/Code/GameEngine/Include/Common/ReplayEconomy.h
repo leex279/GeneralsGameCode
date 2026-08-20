@@ -38,6 +38,18 @@ private:
 	ReplayCashReasonScope &operator=(const ReplayCashReasonScope &) = delete;
 };
 
+// TheSuperHackers @feature Leex 20/08/2026 Exclude one script-owned science purchase from player-action telemetry. (#TBD)
+class ReplaySciencePurchaseSuppressionScope
+{
+public:
+	ReplaySciencePurchaseSuppressionScope();
+	~ReplaySciencePurchaseSuppressionScope();
+
+private:
+	ReplaySciencePurchaseSuppressionScope(const ReplaySciencePurchaseSuppressionScope &) = delete;
+	ReplaySciencePurchaseSuppressionScope &operator=(const ReplaySciencePurchaseSuppressionScope &) = delete;
+};
+
 // TheSuperHackers @feature Leex 20/08/2026 Export passive trace-local economy and queue observations without retaining engine pointers. (#TBD)
 class ReplayEconomy
 {
@@ -65,8 +77,11 @@ public:
 
 private:
 	friend class ReplayCashReasonScope;
+	friend class ReplaySciencePurchaseSuppressionScope;
 	static void pushCashReason(ReplayCashReason reason);
 	static void popCashReason();
+	static void pushSciencePurchaseSuppression();
+	static void popSciencePurchaseSuppression();
 };
 
 #endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

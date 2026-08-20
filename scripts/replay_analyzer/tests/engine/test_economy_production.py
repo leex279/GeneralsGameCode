@@ -13,6 +13,7 @@ from generals_replay_analyzer.telemetry.model import (
     CashChangedPayload,
     CashChangedRecord,
     CompleteRecord,
+    PlayersInitializedRecord,
     SupplyCollectedRecord,
     TelemetryRecord,
 )
@@ -109,6 +110,19 @@ def test_natural_crc_stopping_replay_exposes_engine_cash_chain_and_final_balance
 
     assert trace.is_file(), completed.stdout[-2000:] + completed.stderr[-2000:]
     records = tuple(iter_validated_trace(trace))
+    players = next(record for record in records if isinstance(record, PlayersInitializedRecord))
+    complete = records[-1]
+    assert isinstance(complete, CompleteRecord)
+    assert players.payload.engine_player_indices is not None
+    assert complete.payload.final_cash_balances is not None
+    final_domain = [entry.player_index for entry in complete.payload.final_cash_balances]
+    assert final_domain == players.payload.engine_player_indices
+    resolved_slots = {
+        slot.player_index
+        for slot in players.payload.slots or []
+        if slot.player_index is not None
+    }
+    assert resolved_slots < set(players.payload.engine_player_indices)
     cash = [record for record in records if record.event_type == "cash_changed"]
     counts = Counter(record.event_type for record in records)
     expected = {"production_queued": 1, "cash_changed": 6}
@@ -240,6 +254,44 @@ def test_special_power_use_is_observed_only_at_the_canonical_committed_trigger(r
     assert "ReplayEconomy::observeSpecialPowerUsed" not in dispatch
     assert trigger.index("ReplayEconomy::observeSpecialPowerUsed") < trigger.index("startPowerRecharge()")
     assert "triggerSpecialPower( obj->getPosition(), obj )" in dispatch
+
+
+def test_script_purchase_science_suppresses_only_its_committed_purchase_call(repository_root: Path) -> None:
+    script_actions = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp"
+    ).read_text(encoding="utf-8")
+    purchase_action = script_actions.split("void ScriptActions::doPlayerPurchaseScience", maxsplit=1)[1].split(
+        "void ScriptActions::doPlayerSetScienceAvailability", maxsplit=1
+    )[0]
+    economy = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEconomy.cpp"
+    ).read_text(encoding="utf-8")
+    science_observer = economy.split("void ReplayEconomy::observeSciencePurchased", maxsplit=1)[1].split(
+        "void ReplayEconomy::observeSpecialPowerUsed", maxsplit=1
+    )[0]
+
+    suppression = "ReplaySciencePurchaseSuppressionScope replayScienceSuppression"
+    committed_purchase = "pPlayer->attemptToPurchaseScience(science)"
+    assert purchase_action.count(suppression) == 1
+    assert purchase_action.count(committed_purchase) == 1
+    assert purchase_action.index(suppression) < purchase_action.index(committed_purchase)
+    assert "sciencePurchaseSuppressionDepth > 0" in science_observer
+    assert science_observer.index("sciencePurchaseSuppressionDepth > 0") < science_observer.index(
+        "ReplayTelemetry::emit"
+    )
+
+
+def test_players_initialized_freezes_the_full_engine_player_domain(repository_root: Path) -> None:
+    source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayGameDataExport.cpp"
+    ).read_text(encoding="utf-8")
+    prepare = source.split("Bool ReplayGameDataExport::prepareCatalog", maxsplit=1)[1].split(
+        "void ReplayGameDataExport::emitPlayersInitialized", maxsplit=1
+    )[0]
+
+    assert "buildEnginePlayerIndices" in prepare
+    assert prepare.index("buildEnginePlayerIndices") < prepare.index("s_playersPayload =")
+    assert '\\"engine_player_indices\\"' in prepare
 
 
 def test_replay_economy_state_is_modern_only_and_retains_no_engine_pointers(repository_root: Path) -> None:

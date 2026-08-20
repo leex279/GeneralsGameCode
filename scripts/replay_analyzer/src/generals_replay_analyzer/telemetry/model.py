@@ -119,6 +119,7 @@ class PlayersInitializedPayload(OpenPayload):
     players: list[PlayerObservation] | None = None
     header_local_slot_index: int | None = None
     slots: list[PlayerSlotObservation] | None = None
+    engine_player_indices: list[NonNegativeInt] | None = None
     game_data_catalog: "GameDataCatalogReference | MapAssetReference"
 
     @model_validator(mode="after")
@@ -129,6 +130,10 @@ class PlayersInitializedPayload(OpenPayload):
             return self
         if self.players is not None:
             raise ValueError("v2 slots and historical v1 players cannot coexist")
+        if not self.engine_player_indices:
+            raise ValueError("v2 players_initialized must contain the full engine player domain")
+        if self.engine_player_indices != sorted(set(self.engine_player_indices)):
+            raise ValueError("engine_player_indices must be strictly ordered and unique")
         if [slot.slot_index for slot in self.slots] != list(range(8)):
             raise ValueError("slots must be ordered by slot_index 0 through 7")
         resolved_indexes = [slot.player_index for slot in self.slots if slot.player_index is not None]
@@ -271,7 +276,7 @@ class SupplyCollectedPayload(OpenPayload):
     source_status: Literal["resolved", "unknown", "mixed"] | None = None
     dropoff_object_id: NonNegativeInt | None = None
     player_index: NonNegativeInt
-    amount: NonNegativeFloat
+    amount: Annotated[int, Field(gt=0)]
     location: RawPosition
 
 

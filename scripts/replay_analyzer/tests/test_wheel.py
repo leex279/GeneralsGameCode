@@ -118,7 +118,12 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
             **manifest,
             "sequence": 1,
             "event_type": "players_initialized",
-            "payload": {"header_local_slot_index": None, "slots": slots, "game_data_catalog": reference},
+            "payload": {
+                "header_local_slot_index": None,
+                "slots": slots,
+                "engine_player_indices": [0],
+                "game_data_catalog": reference,
+            },
         }
         prior = b"".join(
             (json.dumps(record, separators=(",", ":")) + "\\n").encode() for record in [manifest, players]

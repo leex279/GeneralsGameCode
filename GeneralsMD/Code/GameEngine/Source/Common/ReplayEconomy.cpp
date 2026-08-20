@@ -75,6 +75,7 @@ namespace
 		std::map<Int, std::vector<Int>> supplySources;
 		unsigned long long nextProductionId = 1;
 		unsigned long long nextUpgradeId = 1;
+		Int sciencePurchaseSuppressionDepth = 0;
 		Bool initialized = FALSE;
 	};
 
@@ -239,6 +240,16 @@ ReplayCashReasonScope::~ReplayCashReasonScope()
 	ReplayEconomy::popCashReason();
 }
 
+ReplaySciencePurchaseSuppressionScope::ReplaySciencePurchaseSuppressionScope()
+{
+	ReplayEconomy::pushSciencePurchaseSuppression();
+}
+
+ReplaySciencePurchaseSuppressionScope::~ReplaySciencePurchaseSuppressionScope()
+{
+	ReplayEconomy::popSciencePurchaseSuppression();
+}
+
 void ReplayEconomy::pushCashReason(ReplayCashReason reason)
 {
 	s_state.cashReasons.push_back({ reason, FALSE });
@@ -249,6 +260,19 @@ void ReplayEconomy::popCashReason()
 	if (!s_state.cashReasons.empty())
 	{
 		s_state.cashReasons.pop_back();
+	}
+}
+
+void ReplayEconomy::pushSciencePurchaseSuppression()
+{
+	++s_state.sciencePurchaseSuppressionDepth;
+}
+
+void ReplayEconomy::popSciencePurchaseSuppression()
+{
+	if (s_state.sciencePurchaseSuppressionDepth > 0)
+	{
+		--s_state.sciencePurchaseSuppressionDepth;
 	}
 }
 
@@ -385,7 +409,7 @@ void ReplayEconomy::observeUpgradeCompleted(const Object *producer, const AsciiS
 void ReplayEconomy::observeSciencePurchased(Int playerIndex, const AsciiString &scienceName,
 	Int purchaseCostPoints, Int pointsBefore, Int pointsAfter)
 {
-	if (!ReplayTelemetry::isEnabled() || purchaseCostPoints <= 0)
+	if (!ReplayTelemetry::isEnabled() || purchaseCostPoints <= 0 || s_state.sciencePurchaseSuppressionDepth > 0)
 	{
 		return;
 	}
