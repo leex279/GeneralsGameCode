@@ -31,8 +31,8 @@ LIFECYCLE_EVENTS = {
     "object_destroyed",
 }
 REFERENCE_FIELDS: dict[str, tuple[str, ...]] = {
-    "construction_started": ("object_id",),
-    "construction_completed": ("object_id",),
+    "construction_started": ("object_id", "producer_object_id", "builder_object_id"),
+    "construction_completed": ("object_id", "producer_object_id", "builder_object_id"),
     "owner_changed": ("object_id",),
     "sold": ("object_id",),
     "object_destroyed": ("object_id",),
@@ -107,7 +107,13 @@ def _referenced_ids(event_type: str, payload: Mapping[str, object]) -> Iterator[
         value = payload.get(field)
         if isinstance(value, int):
             yield value
-    if event_type == "order_issued":
+    if event_type == "object_created":
+        context = payload.get("creation_context")
+        if isinstance(context, Mapping):
+            producer = context.get("producer_object_id")
+            if isinstance(producer, int):
+                yield producer
+    elif event_type == "order_issued":
         selected = payload.get("selected_object_ids")
         if isinstance(selected, list):
             yield from (value for value in selected if isinstance(value, int))
@@ -118,7 +124,6 @@ def _referenced_ids(event_type: str, payload: Mapping[str, object]) -> Iterator[
 
 def _assert_creation_precedes_every_reference(records: tuple[TelemetryRecord, ...]) -> None:
     created: set[int] = set()
-    destroyed: set[int] = set()
     for record in records:
         event_type = record.event_type
         payload = record.payload.model_dump()
@@ -129,9 +134,6 @@ def _assert_creation_precedes_every_reference(records: tuple[TelemetryRecord, ..
             continue
         for object_id in _referenced_ids(event_type, payload):
             assert object_id in created, (event_type, object_id)
-            assert object_id not in destroyed, (event_type, object_id)
-        if event_type == "object_destroyed":
-            destroyed.add(payload["object_id"])
 
 
 def _normalized_bytes(trace: Path) -> bytes:
@@ -269,21 +271,107 @@ def test_every_lifecycle_instrumentation_seam_has_the_required_feature_comment(r
         "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp",
         "GeneralsMD/Code/GameEngine/Source/GameLogic/Object/Object.cpp",
         "GeneralsMD/Code/GameEngine/Source/GameLogic/Object/Update/ProductionUpdate.cpp",
+        "GeneralsMD/Code/GameEngine/Source/Common/Thing/Thing.cpp",
         "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp",
     )
     call_names = (
         "ReplayEntityLifecycle::reset",
         "ReplayEntityLifecycle::observeRegistered",
         "ReplayEntityLifecycle::observeTransform",
+        "ReplayEntityLifecycle::observePositionSet",
         "ReplayEntityLifecycle::observeTeamChanged",
         "ReplayEntityLifecycle::observeStatusChanged",
         "ReplayEntityLifecycle::observeDestroyed",
         "ReplayEntityLifecycle::initialize",
         "ReplayEntityLifecycle::flushPendingCreations",
         "ReplayEntityCreationScope creationScope",
+        "creationScope.observeReturned",
     )
     for relative_path in paths:
         lines = (repository_root / relative_path).read_text(encoding="utf-8").splitlines()
         for index, line in enumerate(lines):
             if any(call_name in line for call_name in call_names):
                 assert required_comment in "\n".join(lines[max(0, index - 2) : index])
+
+
+def test_first_explicit_position_set_freezes_creation_pose_before_later_transform_updates(
+    repository_root: Path,
+) -> None:
+    thing_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Thing/Thing.cpp"
+    ).read_text(encoding="utf-8")
+    lifecycle_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEntityLifecycle.cpp"
+    ).read_text(encoding="utf-8")
+    set_position = thing_source.split("void Thing::setPosition( const Coord3D *pos )", maxsplit=1)[1].split(
+        "void Thing::setOrientation", maxsplit=1
+    )[0]
+    assert "void ReplayEntityLifecycle::observePositionSet" in lifecycle_source
+    observe_position = lifecycle_source.split(
+        "void ReplayEntityLifecycle::observePositionSet", maxsplit=1
+    )[1].split("void ReplayEntityLifecycle::", maxsplit=1)[0]
+    finalize_creation = lifecycle_source.split("void finalizeCreation", maxsplit=1)[1].split(
+        "CreationMap::iterator findCreation", maxsplit=1
+    )[0]
+    initialize = lifecycle_source.split("void ReplayEntityLifecycle::initialize", maxsplit=1)[1].split(
+        "void ReplayEntityLifecycle::flushPendingCreations", maxsplit=1
+    )[0]
+
+    assert "ReplayEntityLifecycle::observePositionSet(AsObject(this))" in set_position
+    assert set_position.index("ReplayEntityLifecycle::observePositionSet") > set_position.index("m_cachedPos = *pos")
+    assert "if (!it->second.hasPosition)" in observe_position
+    assert "it->second.orientation = object->getOrientation()" in observe_position
+    assert "entry.orientation = object->getOrientation()" not in finalize_creation
+    assert initialize.index("finalizeThrough(~0ULL)") < initialize.index("flushEvents()")
+
+
+def test_direct_creation_source_marks_only_returned_root_after_nested_object_creation(
+    repository_root: Path,
+) -> None:
+    game_logic = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp"
+    ).read_text(encoding="utf-8")
+    lifecycle_header = (
+        repository_root / "GeneralsMD/Code/GameEngine/Include/Common/ReplayEntityLifecycle.h"
+    ).read_text(encoding="utf-8")
+    lifecycle_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEntityLifecycle.cpp"
+    ).read_text(encoding="utf-8")
+    nested_containment = (
+        repository_root
+        / "GeneralsMD/Code/GameEngine/Source/GameLogic/Object/Contain/OverlordContain.cpp"
+    ).read_text(encoding="utf-8")
+    starting_call = game_logic.split("static Object * placeObjectAtPosition", maxsplit=1)[1].split(
+        "static void placeNetworkBuildingsForPlayer", maxsplit=1
+    )[0]
+
+    assert "void observeReturned(const Object *object)" in lifecycle_header
+    assert "s_creationSource" not in lifecycle_source
+    assert "s_directCreationDepth != 0" in lifecycle_source
+    assert starting_call.index("creationScope.observeReturned(obj)") > starting_call.index(
+        "TheThingFactory->newObject"
+    )
+    assert "onObjectCreated()" in nested_containment
+    assert "createPayload()" in nested_containment
+    assert "TheThingFactory->newObject" in nested_containment
+    assert "observeReturned" not in nested_containment
+
+
+def test_initial_construction_transition_uses_registration_identity_snapshot(repository_root: Path) -> None:
+    lifecycle_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEntityLifecycle.cpp"
+    ).read_text(encoding="utf-8")
+    registration = lifecycle_source.split("void ReplayEntityLifecycle::observeRegistered", maxsplit=1)[1].split(
+        "void ReplayEntityLifecycle::", maxsplit=1
+    )[0]
+    finalize_creation = lifecycle_source.split("void finalizeCreation", maxsplit=1)[1].split(
+        "CreationMap::iterator findCreation", maxsplit=1
+    )[0]
+    owner_change = lifecycle_source.split("void ReplayEntityLifecycle::observeTeamChanged", maxsplit=1)[1].split(
+        "void ReplayEntityLifecycle::observeStatusChanged", maxsplit=1
+    )[0]
+
+    assert "entry.initialIdentity = identityForTeam(object->getTeam())" in registration
+    assert "initialConstructionPayload(entry" in finalize_creation
+    assert "constructionPayload(object" not in finalize_creation
+    assert owner_change.index("ensureObjectCreated(object)") < owner_change.index("identityForTeam(newTeam)")

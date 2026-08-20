@@ -5,6 +5,7 @@ import json
 import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from importlib import resources
 from pathlib import Path
 from typing import cast
@@ -72,21 +73,42 @@ class _EntityLifecycleState:
     destroyed: bool = False
 
 
-_OBJECT_REFERENCE_FIELDS: dict[str, tuple[str, ...]] = {
-    "construction_started": ("object_id", "producer_object_id", "builder_object_id"),
-    "construction_completed": ("object_id", "producer_object_id", "builder_object_id"),
-    "owner_changed": ("object_id",),
-    "sold": ("object_id",),
-    "object_destroyed": ("object_id",),
-    "production_queued": ("producer_object_id",),
-    "production_cancelled": ("producer_object_id",),
-    "production_completed": ("producer_object_id",),
-    "supply_collected": ("collector_object_id", "source_object_id"),
-    "damage_applied": ("victim_object_id", "attacker_object_id"),
-    "healing_applied": ("target_object_id",),
-    "veterancy_changed": ("object_id",),
-    "entity_state_changed": ("object_id",),
-    "entity_sample": ("object_id",),
+class _ReferenceRequirement(Enum):
+    """Distinguish current-state subjects from immutable historical provenance."""
+
+    REQUIRES_CREATION = "requires_creation"
+    REQUIRES_ALIVE = "requires_alive"
+
+
+_OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
+    "construction_started": {
+        "object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+        "producer_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+        "builder_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+    },
+    "construction_completed": {
+        "object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+        "producer_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+        "builder_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+    },
+    "owner_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "sold": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "object_destroyed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "production_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "production_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "production_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "supply_collected": {
+        "collector_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+        "source_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+    },
+    "damage_applied": {
+        "victim_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+        "attacker_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+    },
+    "healing_applied": {"target_object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "veterancy_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "entity_state_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "entity_sample": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
 }
 
 
@@ -227,25 +249,31 @@ def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, eng
         )
 
 
-def _referenced_object_ids(event_type: str, payload: Mapping[str, object]) -> Iterator[int]:
+def _referenced_object_ids(
+    event_type: str, payload: Mapping[str, object]
+) -> Iterator[tuple[int, _ReferenceRequirement]]:
     """Yield only fields whose schema semantics are entity identities, never category or production IDs."""
-    for field in _OBJECT_REFERENCE_FIELDS.get(event_type, ()):
+    for field, requirement in _OBJECT_REFERENCE_RULES.get(event_type, {}).items():
         value = payload.get(field)
         if isinstance(value, int):
-            yield value
+            yield value, requirement
     if event_type == "object_created":
         context = payload.get("creation_context")
         if isinstance(context, Mapping):
             producer = context.get("producer_object_id")
             if isinstance(producer, int):
-                yield producer
+                yield producer, _ReferenceRequirement.REQUIRES_CREATION
     elif event_type == "order_issued":
         selected = payload.get("selected_object_ids")
         if isinstance(selected, list):
-            yield from (value for value in selected if isinstance(value, int))
+            yield from (
+                (value, _ReferenceRequirement.REQUIRES_ALIVE)
+                for value in selected
+                if isinstance(value, int)
+            )
         target = payload.get("target_object_id")
         if isinstance(target, int):
-            yield target
+            yield target, _ReferenceRequirement.REQUIRES_ALIVE
 
 
 def _validate_object_reference(
@@ -254,6 +282,7 @@ def _validate_object_reference(
     sequence: int,
     event_type: str,
     object_id: int,
+    requirement: _ReferenceRequirement,
     entities: dict[int, _EntityLifecycleState],
 ) -> None:
     state = entities.get(object_id)
@@ -264,7 +293,7 @@ def _validate_object_reference(
             sequence,
             f"event {event_type} references object_id {object_id} before object_created",
         )
-    if state.destroyed:
+    if requirement is _ReferenceRequirement.REQUIRES_ALIVE and state.destroyed:
         raise _error(
             path,
             line_number,
@@ -298,8 +327,16 @@ def _validate_v2_entity_lifecycle(
     if (event_type == "object_created" or references) and players_initialized_count != 1:
         raise _error(path, line_number, record.sequence, f"event {event_type} must follow players_initialized")
 
-    for object_id in references:
-        _validate_object_reference(path, line_number, record.sequence, event_type, object_id, entities)
+    for object_id, requirement in references:
+        _validate_object_reference(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            object_id,
+            requirement,
+            entities,
+        )
 
     if event_type == "object_created":
         object_id = cast(int, payload["object_id"])

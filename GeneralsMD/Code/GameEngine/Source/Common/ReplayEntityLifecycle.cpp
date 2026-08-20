@@ -52,6 +52,12 @@ namespace
 		ObjectStatusMaskType initialStatus;
 		std::vector<std::string> kindOfFlags;
 		ReplayEntityCreationSource source;
+		ObjectID initialProducerId;
+		ObjectID initialBuilderId;
+		Bool hasInitialProducerPlayer;
+		Int initialProducerPlayer;
+		Bool hasInitialResponsiblePlayer;
+		Int initialResponsiblePlayer;
 		Bool hasPosition;
 		Coord3D position;
 		Real orientation;
@@ -73,7 +79,7 @@ namespace
 	CreationMap s_creations;
 	std::vector<PendingEvent> s_pendingEvents;
 	unsigned long long s_nextObservationOrder = 0;
-	ReplayEntityCreationSource s_creationSource = REPLAY_ENTITY_CREATION_UNKNOWN;
+	UnsignedInt s_directCreationDepth = 0;
 
 	UnsignedInt currentFrame()
 	{
@@ -258,9 +264,19 @@ namespace
 			+ ",\"responsible_player_index\":" + responsiblePlayer(object) + "}";
 	}
 
+	std::string initialConstructionPayload(const CreationEntry &entry)
+	{
+		return "{\"object_id\":" + std::to_string(static_cast<UnsignedInt>(entry.objectId))
+			+ ",\"previous_state\":\"not_present\",\"new_state\":\"under_construction\"," + identityFields(entry.initialIdentity)
+			+ ",\"producer_object_id\":" + nullableObjectId(entry.initialProducerId)
+			+ ",\"builder_object_id\":" + nullableObjectId(entry.initialBuilderId)
+			+ ",\"responsible_player_index\":"
+			+ nullableInt(entry.hasInitialResponsiblePlayer, entry.initialResponsiblePlayer) + "}";
+	}
+
 	void flushEvents()
 	{
-		if (!ReplayTelemetry::isInitialized() || s_pendingEvents.empty())
+		if (!ReplayTelemetry::isInitialized() || s_directCreationDepth != 0 || s_pendingEvents.empty())
 		{
 			return;
 		}
@@ -284,7 +300,6 @@ namespace
 			ReplayTelemetry::fail("lifecycle_creation_missing", "registered entity was unavailable before object_created could be finalized");
 			return;
 		}
-		entry.orientation = object->getOrientation();
 		std::string orientation;
 		if (!jsonNumber(entry.orientation, orientation))
 		{
@@ -302,10 +317,6 @@ namespace
 			}
 			position = "{\"x\":" + x + ",\"y\":" + y + ",\"z\":" + z + "}";
 		}
-		const ObjectID producerId = object->getProducerID();
-		const Object *producer = producerId != INVALID_ID && TheGameLogic != nullptr
-			? TheGameLogic->findObjectByID(producerId) : nullptr;
-		const Player *producerPlayer = producer != nullptr ? producer->getControllingPlayer() : nullptr;
 		const std::string payload = "{\"object_id\":" + std::to_string(static_cast<UnsignedInt>(entry.objectId))
 			+ ",\"template_name\":" + jsonString(entry.templateName.c_str()) + "," + identityFields(entry.initialIdentity)
 			+ ",\"position_status\":" + jsonString(entry.hasPosition ? "placed" : "unplaced")
@@ -314,14 +325,14 @@ namespace
 			+ ",\"initial_status\":" + stringArray(statusNames(entry.initialStatus))
 			+ ",\"creation_source\":" + jsonString(creationSourceName(entry.source))
 			+ ",\"creation_context\":{\"registration_frame\":" + std::to_string(entry.registrationFrame)
-			+ ",\"producer_object_id\":" + nullableObjectId(producerId)
+			+ ",\"producer_object_id\":" + nullableObjectId(entry.initialProducerId)
 			+ ",\"producer_player_index\":"
-			+ (producerPlayer != nullptr ? std::to_string(producerPlayer->getPlayerIndex()) : "null") + "}}";
+			+ nullableInt(entry.hasInitialProducerPlayer, entry.initialProducerPlayer) + "}}";
 		queueEvent(entry.creationOrder, entry.registrationFrame, "object_created", payload);
 		if (entry.initialConstructionOrder != 0)
 		{
 			queueEvent(entry.initialConstructionOrder, entry.registrationFrame, "construction_started",
-				constructionPayload(object, "not_present", "under_construction"));
+				initialConstructionPayload(entry));
 		}
 		entry.finalized = TRUE;
 	}
@@ -333,6 +344,10 @@ namespace
 
 	void finalizeThrough(unsigned long long maximumOrder)
 	{
+		if (s_directCreationDepth != 0)
+		{
+			return;
+		}
 		for (CreationMap::iterator it = s_creations.begin(); it != s_creations.end(); ++it)
 		{
 			CreationEntry &entry = it->second;
@@ -354,20 +369,48 @@ namespace
 }
 
 ReplayEntityCreationScope::ReplayEntityCreationScope(ReplayEntityCreationSource source) :
-	m_previous(ReplayEntityLifecycle::setCreationSource(source))
+	m_source(source)
 {
+	ReplayEntityLifecycle::beginDirectCreation();
 }
 
 ReplayEntityCreationScope::~ReplayEntityCreationScope()
 {
-	ReplayEntityLifecycle::setCreationSource(m_previous);
+	ReplayEntityLifecycle::endDirectCreation();
 }
 
-ReplayEntityCreationSource ReplayEntityLifecycle::setCreationSource(ReplayEntityCreationSource source)
+void ReplayEntityCreationScope::observeReturned(const Object *object)
 {
-	const ReplayEntityCreationSource previous = s_creationSource;
-	s_creationSource = source;
-	return previous;
+	ReplayEntityLifecycle::markCreationSource(object, m_source);
+}
+
+void ReplayEntityLifecycle::beginDirectCreation()
+{
+	++s_directCreationDepth;
+}
+
+void ReplayEntityLifecycle::endDirectCreation()
+{
+	DEBUG_ASSERTCRASH(s_directCreationDepth != 0, ("unbalanced replay entity direct-creation scope"));
+	if (s_directCreationDepth != 0)
+	{
+		--s_directCreationDepth;
+	}
+}
+
+void ReplayEntityLifecycle::markCreationSource(const Object *object, ReplayEntityCreationSource source)
+{
+	CreationMap::iterator it = findCreation(object);
+	if (it == s_creations.end())
+	{
+		return;
+	}
+	if (it->second.finalized)
+	{
+		ReplayTelemetry::fail("creation_source_after_finalization", "direct creation source arrived after object_created finalization");
+		return;
+	}
+	it->second.source = source;
 }
 
 void ReplayEntityLifecycle::reset()
@@ -376,7 +419,7 @@ void ReplayEntityLifecycle::reset()
 	s_creations.clear();
 	s_pendingEvents.clear();
 	s_nextObservationOrder = 0;
-	s_creationSource = REPLAY_ENTITY_CREATION_UNKNOWN;
+	s_directCreationDepth = 0;
 }
 
 void ReplayEntityLifecycle::observeRegistered(const Object *object)
@@ -400,7 +443,31 @@ void ReplayEntityLifecycle::observeRegistered(const Object *object)
 	entry.initialIdentity = identityForTeam(object->getTeam());
 	entry.initialStatus = object->getStatusBits();
 	entry.kindOfFlags = kindOfNames(object->getTemplate());
-	entry.source = s_creationSource;
+	entry.source = REPLAY_ENTITY_CREATION_UNKNOWN;
+	entry.initialProducerId = object->getProducerID();
+	entry.initialBuilderId = object->getBuilderID();
+	entry.hasInitialProducerPlayer = FALSE;
+	entry.initialProducerPlayer = 0;
+	entry.hasInitialResponsiblePlayer = FALSE;
+	entry.initialResponsiblePlayer = 0;
+	const Object *producer = entry.initialProducerId != INVALID_ID && TheGameLogic != nullptr
+		? TheGameLogic->findObjectByID(entry.initialProducerId) : nullptr;
+	const Player *producerPlayer = producer != nullptr ? producer->getControllingPlayer() : nullptr;
+	if (producerPlayer != nullptr)
+	{
+		entry.hasInitialProducerPlayer = TRUE;
+		entry.initialProducerPlayer = producerPlayer->getPlayerIndex();
+	}
+	const ObjectID responsibleId = entry.initialBuilderId != INVALID_ID
+		? entry.initialBuilderId : entry.initialProducerId;
+	const Object *responsible = responsibleId != INVALID_ID && TheGameLogic != nullptr
+		? TheGameLogic->findObjectByID(responsibleId) : nullptr;
+	const Player *responsiblePlayer = responsible != nullptr ? responsible->getControllingPlayer() : nullptr;
+	if (responsiblePlayer != nullptr)
+	{
+		entry.hasInitialResponsiblePlayer = TRUE;
+		entry.initialResponsiblePlayer = responsiblePlayer->getPlayerIndex();
+	}
 	entry.hasPosition = FALSE;
 	entry.position.x = 0.0f;
 	entry.position.y = 0.0f;
@@ -412,6 +479,21 @@ void ReplayEntityLifecycle::observeRegistered(const Object *object)
 	s_creations.insert(std::make_pair(entry.objectId, entry));
 }
 
+void ReplayEntityLifecycle::observePositionSet(const Object *object)
+{
+	CreationMap::iterator it = findCreation(object);
+	if (it == s_creations.end())
+	{
+		return;
+	}
+	if (!it->second.hasPosition)
+	{
+		it->second.position = *object->getPosition();
+		it->second.orientation = object->getOrientation();
+		it->second.hasPosition = TRUE;
+	}
+}
+
 void ReplayEntityLifecycle::observeTransform(const Object *object, Bool positionChanged)
 {
 	CreationMap::iterator it = findCreation(object);
@@ -419,10 +501,10 @@ void ReplayEntityLifecycle::observeTransform(const Object *object, Bool position
 	{
 		return;
 	}
-	it->second.orientation = object->getOrientation();
 	if (positionChanged && !it->second.hasPosition)
 	{
 		it->second.position = *object->getPosition();
+		it->second.orientation = object->getOrientation();
 		it->second.hasPosition = TRUE;
 	}
 }
@@ -496,7 +578,7 @@ void ReplayEntityLifecycle::observeDestroyed(const Object *object)
 	{
 		return;
 	}
-	finalizeCreation(it->second, object);
+	finalizeThrough(it->second.creationOrder);
 	flushEvents();
 	const NullableIdentity identity = identityForTeam(object->getTeam());
 	const std::string payload = "{\"object_id\":" + std::to_string(static_cast<UnsignedInt>(object->getID()))

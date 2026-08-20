@@ -513,9 +513,11 @@ static Object * placeObjectAtPosition(Int slotNum, AsciiString objectTemplateNam
 	Object *obj;
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	{
-		// TheSuperHackers @feature Leex 20/08/2026 Tag the direct starting-object creation call site without owner or template inference. (#TBD)
+		// TheSuperHackers @feature Leex 20/08/2026 Mark only the returned starting-object root without classifying nested callback creations. (#TBD)
 		ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_STARTING_OBJECT);
 		obj = TheThingFactory->newObject( btt, pPlayer->getDefaultTeam() );
+		// TheSuperHackers @feature Leex 20/08/2026 Bind starting-object source only to the root returned by this call. (#TBD)
+		creationScope.observeReturned(obj);
 	}
 #else
 	obj = TheThingFactory->newObject( btt, pPlayer->getDefaultTeam() );
@@ -1777,9 +1779,11 @@ void GameLogic::tryStartNewGame( Bool loadingSaveGame )
 		Object *obj;
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 		{
-			// TheSuperHackers @feature Leex 20/08/2026 Tag bridge registration from the authoritative map-load creation phase. (#TBD)
+			// TheSuperHackers @feature Leex 20/08/2026 Mark only the returned bridge root from the authoritative map-load call site. (#TBD)
 			ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);
 			obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+			// TheSuperHackers @feature Leex 20/08/2026 Bind map source only to the bridge root returned by this call. (#TBD)
+			creationScope.observeReturned(obj);
 		}
 #else
 		obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
@@ -1960,9 +1964,11 @@ void GameLogic::tryStartNewGame( Bool loadingSaveGame )
 			Object *obj;
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 			{
-				// TheSuperHackers @feature Leex 20/08/2026 Tag ordinary object registration from the authoritative map-load creation phase. (#TBD)
+				// TheSuperHackers @feature Leex 20/08/2026 Mark only the returned ordinary map root without classifying nested callback creations. (#TBD)
 				ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);
 				obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );
+				// TheSuperHackers @feature Leex 20/08/2026 Bind map source only to the ordinary root returned by this call. (#TBD)
+				creationScope.observeReturned(obj);
 			}
 #else
 			obj = TheThingFactory->newObject( thingTemplate, team ); //, OBJECT_STATUS_LOADING_FROM_MAP );

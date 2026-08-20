@@ -38,6 +38,9 @@
 #include "Common/Thing.h"
 #include "Common/ThingTemplate.h"
 #include "Common/ThingFactory.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEntityLifecycle.h"
+#endif
 #include "Common/GlobalData.h"
 #include "Common/NameKeyGenerator.h"
 #include "Common/Player.h"
@@ -197,6 +200,10 @@ void Thing::setPosition( const Coord3D *pos )
 		TheTerrainLogic->alignOnTerrain(getOrientation(), *pos, stickToGround, mtx );
 		setTransformMatrix(&mtx);
 	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Freeze the first explicit position-set pose even when coordinates equal the default. (#TBD)
+	ReplayEntityLifecycle::observePositionSet(AsObject(this));
+#endif
 	DEBUG_ASSERTCRASH(!(_isnan(getPosition()->x) || _isnan(getPosition()->y) || _isnan(getPosition()->z)), ("Drawable/Object position NAN! '%s'", m_template->getName().str() ));
 }
 

@@ -818,10 +818,12 @@ UpdateSleepTime ProductionUpdate::update()
 							Object *newObj;
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 							{
-								// TheSuperHackers @feature Leex 20/08/2026 Tag factory output from the authoritative production creation call site. (#TBD)
+								// TheSuperHackers @feature Leex 20/08/2026 Mark only the returned factory-output root without classifying nested callback creations. (#TBD)
 								ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_PLAYER_PRODUCTION);
 								newObj = TheThingFactory->newObject( production->m_objectToProduce,
 									creationBuilding->getControllingPlayer()->getDefaultTeam() );
+								// TheSuperHackers @feature Leex 20/08/2026 Bind production source only to the factory-output root returned by this call. (#TBD)
+								creationScope.observeReturned(newObj);
 							}
 #else
 							newObj = TheThingFactory->newObject( production->m_objectToProduce,

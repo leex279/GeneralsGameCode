@@ -1884,7 +1884,7 @@ void Object::reactToTransformChange(const Matrix3D* oldMtx, const Coord3D* oldPo
 	Bool posDiff = isPosDifferent(oldPos, getPosition());
 	Bool angDiff = isAngleDifferent(oldAngle, getOrientation());
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	// TheSuperHackers @feature Leex 20/08/2026 Copy the first authoritative placement and current orientation without retaining an Object pointer. (#TBD)
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve changed-position composite transforms as a first-placement fallback without retaining an Object pointer. (#TBD)
 	ReplayEntityLifecycle::observeTransform(this, posDiff);
 #endif
 

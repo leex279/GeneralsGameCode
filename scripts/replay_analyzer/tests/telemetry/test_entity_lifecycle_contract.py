@@ -461,3 +461,176 @@ def test_v2_rejects_initial_under_construction_status_without_its_observed_trans
                 _trace(tmp_path, [("object_created", _creation(initial_status=["UNDER_CONSTRUCTION"]))])
             )
         )
+
+
+def test_v2_accepts_registration_identity_for_initial_construction_before_owner_change(tmp_path: Path) -> None:
+    construction = {
+        "object_id": 101,
+        "previous_state": "not_present",
+        "new_state": "under_construction",
+        "owner_player_index": 0,
+        "team_id": 11,
+        "producer_object_id": None,
+        "builder_object_id": None,
+        "responsible_player_index": None,
+    }
+    owner_change = {
+        "object_id": 101,
+        "previous_owner_player_index": 0,
+        "new_owner_player_index": 1,
+        "previous_team_id": 11,
+        "new_team_id": 12,
+    }
+
+    records = tuple(
+        iter_validated_trace(
+            _trace(
+                tmp_path,
+                [
+                    ("object_created", _creation(initial_status=["UNDER_CONSTRUCTION"])),
+                    ("construction_started", construction),
+                    ("owner_changed", owner_change),
+                ],
+                "initial-construction-before-owner-change.ndjson",
+            )
+        )
+    )
+
+    assert [record.event_type for record in records[2:-1]] == [
+        "object_created",
+        "construction_started",
+        "owner_changed",
+    ]
+
+
+def _destroyed_provenance_events() -> list[tuple[str, dict[str, object]]]:
+    destroyed = {
+        "object_id": 101,
+        "previous_state": "alive",
+        "new_state": "destroyed",
+        "owner_player_index": 0,
+        "team_id": 11,
+        "destruction_source": "destroy_object",
+    }
+    return [("object_created", _creation()), ("object_destroyed", destroyed)]
+
+
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        (
+            "damage_applied",
+            {
+                "victim_object_id": 202,
+                "attacker_object_id": 101,
+                "weapon_name": "TestWeapon",
+                "attempted_amount": 1.0,
+                "applied_amount": 1.0,
+                "prior_health": 2.0,
+                "new_health": 1.0,
+                "damage_type": "DAMAGE_NORMAL",
+                "death_type": "DEATH_NORMAL",
+                "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "killing_blow": False,
+            },
+        ),
+        (
+            "supply_collected",
+            {
+                "collector_object_id": 202,
+                "source_object_id": 101,
+                "player_index": 0,
+                "amount": 75.0,
+                "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+            },
+        ),
+        (
+            "production_completed",
+            {
+                "production_id": 7,
+                "producer_object_id": 101,
+                "player_index": 0,
+                "template_name": "AmericaVehicleHumvee",
+            },
+        ),
+        (
+            "construction_started",
+            {
+                "object_id": 202,
+                "previous_state": "not_present",
+                "new_state": "under_construction",
+                "owner_player_index": 0,
+                "team_id": 11,
+                "producer_object_id": 101,
+                "builder_object_id": 101,
+                "responsible_player_index": 0,
+            },
+        ),
+    ],
+)
+def test_v2_accepts_destroyed_objects_as_historical_provenance(
+    tmp_path: Path, event: str, payload: dict[str, object]
+) -> None:
+    current = _creation(object_id=202)
+    if event == "construction_started":
+        current["initial_status"] = ["UNDER_CONSTRUCTION"]
+    events = [*_destroyed_provenance_events(), ("object_created", current), (event, payload)]
+
+    records = tuple(iter_validated_trace(_trace(tmp_path, events, f"historical-{event}.ndjson")))
+
+    assert records[-2].event_type == event
+
+
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        (
+            "damage_applied",
+            {
+                "victim_object_id": 101,
+                "attacker_object_id": None,
+                "weapon_name": None,
+                "attempted_amount": 1.0,
+                "applied_amount": 1.0,
+                "prior_health": 1.0,
+                "new_health": 0.0,
+                "damage_type": "DAMAGE_NORMAL",
+                "death_type": "DEATH_NORMAL",
+                "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "killing_blow": True,
+            },
+        ),
+        (
+            "supply_collected",
+            {
+                "collector_object_id": 101,
+                "source_object_id": 202,
+                "player_index": 0,
+                "amount": 75.0,
+                "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+            },
+        ),
+        (
+            "construction_completed",
+            {
+                "object_id": 101,
+                "previous_state": "under_construction",
+                "new_state": "complete",
+                "owner_player_index": 0,
+                "team_id": 11,
+                "producer_object_id": None,
+                "builder_object_id": None,
+                "responsible_player_index": None,
+            },
+        ),
+    ],
+)
+def test_v2_rejects_destroyed_objects_as_current_subjects(
+    tmp_path: Path, event: str, payload: dict[str, object]
+) -> None:
+    events = _destroyed_provenance_events()
+    if event == "supply_collected":
+        events.insert(1, ("object_created", _creation(object_id=202)))
+
+    with pytest.raises(TelemetryTraceValidationError, match="after object_destroyed"):
+        tuple(iter_validated_trace(_trace(tmp_path, [*events, (event, payload)], f"dead-subject-{event}.ndjson")))
