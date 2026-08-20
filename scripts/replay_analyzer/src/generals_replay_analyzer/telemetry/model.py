@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, NonNegative
 
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
+UINT32_MAX = 4_294_967_295
+UInt32 = Annotated[int, Field(ge=0, le=UINT32_MAX)]
+PositiveUInt32 = Annotated[int, Field(gt=0, le=UINT32_MAX)]
 EVENT_TYPES = (
     "manifest", "players_initialized", "object_created", "construction_started", "construction_completed",
     "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled",
@@ -266,9 +269,9 @@ class SpecialPowerUsedPayload(OpenPayload):
 
 class CashChangedPayload(OpenPayload):
     player_index: NonNegativeInt
-    before: int
+    before: UInt32
     delta: int
-    after: int
+    after: UInt32
     track_income: bool
     reason: str = Field(min_length=1)
 
@@ -279,7 +282,7 @@ class SupplyCollectedPayload(OpenPayload):
     source_status: Literal["resolved", "unknown", "mixed"] | None = None
     dropoff_object_id: NonNegativeInt | None = None
     player_index: NonNegativeInt
-    amount: Annotated[int, Field(gt=0)]
+    amount: PositiveUInt32
     location: RawPosition
 
 
@@ -392,7 +395,7 @@ class FinalCashBalance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     player_index: NonNegativeInt
     has_money: bool
-    balance: NonNegativeInt | None
+    balance: UInt32 | None
 
     @model_validator(mode="after")
     def _require_balance_presence(self) -> "FinalCashBalance":

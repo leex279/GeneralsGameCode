@@ -6,11 +6,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from generals_replay_analyzer.telemetry.model import (
+    CashChangedPayload,
+    FinalCashBalance,
+    SupplyCollectedPayload,
+)
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "823e4567-e89b-12d3-a456-426614174000"
 ENGINE_IDENTITY = "zero-hour-economy-test-exe-00000000-ini-00000000"
+UINT32_MAX = 4_294_967_295
 
 
 def _record(sequence: int, event_type: str, payload: dict[str, object], frame: int = 0) -> dict[str, object]:
@@ -839,6 +846,199 @@ def _supply_only_trace(
     )
 
 
+def _cash_only_trace(
+    directory: Path,
+    *,
+    before: int,
+    after: int,
+    delta: int,
+    final_balance: int,
+    name: str,
+) -> Path:
+    records = _base_records(directory)
+    records.append(
+        _record(
+            6,
+            "cash_changed",
+            {
+                "player_index": 0,
+                "before": before,
+                "delta": delta,
+                "after": after,
+                "track_income": False,
+                "reason": "unknown",
+            },
+            frame=15,
+        )
+    )
+    return _finish(
+        directory / name,
+        records,
+        [{"player_index": 0, "has_money": True, "balance": final_balance}],
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "field"),
+    [
+        (
+            lambda: CashChangedPayload(
+                player_index=0,
+                before=UINT32_MAX + 1,
+                delta=-1,
+                after=UINT32_MAX,
+                track_income=False,
+                reason="unknown",
+            ),
+            "before",
+        ),
+        (
+            lambda: CashChangedPayload(
+                player_index=0,
+                before=UINT32_MAX,
+                delta=1,
+                after=UINT32_MAX + 1,
+                track_income=False,
+                reason="unknown",
+            ),
+            "after",
+        ),
+        (
+            lambda: SupplyCollectedPayload(
+                collector_object_id=20,
+                source_object_id=30,
+                source_status="resolved",
+                dropoff_object_id=40,
+                player_index=0,
+                amount=UINT32_MAX + 1,
+                location={"x": 40.0, "y": 2.0, "z": 0.0},
+            ),
+            "amount",
+        ),
+        (
+            lambda: FinalCashBalance(
+                player_index=0,
+                has_money=True,
+                balance=UINT32_MAX + 1,
+            ),
+            "balance",
+        ),
+    ],
+)
+def test_v2_models_reject_values_above_engine_uint32_range(
+    factory: Callable[[], object],
+    field: str,
+) -> None:
+    with pytest.raises(ValidationError, match=field):
+        factory()
+
+
+def test_v2_models_accept_exact_engine_uint32_boundaries() -> None:
+    cash = CashChangedPayload(
+        player_index=0,
+        before=0,
+        delta=UINT32_MAX,
+        after=UINT32_MAX,
+        track_income=False,
+        reason="unknown",
+    )
+    supply = SupplyCollectedPayload(
+        collector_object_id=20,
+        source_object_id=30,
+        source_status="resolved",
+        dropoff_object_id=40,
+        player_index=0,
+        amount=UINT32_MAX,
+        location={"x": 40.0, "y": 2.0, "z": 0.0},
+    )
+
+    assert (cash.before, cash.after) == (0, UINT32_MAX)
+    assert supply.amount == UINT32_MAX
+    assert FinalCashBalance(player_index=0, has_money=True, balance=0).balance == 0
+    assert FinalCashBalance(player_index=0, has_money=True, balance=UINT32_MAX).balance == UINT32_MAX
+
+
+@pytest.mark.parametrize("field", ["before", "after"])
+def test_reader_rejects_cash_values_above_engine_uint32_range(tmp_path: Path, field: str) -> None:
+    if field == "before":
+        trace = _cash_only_trace(
+            tmp_path,
+            before=UINT32_MAX + 1,
+            after=UINT32_MAX,
+            delta=-1,
+            final_balance=UINT32_MAX,
+            name="cash-before-overflow.ndjson",
+        )
+    else:
+        trace = _cash_only_trace(
+            tmp_path,
+            before=UINT32_MAX,
+            after=UINT32_MAX + 1,
+            delta=1,
+            final_balance=UINT32_MAX + 1,
+            name="cash-after-overflow.ndjson",
+        )
+
+    with pytest.raises(TelemetryTraceValidationError, match=rf"payload\.{field}.*maximum"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_rejects_supply_amount_above_engine_uint32_range(tmp_path: Path) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=0,
+        amount=UINT32_MAX + 1,
+        after=0,
+        delta=0,
+        name="supply-amount-overflow.ndjson",
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match=r"payload\.amount.*maximum"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_rejects_final_balance_above_engine_uint32_range(tmp_path: Path) -> None:
+    records = _base_records(tmp_path)
+    trace = _finish(
+        tmp_path / "final-balance-overflow.ndjson",
+        records,
+        [{"player_index": 0, "has_money": True, "balance": UINT32_MAX + 1}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match=r"final_cash_balances.*balance.*maximum"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_rejects_out_of_range_modulo_congruent_supply_tuple(tmp_path: Path) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=UINT32_MAX + 1,
+        amount=1,
+        after=1,
+        delta=-UINT32_MAX,
+        name="impossible-modulo-congruent-supply.ndjson",
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match=r"payload\.before.*maximum"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_accepts_exact_engine_uint32_boundaries(tmp_path: Path) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=0,
+        amount=UINT32_MAX,
+        after=UINT32_MAX,
+        delta=UINT32_MAX,
+        name="supply-uint32-boundaries.ndjson",
+    )
+
+    records = tuple(iter_validated_trace(trace))
+    cash = next(record for record in records if record.event_type == "cash_changed")
+    assert (cash.payload.before, cash.payload.after) == (0, UINT32_MAX)
+    assert records[-1].payload.final_cash_balances[0].balance == UINT32_MAX
+
+
 def test_reader_requires_supply_income_pair_to_track_income(tmp_path: Path) -> None:
     trace = _supply_only_trace(
         tmp_path,
@@ -857,17 +1057,17 @@ def test_reader_requires_supply_income_pair_to_track_income(tmp_path: Path) -> N
 def test_reader_accepts_unsigned_32_bit_supply_deposit_wraparound(tmp_path: Path) -> None:
     trace = _supply_only_trace(
         tmp_path,
-        before=4_294_967_290,
-        amount=10,
-        after=4,
-        delta=-4_294_967_286,
+        before=UINT32_MAX,
+        amount=1,
+        after=0,
+        delta=-UINT32_MAX,
         name="supply-uint32-wrap.ndjson",
     )
 
     records = tuple(iter_validated_trace(trace))
     cash = next(record for record in records if record.event_type == "cash_changed")
-    assert cash.payload.delta == -4_294_967_286
-    assert cash.payload.after == 4
+    assert cash.payload.delta == -UINT32_MAX
+    assert cash.payload.after == 0
 
 
 @pytest.mark.parametrize(

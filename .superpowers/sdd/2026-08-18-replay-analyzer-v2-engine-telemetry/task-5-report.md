@@ -63,9 +63,11 @@ delta.
 ## Contract and reader validation
 
 Telemetry v2 now strictly defines the Task 5 payloads, closed cash reasons, finite positive supply data, coherent
-resolved/null source status, stable queue identity, and non-empty ordered `final_cash_balances`. Historical v1 remains
-readable because the shared Pydantic model keeps the new completion field optional while the v2 schema and reader
-require it.
+resolved/null source status, stable queue identity, and non-empty ordered `final_cash_balances`. Every writer-backed
+cash `before`/`after`, positive supply `amount`, and present final `balance` is bounded to the engine's exact
+`uint32_t` range (`0..4_294_967_295`) in both the JSON Schema and Pydantic model before modular supply validation.
+Historical v1 remains readable because its schema is unchanged and the shared model keeps the new completion field
+optional while the v2 schema and reader require it.
 
 Before any record is returned, the atomic reader validates:
 
@@ -122,6 +124,13 @@ false `track_income` supply pair accepted, and one valid uint32 wraparound depos
 then passed **13 tests**, and the combined Task 5/v2/lifecycle contracts passed **129 tests**. Literal malformed
 amount/before/after cases remain rejected, while the wrap case preserves the exact negative wide delta.
 
+The third corrective review round captured **9 failed, 3 passed** before production changes: direct Pydantic models
+and the v2 reader accepted all four `UINT32_MAX + 1` writer-backed fields, including an impossible out-of-range tuple
+that happened to satisfy modular arithmetic. After adding exact model/schema maxima, the same focused selection was
+**12 passed**. The complete Task 5 contract was **79 passed**, including zero/max boundaries, maximum positive supply,
+and the exact `UINT32_MAX + 1` wrap from max cash to zero. The wheel smoke test also proves the installed v2 schema is
+byte-identical to the canonical contract.
+
 ## Replay evidence
 
 Tracked replay fixture:
@@ -174,7 +183,7 @@ runtime behavior is covered by compiled authoritative seams plus strict syntheti
 Final commands and results (the Python commands were run from `scripts/replay_analyzer/`):
 
 - `uv run --project . pytest -m "not engine and not ollama" -q`
-  - **388 passed, 44 deselected**
+  - **399 passed, 44 deselected**
 - `uv run --project . pytest tests/engine -q`
   - **43 passed, 1 skipped**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
@@ -185,7 +194,7 @@ Final commands and results (the Python commands were run from `scripts/replay_an
 - x86 VS 2022 `VsDevCmd` environment plus
   `cmake --build build/win32 --target z_generals --config Release -- -j 4`
   - **passed and linked `generalszh.exe`** in the preceding corrective commit; not rerun in round 2 because the writer
-    and all C++ sources are byte-unchanged
+    and all C++ sources are byte-unchanged; not rerun in round 3 for the same source-grounded reason
 
 The engine suite includes telemetry-on versus telemetry-off return/stdout/stderr equality, natural normalized double
 run determinism, final cash folding, CRC-stop behavior, and passive open/late/publish writer-failure paths. Existing
@@ -211,5 +220,9 @@ modern-only `ReplayEconomy` helper and minimally extends:
 
 The second corrective round changes only the Python model/reader, their focused contracts, and this report; the
 authoritative C++ writer remains unchanged after source inspection confirmed its queue snapshot and uint32 types.
+
+The third corrective round changes only the canonical v2 JSON Schema, shared Pydantic money types, focused contract
+and wheel tests, and this report. The wheel force-includes the canonical schema verbatim; no separately maintained
+packaged schema can drift. The v1 JSON Schema, reader logic, writer, and all C++ sources remain unchanged.
 
 The five inherited stat-only worktree paths were not edited or staged.
