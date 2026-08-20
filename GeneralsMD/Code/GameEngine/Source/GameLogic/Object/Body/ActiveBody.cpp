@@ -36,6 +36,9 @@
 #include "Common/GameState.h"
 #include "Common/GlobalData.h"
 #include "Common/PlayerList.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
+#endif
 #include "Common/Team.h"
 #include "Common/Thing.h"
 #include "Common/ThingTemplate.h"
@@ -358,6 +361,9 @@ void ActiveBody::attemptDamage( DamageInfo *damageInfo )
 		return;
 
 	Object *damager = TheGameLogic->findObjectByID( damageInfo->in.m_sourceID );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	const Real telemetryPriorHealth = m_currentHealth;
+#endif
 	if( damager )
 	{
 		//Store the template so later if the attacking object dies, we use script conditions to look at the
@@ -565,6 +571,10 @@ void ActiveBody::attemptDamage( DamageInfo *damageInfo )
 		// record the actual damage done from this, and when it happened
 		damageInfo->out.m_actualDamageDealt = amount;
 		damageInfo->out.m_actualDamageClipped = m_prevHealth - m_currentHealth;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Observe applied health damage before callbacks and onDie can destroy the victim. (#TBD)
+		ReplayCombat::observeDamage(obj, damageInfo, telemetryPriorHealth, m_currentHealth);
+#endif
 
 		// then copy the whole DamageInfo struct for easy lookup
 		// (object pointer loses scope as soon as atteptdamage's caller ends)
@@ -811,6 +821,9 @@ void ActiveBody::attemptHealing( DamageInfo *damageInfo )
 	}
 
 	Object* obj = getObject();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	const Real telemetryPriorHealth = m_currentHealth;
+#endif
 
 	// srj sez: sorry, once yer dead, yer dead.
 	// Special case for bridges, cause the system now things they're dead
@@ -837,6 +850,10 @@ void ActiveBody::attemptHealing( DamageInfo *damageInfo )
 		// record the actual damage done from this, and when it happened
 		damageInfo->out.m_actualDamageDealt = amount;
 		damageInfo->out.m_actualDamageClipped = m_prevHealth - m_currentHealth;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Observe healing only after authoritative health clipping has completed. (#TBD)
+		ReplayCombat::observeHealing(obj, damageInfo, telemetryPriorHealth, m_currentHealth);
+#endif
 
 		//then copy the whole DamageInfo struct for easy lookup
 		//(object pointer loses scope as soon as atteptdamage's caller ends)

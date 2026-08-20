@@ -41,6 +41,7 @@
 #include "Common/PlayerList.h"
 #include "Common/Radar.h"
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
 #include "Common/ReplayEntityLifecycle.h"
 #endif
 #include "Common/SpecialPower.h"
@@ -3250,6 +3251,11 @@ void Object::onVeterancyLevelChanged( VeterancyLevel oldLevel, VeterancyLevel ne
 
 	if (doAnimation)
 		createVeterancyLevelFX(oldLevel, newLevel);
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Observe veterancy only after the object has applied its authoritative level state. (#TBD)
+	ReplayCombat::observeVeterancy(this, oldLevel, newLevel);
+#endif
 }
 
 void Object::createVeterancyLevelFX(VeterancyLevel oldLevel, VeterancyLevel newLevel)

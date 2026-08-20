@@ -1151,11 +1151,13 @@ if(NOT IS_VS6_BUILD)
     # TheSuperHackers @feature Leex 18/08/2026 Keep the replay parse observer out of VC6 retail-validation builds.
     # TheSuperHackers @feature Leex 18/08/2026 Compile passive replay telemetry and its semantic catalog only in the modern analyzer block. (#TBD)
     list(APPEND GAMEENGINE_SRC
+		Include/Common/ReplayCombat.h
         Include/Common/ReplayGameDataExport.h
         Include/Common/ReplayEconomy.h
         Include/Common/ReplayEntityLifecycle.h
         Include/Common/ReplayParseDump.h
         Include/Common/ReplayTelemetry.h
+		Source/Common/ReplayCombat.cpp
         Source/Common/ReplayGameDataExport.cpp
         Source/Common/ReplayEconomy.cpp
         Source/Common/ReplayEntityLifecycle.cpp

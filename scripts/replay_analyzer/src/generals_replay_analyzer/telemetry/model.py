@@ -1,5 +1,6 @@
 """Pydantic models for immutable, versioned replay telemetry observations."""
 
+import math
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from pydantic import (
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 UINT32_MAX = 4_294_967_295
+FLOAT32_MAX = 3.402823466e38
 EVENT_TYPES = (
     "manifest", "players_initialized", "object_created", "construction_started", "construction_completed",
     "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled",
@@ -320,13 +322,19 @@ class SupplyCollectedPayload(OpenPayload):
 
 class DamageAppliedPayload(OpenPayload):
     victim_object_id: NonNegativeInt
+    victim_player_index: NonNegativeInt | None = None
     attacker_object_id: NonNegativeInt | None
+    attacker_player_index: NonNegativeInt | None = None
+    attacker_template_name: Annotated[str, Field(min_length=1)] | None = None
     weapon_name: str | None
-    attempted_amount: NonNegativeFloat
-    applied_amount: NonNegativeFloat
-    prior_health: NonNegativeFloat
-    new_health: NonNegativeFloat
+    attempted_amount: Annotated[float, Field(ge=-FLOAT32_MAX, le=FLOAT32_MAX)]
+    calculated_amount: Annotated[float, Field(gt=0, le=FLOAT32_MAX)] | None = None
+    applied_amount: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    prior_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    new_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    damage_type_id: NonNegativeInt | None = None
     damage_type: str = Field(min_length=1)
+    death_type_id: NonNegativeInt | None = None
     death_type: str = Field(min_length=1)
     location: RawPosition
     killing_blow: bool
@@ -334,24 +342,54 @@ class DamageAppliedPayload(OpenPayload):
 
 class HealingAppliedPayload(OpenPayload):
     target_object_id: NonNegativeInt
-    applied_amount: NonNegativeFloat
-    prior_health: NonNegativeFloat
-    new_health: NonNegativeFloat
+    target_player_index: NonNegativeInt | None = None
+    source_object_id: NonNegativeInt | None = None
+    source_player_index: NonNegativeInt | None = None
+    attempted_amount: Annotated[float, Field(ge=-FLOAT32_MAX, le=FLOAT32_MAX)] | None = None
+    calculated_amount: Annotated[float, Field(gt=0, le=FLOAT32_MAX)] | None = None
+    applied_amount: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    prior_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    new_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    location: RawPosition | None = None
 
 
 class VeterancyChangedPayload(OpenPayload):
     object_id: NonNegativeInt
-    previous_level: int
-    new_level: int
+    owner_player_index: NonNegativeInt | None = None
+    previous_level_id: NonNegativeInt | None = None
+    previous_level: int | Literal["REGULAR", "VETERAN", "ELITE", "HEROIC"]
+    new_level_id: NonNegativeInt | None = None
+    new_level: int | Literal["REGULAR", "VETERAN", "ELITE", "HEROIC"]
 
 
 class PlayerStatusPayload(OpenPayload):
     player_index: NonNegativeInt
+    previous_status: Literal["active"] | None = None
+    new_status: Literal["defeated", "surrendered", "disconnected"] | None = None
+    source: Literal[
+        "victory_conditions",
+        "script_action",
+        "replay_command",
+        "replay_header_disconnect_plus_executed_surrender",
+    ] | None = None
+    replay_slot_index: Annotated[int, Field(ge=0, le=7)] | None = None
 
 
 class MatchOutcomePayload(OpenPayload):
-    outcome: str = Field(min_length=1)
-    winner_player_index: NonNegativeInt | None
+    outcome: Annotated[str, Field(min_length=1)] | None = None
+    winner_player_index: NonNegativeInt | None = None
+    status: Literal["decided", "unknown"] | None = None
+    source: Literal["victory_conditions", "unavailable"] | None = None
+    winner_player_indices: list[NonNegativeInt] | None = None
+    loser_player_indices: list[NonNegativeInt] | None = None
+    engine_player_indices: list[NonNegativeInt] | None = None
+    terminal_reason: Literal["clean_completion", "crc_mismatch", "replay_truncated", "interrupted"] | None = None
+    quit_early: bool | None = None
+    replay_header_desync: bool | None = None
+    replay_header_disconnected_slots: list[Annotated[int, Field(ge=0, le=7)]] | None = None
+    crc_mismatch: bool | None = None
+    crc_mismatch_frame: NonNegativeInt | None = None
+    clean_shutdown: bool | None = None
 
 
 class OrderIssuedPayload(OpenPayload):
@@ -448,7 +486,11 @@ class CompletePayload(OpenPayload):
     command_count: NonNegativeInt
     event_counts: dict[str, NonNegativeInt]
     crc_mismatch: bool
+    crc_mismatch_frame: NonNegativeInt | None = None
     replay_truncated: bool
+    quit_early: bool | None = None
+    replay_header_desync: bool | None = None
+    replay_header_disconnected_slots: list[Annotated[int, Field(ge=0, le=7)]] | None = None
     clean_shutdown: bool
     writer_error: str | None
     trace_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -487,6 +529,16 @@ def _require_v2_payload_fields(payload: BaseModel, field_names: set[str]) -> Non
     missing = sorted(field_names - payload.model_fields_set)
     if missing:
         raise ValueError(f"v2 lifecycle payload is missing required fields: {', '.join(missing)}")
+
+
+def _require_v2_closed_payload(payload: BaseModel, nested_fields: tuple[str, ...] = ()) -> None:
+    unexpected = sorted((payload.model_extra or {}).keys())
+    for field_name in nested_fields:
+        nested = getattr(payload, field_name)
+        if isinstance(nested, BaseModel):
+            unexpected.extend(f"{field_name}.{name}" for name in sorted((nested.model_extra or {}).keys()))
+    if unexpected:
+        raise ValueError(f"v2 payload contains unexpected fields: {', '.join(unexpected)}")
 
 
 class ObjectCreatedRecord(TelemetryEnvelope):
@@ -639,35 +691,203 @@ class DamageAppliedRecord(TelemetryEnvelope):
     event_type: Literal["damage_applied"]
     payload: DamageAppliedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_damage(self) -> "DamageAppliedRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload, ("location",))
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "victim_player_index",
+                "attacker_player_index",
+                "attacker_template_name",
+                "calculated_amount",
+                "damage_type_id",
+                "death_type_id",
+            },
+        )
+        if self.payload.victim_object_id == 0 or self.payload.attacker_object_id == 0:
+            raise ValueError("v2 combat object IDs must be greater than zero")
+        if self.payload.attacker_object_id is None and (
+            self.payload.attacker_player_index is not None or self.payload.attacker_template_name is not None
+        ):
+            raise ValueError("attacker identity fields require attacker_object_id")
+        calculated = self.payload.calculated_amount
+        if calculated is None or calculated <= 0 or self.payload.applied_amount <= 0 or self.payload.prior_health <= 0:
+            raise ValueError("v2 damage requires a positive calculated, applied, and prior-health transition")
+        if self.payload.applied_amount > calculated and not math.isclose(
+            self.payload.applied_amount, calculated, rel_tol=1e-6, abs_tol=1e-5
+        ):
+            raise ValueError("applied damage cannot exceed authoritative calculated damage")
+        expected_applied = self.payload.prior_health - self.payload.new_health
+        if not math.isclose(self.payload.applied_amount, expected_applied, rel_tol=1e-6, abs_tol=1e-5):
+            raise ValueError("damage health arithmetic does not match applied_amount")
+        if self.payload.killing_blow != (self.payload.new_health == 0):
+            raise ValueError("killing_blow must exactly describe the positive-to-zero health transition")
+        return self
+
 
 class HealingAppliedRecord(TelemetryEnvelope):
     event_type: Literal["healing_applied"]
     payload: HealingAppliedPayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_healing(self) -> "HealingAppliedRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload, ("location",))
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "target_player_index",
+                "source_object_id",
+                "source_player_index",
+                "attempted_amount",
+                "calculated_amount",
+                "location",
+            },
+        )
+        if self.payload.target_object_id == 0 or self.payload.source_object_id == 0:
+            raise ValueError("v2 healing object IDs must be greater than zero")
+        if self.payload.source_object_id is None and self.payload.source_player_index is not None:
+            raise ValueError("source_player_index requires source_object_id")
+        calculated = self.payload.calculated_amount
+        if calculated is None or calculated <= 0 or self.payload.applied_amount <= 0:
+            raise ValueError("v2 healing requires a positive calculated and applied transition")
+        if self.payload.applied_amount > calculated and not math.isclose(
+            self.payload.applied_amount, calculated, rel_tol=1e-6, abs_tol=1e-5
+        ):
+            raise ValueError("applied healing cannot exceed authoritative calculated healing")
+        expected_applied = self.payload.new_health - self.payload.prior_health
+        if not math.isclose(self.payload.applied_amount, expected_applied, rel_tol=1e-6, abs_tol=1e-5):
+            raise ValueError("healing health arithmetic does not match applied_amount")
+        return self
 
 
 class VeterancyChangedRecord(TelemetryEnvelope):
     event_type: Literal["veterancy_changed"]
     payload: VeterancyChangedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_veterancy(self) -> "VeterancyChangedRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload)
+        _require_v2_payload_fields(
+            self.payload,
+            {"owner_player_index", "previous_level_id", "new_level_id"},
+        )
+        names = ("REGULAR", "VETERAN", "ELITE", "HEROIC")
+        previous_id = self.payload.previous_level_id
+        new_id = self.payload.new_level_id
+        if (
+            self.payload.object_id == 0
+            or previous_id is None
+            or new_id is None
+            or previous_id >= len(names)
+            or new_id >= len(names)
+            or self.payload.previous_level != names[previous_id]
+            or self.payload.new_level != names[new_id]
+            or previous_id == new_id
+        ):
+            raise ValueError("v2 veterancy IDs and stable names must describe one real level change")
+        return self
+
 
 class PlayerDefeatedRecord(TelemetryEnvelope):
     event_type: Literal["player_defeated"]
     payload: PlayerStatusPayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_status(self) -> "PlayerDefeatedRecord":
+        if self.schema_version == 2:
+            _require_v2_closed_payload(self.payload)
+            if (
+                self.payload.previous_status != "active"
+                or self.payload.new_status != "defeated"
+                or self.payload.source not in {"victory_conditions", "script_action"}
+            ):
+                raise ValueError("player_defeated must preserve its authoritative active-to-defeated source")
+        return self
 
 
 class PlayerSurrenderedRecord(TelemetryEnvelope):
     event_type: Literal["player_surrendered"]
     payload: PlayerStatusPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_status(self) -> "PlayerSurrenderedRecord":
+        if self.schema_version == 2:
+            _require_v2_closed_payload(self.payload)
+            if (
+                self.payload.previous_status != "active"
+                or self.payload.new_status != "surrendered"
+                or self.payload.source != "replay_command"
+            ):
+                raise ValueError("player_surrendered must preserve its authoritative replay-command transition")
+        return self
+
 
 class PlayerDisconnectedRecord(TelemetryEnvelope):
     event_type: Literal["player_disconnected"]
     payload: PlayerStatusPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_status(self) -> "PlayerDisconnectedRecord":
+        if self.schema_version == 2:
+            _require_v2_closed_payload(self.payload)
+            if (
+                self.payload.previous_status != "active"
+                or self.payload.new_status != "disconnected"
+                or self.payload.source != "replay_header_disconnect_plus_executed_surrender"
+                or self.payload.replay_slot_index is None
+            ):
+                raise ValueError("player_disconnected requires header metadata plus an executed transition")
+        return self
+
 
 class MatchOutcomeRecord(TelemetryEnvelope):
     event_type: Literal["match_outcome"]
     payload: MatchOutcomePayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_outcome(self) -> "MatchOutcomeRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload)
+        if {"outcome", "winner_player_index"} & self.payload.model_fields_set:
+            raise ValueError("v2 match_outcome cannot contain legacy outcome fields")
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "status",
+                "source",
+                "winner_player_indices",
+                "loser_player_indices",
+                "engine_player_indices",
+                "terminal_reason",
+                "quit_early",
+                "replay_header_desync",
+                "replay_header_disconnected_slots",
+                "crc_mismatch",
+                "crc_mismatch_frame",
+                "clean_shutdown",
+            },
+        )
+        winners = self.payload.winner_player_indices or []
+        losers = self.payload.loser_player_indices or []
+        domain = self.payload.engine_player_indices or []
+        if domain != sorted(set(domain)) or winners != sorted(set(winners)) or losers != sorted(set(losers)):
+            raise ValueError("outcome player indices must be strictly ordered and unique")
+        if set(winners) & set(losers):
+            raise ValueError("winner and loser player indices must be disjoint")
+        if self.payload.status == "decided":
+            if self.payload.source != "victory_conditions" or not winners:
+                raise ValueError("decided outcome requires authoritative victory-condition winners")
+        elif self.payload.source != "unavailable" or winners or losers:
+            raise ValueError("unknown outcome cannot claim winners or losers")
+        return self
 
 
 class OrderIssuedRecord(TelemetryEnvelope):
@@ -693,6 +913,21 @@ class CompleteRecord(TelemetryEnvelope):
     def _require_terminal_frame_match(self) -> "CompleteRecord":
         if self.payload.final_frame != self.frame:
             raise ValueError("complete payload final_frame must equal envelope frame")
+        if self.schema_version == 2:
+            _require_v2_closed_payload(self.payload)
+            _require_v2_payload_fields(
+                self.payload,
+                {
+                    "crc_mismatch_frame",
+                    "quit_early",
+                    "replay_header_desync",
+                    "replay_header_disconnected_slots",
+                },
+            )
+            if self.payload.crc_mismatch != (self.payload.crc_mismatch_frame is not None):
+                raise ValueError("crc_mismatch_frame must be present exactly for a CRC mismatch")
+            if self.payload.clean_shutdown and (self.payload.crc_mismatch or self.payload.replay_truncated):
+                raise ValueError("clean completion cannot also be a CRC mismatch or truncated")
         return self
 
 

@@ -43,6 +43,9 @@
 #include "Common/MessageStream.h"
 #include "Common/MultiplayerSettings.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
+#endif
 #include "Common/BuildAssistant.h"
 #include "Common/SpecialPower.h"
 #include "Common/ThingTemplate.h"
@@ -2258,6 +2261,10 @@ bool GameLogic::onSetBeaconText(MAYBE_UNUSED GameMessage *msg, AIGroupPtr &curre
 bool GameLogic::onSelfDestruct(MAYBE_UNUSED GameMessage *msg)
 {
 	Player *msgPlayer = getMessagePlayer(msg);
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Attribute only executed surrender commands to the resulting player transition. (#TBD)
+	ReplayPlayerTransitionScope replayPlayerTransition(REPLAY_PLAYER_SURRENDERED);
+#endif
 
 	if (msg->getArgument(0)->boolean)
 	{

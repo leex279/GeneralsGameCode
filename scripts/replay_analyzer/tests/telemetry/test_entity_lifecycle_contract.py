@@ -53,6 +53,14 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "map_assets": [],
     }
     if version == 2:
+        payload.update(
+            {
+                "crc_mismatch_frame": None,
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
+            }
+        )
         cash_after = [
             record["payload"]["after"]
             for record in prior_records
@@ -71,6 +79,28 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         len(prior_records),
         "complete",
         payload,
+    )
+
+
+def _outcome(sequence: int, engine_player_indices: list[int]) -> dict[str, object]:
+    return _record(
+        2,
+        sequence,
+        "match_outcome",
+        {
+            "status": "unknown",
+            "source": "unavailable",
+            "winner_player_indices": [],
+            "loser_player_indices": [],
+            "engine_player_indices": engine_player_indices,
+            "terminal_reason": "clean_completion",
+            "quit_early": False,
+            "replay_header_desync": False,
+            "replay_header_disconnected_slots": [],
+            "crc_mismatch": False,
+            "crc_mismatch_frame": None,
+            "clean_shutdown": True,
+        },
     )
 
 
@@ -238,6 +268,7 @@ def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: st
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
     records.extend(_record(2, sequence, event, payload) for sequence, (event, payload) in enumerate(events, 2))
+    records.append(_outcome(len(records), [0, 1]))
     records.append(_completion(2, records))
     return _write_records(tmp_path / name, records)
 
@@ -245,7 +276,7 @@ def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: st
 def test_v2_accepts_one_ordered_lifecycle_with_explicit_nullable_identity_and_states(tmp_path: Path) -> None:
     records = tuple(iter_validated_trace(_trace(tmp_path, _lifecycle_payloads())))
 
-    assert [record.event_type for record in records[2:-1]] == [event for event, _ in _lifecycle_payloads()]
+    assert [record.event_type for record in records[2:-2]] == [event for event, _ in _lifecycle_payloads()]
 
 
 def test_v2_accepts_explicit_unplaced_unknown_creation_without_fabricated_coordinates(tmp_path: Path) -> None:
@@ -338,16 +369,22 @@ def test_v2_rejects_ambiguous_or_invalid_creation_identity(
         ),
         (
             "damage_applied",
-            {
-                "victim_object_id": 101,
-                "attacker_object_id": None,
-                "weapon_name": None,
-                "attempted_amount": 1.0,
-                "applied_amount": 1.0,
+                {
+                    "victim_object_id": 101,
+                    "victim_player_index": 0,
+                    "attacker_object_id": None,
+                    "attacker_player_index": None,
+                    "attacker_template_name": None,
+                    "weapon_name": None,
+                    "attempted_amount": 1.0,
+                    "calculated_amount": 1.0,
+                    "applied_amount": 1.0,
                 "prior_health": 2.0,
                 "new_health": 1.0,
-                "damage_type": "DAMAGE_NORMAL",
-                "death_type": "DEATH_NORMAL",
+                    "damage_type": "DAMAGE_NORMAL",
+                    "damage_type_id": 0,
+                    "death_type": "DEATH_NORMAL",
+                    "death_type_id": 0,
                 "location": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "killing_blow": False,
             },
@@ -551,7 +588,7 @@ def test_v2_accepts_registration_identity_for_initial_construction_before_owner_
         )
     )
 
-    assert [record.event_type for record in records[2:-1]] == [
+    assert [record.event_type for record in records[2:-2]] == [
         "object_created",
         "construction_started",
         "owner_changed",
@@ -575,16 +612,22 @@ def _destroyed_provenance_events() -> list[tuple[str, dict[str, object]]]:
     [
         (
             "damage_applied",
-            {
-                "victim_object_id": 202,
-                "attacker_object_id": 101,
-                "weapon_name": "TestWeapon",
-                "attempted_amount": 1.0,
-                "applied_amount": 1.0,
+                {
+                    "victim_object_id": 202,
+                    "victim_player_index": 0,
+                    "attacker_object_id": 101,
+                    "attacker_player_index": None,
+                    "attacker_template_name": "AmericaVehicleHumvee",
+                    "weapon_name": "TestWeapon",
+                    "attempted_amount": 1.0,
+                    "calculated_amount": 1.0,
+                    "applied_amount": 1.0,
                 "prior_health": 2.0,
                 "new_health": 1.0,
-                "damage_type": "DAMAGE_NORMAL",
-                "death_type": "DEATH_NORMAL",
+                    "damage_type": "DAMAGE_NORMAL",
+                    "damage_type_id": 0,
+                    "death_type": "DEATH_NORMAL",
+                    "death_type_id": 0,
                 "location": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "killing_blow": False,
             },
@@ -640,7 +683,7 @@ def test_v2_accepts_destroyed_objects_as_historical_provenance(
 
     records = tuple(iter_validated_trace(_trace(tmp_path, events, f"historical-{event}.ndjson")))
 
-    assert event in [record.event_type for record in records[2:-1]]
+    assert event in [record.event_type for record in records[2:-2]]
 
 
 @pytest.mark.parametrize(
@@ -648,16 +691,22 @@ def test_v2_accepts_destroyed_objects_as_historical_provenance(
     [
         (
             "damage_applied",
-            {
-                "victim_object_id": 101,
-                "attacker_object_id": None,
-                "weapon_name": None,
-                "attempted_amount": 1.0,
-                "applied_amount": 1.0,
+                {
+                    "victim_object_id": 101,
+                    "victim_player_index": 0,
+                    "attacker_object_id": None,
+                    "attacker_player_index": None,
+                    "attacker_template_name": None,
+                    "weapon_name": None,
+                    "attempted_amount": 1.0,
+                    "calculated_amount": 1.0,
+                    "applied_amount": 1.0,
                 "prior_health": 1.0,
                 "new_health": 0.0,
-                "damage_type": "DAMAGE_NORMAL",
-                "death_type": "DEATH_NORMAL",
+                    "damage_type": "DAMAGE_NORMAL",
+                    "damage_type_id": 0,
+                    "death_type": "DEATH_NORMAL",
+                    "death_type_id": 0,
                 "location": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "killing_blow": True,
             },

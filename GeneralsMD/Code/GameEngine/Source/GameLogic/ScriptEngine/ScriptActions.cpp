@@ -40,6 +40,7 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/Radar.h"									// For TheRadar
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
 #include "Common/ReplayEconomy.h"
 #endif
 #include "Common/SpecialPower.h"
@@ -2587,6 +2588,10 @@ void ScriptActions::doPlayerKill(const AsciiString& playerName)
 	if (!pPlayer) {
 		return;
 	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Attribute script-owned killPlayer transitions without inferring a replay command. (#TBD)
+	ReplayPlayerTransitionScope replayPlayerTransition(REPLAY_PLAYER_SCRIPT_DEFEATED);
+#endif
 	pPlayer->killPlayer();
 }
 

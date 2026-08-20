@@ -131,19 +131,48 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                 "game_data_catalog": reference,
             },
         }
+        outcome = {
+            **manifest,
+            "sequence": 2,
+            "event_type": "match_outcome",
+            "payload": {
+                "status": "unknown",
+                "source": "unavailable",
+                "winner_player_indices": [],
+                "loser_player_indices": [],
+                "engine_player_indices": [0],
+                "terminal_reason": "clean_completion",
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
+                "crc_mismatch": False,
+                "crc_mismatch_frame": None,
+                "clean_shutdown": True,
+            },
+        }
         prior = b"".join(
-            (json.dumps(record, separators=(",", ":")) + "\\n").encode() for record in [manifest, players]
+            (json.dumps(record, separators=(",", ":")) + "\\n").encode()
+            for record in [manifest, players, outcome]
         )
         complete = {
             **manifest,
-            "sequence": 2,
+            "sequence": 3,
             "event_type": "complete",
             "payload": {
                 "final_frame": 0,
                 "command_count": 0,
-                "event_counts": {"manifest": 1, "players_initialized": 1, "complete": 1},
+                "event_counts": {
+                    "manifest": 1,
+                    "players_initialized": 1,
+                    "match_outcome": 1,
+                    "complete": 1,
+                },
                 "crc_mismatch": False,
+                "crc_mismatch_frame": None,
                 "replay_truncated": False,
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
                 "clean_shutdown": True,
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
@@ -156,6 +185,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
         assert [record.event_type for record in iter_validated_trace(trace)] == [
             "manifest",
             "players_initialized",
+            "match_outcome",
             "complete",
         ]
         """

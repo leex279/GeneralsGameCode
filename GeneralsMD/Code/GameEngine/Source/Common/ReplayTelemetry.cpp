@@ -5,6 +5,7 @@
 #include "Common/ReplayTelemetry.h"
 
 #include "Common/GlobalData.h"
+#include "Common/ReplayCombat.h"
 #include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
@@ -396,6 +397,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_replayLocalSlotIndex = -1;
 	s_initialized = FALSE;
 	ReplayGameDataExport::reset();
+	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local combat and terminal observations before a new replay. (#TBD)
+	ReplayCombat::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local economy and queue identities before a new replay. (#TBD)
 	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local entity snapshots whenever telemetry is reconfigured. (#TBD)
@@ -449,6 +452,7 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	{
 		return;
 	}
+	ReplayCombat::reset();
 
 	s_sequence = 0;
 	s_commandCount = 0;
@@ -497,6 +501,8 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	s_mapIdentity = header.filename;
 	s_initialSeed = 0;
 	s_replayLocalSlotIndex = header.localPlayerIndex;
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve replay terminal metadata separately from observed executed player transitions. (#TBD)
+	ReplayCombat::observeReplayHeader(header);
 	if (TheRecorder != nullptr && TheRecorder->getGameInfo() != nullptr)
 	{
 		s_mapIdentity = TheRecorder->getGameInfo()->getMap();
@@ -537,6 +543,8 @@ void ReplayTelemetry::initialize()
 	}
 	s_initialized = TRUE;
 	ReplayGameDataExport::emitPlayersInitialized();
+	// TheSuperHackers @feature Leex 20/08/2026 Freeze the authoritative player domain after publishing the matching snapshot. (#TBD)
+	ReplayCombat::initialize();
 	// TheSuperHackers @feature Leex 20/08/2026 Preserve manifest-first ordering while flushing pre-initialization entity snapshots. (#TBD)
 	ReplayEntityLifecycle::initialize();
 	// TheSuperHackers @feature Leex 20/08/2026 Flush immutable pre-initialization cash only after entity creation evidence. (#TBD)
@@ -600,17 +608,21 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 		return;
 	}
 
-	flushOutput();
-	++s_eventCounts["complete"];
 	const Bool crcMismatch = TheRecorder != nullptr && TheRecorder->sawCRCMismatch();
 	const Bool replayTruncated = !cleanShutdown && !crcMismatch;
+	// TheSuperHackers @feature Leex 20/08/2026 Emit exactly one authoritative outcome immediately before trace completion. (#TBD)
+	ReplayCombat::emitMatchOutcome(finalFrame, cleanShutdown, replayTruncated, crcMismatch);
+	flushOutput();
+	++s_eventCounts["complete"];
 	const std::string writerError = s_writerError.isEmpty() ? "null" : jsonString(s_writerError);
 	// TheSuperHackers @feature Leex 20/08/2026 Reconcile every observed cash chain against terminal engine Money state. (#TBD)
 	const AsciiString finalCashBalances = ReplayEconomy::finalCashBalancesJson();
+	const AsciiString combatCompletionFields = ReplayCombat::completionFieldsJson(cleanShutdown, replayTruncated, crcMismatch);
 	const std::string payload = "{\"final_frame\":" + std::to_string(finalFrame)
 		+ ",\"command_count\":" + std::to_string(s_commandCount)
 		+ ",\"event_counts\":" + eventCountsJson()
 		+ ",\"crc_mismatch\":" + (crcMismatch ? "true" : "false")
+		+ "," + combatCompletionFields.str()
 		+ ",\"replay_truncated\":" + (replayTruncated ? "true" : "false")
 		+ ",\"clean_shutdown\":" + (cleanShutdown ? "true" : "false")
 		+ ",\"writer_error\":" + writerError

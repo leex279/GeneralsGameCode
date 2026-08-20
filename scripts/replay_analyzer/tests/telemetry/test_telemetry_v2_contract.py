@@ -55,12 +55,42 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "map_assets": [],
     }
     if version == 2:
-        payload["final_cash_balances"] = [{"player_index": 0, "has_money": True, "balance": 0}]
+        payload.update(
+            {
+                "crc_mismatch_frame": None,
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
+                "final_cash_balances": [{"player_index": 0, "has_money": True, "balance": 0}],
+            }
+        )
     return _record(
         version,
         len(prior_records),
         "complete",
         payload,
+    )
+
+
+def _outcome(sequence: int, engine_player_indices: list[int] | None = None) -> dict[str, object]:
+    return _record(
+        2,
+        sequence,
+        "match_outcome",
+        {
+            "status": "unknown",
+            "source": "unavailable",
+            "winner_player_indices": [],
+            "loser_player_indices": [],
+            "engine_player_indices": engine_player_indices or [0],
+            "terminal_reason": "clean_completion",
+            "quit_early": False,
+            "replay_header_desync": False,
+            "replay_header_disconnected_slots": [],
+            "crc_mismatch": False,
+            "crc_mismatch_frame": None,
+            "clean_shutdown": True,
+        },
     )
 
 
@@ -216,6 +246,7 @@ def _write_v2_trace(
     payloads = [_v2_players(reference)] if player_payloads is None else player_payloads
     records = [_record(2, 0, "manifest", _v2_manifest(reference))]
     records.extend(_record(2, index, "players_initialized", payload) for index, payload in enumerate(payloads, start=1))
+    records.append(_outcome(len(records)))
     records.append(_completion(2, records))
     return _write_records(directory / name, records)
 
@@ -232,7 +263,10 @@ def _write_v2_trace_with_player_numeric_token(directory: Path, token: str, name:
     marker = b'"x":1.0'
     assert marker in player_line
     player_line = player_line.replace(marker, b'"x":' + token.encode("ascii"), 1)
-    prior = manifest_line + player_line
+    outcome = _outcome(len(records))
+    records.append(outcome)
+    outcome_line = json.dumps(outcome, separators=(",", ":")).encode("utf-8") + b"\n"
+    prior = manifest_line + player_line + outcome_line
     completion = _completion(2, records)
     completion["payload"]["trace_sha256"] = hashlib.sha256(prior).hexdigest()
     completion_line = json.dumps(completion, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -313,12 +347,14 @@ def test_reader_accepts_v2_only_with_a_catalog_and_one_complete_slot_snapshot(tm
         _record(2, 0, "manifest", _v2_manifest(reference)),
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
+    records.append(_outcome(len(records)))
     records.append(_completion(2, records))
 
     validated = tuple(iter_validated_trace(_write_records(tmp_path / "v2.ndjson", records)))
     assert [record.event_type for record in validated] == [
         "manifest",
         "players_initialized",
+        "match_outcome",
         "complete",
     ]
     slot_states = [slot.slot_state for slot in validated[1].payload.slots]
@@ -419,7 +455,7 @@ def test_v2_reader_recomputes_exact_completion_event_counts_before_exposing_reco
 
     with pytest.raises(
         TelemetryTraceValidationError,
-        match=r"record 3 sequence 2 schema path payload\.event_counts",
+        match=r"record 4 sequence 3 schema path payload\.event_counts",
     ):
         next(iter_validated_trace(tampered))
 
@@ -518,6 +554,7 @@ def test_reader_accepts_finite_trace_exponent_boundaries(tmp_path: Path, token: 
     assert [record.event_type for record in iter_validated_trace(trace)] == [
         "manifest",
         "players_initialized",
+        "match_outcome",
         "complete",
     ]
 
@@ -528,4 +565,4 @@ def test_reader_accepts_finite_catalog_exponent_boundaries(tmp_path: Path, token
     reference = _write_catalog_with_numeric_token(tmp_path, token)
     trace = _write_v2_trace(tmp_path, reference, name=f"finite-catalog-{token.replace('-', 'm')}.ndjson")
 
-    assert len(tuple(iter_validated_trace(trace))) == 3
+    assert len(tuple(iter_validated_trace(trace))) == 4

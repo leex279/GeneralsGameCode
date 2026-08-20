@@ -39,6 +39,9 @@
 #include "Common/PlayerTemplate.h"
 #include "Common/Radar.h"
 #include "Common/Recorder.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
+#endif
 
 #include "GameClient/InGameUI.h"
 #include "GameClient/Diplomacy.h"
@@ -226,6 +229,10 @@ void VictoryConditions::update()
 			}
 
 			// destroy any remaining units (infantry if its a short game, for example)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 20/08/2026 Attribute killPlayer only to the authoritative victory-condition defeat transition. (#TBD)
+			ReplayPlayerTransitionScope replayPlayerTransition(REPLAY_PLAYER_DEFEATED);
+#endif
 			p->killPlayer();
 			PopulateInGameDiplomacyPopup();
 		}

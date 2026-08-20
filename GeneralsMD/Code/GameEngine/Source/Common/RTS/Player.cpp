@@ -62,6 +62,7 @@
 #include "Common/Radar.h"
 #include "Common/ResourceGatheringManager.h"
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayCombat.h"
 #include "Common/ReplayEconomy.h"
 #endif
 #include "Common/Team.h"
@@ -2032,6 +2033,9 @@ void Player::setUnitsShouldHunt(Bool unitsShouldHunt, CommandSourceType source)
 //=============================================================================
 void Player::killPlayer()
 {
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	const Bool replayPlayerWasActive = isPlayerActive();
+#endif
 	PlayerTeamList::iterator it = m_playerTeamPrototypes.begin();
 	for (; it != m_playerTeamPrototypes.end(); ++it) {
 		for (DLINK_ITERATOR<Team> iter = (*it)->iterate_TeamInstanceList(); !iter.done(); iter.advance()) {
@@ -2044,6 +2048,13 @@ void Player::killPlayer()
 	}
 
 	m_isPlayerDead = TRUE; // this is so OCLs don't ever again spawn useful units for us.
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (replayPlayerWasActive && !(TheGameLogic->isInSinglePlayerGame() && getPlayerType() == PLAYER_COMPUTER))
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Observe the authoritative active-to-dead player state change at its assignment. (#TBD)
+		ReplayCombat::observePlayerTerminalTransition(this);
+	}
+#endif
 
 	for (it = m_playerTeamPrototypes.begin(); it != m_playerTeamPrototypes.end(); ++it) {
 		for (DLINK_ITERATOR<Team> iter = (*it)->iterate_TeamInstanceList(); !iter.done(); iter.advance()) {

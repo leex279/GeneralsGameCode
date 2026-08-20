@@ -26,6 +26,7 @@
 
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
+#include "Common/ReplayCombat.h"
 #include "Common/ReplayParseDump.h"
 #include "Common/ReplayTelemetry.h"
 #endif
@@ -1124,6 +1125,10 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 			// Note: We subtract the queue size from the frame number. This way we calculate the correct frame
 			// the mismatch first happened in case the NetCRCInterval is set to 1 during the game.
 			const UnsignedInt mismatchFrame = TheGameLogic->getFrame() - m_crcInfo.GetQueueSize() - 1;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 20/08/2026 Capture the first authoritative replay CRC mismatch frame before completion. (#TBD)
+			ReplayCombat::observeCRCMismatch(mismatchFrame);
+#endif
 
 			// Now also prints a UI message for it.
 			const UnicodeString mismatchDetailsStr = TheGameText->FETCH_OR_SUBSTITUTE("GUI:CRCMismatchDetails", L"InGame:%8.8X Replay:%8.8X Frame:%d");

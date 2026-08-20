@@ -201,6 +201,30 @@ def _base_records(directory: Path) -> list[dict[str, object]]:
 
 
 def _finish(path: Path, records: list[dict[str, object]], balances: list[dict[str, object]]) -> Path:
+    records[:] = [record for record in records if record["event_type"] != "match_outcome"]
+    players = next(record for record in records if record["event_type"] == "players_initialized")
+    domain = players["payload"]["engine_player_indices"]
+    records.append(
+        _record(
+            len(records),
+            "match_outcome",
+            {
+                "status": "unknown",
+                "source": "unavailable",
+                "winner_player_indices": [],
+                "loser_player_indices": [],
+                "engine_player_indices": domain,
+                "terminal_reason": "clean_completion",
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
+                "crc_mismatch": False,
+                "crc_mismatch_frame": None,
+                "clean_shutdown": True,
+            },
+            frame=20,
+        )
+    )
     prior = b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
     counts: dict[str, int] = {}
     for record in records:
@@ -216,7 +240,11 @@ def _finish(path: Path, records: list[dict[str, object]], balances: list[dict[st
                 "command_count": 1,
                 "event_counts": counts,
                 "crc_mismatch": False,
+                "crc_mismatch_frame": None,
                 "replay_truncated": False,
+                "quit_early": False,
+                "replay_header_desync": False,
+                "replay_header_disconnected_slots": [],
                 "clean_shutdown": True,
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
