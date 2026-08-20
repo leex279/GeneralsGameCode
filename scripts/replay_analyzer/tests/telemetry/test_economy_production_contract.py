@@ -273,6 +273,78 @@ def test_reader_preserves_full_player_domain_with_zero_cash_and_no_money_entries
     assert [entry.player_index for entry in validated[-1].payload.final_cash_balances] == [0, 4, 9]
 
 
+def test_reader_rejects_resolved_replay_slot_omitted_from_engine_player_domain(tmp_path: Path) -> None:
+    records = _base_records(tmp_path)[:2]
+    players = records[1]
+    players["payload"]["engine_player_indices"] = [4]
+    trace = _finish(
+        tmp_path / "resolved-slot-outside-domain.ndjson",
+        records,
+        [{"player_index": 4, "has_money": False, "balance": None}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="resolved replay slot player_index.*engine player domain"):
+        tuple(iter_validated_trace(trace))
+
+
+@pytest.mark.parametrize("transition", ["object_created", "owner_changed"])
+def test_reader_rejects_lifecycle_owner_omitted_from_engine_player_domain(
+    tmp_path: Path,
+    transition: str,
+) -> None:
+    records = _base_records(tmp_path)[:2]
+    records.append(_record(2, "object_created", _object_created(10, "AmericaWarFactory")))
+    if transition == "object_created":
+        records[-1]["payload"]["owner_player_index"] = 4
+    else:
+        records.append(_record(3, "owner_changed", _owner_changed(10, 4)))
+    trace = _finish(
+        tmp_path / f"lifecycle-owner-outside-domain-{transition}.ndjson",
+        records,
+        [{"player_index": 0, "has_money": False, "balance": None}],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="lifecycle owner.*engine player domain"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_accepts_neutral_and_map_lifecycle_owners_in_full_player_domain(tmp_path: Path) -> None:
+    records = _base_records(tmp_path)[:2]
+    players = records[1]
+    players["payload"]["engine_player_indices"] = [0, 4, 9]
+    neutral = _object_created(10, "AmericaWarFactory")
+    neutral.update({"owner_player_index": 9, "team_id": 9})
+    records.extend(
+        [
+            _record(2, "object_created", neutral),
+            _record(
+                3,
+                "owner_changed",
+                {
+                    "object_id": 10,
+                    "previous_owner_player_index": 9,
+                    "new_owner_player_index": 4,
+                    "previous_team_id": 9,
+                    "new_team_id": 4,
+                },
+            ),
+        ]
+    )
+    trace = _finish(
+        tmp_path / "neutral-map-owner-domain.ndjson",
+        records,
+        [
+            {"player_index": 0, "has_money": False, "balance": None},
+            {"player_index": 4, "has_money": False, "balance": None},
+            {"player_index": 9, "has_money": False, "balance": None},
+        ],
+    )
+
+    validated = tuple(iter_validated_trace(trace))
+    assert validated[2].payload.owner_player_index == 9
+    assert validated[3].payload.new_owner_player_index == 4
+
+
 @pytest.mark.parametrize(
     ("mutate", "diagnostic"),
     [
@@ -462,9 +534,7 @@ def _insert_before_event(
     ("event_type", "subject_object_id"),
     [
         ("production_queued", 10),
-        ("production_completed", 10),
         ("upgrade_queued", 10),
-        ("upgrade_cancelled", 10),
         ("special_power_used", 10),
         ("supply_collected", 20),
         ("supply_collected", 40),
@@ -521,6 +591,82 @@ def test_reader_requires_task_subject_owner_to_equal_event_player(
 
     with pytest.raises(TelemetryTraceValidationError, match="current owner"):
         tuple(iter_validated_trace(damaged))
+
+
+@pytest.mark.parametrize(
+    ("queued_event", "queued_payload", "terminal_event", "terminal_payload", "terminal_frame"),
+    [
+        ("production_queued", _production("queued"), "production_completed", _production("completed"), 20),
+        ("upgrade_queued", _upgrade("queued"), "upgrade_cancelled", _upgrade("cancelled"), 12),
+    ],
+)
+def test_reader_preserves_queue_player_identity_across_producer_owner_transfer(
+    tmp_path: Path,
+    queued_event: str,
+    queued_payload: dict[str, object],
+    terminal_event: str,
+    terminal_payload: dict[str, object],
+    terminal_frame: int,
+) -> None:
+    records = _base_records(tmp_path)
+    records[1]["payload"]["engine_player_indices"] = [0, 4]
+    records.extend(
+        [
+            _record(6, queued_event, queued_payload, frame=int(queued_payload["queued_frame"])),
+            _record(7, "owner_changed", _owner_changed(10, 4), frame=3),
+            _record(8, terminal_event, terminal_payload, frame=terminal_frame),
+        ]
+    )
+    trace = _finish(
+        tmp_path / f"queue-transfer-{terminal_event}.ndjson",
+        records,
+        [
+            {"player_index": 0, "has_money": False, "balance": None},
+            {"player_index": 4, "has_money": False, "balance": None},
+        ],
+    )
+
+    validated = tuple(iter_validated_trace(trace))
+    terminal = next(record for record in validated if record.event_type == terminal_event)
+    assert terminal.payload.player_index == 0
+
+
+@pytest.mark.parametrize(
+    ("queued_event", "queued_payload", "terminal_event", "terminal_payload", "terminal_frame"),
+    [
+        ("production_queued", _production("queued"), "production_completed", _production("completed"), 20),
+        ("upgrade_queued", _upgrade("queued"), "upgrade_cancelled", _upgrade("cancelled"), 12),
+    ],
+)
+def test_reader_rejects_terminal_queue_identity_drift_after_owner_transfer(
+    tmp_path: Path,
+    queued_event: str,
+    queued_payload: dict[str, object],
+    terminal_event: str,
+    terminal_payload: dict[str, object],
+    terminal_frame: int,
+) -> None:
+    records = _base_records(tmp_path)
+    records[1]["payload"]["engine_player_indices"] = [0, 4]
+    terminal_payload["player_index"] = 4
+    records.extend(
+        [
+            _record(6, queued_event, queued_payload, frame=int(queued_payload["queued_frame"])),
+            _record(7, "owner_changed", _owner_changed(10, 4), frame=3),
+            _record(8, terminal_event, terminal_payload, frame=terminal_frame),
+        ]
+    )
+    trace = _finish(
+        tmp_path / f"queue-transfer-drift-{terminal_event}.ndjson",
+        records,
+        [
+            {"player_index": 0, "has_money": False, "balance": None},
+            {"player_index": 4, "has_money": False, "balance": None},
+        ],
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="identity changed"):
+        tuple(iter_validated_trace(trace))
 
 
 @pytest.mark.parametrize("event_type", ["production_queued", "special_power_used"])
@@ -642,6 +788,115 @@ def test_reader_rejects_orphan_supply_income_cash_event(tmp_path: Path) -> None:
 
     with pytest.raises(TelemetryTraceValidationError, match="orphan supply_income"):
         tuple(iter_validated_trace(damaged))
+
+
+def _supply_only_trace(
+    directory: Path,
+    *,
+    before: int,
+    amount: int,
+    after: int,
+    delta: int,
+    track_income: bool = True,
+    name: str = "supply-only.ndjson",
+) -> Path:
+    records = _base_records(directory)
+    records.extend(
+        [
+            _record(
+                6,
+                "supply_collected",
+                {
+                    "collector_object_id": 20,
+                    "source_object_id": 30,
+                    "source_status": "resolved",
+                    "dropoff_object_id": 40,
+                    "player_index": 0,
+                    "amount": amount,
+                    "location": {"x": 40.0, "y": 2.0, "z": 0.0},
+                },
+                frame=15,
+            ),
+            _record(
+                7,
+                "cash_changed",
+                {
+                    "player_index": 0,
+                    "before": before,
+                    "delta": delta,
+                    "after": after,
+                    "track_income": track_income,
+                    "reason": "supply_income",
+                },
+                frame=15,
+            ),
+        ]
+    )
+    return _finish(
+        directory / name,
+        records,
+        [{"player_index": 0, "has_money": True, "balance": after}],
+    )
+
+
+def test_reader_requires_supply_income_pair_to_track_income(tmp_path: Path) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=100,
+        amount=20,
+        after=120,
+        delta=20,
+        track_income=False,
+        name="supply-track-income-false.ndjson",
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="supply_collected cash pair"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_reader_accepts_unsigned_32_bit_supply_deposit_wraparound(tmp_path: Path) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=4_294_967_290,
+        amount=10,
+        after=4,
+        delta=-4_294_967_286,
+        name="supply-uint32-wrap.ndjson",
+    )
+
+    records = tuple(iter_validated_trace(trace))
+    cash = next(record for record in records if record.event_type == "cash_changed")
+    assert cash.payload.delta == -4_294_967_286
+    assert cash.payload.after == 4
+
+
+@pytest.mark.parametrize(
+    ("field", "before", "amount", "after", "delta"),
+    [
+        ("amount", 100, 19, 120, 20),
+        ("before", 101, 20, 120, 19),
+        ("after", 100, 20, 121, 21),
+    ],
+)
+def test_reader_rejects_tampered_unsigned_supply_deposit_relation(
+    tmp_path: Path,
+    field: str,
+    before: int,
+    amount: int,
+    after: int,
+    delta: int,
+) -> None:
+    trace = _supply_only_trace(
+        tmp_path,
+        before=before,
+        amount=amount,
+        after=after,
+        delta=delta,
+        name=f"tampered-supply-{field}.ndjson",
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="supply_collected cash pair"):
+        tuple(iter_validated_trace(trace))
 
 
 @pytest.mark.parametrize(

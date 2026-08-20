@@ -139,6 +139,9 @@ class PlayersInitializedPayload(OpenPayload):
         resolved_indexes = [slot.player_index for slot in self.slots if slot.player_index is not None]
         if len(resolved_indexes) != len(set(resolved_indexes)):
             raise ValueError("resolved occupied slots must have unique player_index mappings")
+        engine_player_indices = set(self.engine_player_indices)
+        if any(player_index not in engine_player_indices for player_index in resolved_indexes):
+            raise ValueError("resolved replay slot player_index must belong to the engine player domain")
         header_slots = [slot.slot_index for slot in self.slots if slot.is_header_local_slot]
         expected_header_slots = [] if self.header_local_slot_index is None else [self.header_local_slot_index]
         if header_slots != expected_header_slots:

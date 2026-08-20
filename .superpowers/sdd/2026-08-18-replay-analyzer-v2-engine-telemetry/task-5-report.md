@@ -43,6 +43,8 @@ trace IDs are monotonically assigned and keyed by producer object ID plus the au
 Upgrade IDs are independently monotonically assigned and keyed by producer ID plus stable upgrade name while active.
 Terminal flags prevent duplicate or conflicting terminal emission. Telemetry reconfiguration and `GameLogic::reset`
 clear IDs, active queues, supply provenance, pending cash and reason scopes before object-ID reuse.
+The reader requires the producer's current owner to match only when a queue is created. A live producer may transfer
+afterward; cancellation/completion must retain the immutable queued player and every other stored identity field.
 
 `Money` does not attribute player zero until `setPlayerIndex` proves ownership. Starting balances copied from a player
 template are observed only when that ownership is attached. Cash captured before telemetry initialization is buffered
@@ -54,6 +56,9 @@ and refunds, construction charges, starting cash, supply income, sale refunds an
 contexts. A central mutation without proven context remains `unknown`; nested or later operations cannot inherit a
 consumed reason. Delta validation uses `long long` in C++ and unbounded Python arithmetic in the reader, so unsigned
 wrap or signed overflow cannot be reported as ordinary signed arithmetic.
+`UnsignedInt` is source-defined as four-byte `uint32_t`; supply deposit pairing therefore checks the engine relation
+`after == (before + amount) mod 2^32`, while retaining the writer's independent exact wide signed `after - before`
+delta.
 
 ## Contract and reader validation
 
@@ -69,14 +74,16 @@ Before any record is returned, the atomic reader validates:
 - distinct unit-production and upgrade identity domains;
 - exact cash `before + delta == after` and per-player before/after continuity;
 - closed reason values and terminal balance equality for every observed cash chain;
-- an immutable full engine-player domain, membership of every Task 5 event player, and final balances with exactly the
-  same ordered indices, including explicit zero-cash/no-change and no-Money players;
+- an immutable full engine-player domain; membership of every resolved replay slot, every non-null explicit lifecycle
+  owner before and after ownership transfer, and every Task 5 event player; and final balances with exactly the same
+  ordered indices, including explicit zero-cash/no-change and no-Money players;
 - exact science point subtraction and catalog membership for thing templates, upgrades and sciences;
 - legal finite JSON numbers, positive supply amounts and coherent source status; and
 - live currently owned producer/special-power source identities; live collector and dropoff identities owned by the
   receiving player; creation-only historical warehouse provenance; and resolved supply source distinct from dropoff;
-- every supply handoff immediately followed in record and sequence order by a same-frame, same-player, same-positive-
-  amount `supply_income` cash change, with orphan supply-income cash events rejected.
+- every supply handoff immediately followed in record and sequence order by a same-frame, same-player,
+  `track_income=true`, `supply_income` cash change whose before/after values equal the raw positive amount under the
+  engine's 32-bit unsigned modular addition, with orphan supply-income cash events rejected.
 
 Catalog or state validation failure discards the buffered trace; no partially validated records escape.
 
@@ -108,6 +115,12 @@ asserts exact observed fixture availability, cash reasons,
 supply-before-cash adjacency, resolved source provenance, queue/terminal subset identity, and final-balance folding.
 It also proves completion balance indices exactly equal the initialized full-player domain and that resolved replay
 slots are a strict subset of that domain on the natural fixture.
+
+The second corrective review round captured **7 failed, 6 passed** before production changes: three missing
+slot/lifecycle domain bindings, two owner-transfer queue terminals incorrectly compared with current ownership, one
+false `track_income` supply pair accepted, and one valid uint32 wraparound deposit rejected. The same focused matrix
+then passed **13 tests**, and the combined Task 5/v2/lifecycle contracts passed **129 tests**. Literal malformed
+amount/before/after cases remain rejected, while the wrap case preserves the exact negative wide delta.
 
 ## Replay evidence
 
@@ -161,7 +174,7 @@ runtime behavior is covered by compiled authoritative seams plus strict syntheti
 Final commands and results (the Python commands were run from `scripts/replay_analyzer/`):
 
 - `uv run --project . pytest -m "not engine and not ollama" -q`
-  - **377 passed, 44 deselected**
+  - **388 passed, 44 deselected**
 - `uv run --project . pytest tests/engine -q`
   - **43 passed, 1 skipped**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
@@ -171,7 +184,8 @@ Final commands and results (the Python commands were run from `scripts/replay_an
   - **passed, 15 source files**
 - x86 VS 2022 `VsDevCmd` environment plus
   `cmake --build build/win32 --target z_generals --config Release -- -j 4`
-  - **passed and linked `generalszh.exe`**
+  - **passed and linked `generalszh.exe`** in the preceding corrective commit; not rerun in round 2 because the writer
+    and all C++ sources are byte-unchanged
 
 The engine suite includes telemetry-on versus telemetry-off return/stdout/stderr equality, natural normalized double
 run determinism, final cash folding, CRC-stop behavior, and passive open/late/publish writer-failure paths. Existing
@@ -194,5 +208,8 @@ modern-only `ReplayEconomy` helper and minimally extends:
 - the unit/upgrade/construction/sell/script reason call sites;
 - CMake's existing modern analyzer source block; and
 - the v2 schema/model/reader, lifecycle reference table, wheel fixture and focused contract/engine tests.
+
+The second corrective round changes only the Python model/reader, their focused contracts, and this report; the
+authoritative C++ writer remains unchanged after source inspection confirmed its queue snapshot and uint32 types.
 
 The five inherited stat-only worktree paths were not edited or staged.

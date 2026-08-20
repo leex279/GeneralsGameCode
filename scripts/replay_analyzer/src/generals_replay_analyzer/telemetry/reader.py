@@ -25,6 +25,7 @@ from generals_replay_analyzer.telemetry.model import (
 )
 
 _RECORD_ADAPTER: TypeAdapter[TelemetryRecord] = TypeAdapter(TelemetryRecord)
+_UINT32_MODULUS = 1 << 32
 
 
 class TelemetryTraceValidationError(ValueError):
@@ -357,12 +358,27 @@ def _validate_v2_entity_lifecycle(
     sold_ids: set[int],
     destroyed_ids: set[int],
     players_initialized_count: int,
+    engine_player_indices: frozenset[int],
 ) -> None:
     """Validate entity identity and irreversible transitions before any buffered record can escape."""
     event_type = record.event_type
     if event_type in {"manifest", "players_initialized", "complete"}:
         return
     payload = cast(dict[str, object], record.payload.model_dump())
+    for owner_field in (
+        "owner_player_index",
+        "previous_owner_player_index",
+        "new_owner_player_index",
+    ):
+        owner_player_index = payload.get(owner_field)
+        if isinstance(owner_player_index, int) and owner_player_index not in engine_player_indices:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"event {event_type} lifecycle owner {owner_field}={owner_player_index} "
+                "is outside the initialized engine player domain",
+            )
     if event_type == "object_destroyed" and payload.get("object_id") in destroyed_ids:
         raise _error(
             path,
@@ -603,17 +619,18 @@ def _validate_v2_economy_production(
             f"event {event_type} player_index {player_index} is outside the initialized engine player domain",
         )
     if event_type.startswith("production_"):
-        producer_object_id = cast(int, payload["producer_object_id"])
-        _require_current_owner(
-            path,
-            line_number,
-            record.sequence,
-            event_type,
-            "producer_object_id",
-            producer_object_id,
-            player_index,
-            entities,
-        )
+        if event_type == "production_queued":
+            producer_object_id = cast(int, payload["producer_object_id"])
+            _require_current_owner(
+                path,
+                line_number,
+                record.sequence,
+                event_type,
+                "producer_object_id",
+                producer_object_id,
+                player_index,
+                entities,
+            )
         if event_type == "production_queued" and payload["queued_frame"] != record.frame:
             raise _error(path, line_number, record.sequence, "production queued_frame must equal envelope frame")
         if event_type != "production_queued" and payload["terminal_frame"] != record.frame:
@@ -630,17 +647,18 @@ def _validate_v2_economy_production(
             "production",
         )
     elif event_type.startswith("upgrade_"):
-        producer_object_id = cast(int, payload["producer_object_id"])
-        _require_current_owner(
-            path,
-            line_number,
-            record.sequence,
-            event_type,
-            "producer_object_id",
-            producer_object_id,
-            player_index,
-            entities,
-        )
+        if event_type == "upgrade_queued":
+            producer_object_id = cast(int, payload["producer_object_id"])
+            _require_current_owner(
+                path,
+                line_number,
+                record.sequence,
+                event_type,
+                "producer_object_id",
+                producer_object_id,
+                player_index,
+                entities,
+            )
         if event_type == "upgrade_queued" and payload["queued_frame"] != record.frame:
             raise _error(path, line_number, record.sequence, "upgrade queued_frame must equal envelope frame")
         if event_type != "upgrade_queued" and payload["terminal_frame"] != record.frame:
@@ -734,14 +752,15 @@ def _validate_v2_supply_cash_pair(
                 record.sequence,
                 "supply_collected cash pair must be the immediately following record",
             )
-        delta = cast(int, payload["delta"])
+        before = cast(int, payload["before"])
+        after = cast(int, payload["after"])
         if (
             record.sequence != pending.sequence + 1
             or record.frame != pending.frame
             or payload["player_index"] != pending.player_index
-            or delta != pending.amount
-            or delta <= 0
             or payload["reason"] != "supply_income"
+            or payload["track_income"] is not True
+            or (before + pending.amount) % _UINT32_MODULUS != after
         ):
             raise _error(
                 path,
@@ -936,6 +955,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 sold_object_ids,
                 destroyed_object_ids,
                 players_initialized_count,
+                engine_player_indices,
             )
             _validate_v2_economy_production(
                 path,

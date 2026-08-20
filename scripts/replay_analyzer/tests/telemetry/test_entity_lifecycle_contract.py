@@ -63,7 +63,8 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
                 "player_index": 0,
                 "has_money": True,
                 "balance": cash_after[-1] if cash_after else 0,
-            }
+            },
+            {"player_index": 1, "has_money": False, "balance": None},
         ]
     return _record(
         version,
@@ -148,7 +149,7 @@ def _v2_players(reference: dict[str, object]) -> dict[str, object]:
     return {
         "header_local_slot_index": 0,
         "slots": slots,
-        "engine_player_indices": [0],
+        "engine_player_indices": [0, 1],
         "game_data_catalog": reference,
     }
 
