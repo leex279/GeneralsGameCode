@@ -3,12 +3,13 @@
 import hashlib
 import json
 import re
+import struct
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from generals_replay_analyzer.telemetry.model import DamageAppliedRecord, MatchOutcomeRecord
+from generals_replay_analyzer.telemetry.model import FLOAT32_MAX, DamageAppliedRecord, MatchOutcomeRecord
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "a23e4567-e89b-12d3-a456-426614174000"
@@ -300,6 +301,74 @@ def test_reader_accepts_authoritative_combat_and_terminal_outcome_contract(tmp_p
     assert records[-2].payload.winner_player_indices == [0]
     assert records[-1].payload.crc_mismatch_frame == 108
     assert records[4].payload.applied_amount == 40.0
+
+
+def test_v2_engine_real_bound_matches_writer_nine_digit_float32_serialization() -> None:
+    binary_float32_max = struct.unpack("!f", bytes.fromhex("7f7fffff"))[0]
+    writer_text = (
+        Path(__file__).parents[4]
+        / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
+    ).read_text(encoding="utf-8")
+    schema = json.loads(
+        (Path(__file__).parents[2] / "contracts/telemetry-v2.schema.json").read_text(encoding="utf-8")
+    )
+
+    assert "std::chars_format::general, 9" in writer_text
+    assert format(binary_float32_max, ".9g") == "3.40282347e+38"
+    assert FLOAT32_MAX == float(format(binary_float32_max, ".9g"))
+    assert schema["$defs"]["engineReal"] == {
+        "type": "number",
+        "minimum": -FLOAT32_MAX,
+        "maximum": FLOAT32_MAX,
+    }
+
+
+@pytest.mark.parametrize("serialized_bound", [3.40282347e38, -3.40282347e38], ids=["positive", "negative"])
+def test_reader_accepts_writer_serialized_float32_limits(tmp_path: Path, serialized_bound: float) -> None:
+    records = _base(tmp_path)
+    damage = _damage(prior=3.40282347e38, new=0.0, killing=True)
+    damage["attempted_amount"] = serialized_bound
+    location = damage["location"]
+    assert isinstance(location, dict)
+    location["x"] = serialized_bound
+    records.append(_record(4, "damage_applied", damage, frame=10))
+
+    validated = tuple(
+        iter_validated_trace(
+            _finish(tmp_path / f"float32-limit-{serialized_bound}.ndjson", records, outcome=_outcome())
+        )
+    )
+
+    observed = validated[4].payload
+    assert observed.attempted_amount == serialized_bound
+    assert observed.location.x == serialized_bound
+    assert observed.applied_amount == 3.40282347e38
+
+
+@pytest.mark.parametrize("value", [3.40282348e38, -3.40282348e38, 1e39, -1e39])
+def test_reader_rejects_values_above_writer_serialized_float32_limits(tmp_path: Path, value: float) -> None:
+    records = _base(tmp_path)
+    damage = _damage()
+    location = damage["location"]
+    assert isinstance(location, dict)
+    location["x"] = value
+    records.append(_record(4, "damage_applied", damage, frame=10))
+
+    with pytest.raises(TelemetryTraceValidationError, match="float32"):
+        tuple(iter_validated_trace(_finish(tmp_path / f"above-float32-{value}.ndjson", records, outcome=_outcome())))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_v2_combat_model_rejects_nonfinite_engine_reals(value: float) -> None:
+    damage = _record(4, "damage_applied", _damage(), frame=10)
+    payload = damage["payload"]
+    assert isinstance(payload, dict)
+    location = payload["location"]
+    assert isinstance(location, dict)
+    location["x"] = value
+
+    with pytest.raises(ValueError, match="finite float32"):
+        DamageAppliedRecord.model_validate(damage)
 
 
 def test_task6_pydantic_payloads_are_closed_for_v2_without_tightening_v1() -> None:

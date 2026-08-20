@@ -20,7 +20,8 @@ from generals_replay_analyzer.telemetry.combat_types import require_combat_type_
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 UINT32_MAX = 4_294_967_295
-FLOAT32_MAX = 3.402823466e38
+# Largest finite float32 after the engine writer's nine-significant-digit JSON serialization.
+FLOAT32_MAX = 3.40282347e38
 EVENT_TYPES = (
     "manifest", "players_initialized", "object_created", "construction_started", "construction_completed",
     "owner_changed", "sold", "object_destroyed", "production_queued", "production_cancelled",

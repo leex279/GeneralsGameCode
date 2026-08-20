@@ -65,7 +65,9 @@ rejected before any record is exposed.
 
 Exact Zero Hour damage/death identifiers live in packaged `zero-hour-combat-types-v1.json`. Tests compare it with
 the authoritative C++ arrays and with the installed-wheel bytes; Pydantic rejects unknown IDs and any ID/name drift.
-Every health and coordinate `Real` in these events must be finite and within the IEEE-754 float32 range.
+Every health and coordinate `Real` in these events must be finite and within the closed producer-serialization range
+of +/-`3.40282347e38`. That decimal is the engine writer's nine-significant-digit JSON representation of finite binary
+float32 maximum, rather than the slightly smaller unrounded binary value; any larger magnitude remains rejected.
 
 Before returning any record, the atomic reader validates:
 
@@ -112,6 +114,12 @@ combat types, and float32 bounds. The contract then reached **34 passed**; a fin
 case was captured **1 failed** and fixed to reach **35 passed**. Focused real/static engine coverage is now **9 passed**,
 including a real partial replay that ends explicitly as `replay_truncated`.
 
+The second corrective review pinned the writer-format boundary before changing production code. The targeted run was
+**3 failed, 4 passed**: the model constant differed from the writer's nine-digit representation and the schema rejected
+both signed producer limits. After updating only the v2 model/schema ceiling, the same selection was **10 passed** and
+the full focused contract was **45 passed**. Above-boundary, overflow, NaN, and infinity probes remain rejected; the
+installed-wheel test proves its packaged v2 schema bytes exactly match the canonical source while v1 stays unchanged.
+
 ## Replay evidence
 
 Tracked replay fixture:
@@ -142,21 +150,23 @@ winner, or match-history claims.
 Final commands and results (Python commands run from `scripts/replay_analyzer/`):
 
 - `uv run --project . pytest tests/telemetry/test_combat_outcome_contract.py -q`
-  - **35 passed**
+  - **45 passed**
+- `uv run --project . pytest tests/test_wheel.py -q`
+  - **1 passed**, including exact canonical/installed-wheel v1 and v2 schema byte parity
 - `uv run --project . pytest tests/engine/test_combat_outcome.py -q`
   - **9 passed**
 - `uv run --project . pytest -m "not engine" -q`
-  - **438 passed, 54 deselected**
+  - **448 passed, 54 deselected**
 - `uv run --project . pytest -m engine -q`
-  - **53 passed, 1 skipped, 438 deselected**
+  - **53 passed, 1 skipped, 448 deselected**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
 - `uv run --project . ruff check src tests`
   - **passed**
 - `uv run --project . mypy --strict src`
   - **passed, 16 source files**
-- x86 VS 2022 `vcvars32.bat` environment plus
-  `cmake --build build/win32 --target z_generals --config Release`
-  - **passed and linked `generalszh.exe`** after the final C++ changes
+- No C++ changed in the second corrective review, so no build was rerun. The latest Task 6 x86 VS 2022 evidence remains
+  `cmake --build build/win32 --target z_generals --config Release`: **passed and linked `generalszh.exe`** after the
+  preceding C++ correction.
 
 The full engine suite includes deterministic normalized double runs, telemetry-enabled versus disabled replay
 return/stdout/stderr equality, CRC-stop behavior, exact event-count validation, and open/late/publish failure and
