@@ -11,11 +11,19 @@ from pydantic import (
     NonNegativeFloat,
     NonNegativeInt,
     ValidationInfo,
+    ValidatorFunctionWrapHandler,
     field_validator,
     model_validator,
 )
 
 from generals_replay_analyzer.telemetry.combat_types import require_combat_type_pair
+from generals_replay_analyzer.telemetry.engine_state_catalog import (
+    AI_STATE_NAMES,
+    LAYER_NAMES,
+    LOCOMOTOR_SET_NAMES,
+    STATE_SOURCES,
+)
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
@@ -30,6 +38,7 @@ EVENT_TYPES = (
     "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome",
     "order_issued", "entity_state_changed", "entity_sample", "complete",
 )
+TASK7_STATE_NAMES = frozenset(STATE_SOURCES)
 
 
 def _validation_schema_version(info: ValidationInfo) -> int:
@@ -45,6 +54,61 @@ def _require_v2_engine_real(field: str, value: float) -> None:
     """Constrain serialized engine Real observations without tightening frozen v1."""
     if not math.isfinite(value) or abs(value) > FLOAT32_MAX:
         raise ValueError(f"v2 {field} must be a finite float32 engine Real")
+
+
+def _require_v2_engine_enum_name(
+    numeric_id: int | None,
+    stable_name: str | None,
+    status: str | None,
+    catalog: dict[int, str],
+    label: str,
+) -> None:
+    """Bind raw IDs to exact stable names without guessing unavailable or unknown values."""
+    if status not in {"stable", "unknown_engine_value", "unavailable_no_ai"}:
+        raise ValueError(f"v2 {label} name provenance status is required")
+    if status == "stable" and (
+        numeric_id is None or numeric_id not in catalog or stable_name != catalog[numeric_id]
+    ):
+        raise ValueError(f"stable {label} provenance requires its exact numeric and symbolic identity")
+    if status == "unavailable_no_ai" and (numeric_id is not None or stable_name is not None):
+        raise ValueError(f"{label} identity must be null when no AI interface exposes it")
+    if status == "unknown_engine_value" and (
+        numeric_id is None or numeric_id in catalog or stable_name is not None
+    ):
+        raise ValueError(f"unknown {label} value requires an unmapped raw numeric ID and no guessed name")
+
+
+def _require_v2_state_classification(
+    classification: str,
+    source: str | None,
+    ai_state_id: int | None,
+    is_engine_moving: bool | None,
+) -> None:
+    """Require a direct producer classification/source pair and its exposed engine prerequisites."""
+    if classification not in STATE_SOURCES or source not in STATE_SOURCES[classification]:
+        raise ValueError("v2 state classification/source is not a direct canonical engine mapping")
+    if source == "ai_interface_unavailable" and ai_state_id is not None:
+        raise ValueError("AI-unavailable state classification cannot claim a raw AI state")
+    if source is not None and source.startswith("ai_") and source != "ai_interface_unavailable" and ai_state_id is None:
+        raise ValueError("AI-derived state classification requires a raw AI state ID")
+    if source == "ai_moving_state" and is_engine_moving is not True:
+        raise ValueError("moving classification requires the direct engine-moving flag")
+    if source == "ai_idle_state" and is_engine_moving is not False:
+        raise ValueError("idle classification contradicts the direct engine-moving flag")
+    if source == "ai_guard_state" and ai_state_id not in {16, 21, 43}:
+        raise ValueError("guarding classification requires an exact guard AI state")
+
+
+def _require_v2_layer_name(layer_id: int, layer_name: str | None, status: str | None) -> None:
+    """Bind exact fixed layers while leaving bridge layers explicitly dynamic."""
+    if status == "stable" and (layer_id not in LAYER_NAMES or layer_name != LAYER_NAMES[layer_id]):
+        raise ValueError("stable layer provenance requires its exact numeric and symbolic identity")
+    if status == "dynamic_bridge_layer" and not (2 <= layer_id <= 14 and layer_name is None):
+        raise ValueError("dynamic bridge layer requires a raw bridge-layer ID and no guessed stable name")
+    if status == "unknown_engine_value" and (layer_id in LAYER_NAMES or 2 <= layer_id <= 14 or layer_name is not None):
+        raise ValueError("unknown layer requires an unmapped raw ID and no guessed stable name")
+    if status not in {"stable", "dynamic_bridge_layer", "unknown_engine_value"}:
+        raise ValueError("v2 layer name provenance status is required")
 
 
 class OpenPayload(BaseModel):
@@ -402,29 +466,138 @@ class MatchOutcomePayload(OpenPayload):
     clean_shutdown: bool | None = None
 
 
+class EntityIdentity(BaseModel):
+    """One current engine object identity captured at an observation seam."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    object_id: Annotated[int, Field(ge=1)]
+    template_name: Annotated[str, Field(min_length=1)]
+
+
 class OrderIssuedPayload(OpenPayload):
+    order_id: Annotated[int, Field(ge=1)] | None = None
+    command_frame: NonNegativeInt | None = None
     message_type: int
     message_name: str | None
     source_player_index: NonNegativeInt
     selected_object_ids: list[NonNegativeInt]
+    selected_entities: list[EntityIdentity] | None = None
+    target_kind: Literal["none", "object", "location"] | None = None
     target_object_id: NonNegativeInt | None
+    target_template_name: Annotated[str, Field(min_length=1)] | None = None
     target_location: RawPosition | None
     command_source: str = Field(min_length=1)
+    ai_command_source_id: int | None = None
+    ai_command_source_name: Annotated[str, Field(min_length=1)] | None = None
+
+    @field_validator(
+        "order_id", "command_frame", "selected_entities", "target_kind", "target_template_name",
+        "ai_command_source_id", "ai_command_source_name", mode="wrap",
+    )
+    @classmethod
+    def _keep_v1_extension_values_open(
+        cls, value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> object:
+        """Keep names that were v1 extension slots unconstrained while validating their v2 definitions."""
+        if _validation_schema_version(info) == 1:
+            return value
+        return handler(value)
 
 
 class EntityStateChangedPayload(OpenPayload):
     object_id: NonNegativeInt
-    previous_state: str = Field(min_length=1)
-    current_state: str = Field(min_length=1)
+    template_name: Annotated[str, Field(min_length=1)] | None = None
+    owner_player_index: NonNegativeInt | None = None
+    previous_state: Annotated[str, Field(min_length=1)]
+    previous_state_source: str | None = None
+    current_state: Annotated[str, Field(min_length=1)]
+    current_state_source: str | None = None
+    previous_ai_state_id: int | None = None
+    current_ai_state_id: int | None = None
+    previous_ai_state_name: Annotated[str, Field(min_length=1)] | None = None
+    current_ai_state_name: Annotated[str, Field(min_length=1)] | None = None
+    previous_ai_state_name_status: str | None = None
+    current_ai_state_name_status: str | None = None
+    previous_locomotor_set_id: int | None = None
+    current_locomotor_set_id: int | None = None
+    previous_locomotor_set_name: Annotated[str, Field(min_length=1)] | None = None
+    current_locomotor_set_name: Annotated[str, Field(min_length=1)] | None = None
+    previous_locomotor_set_name_status: str | None = None
+    current_locomotor_set_name_status: str | None = None
+    previous_is_engine_moving: bool | None = None
+    current_is_engine_moving: bool | None = None
+    current_order_id: Annotated[int, Field(ge=1)] | None = None
+    transition_source: Literal["end_of_game_logic_update"] | None = None
+
+    @field_validator(
+        "template_name", "owner_player_index", "previous_state_source", "current_state_source",
+        "previous_ai_state_id", "current_ai_state_id", "previous_ai_state_name", "current_ai_state_name",
+        "previous_ai_state_name_status", "current_ai_state_name_status", "previous_locomotor_set_id",
+        "current_locomotor_set_id", "previous_locomotor_set_name", "current_locomotor_set_name",
+        "previous_locomotor_set_name_status", "current_locomotor_set_name_status",
+        "previous_is_engine_moving", "current_is_engine_moving", "current_order_id", "transition_source",
+        mode="wrap",
+    )
+    @classmethod
+    def _keep_v1_extension_values_open(
+        cls, value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> object:
+        """Keep names that were v1 extension slots unconstrained while validating their v2 definitions."""
+        if _validation_schema_version(info) == 1:
+            return value
+        return handler(value)
 
 
 class EntitySamplePayload(OpenPayload):
     object_id: NonNegativeInt
+    template_name: Annotated[str, Field(min_length=1)] | None = None
+    owner_player_index: NonNegativeInt | None = None
     position: RawPosition
     orientation: float
-    layer: int
-    speed: NonNegativeFloat
-    current_state: str = Field(min_length=1)
+    layer: int | None = None
+    layer_id: int | None = None
+    layer_name: Annotated[str, Field(min_length=1)] | None = None
+    layer_name_status: Literal["stable", "dynamic_bridge_layer", "unknown_engine_value"] | None = None
+    speed_status: Literal["measured_physics_velocity", "unavailable_no_physics"] | None = None
+    speed: NonNegativeFloat | None
+    current_state: Annotated[str, Field(min_length=1)]
+    current_state_source: str | None = None
+    ai_state_id: int | None = None
+    ai_state_name: Annotated[str, Field(min_length=1)] | None = None
+    ai_state_name_status: str | None = None
+    locomotor_set_id: int | None = None
+    locomotor_set_name: Annotated[str, Field(min_length=1)] | None = None
+    locomotor_set_name_status: str | None = None
+    current_order_id: Annotated[int, Field(ge=1)] | None = None
+    current_order_message_type: NonNegativeInt | None = None
+    current_order_message_name: Annotated[str, Field(min_length=1)] | None = None
+    path_goal_status: Literal[
+        "path_tail", "unavailable_no_ai", "unavailable_no_path", "unavailable_empty_path"
+    ] | None = None
+    path_goal: RawPosition | None = None
+    is_mobile: bool | None = None
+    is_structure: bool | None = None
+    is_disabled: bool | None = None
+    is_engine_moving: bool | None = None
+    sample_reason: Literal[
+        "lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"
+    ] | None = None
+
+    @field_validator(
+        "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status", "speed_status",
+        "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status", "locomotor_set_id",
+        "locomotor_set_name", "locomotor_set_name_status", "current_order_id", "current_order_message_type",
+        "current_order_message_name", "path_goal_status", "path_goal", "is_mobile", "is_structure",
+        "is_disabled", "is_engine_moving", "sample_reason", mode="wrap",
+    )
+    @classmethod
+    def _keep_v1_extension_values_open(
+        cls, value: object, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> object:
+        """Keep names that were v1 extension slots unconstrained while validating their v2 definitions."""
+        if _validation_schema_version(info) == 1:
+            return value
+        return handler(value)
 
 
 class ManifestPayload(BaseModel):
@@ -529,6 +702,16 @@ class TelemetryEnvelope(BaseModel):
 class ManifestRecord(TelemetryEnvelope):
     event_type: Literal["manifest"]
     payload: ManifestPayload
+
+    @model_validator(mode="after")
+    def _require_bounded_v2_exporter_settings(self) -> "ManifestRecord":
+        if self.schema_version == 2:
+            interval = self.payload.exporter_settings.get("movement_sample_frames")
+            if type(interval) is not int or not 1 <= interval <= 3600:
+                raise ValueError("v2 movement_sample_frames must be an integer from 1 through 3600")
+            if self.payload.exporter_settings.get("order_coverage") != canonical_order_coverage():
+                raise ValueError("v2 order_coverage must equal the canonical closed supported-order coverage")
+        return self
 
 
 class PlayersInitializedRecord(TelemetryEnvelope):
@@ -942,15 +1125,258 @@ class OrderIssuedRecord(TelemetryEnvelope):
     event_type: Literal["order_issued"]
     payload: OrderIssuedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_order(self) -> "OrderIssuedRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload, ("target_location",))
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "order_id", "command_frame", "selected_entities", "target_kind", "target_template_name",
+                "ai_command_source_id", "ai_command_source_name",
+            },
+        )
+        if self.payload.order_id is None or self.payload.command_frame != self.frame:
+            raise ValueError("command_frame must equal the authoritative order envelope frame")
+        if self.payload.message_type < 0:
+            raise ValueError("v2 order message_type must be nonnegative")
+        if not self.payload.message_name:
+            raise ValueError("v2 order message_name must preserve the packaged symbolic command name")
+        if self.payload.command_source != "recorded_network_player_command":
+            raise ValueError("v2 command_source must identify recorded network player dispatch")
+        if self.payload.ai_command_source_id != 0 or self.payload.ai_command_source_name != "CMD_FROM_PLAYER":
+            raise ValueError("v2 order AI command source must preserve CMD_FROM_PLAYER numeric identity")
+        selected_entities = self.payload.selected_entities or []
+        selected_ids = self.payload.selected_object_ids
+        if (
+            not selected_ids
+            or any(object_id == 0 for object_id in selected_ids)
+            or len(selected_ids) != len(set(selected_ids))
+            or [identity.object_id for identity in selected_entities] != selected_ids
+        ):
+            raise ValueError("selected_entities must exactly preserve unique selected_object_ids source order")
+        if any(identity.model_extra for identity in selected_entities):
+            raise ValueError("selected_entities must contain closed object identity records")
+        target_kind = self.payload.target_kind
+        if target_kind == "object":
+            if self.payload.target_object_id in {None, 0} or self.payload.target_template_name is None:
+                raise ValueError("object-target order requires current target identity")
+            if self.payload.target_location is not None:
+                raise ValueError("object-target order cannot claim a raw target location")
+        elif target_kind == "location":
+            if self.payload.target_location is None:
+                raise ValueError("location-target order requires its raw replay location")
+            if self.payload.target_object_id is not None or self.payload.target_template_name is not None:
+                raise ValueError("location-target order cannot claim a target object")
+        elif target_kind == "none":
+            if (
+                self.payload.target_object_id is not None
+                or self.payload.target_template_name is not None
+                or self.payload.target_location is not None
+            ):
+                raise ValueError("target-free order must keep all target fields null")
+        else:
+            raise ValueError("v2 order requires an explicit supported target_kind")
+        if self.payload.target_location is not None:
+            for axis, value in (
+                ("x", self.payload.target_location.x),
+                ("y", self.payload.target_location.y),
+                ("z", self.payload.target_location.z),
+            ):
+                _require_v2_engine_real(f"target_location.{axis}", value)
+        return self
+
 
 class EntityStateChangedRecord(TelemetryEnvelope):
     event_type: Literal["entity_state_changed"]
     payload: EntityStateChangedPayload
 
+    @model_validator(mode="after")
+    def _require_strict_v2_engine_transition(self) -> "EntityStateChangedRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload)
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "template_name", "owner_player_index", "previous_state_source", "current_state_source",
+                "previous_ai_state_id", "current_ai_state_id", "previous_ai_state_name", "current_ai_state_name",
+                "previous_ai_state_name_status", "current_ai_state_name_status",
+                "previous_locomotor_set_id", "current_locomotor_set_id",
+                "previous_locomotor_set_name", "current_locomotor_set_name",
+                "previous_locomotor_set_name_status", "current_locomotor_set_name_status",
+                "previous_is_engine_moving", "current_is_engine_moving", "current_order_id", "transition_source",
+            },
+        )
+        if self.payload.object_id == 0 or self.payload.template_name is None:
+            raise ValueError("v2 entity state transition requires a current object identity")
+        if self.payload.previous_state not in TASK7_STATE_NAMES or self.payload.current_state not in TASK7_STATE_NAMES:
+            raise ValueError("v2 entity state transition requires a supported direct classification")
+        if (
+            self.payload.previous_state_source is None
+            or self.payload.current_state_source is None
+            or self.payload.previous_ai_state_name_status is None
+            or self.payload.current_ai_state_name_status is None
+            or self.payload.previous_is_engine_moving is None
+            or self.payload.current_is_engine_moving is None
+            or self.payload.transition_source is None
+        ):
+            raise ValueError("v2 entity state transition requires explicit engine provenance and movement flags")
+        _require_v2_engine_enum_name(
+            self.payload.previous_ai_state_id,
+            self.payload.previous_ai_state_name,
+            self.payload.previous_ai_state_name_status,
+            AI_STATE_NAMES,
+            "AI state",
+        )
+        _require_v2_engine_enum_name(
+            self.payload.current_ai_state_id,
+            self.payload.current_ai_state_name,
+            self.payload.current_ai_state_name_status,
+            AI_STATE_NAMES,
+            "AI state",
+        )
+        _require_v2_engine_enum_name(
+            self.payload.previous_locomotor_set_id,
+            self.payload.previous_locomotor_set_name,
+            self.payload.previous_locomotor_set_name_status,
+            LOCOMOTOR_SET_NAMES,
+            "locomotor set",
+        )
+        _require_v2_engine_enum_name(
+            self.payload.current_locomotor_set_id,
+            self.payload.current_locomotor_set_name,
+            self.payload.current_locomotor_set_name_status,
+            LOCOMOTOR_SET_NAMES,
+            "locomotor set",
+        )
+        _require_v2_state_classification(
+            self.payload.previous_state,
+            self.payload.previous_state_source,
+            self.payload.previous_ai_state_id,
+            self.payload.previous_is_engine_moving,
+        )
+        _require_v2_state_classification(
+            self.payload.current_state,
+            self.payload.current_state_source,
+            self.payload.current_ai_state_id,
+            self.payload.current_is_engine_moving,
+        )
+        before = (
+            self.payload.previous_state,
+            self.payload.previous_state_source,
+            self.payload.previous_ai_state_id,
+            self.payload.previous_locomotor_set_id,
+            self.payload.previous_is_engine_moving,
+        )
+        after = (
+            self.payload.current_state,
+            self.payload.current_state_source,
+            self.payload.current_ai_state_id,
+            self.payload.current_locomotor_set_id,
+            self.payload.current_is_engine_moving,
+        )
+        if before == after:
+            raise ValueError("entity_state_changed requires an actual engine state transition")
+        return self
+
 
 class EntitySampleRecord(TelemetryEnvelope):
     event_type: Literal["entity_sample"]
     payload: EntitySamplePayload
+
+    @model_validator(mode="after")
+    def _require_strict_v2_engine_sample(self) -> "EntitySampleRecord":
+        if self.schema_version != 2:
+            return self
+        _require_v2_closed_payload(self.payload, ("position", "path_goal"))
+        _require_v2_payload_fields(
+            self.payload,
+            {
+                "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status",
+                "speed_status", "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status",
+                "locomotor_set_id", "locomotor_set_name", "locomotor_set_name_status", "current_order_id",
+                "current_order_message_type", "current_order_message_name",
+                "path_goal_status", "path_goal", "is_mobile", "is_structure", "is_disabled", "is_engine_moving",
+                "sample_reason",
+            },
+        )
+        if self.payload.object_id == 0 or self.payload.template_name is None or self.payload.layer_id is None:
+            raise ValueError("v2 entity sample requires current object, template, and layer identity")
+        if self.payload.current_state not in TASK7_STATE_NAMES:
+            raise ValueError("v2 entity sample requires a supported direct classification")
+        if (
+            self.payload.layer_name_status is None
+            or self.payload.speed_status is None
+            or self.payload.current_state_source is None
+            or self.payload.ai_state_name_status is None
+            or self.payload.path_goal_status is None
+            or self.payload.is_mobile is None
+            or self.payload.is_structure is None
+            or self.payload.is_disabled is None
+            or self.payload.is_engine_moving is None
+            or self.payload.sample_reason is None
+        ):
+            raise ValueError("v2 entity sample requires explicit source and sampling provenance")
+        for field, value in (
+            ("position.x", self.payload.position.x),
+            ("position.y", self.payload.position.y),
+            ("position.z", self.payload.position.z),
+            ("orientation", self.payload.orientation),
+        ):
+            _require_v2_engine_real(field, value)
+        if self.payload.path_goal is not None:
+            for axis, value in (
+                ("x", self.payload.path_goal.x),
+                ("y", self.payload.path_goal.y),
+                ("z", self.payload.path_goal.z),
+            ):
+                _require_v2_engine_real(f"path_goal.{axis}", value)
+        if (self.payload.path_goal_status == "path_tail") != (self.payload.path_goal is not None):
+            raise ValueError("path_goal must be present exactly for path_tail provenance")
+        if (self.payload.speed_status == "measured_physics_velocity") != (self.payload.speed is not None):
+            raise ValueError("speed must be present exactly when measured from PhysicsBehavior")
+        if self.payload.speed is not None:
+            _require_v2_engine_real("speed", self.payload.speed)
+        _require_v2_engine_enum_name(
+            self.payload.ai_state_id,
+            self.payload.ai_state_name,
+            self.payload.ai_state_name_status,
+            AI_STATE_NAMES,
+            "AI state",
+        )
+        _require_v2_engine_enum_name(
+            self.payload.locomotor_set_id,
+            self.payload.locomotor_set_name,
+            self.payload.locomotor_set_name_status,
+            LOCOMOTOR_SET_NAMES,
+            "locomotor set",
+        )
+        _require_v2_state_classification(
+            self.payload.current_state,
+            self.payload.current_state_source,
+            self.payload.ai_state_id,
+            self.payload.is_engine_moving,
+        )
+        order_fields = (
+            self.payload.current_order_id,
+            self.payload.current_order_message_type,
+            self.payload.current_order_message_name,
+        )
+        if any(value is None for value in order_fields) != all(value is None for value in order_fields):
+            raise ValueError("current order ID and numeric/symbolic references must be jointly present or null")
+        _require_v2_layer_name(self.payload.layer_id, self.payload.layer_name, self.payload.layer_name_status)
+        if self.payload.is_disabled != (self.payload.current_state == "disabled"):
+            raise ValueError("disabled classification must exactly follow engine disabled state")
+        if self.payload.sample_reason == "periodic_moving_heartbeat" and not (
+            self.payload.is_mobile
+            and not self.payload.is_structure
+            and not self.payload.is_disabled
+            and self.payload.is_engine_moving
+        ):
+            raise ValueError("periodic heartbeat is only valid for enabled live moving mobile entities")
+        return self
 
 
 class CompleteRecord(TelemetryEnvelope):

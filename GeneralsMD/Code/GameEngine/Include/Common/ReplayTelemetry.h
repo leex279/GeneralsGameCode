@@ -26,6 +26,7 @@ public:
 	static const AsciiString &getTracePath();
 	static const AsciiString &getEngineDataIdentity();
 	static Int getReplayLocalSlotIndex();
+	static Int getMovementSampleFrames();
 	static AsciiString sha256Hex(const char *data, size_t length);
 	static void setGameDataCatalog(const AsciiString &path, const AsciiString &sha256,
 		const AsciiString &engineDataIdentity);

@@ -1,0 +1,125 @@
+#include "PreRTS.h"
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+
+#include "Common/ReplayOutcome.h"
+
+#include <cerrno>
+#include <cstdio>
+#include <string>
+
+namespace
+{
+	AsciiString s_outputPath;
+	unsigned long long s_commandCount = 0;
+	UnsignedInt s_crcMismatchFrame = 0;
+	UnsignedInt s_tempCounter = 0;
+	Bool s_crcMismatchObserved = FALSE;
+	Bool s_finished = FALSE;
+
+	const char *terminationReason(ReplayTelemetryTerminationReason reason)
+	{
+		switch (reason)
+		{
+			case REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF: return "clean_completion";
+			case REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH: return "crc_mismatch";
+			case REPLAY_TELEMETRY_TERMINATION_TRUNCATED_INPUT: return "replay_truncated";
+			case REPLAY_TELEMETRY_TERMINATION_INTERRUPTED: return "interrupted";
+		}
+		return "interrupted";
+	}
+
+	void diagnostic(const char *message)
+	{
+		fprintf(stderr, "ReplayOutcome: %s\n", message);
+		fflush(stderr);
+	}
+
+	void publish(const std::string &payload)
+	{
+		AsciiString tempPath;
+		FILE *output = nullptr;
+		for (Int attempt = 0; attempt < 100 && output == nullptr; ++attempt)
+		{
+			tempPath.format("%s.tmp.%lu.%u", s_outputPath.str(),
+				static_cast<unsigned long>(GetCurrentProcessId()), ++s_tempCounter);
+			errno = 0;
+			output = fopen(tempPath.str(), "wbx");
+			if (output == nullptr && errno != EEXIST)
+			{
+				break;
+			}
+		}
+		if (output == nullptr)
+		{
+			diagnostic("could not create an exclusive outcome transaction");
+			return;
+		}
+
+		const size_t written = fwrite(payload.data(), 1, payload.size(), output);
+		const Bool writeFailed = written != payload.size() || fflush(output) != 0;
+		const Bool closeFailed = fclose(output) != 0;
+		if (writeFailed || closeFailed)
+		{
+			diagnostic("could not write and close the complete outcome transaction");
+			remove(tempPath.str());
+			return;
+		}
+		// TheSuperHackers @feature Leex 20/08/2026 Publish without replacement so a late collision remains caller-owned. (#TBD)
+		if (!MoveFileA(tempPath.str(), s_outputPath.str()))
+		{
+			diagnostic("could not exclusively publish replay outcome");
+			remove(tempPath.str());
+		}
+	}
+}
+
+void ReplayOutcome::configure(const AsciiString &outputPath)
+{
+	s_outputPath = outputPath;
+	s_commandCount = 0;
+	s_crcMismatchFrame = 0;
+	s_crcMismatchObserved = FALSE;
+	s_finished = FALSE;
+}
+
+Bool ReplayOutcome::isEnabled()
+{
+	return s_outputPath.isNotEmpty();
+}
+
+void ReplayOutcome::observeExecutedCommand()
+{
+	if (isEnabled() && !s_finished)
+	{
+		++s_commandCount;
+	}
+}
+
+void ReplayOutcome::observeCRCMismatch(UnsignedInt frame)
+{
+	if (isEnabled() && !s_crcMismatchObserved)
+	{
+		s_crcMismatchObserved = TRUE;
+		s_crcMismatchFrame = frame;
+	}
+}
+
+void ReplayOutcome::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason)
+{
+	if (!isEnabled() || s_finished)
+	{
+		return;
+	}
+	s_finished = TRUE;
+	const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
+	const std::string payload = "{\"final_frame\":" + std::to_string(finalFrame)
+		+ ",\"command_count\":" + std::to_string(s_commandCount)
+		+ ",\"terminal_reason\":\"" + terminationReason(reason) + "\""
+		+ ",\"crc_mismatch\":" + (crcMismatch ? "true" : "false")
+		+ ",\"crc_mismatch_frame\":"
+		+ (crcMismatch && s_crcMismatchObserved ? std::to_string(s_crcMismatchFrame) : "null") + "}\n";
+	publish(payload);
+}
+
+#endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

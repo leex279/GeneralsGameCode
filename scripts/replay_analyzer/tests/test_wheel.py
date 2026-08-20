@@ -61,6 +61,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
         import tempfile
         from pathlib import Path
 
+        from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
         from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
         directory = Path(tempfile.mkdtemp(prefix="wheel-telemetry-"))
@@ -98,7 +99,11 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                 "replay_version": "1.04",
                 "map_identity": "test.map",
                 "initial_seed": 1,
-                "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False},
+                "exporter_settings": {
+                    "movement_sample_frames": 15,
+                    "audio_enabled": False,
+                    "order_coverage": canonical_order_coverage(),
+                },
                 "game_data_catalog": reference,
             },
         }

@@ -32,6 +32,7 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
 #include "Common/ReplayParseDump.h"
+#include "Common/ReplayOutcome.h"
 #include "Common/ReplayTelemetry.h"
 #endif
 #include "Common/version.h"
@@ -47,6 +48,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #endif
 
 
@@ -469,10 +471,19 @@ namespace
 	Bool s_hasTelemetryPath = FALSE;
 	Bool s_hasTelemetryRunId = FALSE;
 	Bool s_hasTelemetryMovementFrames = FALSE;
+	AsciiString s_replayOutcomePath;
+	Bool s_hasReplayOutcomePath = FALSE;
 
 	void telemetryCommandLineError(const char *message)
 	{
 		fprintf(stderr, "Replay telemetry: %s\n", message);
+		fflush(stderr);
+		exit(1);
+	}
+
+	void replayOutcomeCommandLineError(const char *message)
+	{
+		fprintf(stderr, "Replay outcome: %s\n", message);
 		fflush(stderr);
 		exit(1);
 	}
@@ -508,6 +519,53 @@ namespace
 		return TRUE;
 	}
 
+	Bool canonicalAnalyzerDestination(const Char *path, AsciiString &result)
+	{
+		char absolutePath[32768];
+		char *filePart = nullptr;
+		const DWORD absoluteLength = GetFullPathNameA(path, ARRAY_SIZE(absolutePath), absolutePath, &filePart);
+		if (absoluteLength == 0 || absoluteLength >= ARRAY_SIZE(absolutePath) || filePart == nullptr)
+		{
+			return FALSE;
+		}
+
+		std::string parent(absolutePath, static_cast<size_t>(filePart - absolutePath));
+		while (parent.size() > 3 && (parent.back() == '\\' || parent.back() == '/'))
+		{
+			parent.pop_back();
+		}
+		std::string canonicalParent = parent;
+		// TheSuperHackers @feature Leex 20/08/2026 Resolve reparse-point parents before comparing two nonexistent output identities. (#TBD)
+		HANDLE parentHandle = CreateFileA(parent.c_str(), FILE_READ_ATTRIBUTES,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+		if (parentHandle != INVALID_HANDLE_VALUE)
+		{
+			char resolvedParent[32768];
+			const DWORD resolvedLength = GetFinalPathNameByHandleA(parentHandle, resolvedParent,
+				ARRAY_SIZE(resolvedParent), FILE_NAME_NORMALIZED);
+			CloseHandle(parentHandle);
+			if (resolvedLength > 0 && resolvedLength < ARRAY_SIZE(resolvedParent))
+			{
+				canonicalParent.assign(resolvedParent, resolvedLength);
+			}
+		}
+		for (char &character : canonicalParent)
+		{
+			if (character == '/')
+			{
+				character = '\\';
+			}
+		}
+		if (!canonicalParent.empty() && canonicalParent.back() != '\\')
+		{
+			canonicalParent.push_back('\\');
+		}
+		canonicalParent += filePart;
+		result = canonicalParent.c_str();
+		return TRUE;
+	}
+
 	void validateReplayTelemetryOptions()
 	{
 		if (!s_hasTelemetryPath)
@@ -540,6 +598,40 @@ namespace
 			telemetryCommandLineError("-telemetry output path must not already exist");
 		}
 		ReplayTelemetry::configure(s_telemetryTracePath, s_telemetryRunId, s_telemetryMovementFrames);
+	}
+
+	void validateReplayOutcomeOptions()
+	{
+		if (!s_hasReplayOutcomePath)
+		{
+			return;
+		}
+		if (!TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+		{
+			replayOutcomeCommandLineError("-replay-outcome requires exactly one headless replay");
+		}
+		if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+		{
+			replayOutcomeCommandLineError("-replay-outcome requires sequential replay playback");
+		}
+		if (GetFileAttributesA(s_replayOutcomePath.str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			replayOutcomeCommandLineError("-replay-outcome path must not already exist");
+		}
+		AsciiString canonicalOutcomePath;
+		AsciiString canonicalTelemetryPath;
+		if (s_hasTelemetryPath
+			&& (!canonicalAnalyzerDestination(s_replayOutcomePath.str(), canonicalOutcomePath)
+				|| !canonicalAnalyzerDestination(s_telemetryTracePath.str(), canonicalTelemetryPath)))
+		{
+			replayOutcomeCommandLineError("could not resolve replay output path identities");
+		}
+		if (s_hasTelemetryPath && _stricmp(canonicalOutcomePath.str(), canonicalTelemetryPath.str()) == 0)
+		{
+			replayOutcomeCommandLineError("-replay-outcome must not alias the telemetry path");
+		}
+		// TheSuperHackers @feature Leex 20/08/2026 Configure an opt-in passive terminal summary without enabling telemetry. (#TBD)
+		ReplayOutcome::configure(s_replayOutcomePath);
 	}
 }
 
@@ -608,12 +700,36 @@ Int parseReplayTelemetryMovementFrames(char *args[], int num)
 	{
 		telemetryCommandLineError("-telemetry-movement-frames requires a positive integer");
 	}
+	// TheSuperHackers @feature Leex 20/08/2026 Bound movement sampling before playback so hostile intervals cannot overflow frame-density guarantees. (#TBD)
+	if (movementFrames > 3600)
+	{
+		telemetryCommandLineError("-telemetry-movement-frames must be at most 3600");
+	}
 	if (s_hasTelemetryMovementFrames)
 	{
 		telemetryCommandLineError("-telemetry-movement-frames may only be specified once");
 	}
 	s_telemetryMovementFrames = static_cast<Int>(movementFrames);
 	s_hasTelemetryMovementFrames = TRUE;
+	return 2;
+}
+
+Int parseReplayOutcome(char *args[], int num)
+{
+	if (num <= 1)
+	{
+		replayOutcomeCommandLineError("-replay-outcome requires an absolute output path");
+	}
+	if (s_hasReplayOutcomePath)
+	{
+		replayOutcomeCommandLineError("-replay-outcome may only be specified once");
+	}
+	if (!isAbsoluteAnalyzerPath(args[1]))
+	{
+		replayOutcomeCommandLineError("-replay-outcome path must be absolute");
+	}
+	s_replayOutcomePath = args[1];
+	s_hasReplayOutcomePath = TRUE;
 	return 2;
 }
 #endif
@@ -1313,6 +1429,8 @@ static CommandLineParam paramsForStartup[] =
 	{ "-telemetry", parseReplayTelemetry },
 	{ "-telemetry-run-id", parseReplayTelemetryRunId },
 	{ "-telemetry-movement-frames", parseReplayTelemetryMovementFrames },
+	// TheSuperHackers @feature Leex 20/08/2026 Expose telemetry-independent replay completion evidence for parity tests. (#TBD)
+	{ "-replay-outcome", parseReplayOutcome },
 #endif
 
 	// TheSuperHackers @feature helmutbuhler 23/05/2025
@@ -1620,6 +1738,7 @@ void CommandLine::parseCommandLineForStartup()
 	parseCommandLine(paramsForStartup, ARRAY_SIZE(paramsForStartup));
 #if defined(RTS_REPLAY_ANALYZER)
 	validateReplayTelemetryOptions();
+	validateReplayOutcomeOptions();
 #endif
 }
 

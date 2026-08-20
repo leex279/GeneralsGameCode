@@ -13,6 +13,7 @@ from typing import cast
 from jsonschema import Draft202012Validator, FormatChecker  # type: ignore[import-untyped]
 from pydantic import TypeAdapter, ValidationError
 
+from generals_replay_analyzer.contracts import message_name_for
 from generals_replay_analyzer.telemetry.model import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
@@ -24,6 +25,7 @@ from generals_replay_analyzer.telemetry.model import (
     PlayersInitializedRecord,
     TelemetryRecord,
 )
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 
 _RECORD_ADAPTER: TypeAdapter[TelemetryRecord] = TypeAdapter(TelemetryRecord)
 _UINT32_MODULUS = 1 << 32
@@ -102,6 +104,74 @@ class _PendingSupplyCashPair:
     frame: int
     player_index: int
     amount: int
+
+
+@dataclass(frozen=True)
+class _ObservedOrder:
+    """One validated historical command identity referenced by later entity samples."""
+
+    message_type: int
+    message_name: str
+    selected_object_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ObservedEngineState:
+    """Overlapping source-grounded state facts shared by transitions and samples."""
+
+    classification: str
+    classification_source: str
+    ai_state_id: int | None
+    ai_state_name: str | None
+    locomotor_set_id: int | None
+    locomotor_set_name: str | None
+    is_engine_moving: bool
+
+
+@dataclass(frozen=True)
+class _LastEntitySample:
+    """Prior per-entity sample facts used for density and duplicate validation."""
+
+    frame: int
+    facts: dict[str, object]
+    is_engine_moving: bool
+    interval_eligible: bool
+
+
+@dataclass(frozen=True)
+class _PendingForcedSample:
+    """Highest-priority producer force reason awaiting its same-frame sample."""
+
+    frame: int
+    reason: str
+
+
+_SAMPLE_SNAPSHOT_FIELDS = (
+    "position",
+    "orientation",
+    "layer_id",
+    "speed",
+    "current_state",
+    "current_state_source",
+    "ai_state_id",
+    "ai_state_name",
+    "locomotor_set_id",
+    "locomotor_set_name",
+    "is_engine_moving",
+    "path_goal",
+    "path_goal_status",
+    "is_mobile",
+    "is_structure",
+    "is_disabled",
+    "current_order_id",
+    "current_order_message_type",
+    "current_order_message_name",
+)
+
+
+def _sample_snapshot_facts(payload: dict[str, object]) -> dict[str, object]:
+    """Mirror exactly the engine fields compared by ReplayMovementSampler::sameSample."""
+    return {field: payload[field] for field in _SAMPLE_SNAPSHOT_FIELDS}
 
 
 class _ReferenceRequirement(Enum):
@@ -1073,6 +1143,290 @@ def _validate_v2_catalog_identities(
             raise _error(path, line_number, record.sequence, "science_name is absent from game data catalog")
 
 
+def _validated_order_coverage(path: Path, manifest: ManifestRecord) -> dict[int, tuple[str, str, int | None]]:
+    """Validate the closed dispatch capability against the packaged numeric/name command catalog."""
+    if manifest.schema_version != 2:
+        return {}
+    raw_coverage = manifest.payload.exporter_settings.get("order_coverage")
+    if raw_coverage != canonical_order_coverage():
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': order_coverage must equal the canonical closed supported-order coverage"
+        )
+    if not isinstance(raw_coverage, dict):
+        raise TelemetryTraceValidationError(f"trace '{path}': order_coverage must be a closed object")
+    commands = raw_coverage.get("supported_commands")
+    if not isinstance(commands, list):
+        raise TelemetryTraceValidationError(f"trace '{path}': order_coverage supported_commands must be an array")
+    result: dict[int, tuple[str, str, int | None]] = {}
+    prior_message_type: int | None = None
+    for entry in commands:
+        if not isinstance(entry, dict):
+            raise TelemetryTraceValidationError(f"trace '{path}': order_coverage command entry must be an object")
+        message_type = entry.get("message_type")
+        message_name = entry.get("message_name")
+        target_kind = entry.get("target_kind")
+        target_argument_index = entry.get("target_argument_index")
+        if type(message_type) is not int or not isinstance(message_name, str) or not isinstance(target_kind, str):
+            raise TelemetryTraceValidationError(f"trace '{path}': order_coverage command identity has invalid types")
+        catalog_name = message_name_for(message_type)
+        if catalog_name is None or message_name != catalog_name:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': order_coverage message numeric/name identity differs from packaged command catalog"
+            )
+        if message_type in result or (prior_message_type is not None and message_type <= prior_message_type):
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': order_coverage supported commands must be strictly numeric ordered and unique"
+            )
+        if (target_kind == "none") != (target_argument_index is None):
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': order_coverage target argument must be null exactly for target-free commands"
+            )
+        if target_kind != "none" and type(target_argument_index) is not int:
+            raise TelemetryTraceValidationError(f"trace '{path}': targeted order requires a numeric argument index")
+        result[message_type] = (message_name, target_kind, cast(int | None, target_argument_index))
+        prior_message_type = message_type
+    return result
+
+
+def _validate_v2_order_movement(
+    path: Path,
+    line_number: int,
+    record: TelemetryRecord,
+    entities: dict[int, _EntityLifecycleState],
+    engine_player_indices: frozenset[int],
+    order_coverage: dict[int, tuple[str, str, int | None]],
+    orders: dict[int, _ObservedOrder],
+    current_order_by_object: dict[int, int],
+    current_state_by_object: dict[int, _ObservedEngineState],
+    pending_forced_samples: dict[int, _PendingForcedSample],
+    pending_lifecycle_samples: dict[int, int],
+    last_samples: dict[int, _LastEntitySample],
+    movement_sample_frames: int,
+) -> None:
+    """Validate current order/state references and deterministic bounded movement evidence."""
+    event_type = record.event_type
+    payload = cast(dict[str, object], record.payload.model_dump())
+    if event_type == "object_destroyed":
+        object_id = cast(int, payload["object_id"])
+        pending_force = pending_forced_samples.get(object_id)
+        if pending_force is not None and pending_force.frame == record.frame:
+            pending_forced_samples.pop(object_id)
+        if pending_lifecycle_samples.get(object_id) == record.frame:
+            pending_lifecycle_samples.pop(object_id)
+        prior = last_samples.get(object_id)
+        if (
+            prior is not None
+            and prior.is_engine_moving
+            and prior.interval_eligible
+            and record.frame - prior.frame > movement_sample_frames
+        ):
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "moving entity sample tail gap exceeds movement_sample_frames before object_destroyed",
+            )
+        current_order_by_object.pop(object_id, None)
+        current_state_by_object.pop(object_id, None)
+        last_samples.pop(object_id, None)
+    for object_id, forced_sample in pending_forced_samples.items():
+        if record.frame > forced_sample.frame:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"entity object_id {object_id} is missing its same-frame order/state-forced entity_sample",
+            )
+    for object_id, lifecycle_sample_frame in pending_lifecycle_samples.items():
+        if record.frame > lifecycle_sample_frame:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                f"entity object_id {object_id} is missing its same-frame lifecycle-forced entity_sample",
+            )
+
+    if event_type == "object_destroyed":
+        return
+
+    if event_type == "object_created":
+        pending_lifecycle_samples[cast(int, payload["object_id"])] = record.frame
+        return
+
+    if event_type == "order_issued":
+        message_type = cast(int, payload["message_type"])
+        message_name = cast(str, payload["message_name"])
+        coverage = order_coverage.get(message_type)
+        if coverage is None:
+            raise _error(path, line_number, record.sequence, "order is outside manifest closed supported-order coverage")
+        if coverage[:2] != (message_name, payload["target_kind"]):
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "order message numeric/name/target identity differs from manifest coverage and packaged catalog",
+            )
+        if message_name_for(message_type) != message_name:
+            raise _error(path, line_number, record.sequence, "order message differs from packaged command catalog")
+        source_player = cast(int, payload["source_player_index"])
+        if source_player not in engine_player_indices:
+            raise _error(path, line_number, record.sequence, "order source player is outside engine player domain")
+        order_id = cast(int, payload["order_id"])
+        if order_id in orders or order_id != len(orders) + 1:
+            raise _error(path, line_number, record.sequence, "order_id must be trace-local, contiguous, and unique")
+        selected_ids = cast(list[int], payload["selected_object_ids"])
+        selected_entities = cast(list[dict[str, object]], payload["selected_entities"])
+        for object_id, identity in zip(selected_ids, selected_entities, strict=True):
+            state = entities[object_id]
+            if identity["template_name"] != state.template_name:
+                raise _error(path, line_number, record.sequence, "selected entity template identity changed")
+            if state.owner_player_index != source_player:
+                raise _error(path, line_number, record.sequence, "selected entity is not owned by source player")
+            current_order_by_object[object_id] = order_id
+            pending_force = pending_forced_samples.get(object_id)
+            if pending_force is None or pending_force.reason != "state_forced":
+                pending_forced_samples[object_id] = _PendingForcedSample(record.frame, "order_forced")
+        target_id = payload["target_object_id"]
+        if isinstance(target_id, int) and payload["target_template_name"] != entities[target_id].template_name:
+            raise _error(path, line_number, record.sequence, "target template identity changed")
+        orders[order_id] = _ObservedOrder(message_type, message_name, tuple(selected_ids))
+        return
+
+    if event_type == "entity_state_changed":
+        object_id = cast(int, payload["object_id"])
+        current_order_id = cast(int | None, payload["current_order_id"])
+        if current_order_id != current_order_by_object.get(object_id):
+            raise _error(path, line_number, record.sequence, "state current_order_id contradicts post-dispatch order history")
+        previous_state = _ObservedEngineState(
+            cast(str, payload["previous_state"]),
+            cast(str, payload["previous_state_source"]),
+            cast(int | None, payload["previous_ai_state_id"]),
+            cast(str | None, payload["previous_ai_state_name"]),
+            cast(int | None, payload["previous_locomotor_set_id"]),
+            cast(str | None, payload["previous_locomotor_set_name"]),
+            cast(bool, payload["previous_is_engine_moving"]),
+        )
+        expected_state = current_state_by_object.get(object_id)
+        if expected_state is not None and previous_state != expected_state:
+            raise _error(path, line_number, record.sequence, "state transition previous engine state contradicts history")
+        current_state_by_object[object_id] = _ObservedEngineState(
+            cast(str, payload["current_state"]),
+            cast(str, payload["current_state_source"]),
+            cast(int | None, payload["current_ai_state_id"]),
+            cast(str | None, payload["current_ai_state_name"]),
+            cast(int | None, payload["current_locomotor_set_id"]),
+            cast(str | None, payload["current_locomotor_set_name"]),
+            cast(bool, payload["current_is_engine_moving"]),
+        )
+        pending_forced_samples[object_id] = _PendingForcedSample(record.frame, "state_forced")
+        return
+
+    if event_type != "entity_sample":
+        return
+
+    object_id = cast(int, payload["object_id"])
+    state = entities[object_id]
+    if payload["template_name"] != state.template_name:
+        raise _error(path, line_number, record.sequence, "sample template identity changed")
+    if payload["owner_player_index"] != state.owner_player_index:
+        raise _error(path, line_number, record.sequence, "sample owner identity changed without owner_changed")
+    sample_state = _ObservedEngineState(
+        cast(str, payload["current_state"]),
+        cast(str, payload["current_state_source"]),
+        cast(int | None, payload["ai_state_id"]),
+        cast(str | None, payload["ai_state_name"]),
+        cast(int | None, payload["locomotor_set_id"]),
+        cast(str | None, payload["locomotor_set_name"]),
+        cast(bool, payload["is_engine_moving"]),
+    )
+    expected_state = current_state_by_object.get(object_id)
+    if expected_state is not None and sample_state != expected_state:
+        raise _error(path, line_number, record.sequence, "sample engine state contradicts latest entity state")
+    current_state_by_object[object_id] = sample_state
+    sample_order_id = cast(int | None, payload["current_order_id"])
+    if sample_order_id != current_order_by_object.get(object_id):
+        raise _error(path, line_number, record.sequence, "sample current order contradicts post-dispatch order history")
+    if sample_order_id is not None:
+        observed_order = orders[sample_order_id]
+        if (
+            object_id not in observed_order.selected_object_ids
+            or payload["current_order_message_type"] != observed_order.message_type
+            or payload["current_order_message_name"] != observed_order.message_name
+        ):
+            raise _error(path, line_number, record.sequence, "sample current order numeric/name reference is incoherent")
+    pending_force = pending_forced_samples.get(object_id)
+    if pending_force is not None:
+        if pending_force.frame != record.frame:
+            raise _error(path, line_number, record.sequence, "forced entity sample must share its order/state frame")
+        del pending_forced_samples[object_id]
+    lifecycle_frame = pending_lifecycle_samples.get(object_id)
+    if lifecycle_frame is not None:
+        if lifecycle_frame != record.frame:
+            raise _error(path, line_number, record.sequence, "lifecycle entity sample must share its creation frame")
+        del pending_lifecycle_samples[object_id]
+    prior = last_samples.get(object_id)
+    facts = _sample_snapshot_facts(payload)
+    sample_reason = cast(str, payload["sample_reason"])
+    expected_forced_reason = pending_force.reason if pending_force is not None else None
+    if expected_forced_reason is None and lifecycle_frame is not None:
+        expected_forced_reason = "lifecycle_forced"
+    if expected_forced_reason is not None and sample_reason != expected_forced_reason:
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            f"sample_reason must be {expected_forced_reason} for the pending producer force",
+        )
+    if prior is not None:
+        frame_gap = record.frame - prior.frame
+        if frame_gap <= 0:
+            raise _error(path, line_number, record.sequence, "duplicate entity samples in one frame are forbidden")
+        if prior.is_engine_moving and prior.interval_eligible and frame_gap > movement_sample_frames:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "moving entity sample gap exceeds movement_sample_frames",
+            )
+        if expected_forced_reason is None:
+            interval_eligible = (
+                cast(bool, payload["is_mobile"])
+                and not cast(bool, payload["is_structure"])
+                and not cast(bool, payload["is_disabled"])
+            )
+            changed = facts != prior.facts
+            expected_interval_reason = "changed" if changed else "periodic_moving_heartbeat"
+            if (
+                not interval_eligible
+                or frame_gap < movement_sample_frames
+                or (not changed and not cast(bool, payload["is_engine_moving"]))
+                or sample_reason != expected_interval_reason
+            ):
+                raise _error(
+                    path,
+                    line_number,
+                    record.sequence,
+                    f"sample_reason does not match producer interval provenance ({expected_interval_reason})",
+                )
+            if not changed and frame_gap != movement_sample_frames:
+                raise _error(
+                    path,
+                    line_number,
+                    record.sequence,
+                    "periodic heartbeat gap must exactly equal movement_sample_frames",
+                )
+    elif expected_forced_reason is None:
+        raise _error(path, line_number, record.sequence, "first entity sample must preserve lifecycle provenance")
+    last_samples[object_id] = _LastEntitySample(
+        record.frame,
+        facts,
+        cast(bool, payload["is_engine_moving"]),
+        cast(bool, payload["is_mobile"])
+        and not cast(bool, payload["is_structure"])
+        and not cast(bool, payload["is_disabled"]),
+    )
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Validate immutable observed telemetry before later import stages consume it. (#TBD)
 def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     """Return an iterator only after the complete trace is validated as immutable evidence."""
@@ -1087,6 +1441,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         raise TelemetryTraceValidationError(f"trace '{path}': cannot read trace: {error}") from error
 
     prior_sequence: int | None = None
+    prior_order_movement_frame: int | None = None
     expected_schema_version: int | None = None
     expected_run_id: object | None = None
     expected_catalog: GameDataCatalogReference | None = None
@@ -1110,6 +1465,14 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     terminal_players: dict[int, str] = {}
     observed_disconnected_slots: set[int] = set()
     outcome_records: list[MatchOutcomeRecord] = []
+    movement_sample_frames = 15
+    order_coverage: dict[int, tuple[str, str, int | None]] = {}
+    observed_orders: dict[int, _ObservedOrder] = {}
+    current_order_by_object: dict[int, int] = {}
+    current_state_by_object: dict[int, _ObservedEngineState] = {}
+    pending_forced_samples: dict[int, _PendingForcedSample] = {}
+    pending_lifecycle_samples: dict[int, int] = {}
+    last_entity_samples: dict[int, _LastEntitySample] = {}
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
         try:
@@ -1175,10 +1538,23 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 validated.sequence,
                 f"is not greater than previous sequence {prior_sequence}",
             )
+        if validated.event_type in {"order_issued", "entity_state_changed", "entity_sample"}:
+            if prior_order_movement_frame is not None and validated.frame < prior_order_movement_frame:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    f"order/state/sample frame {validated.frame} is less than previous frame {prior_order_movement_frame}",
+                )
+            prior_order_movement_frame = validated.frame
 
         if isinstance(validated, ManifestRecord):
             expected_catalog = validated.payload.game_data_catalog
             expected_engine_build = validated.payload.engine_build
+            interval = validated.payload.exporter_settings["movement_sample_frames"]
+            assert type(interval) is int
+            movement_sample_frames = interval
+            order_coverage = _validated_order_coverage(path, validated)
         elif isinstance(validated, PlayersInitializedRecord):
             players_initialized_count += 1
             if expected_schema_version == 2 and validated.payload.game_data_catalog != expected_catalog:
@@ -1243,6 +1619,21 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 terminal_players,
                 observed_disconnected_slots,
             )
+            _validate_v2_order_movement(
+                path,
+                line_number,
+                validated,
+                entity_lifecycles,
+                engine_player_indices,
+                order_coverage,
+                observed_orders,
+                current_order_by_object,
+                current_state_by_object,
+                pending_forced_samples,
+                pending_lifecycle_samples,
+                last_entity_samples,
+                movement_sample_frames,
+            )
 
         records_seen += 1
         prior_sequence = validated.sequence
@@ -1298,4 +1689,25 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         )
         catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
         _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
+        if pending_forced_samples:
+            object_id = min(pending_forced_samples)
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': entity object_id {object_id} is missing its same-frame order/state-forced entity_sample"
+            )
+        if pending_lifecycle_samples:
+            object_id = min(pending_lifecycle_samples)
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': entity object_id {object_id} is missing its same-frame lifecycle-forced entity_sample"
+            )
+        for object_id, sample in last_entity_samples.items():
+            entity = entity_lifecycles[object_id]
+            if (
+                not entity.destroyed
+                and sample.is_engine_moving
+                and sample.interval_eligible
+                and complete_record.payload.final_frame - sample.frame > movement_sample_frames
+            ):
+                raise TelemetryTraceValidationError(
+                    f"trace '{path}': moving entity sample tail gap exceeds movement_sample_frames"
+                )
     return tuple(validated_records)

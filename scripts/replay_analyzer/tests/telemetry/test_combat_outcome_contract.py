@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from generals_replay_analyzer.telemetry.model import FLOAT32_MAX, DamageAppliedRecord, MatchOutcomeRecord
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "a23e4567-e89b-12d3-a456-426614174000"
@@ -185,7 +186,11 @@ def _base(directory: Path) -> list[dict[str, object]]:
                 "replay_version": "1.04",
                 "map_identity": "maps/test.map",
                 "initial_seed": 7,
-                "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False},
+                "exporter_settings": {
+                    "movement_sample_frames": 15,
+                    "audio_enabled": False,
+                    "order_coverage": canonical_order_coverage(),
+                },
                 "game_data_catalog": reference,
             },
         ),
@@ -195,6 +200,65 @@ def _base(directory: Path) -> list[dict[str, object]]:
     ]
 
 
+def _inject_lifecycle_samples(records: list[dict[str, object]]) -> None:
+    creations = {
+        int(record["payload"]["object_id"]): record["payload"]
+        for record in records
+        if record["event_type"] == "object_created"
+    }
+    sampled = {
+        int(record["payload"]["object_id"])
+        for record in records
+        if record["event_type"] == "entity_sample"
+    }
+    insert_at = next((index for index, record in enumerate(records) if int(record["frame"]) > 0), len(records))
+    samples = []
+    for object_id in sorted(creations.keys() - sampled):
+        creation = creations[object_id]
+        samples.append(
+            _record(
+                0,
+                "entity_sample",
+                {
+                    "object_id": object_id,
+                    "template_name": creation["template_name"],
+                    "owner_player_index": creation["owner_player_index"],
+                    "position": creation["position"],
+                    "orientation": creation["orientation"],
+                    "layer_id": 1,
+                    "layer_name": "LAYER_GROUND",
+                    "layer_name_status": "stable",
+                    "speed_status": "unavailable_no_physics",
+                    "speed": None,
+                    "current_state": "unknown",
+                    "current_state_source": "ai_interface_unavailable",
+                    "ai_state_id": None,
+                    "ai_state_name": None,
+                    "ai_state_name_status": "unavailable_no_ai",
+                    "locomotor_set_id": None,
+                    "locomotor_set_name": None,
+                    "locomotor_set_name_status": "unavailable_no_ai",
+                    "current_order_id": None,
+                    "current_order_message_type": None,
+                    "current_order_message_name": None,
+                    "path_goal_status": "unavailable_no_ai",
+                    "path_goal": None,
+                    "is_mobile": False,
+                    "is_structure": False,
+                    "is_disabled": False,
+                    "is_engine_moving": False,
+                    "sample_reason": "lifecycle_forced",
+                },
+            )
+        )
+    sample_count = len(samples)
+    for offset, sample in enumerate(samples):
+        sample["sequence"] = insert_at + offset
+    for record in records[insert_at:]:
+        record["sequence"] = int(record["sequence"]) + sample_count
+    records[insert_at:insert_at] = samples
+
+
 def _finish(
     path: Path,
     records: list[dict[str, object]],
@@ -202,6 +266,7 @@ def _finish(
     outcome: dict[str, object] | None = None,
     completion: dict[str, object] | None = None,
 ) -> Path:
+    _inject_lifecycle_samples(records)
     if outcome is not None:
         records.append(_record(len(records), "match_outcome", outcome, frame=108))
     prior = b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
@@ -300,7 +365,7 @@ def test_reader_accepts_authoritative_combat_and_terminal_outcome_contract(tmp_p
     assert records[-2].event_type == "match_outcome"
     assert records[-2].payload.winner_player_indices == [0]
     assert records[-1].payload.crc_mismatch_frame == 108
-    assert records[4].payload.applied_amount == 40.0
+    assert records[6].payload.applied_amount == 40.0
 
 
 def test_v2_engine_real_bound_matches_writer_nine_digit_float32_serialization() -> None:
@@ -339,7 +404,7 @@ def test_reader_accepts_writer_serialized_float32_limits(tmp_path: Path, seriali
         )
     )
 
-    observed = validated[4].payload
+    observed = next(record.payload for record in validated if record.event_type == "damage_applied")
     assert observed.attempted_amount == serialized_bound
     assert observed.location.x == serialized_bound
     assert observed.applied_amount == 3.40282347e38
@@ -511,7 +576,9 @@ def test_bridge_style_healing_after_killing_damage_is_allowed_until_object_destr
 
     validated = tuple(iter_validated_trace(_finish(tmp_path / "bridge-repair.ndjson", records, outcome=_outcome())))
 
-    assert [record.event_type for record in validated[4:6]] == ["damage_applied", "healing_applied"]
+    assert [
+        record.event_type for record in validated if record.event_type in {"damage_applied", "healing_applied"}
+    ] == ["damage_applied", "healing_applied"]
 
 
 def test_healing_requires_its_current_source_to_remain_alive(tmp_path: Path) -> None:
@@ -687,7 +754,7 @@ def test_true_surrender_stays_surrender_even_when_header_later_marks_slot_discon
         )
     )
 
-    assert validated[4].event_type == "player_surrendered"
+    assert any(record.event_type == "player_surrendered" for record in validated)
 
 
 @pytest.mark.parametrize("terminal_reason", ["clean_completion", "replay_truncated", "interrupted"])

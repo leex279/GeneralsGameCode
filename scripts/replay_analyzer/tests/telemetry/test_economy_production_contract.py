@@ -13,6 +13,7 @@ from generals_replay_analyzer.telemetry.model import (
     FinalCashBalance,
     SupplyCollectedPayload,
 )
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "823e4567-e89b-12d3-a456-426614174000"
@@ -188,7 +189,11 @@ def _base_records(directory: Path) -> list[dict[str, object]]:
                 "replay_version": "1.04",
                 "map_identity": "maps/test.map",
                 "initial_seed": 7,
-                "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False},
+                "exporter_settings": {
+                    "movement_sample_frames": 15,
+                    "audio_enabled": False,
+                    "order_coverage": canonical_order_coverage(),
+                },
                 "game_data_catalog": reference,
             },
         ),
@@ -200,8 +205,73 @@ def _base_records(directory: Path) -> list[dict[str, object]]:
     ]
 
 
+def _inject_lifecycle_samples(records: list[dict[str, object]]) -> None:
+    creations = {
+        int(record["payload"]["object_id"]): record["payload"]
+        for record in records
+        if record["event_type"] == "object_created"
+    }
+    sampled = {
+        int(record["payload"]["object_id"])
+        for record in records
+        if record["event_type"] == "entity_sample"
+    }
+    insert_at = next((index for index, record in enumerate(records) if int(record["frame"]) > 0), len(records))
+    current_owners = {object_id: creation["owner_player_index"] for object_id, creation in creations.items()}
+    for record in records[:insert_at]:
+        if record["event_type"] == "owner_changed":
+            payload = record["payload"]
+            current_owners[int(payload["object_id"])] = payload["new_owner_player_index"]
+    samples = []
+    for object_id in sorted(creations.keys() - sampled):
+        creation = creations[object_id]
+        samples.append(
+            _record(
+                0,
+                "entity_sample",
+                {
+                    "object_id": object_id,
+                    "template_name": creation["template_name"],
+                    "owner_player_index": current_owners[object_id],
+                    "position": creation["position"],
+                    "orientation": creation["orientation"],
+                    "layer_id": 1,
+                    "layer_name": "LAYER_GROUND",
+                    "layer_name_status": "stable",
+                    "speed_status": "unavailable_no_physics",
+                    "speed": None,
+                    "current_state": "unknown",
+                    "current_state_source": "ai_interface_unavailable",
+                    "ai_state_id": None,
+                    "ai_state_name": None,
+                    "ai_state_name_status": "unavailable_no_ai",
+                    "locomotor_set_id": None,
+                    "locomotor_set_name": None,
+                    "locomotor_set_name_status": "unavailable_no_ai",
+                    "current_order_id": None,
+                    "current_order_message_type": None,
+                    "current_order_message_name": None,
+                    "path_goal_status": "unavailable_no_ai",
+                    "path_goal": None,
+                    "is_mobile": False,
+                    "is_structure": False,
+                    "is_disabled": False,
+                    "is_engine_moving": False,
+                    "sample_reason": "lifecycle_forced",
+                },
+            )
+        )
+    sample_count = len(samples)
+    for offset, sample in enumerate(samples):
+        sample["sequence"] = insert_at + offset
+    for record in records[insert_at:]:
+        record["sequence"] = int(record["sequence"]) + sample_count
+    records[insert_at:insert_at] = samples
+
+
 def _finish(path: Path, records: list[dict[str, object]], balances: list[dict[str, object]]) -> Path:
     records[:] = [record for record in records if record["event_type"] != "match_outcome"]
+    _inject_lifecycle_samples(records)
     players = next(record for record in records if record["event_type"] == "players_initialized")
     domain = players["payload"]["engine_player_indices"]
     records.append(

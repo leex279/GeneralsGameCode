@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from generals_replay_analyzer.telemetry.model import ObjectCreatedRecord
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "723e4567-e89b-12d3-a456-426614174000"
@@ -149,7 +150,11 @@ def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
         "replay_version": "1.04",
         "map_identity": "maps/test.map",
         "initial_seed": 7,
-        "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False},
+        "exporter_settings": {
+            "movement_sample_frames": 15,
+            "audio_enabled": False,
+            "order_coverage": canonical_order_coverage(),
+        },
         "game_data_catalog": reference,
     }
 
@@ -206,6 +211,67 @@ def _creation(
             "producer_object_id": None,
             "producer_player_index": None,
         },
+    }
+
+
+def _task7_state_payload(template_name: str = "AmericaVehicleHumvee") -> dict[str, object]:
+    return {
+        "object_id": 101,
+        "template_name": template_name,
+        "owner_player_index": 0,
+        "previous_state": "idle",
+        "previous_state_source": "ai_idle_state",
+        "current_state": "moving",
+        "current_state_source": "ai_moving_state",
+        "previous_ai_state_id": 0,
+        "current_ai_state_id": 1,
+        "previous_ai_state_name": "AI_IDLE",
+        "current_ai_state_name": "AI_MOVE_TO",
+        "previous_ai_state_name_status": "stable",
+        "current_ai_state_name_status": "stable",
+        "previous_locomotor_set_id": 0,
+        "current_locomotor_set_id": 0,
+        "previous_locomotor_set_name": "LOCOMOTORSET_NORMAL",
+        "current_locomotor_set_name": "LOCOMOTORSET_NORMAL",
+        "previous_locomotor_set_name_status": "stable",
+        "current_locomotor_set_name_status": "stable",
+        "previous_is_engine_moving": False,
+        "current_is_engine_moving": True,
+        "current_order_id": None,
+        "transition_source": "end_of_game_logic_update",
+    }
+
+
+def _task7_sample_payload() -> dict[str, object]:
+    return {
+        "object_id": 101,
+        "template_name": "AmericaVehicleHumvee",
+        "owner_player_index": 0,
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "orientation": 0.0,
+        "layer_id": 1,
+        "layer_name": "LAYER_GROUND",
+        "layer_name_status": "stable",
+        "speed_status": "measured_physics_velocity",
+        "speed": 0.0,
+        "current_state": "idle",
+        "current_state_source": "ai_idle_state",
+        "ai_state_id": 0,
+        "ai_state_name": "AI_IDLE",
+        "ai_state_name_status": "stable",
+        "locomotor_set_id": 0,
+        "locomotor_set_name": "LOCOMOTORSET_NORMAL",
+        "locomotor_set_name_status": "stable",
+        "current_order_id": None,
+        "current_order_message_type": None,
+        "current_order_message_name": None,
+        "path_goal_status": "unavailable_no_path",
+        "path_goal": None,
+        "is_mobile": True,
+        "is_structure": False,
+        "is_disabled": False,
+        "is_engine_moving": False,
+        "sample_reason": "lifecycle_forced",
     }
 
 
@@ -269,6 +335,52 @@ def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: st
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
     records.extend(_record(2, sequence, event, payload) for sequence, (event, payload) in enumerate(events, 2))
+    creations = {
+        int(payload["object_id"]): payload
+        for event, payload in events
+        if event == "object_created"
+    }
+    destroyed = {
+        int(payload["object_id"])
+        for event, payload in events
+        if event == "object_destroyed"
+    }
+    sampled = {
+        int(payload["object_id"])
+        for event, payload in events
+        if event == "entity_sample"
+    }
+    current_owners = {object_id: creation["owner_player_index"] for object_id, creation in creations.items()}
+    for event, payload in events:
+        if event == "owner_changed":
+            current_owners[int(payload["object_id"])] = payload["new_owner_player_index"]
+    for object_id in sorted(creations.keys() - destroyed - sampled):
+        creation = creations[object_id]
+        flags = creation["kind_of_flags"]
+        assert isinstance(flags, list)
+        mobile = "VEHICLE" in flags and "STRUCTURE" not in flags
+        sample = _task7_sample_payload()
+        sample.update(
+            {
+                "object_id": object_id,
+                "template_name": creation["template_name"],
+                "owner_player_index": current_owners[object_id],
+                "position": creation["position"] or {"x": 0.0, "y": 0.0, "z": 0.0},
+                "orientation": creation["orientation"],
+                "current_state": "idle" if mobile else "unknown",
+                "current_state_source": "ai_idle_state" if mobile else "ai_interface_unavailable",
+                "ai_state_id": 0 if mobile else None,
+                "ai_state_name": "AI_IDLE" if mobile else None,
+                "ai_state_name_status": "stable" if mobile else "unavailable_no_ai",
+                "locomotor_set_id": 0 if mobile else None,
+                "locomotor_set_name": "LOCOMOTORSET_NORMAL" if mobile else None,
+                "locomotor_set_name_status": "stable" if mobile else "unavailable_no_ai",
+                "path_goal_status": "unavailable_no_path" if mobile else "unavailable_no_ai",
+                "is_mobile": mobile,
+                "is_structure": "STRUCTURE" in flags,
+            }
+        )
+        records.append(_record(2, len(records), "entity_sample", sample))
     records.append(_outcome(len(records), [0, 1]))
     records.append(_completion(2, records))
     return _write_records(tmp_path / name, records)
@@ -394,25 +506,25 @@ def test_v2_rejects_ambiguous_or_invalid_creation_identity(
         (
             "order_issued",
             {
-                "message_type": 1,
-                "message_name": "MSG_ATTACK_OBJECT",
+                "order_id": 1,
+                "command_frame": 0,
+                "message_type": 1074,
+                "message_name": "MSG_DO_STOP",
                 "source_player_index": 0,
                 "selected_object_ids": [101],
+                "selected_entities": [{"object_id": 101, "template_name": "AmericaVehicleHumvee"}],
+                "target_kind": "none",
                 "target_object_id": None,
+                "target_template_name": None,
                 "target_location": None,
-                "command_source": "replay",
+                "command_source": "recorded_network_player_command",
+                "ai_command_source_id": 0,
+                "ai_command_source_name": "CMD_FROM_PLAYER",
             },
         ),
         (
             "entity_sample",
-            {
-                "object_id": 101,
-                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "orientation": 0.0,
-                "layer": 0,
-                "speed": 0.0,
-                "current_state": "idle",
-            },
+            _task7_sample_payload(),
         ),
     ],
 )
@@ -429,7 +541,7 @@ def test_v2_rejects_every_object_reference_before_creation(
         ([*( _lifecycle_payloads()[:1]), ("object_created", _creation())], "duplicate object_created"),
         ([*_lifecycle_payloads()[:5], _lifecycle_payloads()[4]], "duplicate sold"),
         ([*_lifecycle_payloads(), _lifecycle_payloads()[-1]], "duplicate object_destroyed"),
-        ([*_lifecycle_payloads(), ("entity_state_changed", {"object_id": 101, "previous_state": "x", "current_state": "y"})], "after object_destroyed"),
+        ([*_lifecycle_payloads(), ("entity_state_changed", _task7_state_payload())], "after object_destroyed"),
     ],
 )
 def test_v2_rejects_duplicate_or_post_destroy_lifecycle_transitions(
@@ -441,12 +553,7 @@ def test_v2_rejects_duplicate_or_post_destroy_lifecycle_transitions(
 
 def test_v2_checks_template_identity_only_for_direct_object_identity_fields(tmp_path: Path) -> None:
     direct = _creation()
-    conflicting = {
-        "object_id": 101,
-        "template_name": "DifferentTemplate",
-        "previous_state": "idle",
-        "current_state": "moving",
-    }
+    conflicting = _task7_state_payload("DifferentTemplate")
     with pytest.raises(TelemetryTraceValidationError, match="template identity"):
         tuple(iter_validated_trace(_trace(tmp_path, [("object_created", direct), ("entity_state_changed", conflicting)])))
 
@@ -590,7 +697,7 @@ def test_v2_accepts_registration_identity_for_initial_construction_before_owner_
         )
     )
 
-    assert [record.event_type for record in records[2:-2]] == [
+    assert [record.event_type for record in records[2:-2] if record.event_type != "entity_sample"] == [
         "object_created",
         "construction_started",
         "owner_changed",

@@ -28,6 +28,7 @@
 #if defined(RTS_REPLAY_ANALYZER)
 #include "Common/ReplayCombat.h"
 #include "Common/ReplayParseDump.h"
+#include "Common/ReplayOutcome.h"
 #include "Common/ReplayTelemetry.h"
 #endif
 #include "Common/file.h"
@@ -1141,6 +1142,8 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 			// TheSuperHackers @feature Leex 20/08/2026 Capture the first authoritative replay CRC mismatch frame before completion. (#TBD)
 			ReplayCombat::observeCRCMismatch(mismatchFrame);
+			// TheSuperHackers @feature Leex 20/08/2026 Preserve the same authoritative CRC frame independently of telemetry. (#TBD)
+			ReplayOutcome::observeCRCMismatch(mismatchFrame);
 #endif
 
 			// Now also prints a UI message for it.

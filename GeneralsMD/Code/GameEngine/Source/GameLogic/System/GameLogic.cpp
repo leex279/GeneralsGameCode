@@ -54,6 +54,7 @@
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/ReplayEconomy.h"
+#include "Common/ReplayMovementSampler.h"
 #endif
 #include "Common/StatsCollector.h"
 #include "Common/ThingFactory.h"
@@ -426,6 +427,8 @@ void GameLogic::reset()
 	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Clear trace-local entity identity before destroying objects from the prior game. (#TBD)
 	ReplayEntityLifecycle::reset();
+	// TheSuperHackers @feature Leex 20/08/2026 Clear copied sampler snapshots before object IDs can be reused. (#TBD)
+	ReplayMovementSampler::reset();
 #endif
 	m_thingTemplateBuildableOverrides.clear();
 	m_controlBarOverrides.clear();
@@ -3973,6 +3976,11 @@ void GameLogic::update()
 			}
 		}
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Sample deterministic live-object snapshots after simulation updates and destruction cleanup. (#TBD)
+	ReplayMovementSampler::sampleEndOfFrame();
+#endif
 
 
 

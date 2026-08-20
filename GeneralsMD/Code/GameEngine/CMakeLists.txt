@@ -1155,12 +1155,16 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayGameDataExport.h
         Include/Common/ReplayEconomy.h
         Include/Common/ReplayEntityLifecycle.h
+        Include/Common/ReplayMovementSampler.h
+        Include/Common/ReplayOutcome.h
         Include/Common/ReplayParseDump.h
         Include/Common/ReplayTelemetry.h
 		Source/Common/ReplayCombat.cpp
         Source/Common/ReplayGameDataExport.cpp
         Source/Common/ReplayEconomy.cpp
         Source/Common/ReplayEntityLifecycle.cpp
+        Source/Common/ReplayMovementSampler.cpp
+        Source/Common/ReplayOutcome.cpp
         Source/Common/ReplayParseDump.cpp
         Source/Common/ReplayTelemetry.cpp
     )

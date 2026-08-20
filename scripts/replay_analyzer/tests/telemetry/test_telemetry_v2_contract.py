@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 RUN_ID = "723e4567-e89b-12d3-a456-426614174000"
@@ -167,7 +168,11 @@ def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
         "replay_version": "1.04",
         "map_identity": "maps/test.map",
         "initial_seed": 7,
-        "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False},
+        "exporter_settings": {
+            "movement_sample_frames": 15,
+            "audio_enabled": False,
+            "order_coverage": canonical_order_coverage(),
+        },
         "game_data_catalog": reference,
     }
 
@@ -298,6 +303,81 @@ def test_reader_preserves_historical_v1_without_catalog_or_players(tmp_path: Pat
         "manifest",
         "complete",
     ]
+
+
+def test_reader_preserves_frozen_v1_order_and_custom_state_payloads(tmp_path: Path) -> None:
+    records = [
+        _record(
+            1,
+            0,
+            "manifest",
+            {
+                "engine_build": "historical-build",
+                "replay_version": "1.04",
+                "map_identity": "maps/historical.map",
+                "initial_seed": 1,
+                "exporter_settings": {"movement_sample_frames": 15},
+            },
+        ),
+        _record(
+            1,
+            1,
+            "order_issued",
+            {
+                "message_type": -7,
+                "message_name": "",
+                "source_player_index": 0,
+                "selected_object_ids": [],
+                "target_object_id": None,
+                "target_location": None,
+                "command_source": "legacy",
+                "order_id": {"legacy": "opaque"},
+                "selected_entities": {"legacy": True},
+                "target_kind": "legacy-custom",
+                "legacy_extra": {"kept": True},
+            },
+        ),
+        _record(
+            1,
+            2,
+            "entity_state_changed",
+            {
+                "object_id": 0,
+                "previous_state": "legacy-busy",
+                "current_state": "mod-custom-state",
+                "previous_state_source": {"legacy": True},
+                "transition_source": ["legacy-custom"],
+            },
+        ),
+        _record(
+            1,
+            3,
+            "entity_sample",
+            {
+                "object_id": 0,
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "orientation": 0.0,
+                "layer": -1,
+                "speed": 0.0,
+                "current_state": "mod-custom-state",
+                "layer_name_status": ["legacy-custom"],
+                "path_goal": {"legacy": "opaque"},
+                "is_mobile": "sometimes",
+                "sample_reason": 7,
+            },
+        ),
+    ]
+    records.append(_completion(1, records))
+
+    validated = tuple(iter_validated_trace(_write_records(tmp_path / "v1-task7-compatible.ndjson", records)))
+
+    assert [record.event_type for record in validated] == [
+        "manifest", "order_issued", "entity_state_changed", "entity_sample", "complete"
+    ]
+    assert validated[1].payload.model_extra == {"legacy_extra": {"kept": True}}
+    assert validated[1].payload.target_kind == "legacy-custom"
+    assert validated[2].payload.transition_source == ["legacy-custom"]
+    assert validated[3].payload.sample_reason == 7
 
 
 def test_reader_preserves_historical_v1_player_snapshot_without_manifest_catalog(tmp_path: Path) -> None:

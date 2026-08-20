@@ -45,6 +45,7 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 #include "Common/ReplayCombat.h"
+#include "Common/ReplayMovementSampler.h"
 #endif
 #include "Common/BuildAssistant.h"
 #include "Common/SpecialPower.h"
@@ -825,6 +826,14 @@ void GameLogic::logicMessageDispatcher( GameMessage *msg, void *userData )
 	// The current AI group may have been destroyed, and its memory deallocated, in which case it shouldn't be used.
 	if (currentlySelectedGroup && !TheAI->doesGroupExist(currentlySelectedGroup))
 		return;
+#endif
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Observe the closed supported-order subset once, after handlers resolve live selected and target objects. (#TBD)
+	if (currentlySelectedGroup != nullptr)
+	{
+		ReplayMovementSampler::observeResolvedOrder(msg, msgPlayer, currentlySelectedGroup->getAllIDs());
+	}
 #endif
 
 	/**/ /// @todo: multiplayer semantics

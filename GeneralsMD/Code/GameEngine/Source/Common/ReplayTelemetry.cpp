@@ -7,6 +7,8 @@
 #include "Common/GlobalData.h"
 #include "Common/ReplayCombat.h"
 #include "Common/ReplayGameDataExport.h"
+#include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayOutcome.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/version.h"
@@ -404,6 +406,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local entity snapshots whenever telemetry is reconfigured. (#TBD)
 	ReplayEntityLifecycle::reset();
+	// TheSuperHackers @feature Leex 20/08/2026 Reset copied movement and order observations whenever telemetry is reconfigured. (#TBD)
+	ReplayMovementSampler::reset();
 }
 
 Bool ReplayTelemetry::isEnabled()
@@ -429,6 +433,12 @@ const AsciiString &ReplayTelemetry::getEngineDataIdentity()
 Int ReplayTelemetry::getReplayLocalSlotIndex()
 {
 	return s_replayLocalSlotIndex;
+}
+
+// TheSuperHackers @feature Leex 20/08/2026 Expose the validated sampling bound to the passive end-of-frame observer. (#TBD)
+Int ReplayTelemetry::getMovementSampleFrames()
+{
+	return s_movementSampleFrames;
 }
 
 AsciiString ReplayTelemetry::sha256Hex(const char *data, size_t length)
@@ -525,12 +535,14 @@ void ReplayTelemetry::initialize()
 		return;
 	}
 	const Bool audioEnabled = TheGlobalData != nullptr && TheGlobalData->m_audioOn;
+	// TheSuperHackers @feature Leex 20/08/2026 Bind explicit supported-order coverage and movement density to the v2 manifest. (#TBD)
 	const std::string payload = "{\"engine_build\":" + jsonString(s_engineDataIdentity)
 		+ ",\"replay_version\":" + jsonString(s_replayVersion)
 		+ ",\"map_identity\":" + jsonString(s_mapIdentity)
 		+ ",\"initial_seed\":" + std::to_string(s_initialSeed)
 		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames)
-		+ ",\"audio_enabled\":" + (audioEnabled ? "true}" : "false}")
+		+ ",\"audio_enabled\":" + (audioEnabled ? "true" : "false")
+		+ ",\"order_coverage\":" + ReplayMovementSampler::orderCoverageJson().str() + "}"
 		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonString(s_catalogPath)
 		+ ",\"sha256\":" + jsonString(s_catalogSha256)
 		+ ",\"engine_data_identity\":" + jsonString(s_catalogEngineDataIdentity) + "}}";
@@ -572,7 +584,9 @@ void ReplayTelemetry::emit(UnsignedInt frame, const char *eventType, const Ascii
 
 void ReplayTelemetry::observeExecutedCommand()
 {
-	if (s_output != nullptr && s_initialized)
+	// TheSuperHackers @feature Leex 20/08/2026 Count the same executed replay-command seam for telemetry-independent parity evidence. (#TBD)
+	ReplayOutcome::observeExecutedCommand();
+	if (s_output != nullptr)
 	{
 		++s_commandCount;
 	}
@@ -580,7 +594,7 @@ void ReplayTelemetry::observeExecutedCommand()
 
 void ReplayTelemetry::deferFinish(ReplayTelemetryTerminationReason reason)
 {
-	if (s_output != nullptr && s_initialized)
+	if ((s_output != nullptr && s_initialized) || ReplayOutcome::isEnabled())
 	{
 		s_finishDeferred = TRUE;
 		s_deferredTerminationReason = reason;
@@ -601,6 +615,8 @@ void ReplayTelemetry::finishDeferred(UnsignedInt finalFrame)
 void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason)
 {
 	s_finishDeferred = FALSE;
+	// TheSuperHackers @feature Leex 20/08/2026 Publish independent terminal facts before telemetry writer state can short-circuit. (#TBD)
+	ReplayOutcome::finish(finalFrame, reason);
 	if (s_output == nullptr)
 	{
 		return;

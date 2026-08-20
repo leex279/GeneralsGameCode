@@ -161,7 +161,11 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert manifest.frame == 0
     assert manifest.logic_time_seconds == 0.0
     assert manifest.schema_version == 2
-    assert manifest.payload.exporter_settings == {"movement_sample_frames": 15, "audio_enabled": False}
+    assert manifest.payload.exporter_settings["movement_sample_frames"] == 15
+    assert manifest.payload.exporter_settings["audio_enabled"] is False
+    order_coverage = manifest.payload.exporter_settings["order_coverage"]
+    assert isinstance(order_coverage, dict)
+    assert order_coverage["coverage"] == "closed_supported_subset"
     assert manifest.payload.engine_build
     assert manifest.payload.replay_version
     assert manifest.payload.map_identity
@@ -192,6 +196,7 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
         (["-telemetry", "relative.ndjson", "-telemetry-run-id", RUN_ID], "absolute"),
         (["-telemetry", "{trace}", "-telemetry-run-id", "not-a-uuid"], "UUID"),
         (["-telemetry", "{trace}", "-telemetry-run-id", RUN_ID, "-telemetry-movement-frames", "0"], "positive"),
+        (["-telemetry", "{trace}", "-telemetry-run-id", RUN_ID, "-telemetry-movement-frames", "3601"], "at most 3600"),
         (
             [
                 "-telemetry",
@@ -229,6 +234,65 @@ def test_invalid_telemetry_settings_fail_before_replay_playback(
     assert completed.returncode != 0
     assert "Simulating Replay" not in completed.stdout
     assert diagnostic in completed.stderr
+    assert not trace_path.exists()
+
+
+@pytest.mark.parametrize(
+    "case", ["missing", "relative", "duplicate", "existing", "telemetry_alias", "spelling_alias"]
+)
+def test_invalid_replay_outcome_settings_fail_before_playback(
+    case: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Keep the independent outcome channel opt-in, absolute, exclusive, and collision-safe."""
+    outcome_path = (tmp_path / "outcome.json").resolve()
+    second_path = (tmp_path / "second-outcome.json").resolve()
+    trace_path = (tmp_path / "outcome-alias.ndjson").resolve()
+    arguments = ["-replay-outcome"]
+    if case == "relative":
+        arguments.append("relative.json")
+    elif case == "duplicate":
+        arguments.extend([str(outcome_path), "-replay-outcome", str(second_path)])
+    elif case == "existing":
+        outcome_path.write_bytes(b"caller-owned\n")
+        arguments.append(str(outcome_path))
+    elif case == "telemetry_alias":
+        arguments = [
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+            "-replay-outcome",
+            str(trace_path),
+        ]
+    elif case == "spelling_alias":
+        alternate_spelling = f"{trace_path.parent}\\.\\{trace_path.name}"
+        arguments = [
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+            "-replay-outcome",
+            alternate_spelling,
+        ]
+
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, pinned_replay), *arguments],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert "Simulating Replay" not in completed.stdout
+    assert "Replay outcome:" in completed.stderr
+    if case == "existing":
+        assert outcome_path.read_bytes() == b"caller-owned\n"
+    else:
+        assert not outcome_path.exists()
+    assert not second_path.exists()
     assert not trace_path.exists()
 
 
@@ -537,7 +601,9 @@ def test_telemetry_translation_units_explicitly_exclude_vc6() -> None:
     """Catch analyzer-only APIs relying on an indirect build-definition exclusion from the legacy compiler."""
     root = Path(__file__).resolve().parents[4]
     for relative_path in (
+        "GeneralsMD/Code/GameEngine/Include/Common/ReplayOutcome.h",
         "GeneralsMD/Code/GameEngine/Include/Common/ReplayTelemetry.h",
+        "GeneralsMD/Code/GameEngine/Source/Common/ReplayOutcome.cpp",
         "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp",
     ):
         source = (root / relative_path).read_text(encoding="utf-8")
