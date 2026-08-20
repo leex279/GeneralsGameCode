@@ -239,6 +239,7 @@ def _finish(path: Path, records: list[dict[str, object]], balances: list[dict[st
                 "final_frame": 20,
                 "command_count": 1,
                 "event_counts": counts,
+                "terminal_reason": "clean_completion",
                 "crc_mismatch": False,
                 "crc_mismatch_frame": None,
                 "replay_truncated": False,

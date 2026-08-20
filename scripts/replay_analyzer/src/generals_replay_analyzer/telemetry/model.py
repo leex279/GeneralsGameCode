@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from generals_replay_analyzer.telemetry.combat_types import require_combat_type_pair
+
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 UINT32_MAX = 4_294_967_295
@@ -36,6 +38,12 @@ def _validation_schema_version(info: ValidationInfo) -> int:
         if type(version) is int and version in SUPPORTED_SCHEMA_VERSIONS:
             return version
     return SCHEMA_VERSION
+
+
+def _require_v2_engine_real(field: str, value: float) -> None:
+    """Constrain serialized engine Real observations without tightening frozen v1."""
+    if not math.isfinite(value) or abs(value) > FLOAT32_MAX:
+        raise ValueError(f"v2 {field} must be a finite float32 engine Real")
 
 
 class OpenPayload(BaseModel):
@@ -324,14 +332,15 @@ class DamageAppliedPayload(OpenPayload):
     victim_object_id: NonNegativeInt
     victim_player_index: NonNegativeInt | None = None
     attacker_object_id: NonNegativeInt | None
-    attacker_player_index: NonNegativeInt | None = None
+    source_player_mask: Annotated[int, Field(ge=0, le=UINT32_MAX)] | None = None
+    source_player_indices: list[NonNegativeInt] | None = None
     attacker_template_name: Annotated[str, Field(min_length=1)] | None = None
-    weapon_name: str | None
-    attempted_amount: Annotated[float, Field(ge=-FLOAT32_MAX, le=FLOAT32_MAX)]
-    calculated_amount: Annotated[float, Field(gt=0, le=FLOAT32_MAX)] | None = None
-    applied_amount: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
-    prior_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
-    new_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    weapon_name: Annotated[str, Field(min_length=1)] | None
+    attempted_amount: float
+    calculated_amount: float | None = None
+    applied_amount: NonNegativeFloat
+    prior_health: NonNegativeFloat
+    new_health: NonNegativeFloat
     damage_type_id: NonNegativeInt | None = None
     damage_type: str = Field(min_length=1)
     death_type_id: NonNegativeInt | None = None
@@ -345,11 +354,11 @@ class HealingAppliedPayload(OpenPayload):
     target_player_index: NonNegativeInt | None = None
     source_object_id: NonNegativeInt | None = None
     source_player_index: NonNegativeInt | None = None
-    attempted_amount: Annotated[float, Field(ge=-FLOAT32_MAX, le=FLOAT32_MAX)] | None = None
-    calculated_amount: Annotated[float, Field(gt=0, le=FLOAT32_MAX)] | None = None
-    applied_amount: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
-    prior_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
-    new_health: Annotated[float, Field(ge=0, le=FLOAT32_MAX)]
+    attempted_amount: float | None = None
+    calculated_amount: float | None = None
+    applied_amount: NonNegativeFloat
+    prior_health: NonNegativeFloat
+    new_health: NonNegativeFloat
     location: RawPosition | None = None
 
 
@@ -369,8 +378,8 @@ class PlayerStatusPayload(OpenPayload):
     source: Literal[
         "victory_conditions",
         "script_action",
-        "replay_command",
-        "replay_header_disconnect_plus_executed_surrender",
+        "executed_true_self_destruct",
+        "replay_header_disconnect_plus_executed_false_self_destruct",
     ] | None = None
     replay_slot_index: Annotated[int, Field(ge=0, le=7)] | None = None
 
@@ -485,6 +494,7 @@ class CompletePayload(OpenPayload):
     final_frame: NonNegativeInt
     command_count: NonNegativeInt
     event_counts: dict[str, NonNegativeInt]
+    terminal_reason: Literal["clean_completion", "crc_mismatch", "replay_truncated", "interrupted"] | None = None
     crc_mismatch: bool
     crc_mismatch_frame: NonNegativeInt | None = None
     replay_truncated: bool
@@ -700,7 +710,8 @@ class DamageAppliedRecord(TelemetryEnvelope):
             self.payload,
             {
                 "victim_player_index",
-                "attacker_player_index",
+                "source_player_mask",
+                "source_player_indices",
                 "attacker_template_name",
                 "calculated_amount",
                 "damage_type_id",
@@ -709,10 +720,15 @@ class DamageAppliedRecord(TelemetryEnvelope):
         )
         if self.payload.victim_object_id == 0 or self.payload.attacker_object_id == 0:
             raise ValueError("v2 combat object IDs must be greater than zero")
-        if self.payload.attacker_object_id is None and (
-            self.payload.attacker_player_index is not None or self.payload.attacker_template_name is not None
-        ):
-            raise ValueError("attacker identity fields require attacker_object_id")
+        source_mask = self.payload.source_player_mask
+        source_indices = self.payload.source_player_indices
+        if source_mask is None or source_indices is None:
+            raise ValueError("v2 damage requires source_player_mask and source_player_indices")
+        if source_indices != sorted(set(source_indices)):
+            raise ValueError("source_player_indices must be strictly ordered and unique")
+        mask_indices = [index for index in range(32) if source_mask & (1 << index)]
+        if source_indices != mask_indices:
+            raise ValueError("source_player_indices must exactly represent source_player_mask")
         calculated = self.payload.calculated_amount
         if calculated is None or calculated <= 0 or self.payload.applied_amount <= 0 or self.payload.prior_health <= 0:
             raise ValueError("v2 damage requires a positive calculated, applied, and prior-health transition")
@@ -725,6 +741,21 @@ class DamageAppliedRecord(TelemetryEnvelope):
             raise ValueError("damage health arithmetic does not match applied_amount")
         if self.payload.killing_blow != (self.payload.new_health == 0):
             raise ValueError("killing_blow must exactly describe the positive-to-zero health transition")
+        for field, value in (
+            ("attempted_amount", self.payload.attempted_amount),
+            ("calculated_amount", calculated),
+            ("applied_amount", self.payload.applied_amount),
+            ("prior_health", self.payload.prior_health),
+            ("new_health", self.payload.new_health),
+            ("location.x", self.payload.location.x),
+            ("location.y", self.payload.location.y),
+            ("location.z", self.payload.location.z),
+        ):
+            _require_v2_engine_real(field, value)
+        if self.payload.damage_type_id is None or self.payload.death_type_id is None:
+            raise ValueError("v2 damage requires numeric damage and death type IDs")
+        require_combat_type_pair("damage", self.payload.damage_type_id, self.payload.damage_type)
+        require_combat_type_pair("death", self.payload.death_type_id, self.payload.death_type)
         return self
 
 
@@ -752,9 +783,10 @@ class HealingAppliedRecord(TelemetryEnvelope):
             raise ValueError("v2 healing object IDs must be greater than zero")
         if self.payload.source_object_id is None and self.payload.source_player_index is not None:
             raise ValueError("source_player_index requires source_object_id")
+        attempted = self.payload.attempted_amount
         calculated = self.payload.calculated_amount
-        if calculated is None or calculated <= 0 or self.payload.applied_amount <= 0:
-            raise ValueError("v2 healing requires a positive calculated and applied transition")
+        if attempted is None or calculated is None or calculated <= 0 or self.payload.applied_amount <= 0:
+            raise ValueError("v2 healing requires attempted, positive calculated, and applied transition values")
         if self.payload.applied_amount > calculated and not math.isclose(
             self.payload.applied_amount, calculated, rel_tol=1e-6, abs_tol=1e-5
         ):
@@ -762,6 +794,21 @@ class HealingAppliedRecord(TelemetryEnvelope):
         expected_applied = self.payload.new_health - self.payload.prior_health
         if not math.isclose(self.payload.applied_amount, expected_applied, rel_tol=1e-6, abs_tol=1e-5):
             raise ValueError("healing health arithmetic does not match applied_amount")
+        for field, value in (
+            ("attempted_amount", attempted),
+            ("calculated_amount", calculated),
+            ("applied_amount", self.payload.applied_amount),
+            ("prior_health", self.payload.prior_health),
+            ("new_health", self.payload.new_health),
+        ):
+            _require_v2_engine_real(field, value)
+        if self.payload.location is not None:
+            for axis, value in (
+                ("x", self.payload.location.x),
+                ("y", self.payload.location.y),
+                ("z", self.payload.location.z),
+            ):
+                _require_v2_engine_real(f"location.{axis}", value)
         return self
 
 
@@ -823,7 +870,7 @@ class PlayerSurrenderedRecord(TelemetryEnvelope):
             if (
                 self.payload.previous_status != "active"
                 or self.payload.new_status != "surrendered"
-                or self.payload.source != "replay_command"
+                or self.payload.source != "executed_true_self_destruct"
             ):
                 raise ValueError("player_surrendered must preserve its authoritative replay-command transition")
         return self
@@ -840,7 +887,7 @@ class PlayerDisconnectedRecord(TelemetryEnvelope):
             if (
                 self.payload.previous_status != "active"
                 or self.payload.new_status != "disconnected"
-                or self.payload.source != "replay_header_disconnect_plus_executed_surrender"
+                or self.payload.source != "replay_header_disconnect_plus_executed_false_self_destruct"
                 or self.payload.replay_slot_index is None
             ):
                 raise ValueError("player_disconnected requires header metadata plus an executed transition")
@@ -918,6 +965,7 @@ class CompleteRecord(TelemetryEnvelope):
             _require_v2_payload_fields(
                 self.payload,
                 {
+                    "terminal_reason",
                     "crc_mismatch_frame",
                     "quit_early",
                     "replay_header_desync",
@@ -926,8 +974,15 @@ class CompleteRecord(TelemetryEnvelope):
             )
             if self.payload.crc_mismatch != (self.payload.crc_mismatch_frame is not None):
                 raise ValueError("crc_mismatch_frame must be present exactly for a CRC mismatch")
-            if self.payload.clean_shutdown and (self.payload.crc_mismatch or self.payload.replay_truncated):
-                raise ValueError("clean completion cannot also be a CRC mismatch or truncated")
+            expected_flags = {
+                "clean_completion": (True, False, False),
+                "crc_mismatch": (False, True, False),
+                "replay_truncated": (False, False, True),
+                "interrupted": (False, False, False),
+            }
+            actual_flags = (self.payload.clean_shutdown, self.payload.crc_mismatch, self.payload.replay_truncated)
+            if self.payload.terminal_reason is None or actual_flags != expected_flags[self.payload.terminal_reason]:
+                raise ValueError("terminal_reason must exactly agree with completion termination flags")
         return self
 
 

@@ -2262,8 +2262,10 @@ bool GameLogic::onSelfDestruct(MAYBE_UNUSED GameMessage *msg)
 {
 	Player *msgPlayer = getMessagePlayer(msg);
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	// TheSuperHackers @feature Leex 20/08/2026 Attribute only executed surrender commands to the resulting player transition. (#TBD)
-	ReplayPlayerTransitionScope replayPlayerTransition(REPLAY_PLAYER_SURRENDERED);
+	const Bool replayTransferAssets = msg->getArgument(0)->boolean;
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve the executed self-destruct boolean as the exact surrender or disconnect cause. (#TBD)
+	ReplayPlayerTransitionScope replayPlayerTransition(
+		replayTransferAssets ? REPLAY_PLAYER_SURRENDERED : REPLAY_PLAYER_DISCONNECTED);
 #endif
 
 	if (msg->getArgument(0)->boolean)

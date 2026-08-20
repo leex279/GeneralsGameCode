@@ -74,8 +74,6 @@ class _EntityLifecycleState:
     construction_state: str
     sold: bool = False
     destroyed: bool = False
-    current_health: float | None = None
-    killing_sequence: int | None = None
     current_veterancy_level_id: int | None = None
 
 
@@ -149,7 +147,7 @@ _OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
     },
     "healing_applied": {
         "target_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
-        "source_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+        "source_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
     },
     "veterancy_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "entity_state_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
@@ -884,13 +882,7 @@ def _validate_v2_combat(
     if players_initialized_count != 1:
         raise _error(path, line_number, record.sequence, f"event {record.event_type} must follow players_initialized")
     payload = cast(dict[str, object], record.payload.model_dump())
-    for field in (
-        "victim_player_index",
-        "attacker_player_index",
-        "target_player_index",
-        "source_player_index",
-        "owner_player_index",
-    ):
+    for field in ("victim_player_index", "target_player_index", "source_player_index", "owner_player_index"):
         _require_player_domain(
             path,
             line_number,
@@ -900,6 +892,17 @@ def _validate_v2_combat(
             payload.get(field),
             engine_player_indices,
         )
+    if record.event_type == "damage_applied":
+        for source_player_index in cast(list[int], payload["source_player_indices"]):
+            _require_player_domain(
+                path,
+                line_number,
+                record.sequence,
+                record.event_type,
+                "source_player_indices",
+                source_player_index,
+                engine_player_indices,
+            )
 
     if record.event_type == "veterancy_changed":
         object_id = cast(int, payload["object_id"])
@@ -929,7 +932,6 @@ def _validate_v2_combat(
 
     subject_field = "victim_object_id" if record.event_type == "damage_applied" else "target_object_id"
     subject_id = cast(int, payload[subject_field])
-    subject_state = entities[subject_id]
     subject_player_field = "victim_player_index" if record.event_type == "damage_applied" else "target_player_index"
     _require_observed_owner(
         path,
@@ -940,44 +942,18 @@ def _validate_v2_combat(
         payload[subject_player_field],
         entities,
     )
-    if subject_state.killing_sequence is not None:
-        raise _error(
-            path,
-            line_number,
-            record.sequence,
-            f"event {record.event_type} references object_id {subject_id} after its killing health transition",
-        )
-
-    provenance_id_field = "attacker_object_id" if record.event_type == "damage_applied" else "source_object_id"
-    provenance_player_field = "attacker_player_index" if record.event_type == "damage_applied" else "source_player_index"
-    provenance_id = payload[provenance_id_field]
-    if isinstance(provenance_id, int):
+    if record.event_type == "healing_applied" and isinstance(payload["source_object_id"], int):
+        provenance_id = payload["source_object_id"]
         _require_observed_owner(
             path,
             line_number,
             record,
-            provenance_player_field,
+            "source_player_index",
             provenance_id,
-            payload[provenance_player_field],
+            payload["source_player_index"],
             entities,
             allow_unknown=True,
         )
-
-    prior_health = cast(float, payload["prior_health"])
-    new_health = cast(float, payload["new_health"])
-    previous_observed_health = subject_state.current_health
-    if previous_observed_health is not None and not math.isclose(
-        prior_health, previous_observed_health, rel_tol=1e-6, abs_tol=1e-5
-    ):
-        raise _error(
-            path,
-            line_number,
-            record.sequence,
-            f"event {record.event_type} prior_health breaks observed health continuity for object_id {subject_id}",
-        )
-    subject_state.current_health = new_health
-    if record.event_type == "damage_applied" and payload["killing_blow"] is True:
-        subject_state.killing_sequence = record.sequence
 
 
 def _validate_v2_player_transition(
@@ -988,6 +964,7 @@ def _validate_v2_player_transition(
     engine_player_indices: frozenset[int],
     slot_player_indices: Mapping[int, int],
     terminal_players: dict[int, str],
+    disconnected_slots: set[int],
 ) -> None:
     if record.event_type not in _TASK6_PLAYER_EVENTS:
         return
@@ -1020,6 +997,10 @@ def _validate_v2_player_transition(
             record.sequence,
             "terminal player transition replay_slot_index does not map to player_index",
         )
+    if record.event_type == "player_disconnected":
+        if not isinstance(replay_slot_index, int):
+            raise _error(path, line_number, record.sequence, "player_disconnected requires a replay slot")
+        disconnected_slots.add(replay_slot_index)
     terminal_players[player_index] = record.event_type
 
 
@@ -1029,6 +1010,7 @@ def _validate_v2_outcome(
     outcome_records: tuple[MatchOutcomeRecord, ...],
     complete: CompleteRecord,
     engine_player_indices: frozenset[int],
+    observed_disconnected_slots: frozenset[int],
 ) -> None:
     if len(outcome_records) != 1:
         raise TelemetryTraceValidationError(
@@ -1049,17 +1031,11 @@ def _validate_v2_outcome(
         raise TelemetryTraceValidationError(
             f"trace '{path}': match_outcome winner/loser is outside the initialized engine player domain"
         )
-    terminal_reason = (
-        "crc_mismatch"
-        if complete.payload.crc_mismatch
-        else "replay_truncated"
-        if complete.payload.replay_truncated
-        else "clean_completion"
-        if complete.payload.clean_shutdown
-        and not complete.payload.quit_early
-        and not complete.payload.replay_header_desync
-        else "interrupted"
-    )
+    header_disconnected_slots = frozenset(payload.replay_header_disconnected_slots or [])
+    if not observed_disconnected_slots <= header_disconnected_slots:
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': player_disconnected event lacks matching replay-header disconnect metadata"
+        )
     completion_facts = (
         payload.terminal_reason,
         payload.quit_early,
@@ -1070,7 +1046,7 @@ def _validate_v2_outcome(
         payload.clean_shutdown,
     )
     exact_facts = (
-        terminal_reason,
+        complete.payload.terminal_reason,
         complete.payload.quit_early,
         complete.payload.replay_header_desync,
         complete.payload.replay_header_disconnected_slots,
@@ -1132,6 +1108,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     complete_record: CompleteRecord | None = None
     slot_player_indices: dict[int, int] = {}
     terminal_players: dict[int, str] = {}
+    observed_disconnected_slots: set[int] = set()
     outcome_records: list[MatchOutcomeRecord] = []
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
@@ -1264,6 +1241,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 engine_player_indices,
                 slot_player_indices,
                 terminal_players,
+                observed_disconnected_slots,
             )
 
         records_seen += 1
@@ -1316,6 +1294,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             tuple(outcome_records),
             complete_record,
             engine_player_indices,
+            frozenset(observed_disconnected_slots),
         )
         catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
         _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)

@@ -12,6 +12,7 @@
 
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
+#define DEFINE_DEATH_NAMES
 #include "Common/ReplayCombat.h"
 
 #include "Common/Player.h"
@@ -19,6 +20,7 @@
 #include "Common/ReplayTelemetry.h"
 #include "Common/ThingTemplate.h"
 #include "GameLogic/Damage.h"
+#undef DEFINE_DEATH_NAMES
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Object.h"
 #include "GameLogic/VictoryConditions.h"
@@ -130,6 +132,26 @@ namespace
 		return result;
 	}
 
+	Bool sourcePlayerIndices(PlayerMaskType mask, std::vector<Int> &indices)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Preserve DamageInfo's immutable source mask instead of consulting a transferred attacker. (#TBD)
+		const UnsignedInt rawMask = static_cast<UnsignedInt>(mask);
+		for (Int index = 0; index < 32; ++index)
+		{
+			if ((rawMask & (1U << index)) == 0)
+			{
+				continue;
+			}
+			if (!std::binary_search(s_state.enginePlayerIndices.begin(), s_state.enginePlayerIndices.end(), index))
+			{
+				ReplayTelemetry::fail("damage_source_player_invalid", "damage source mask is outside the initialized player domain");
+				return FALSE;
+			}
+			indices.push_back(index);
+		}
+		return TRUE;
+	}
+
 	std::string disconnectedSlotArray()
 	{
 		std::string result("[");
@@ -149,17 +171,6 @@ namespace
 		}
 		result.push_back(']');
 		return result;
-	}
-
-	const char *deathTypeName(DeathType deathType)
-	{
-		static const char *const names[] = {
-			"NORMAL", "NONE", "CRUSHED", "BURNED", "EXPLODED", "POISONED", "TOPPLED", "FLOODED",
-			"SUICIDED", "LASERED", "DETONATED", "SPLATTED", "POISONED_BETA", "EXTRA_2", "EXTRA_3",
-			"EXTRA_4", "EXTRA_5", "EXTRA_6", "EXTRA_7", "EXTRA_8", "POISONED_GAMMA"
-		};
-		const Int index = static_cast<Int>(deathType);
-		return index >= 0 && index < DEATH_NUM_TYPES ? names[index] : nullptr;
 	}
 
 	Bool objectPlayerIndex(const Object *object, Int &playerIndex)
@@ -201,21 +212,16 @@ namespace
 			&& jsonNumber(newHealth, newJson);
 	}
 
-	const char *terminalReason(Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch)
+	const char *terminalReason(ReplayTelemetryTerminationReason reason)
 	{
-		if (crcMismatch)
+		switch (reason)
 		{
-			return "crc_mismatch";
+			case REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF: return "clean_completion";
+			case REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH: return "crc_mismatch";
+			case REPLAY_TELEMETRY_TERMINATION_TRUNCATED_INPUT: return "replay_truncated";
+			case REPLAY_TELEMETRY_TERMINATION_INTERRUPTED: return "interrupted";
 		}
-		if (replayTruncated)
-		{
-			return "replay_truncated";
-		}
-		if (!cleanShutdown || s_state.quitEarly || s_state.replayHeaderDesync)
-		{
-			return "interrupted";
-		}
-		return "clean_completion";
+		return "interrupted";
 	}
 
 	Bool buildEnginePlayerDomain(std::vector<Int> &indices, std::vector<Int> &winners, std::vector<Int> &losers)
@@ -245,11 +251,14 @@ namespace
 				return FALSE;
 			}
 			indices.push_back(playerIndex);
-			if (TheVictoryConditions != nullptr && TheVictoryConditions->hasAchievedVictory(player))
+			// TheSuperHackers @feature Leex 20/08/2026 Keep a defeated winning ally in winners and out of the disjoint loser set. (#TBD)
+			const Bool achievedVictory = TheVictoryConditions != nullptr
+				&& TheVictoryConditions->hasAchievedVictory(player);
+			if (achievedVictory)
 			{
 				winners.push_back(playerIndex);
 			}
-			if (TheVictoryConditions != nullptr && TheVictoryConditions->hasBeenDefeated(player))
+			else if (TheVictoryConditions != nullptr && TheVictoryConditions->hasBeenDefeated(player))
 			{
 				losers.push_back(playerIndex);
 			}
@@ -270,9 +279,11 @@ namespace
 		return TRUE;
 	}
 
-	std::string terminalFields(Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch)
+	std::string terminalFields(ReplayTelemetryTerminationReason reason)
 	{
-		return "\"terminal_reason\":" + jsonString(terminalReason(cleanShutdown, replayTruncated, crcMismatch))
+		const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
+		const Bool cleanShutdown = reason == REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF;
+		return "\"terminal_reason\":" + jsonString(terminalReason(reason))
 			+ ",\"quit_early\":" + (s_state.quitEarly ? "true" : "false")
 			+ ",\"replay_header_desync\":" + (s_state.replayHeaderDesync ? "true" : "false")
 			+ ",\"replay_header_disconnected_slots\":" + disconnectedSlotArray()
@@ -344,7 +355,9 @@ void ReplayCombat::observeDamage(const Object *victim, const DamageInfo *damageI
 		return;
 	}
 	const char *damageType = DamageTypeFlags::getNameFromSingleBit(static_cast<Int>(damageInfo->in.m_damageType));
-	const char *deathType = deathTypeName(damageInfo->in.m_deathType);
+	const Int deathTypeIndex = static_cast<Int>(damageInfo->in.m_deathType);
+	const char *deathType = deathTypeIndex >= 0 && deathTypeIndex < DEATH_NUM_TYPES
+		? TheDeathNames[deathTypeIndex] : nullptr;
 	if (damageType == nullptr || deathType == nullptr)
 	{
 		ReplayTelemetry::fail("combat_type_invalid", "combat observation contains an invalid damage or death type");
@@ -363,15 +376,17 @@ void ReplayCombat::observeDamage(const Object *victim, const DamageInfo *damageI
 	}
 	Int victimPlayer = 0;
 	const Bool hasVictimPlayer = objectPlayerIndex(victim, victimPlayer);
-	const Object *attacker = damageInfo->in.m_sourceID != INVALID_ID && TheGameLogic != nullptr
-		? TheGameLogic->findObjectByID(damageInfo->in.m_sourceID) : nullptr;
-	Int attackerPlayer = 0;
-	const Bool hasAttackerPlayer = objectPlayerIndex(attacker, attackerPlayer);
+	std::vector<Int> sourcePlayers;
+	if (!sourcePlayerIndices(damageInfo->in.m_sourcePlayerMask, sourcePlayers))
+	{
+		return;
+	}
 	const ThingTemplate *attackerTemplate = damageInfo->in.m_sourceTemplate;
 	const std::string payload = "{\"victim_object_id\":" + std::to_string(static_cast<UnsignedInt>(victim->getID()))
 		+ ",\"victim_player_index\":" + nullableInt(hasVictimPlayer, victimPlayer)
 		+ ",\"attacker_object_id\":" + nullableObjectId(damageInfo->in.m_sourceID)
-		+ ",\"attacker_player_index\":" + nullableInt(hasAttackerPlayer, attackerPlayer)
+		+ ",\"source_player_mask\":" + std::to_string(static_cast<UnsignedInt>(damageInfo->in.m_sourcePlayerMask))
+		+ ",\"source_player_indices\":" + intArray(sourcePlayers)
 		+ ",\"attacker_template_name\":"
 		+ (attackerTemplate != nullptr ? jsonString(attackerTemplate->getName().str()) : "null")
 		+ ",\"weapon_name\":null"
@@ -457,22 +472,26 @@ void ReplayCombat::observePlayerTerminalTransition(const Player *player)
 		return;
 	}
 	const Int playerIndex = player->getPlayerIndex();
+	const ReplayPlayerTransitionType transition = s_state.playerTransitionStack.back();
+	const Int slot = ThePlayerList != nullptr ? ThePlayerList->getSlotIndex(playerIndex) : -1;
+	const Bool disconnected = transition == REPLAY_PLAYER_DISCONNECTED;
+	if (disconnected && (slot < 0 || slot >= MAX_SLOTS || !s_state.disconnectedSlots[slot]))
+	{
+		return;
+	}
 	if (!s_state.terminalPlayers.insert(playerIndex).second)
 	{
 		return;
 	}
-	const ReplayPlayerTransitionType transition = s_state.playerTransitionStack.back();
-	const Int slot = ThePlayerList != nullptr ? ThePlayerList->getSlotIndex(playerIndex) : -1;
-	const Bool disconnected = transition == REPLAY_PLAYER_SURRENDERED && slot >= 0 && slot < MAX_SLOTS
-		&& s_state.disconnectedSlots[slot];
 	const char *eventType = "player_defeated";
 	const char *newStatus = "defeated";
 	const char *source = transition == REPLAY_PLAYER_SCRIPT_DEFEATED ? "script_action" : "victory_conditions";
-	if (transition == REPLAY_PLAYER_SURRENDERED)
+	if (transition == REPLAY_PLAYER_SURRENDERED || disconnected)
 	{
 		eventType = disconnected ? "player_disconnected" : "player_surrendered";
 		newStatus = disconnected ? "disconnected" : "surrendered";
-		source = disconnected ? "replay_header_disconnect_plus_executed_surrender" : "replay_command";
+		source = disconnected ? "replay_header_disconnect_plus_executed_false_self_destruct"
+			: "executed_true_self_destruct";
 	}
 	const std::string payload = "{\"player_index\":" + std::to_string(playerIndex)
 		+ ",\"previous_status\":\"active\",\"new_status\":" + jsonString(newStatus)
@@ -481,12 +500,13 @@ void ReplayCombat::observePlayerTerminalTransition(const Player *player)
 	ReplayTelemetry::emit(currentFrame(), eventType, AsciiString(payload.c_str()));
 }
 
-void ReplayCombat::emitMatchOutcome(UnsignedInt finalFrame, Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch)
+void ReplayCombat::emitMatchOutcome(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason)
 {
 	if (!ReplayTelemetry::isInitialized())
 	{
 		return;
 	}
+	const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
 	if (crcMismatch && !s_state.crcMismatchObserved)
 	{
 		ReplayTelemetry::fail("crc_mismatch_frame_unavailable", "CRC mismatch completion has no authoritative mismatch frame");
@@ -511,13 +531,15 @@ void ReplayCombat::emitMatchOutcome(UnsignedInt finalFrame, Bool cleanShutdown, 
 		+ ",\"winner_player_indices\":" + intArray(winners)
 		+ ",\"loser_player_indices\":" + intArray(losers)
 		+ ",\"engine_player_indices\":" + intArray(domain)
-		+ "," + terminalFields(cleanShutdown, replayTruncated, crcMismatch) + "}";
+		+ "," + terminalFields(reason) + "}";
 	ReplayTelemetry::emit(finalFrame, "match_outcome", AsciiString(payload.c_str()));
 }
 
-AsciiString ReplayCombat::completionFieldsJson(Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch)
+AsciiString ReplayCombat::completionFieldsJson(ReplayTelemetryTerminationReason reason)
 {
-	const std::string payload = "\"crc_mismatch_frame\":"
+	const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
+	const std::string payload = "\"terminal_reason\":" + jsonString(terminalReason(reason))
+		+ ",\"crc_mismatch_frame\":"
 		+ (crcMismatch && s_state.crcMismatchObserved ? std::to_string(s_state.crcMismatchFrame) : "null")
 		+ ",\"quit_early\":" + (s_state.quitEarly ? "true" : "false")
 		+ ",\"replay_header_desync\":" + (s_state.replayHeaderDesync ? "true" : "false")

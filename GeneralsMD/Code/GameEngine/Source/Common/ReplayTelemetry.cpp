@@ -187,7 +187,8 @@ namespace
 	AsciiString s_writerError;
 	Bool s_outputFailed = FALSE;
 	Bool s_initialized = FALSE;
-	Bool s_cleanFinishDeferred = FALSE;
+	Bool s_finishDeferred = FALSE;
+	ReplayTelemetryTerminationReason s_deferredTerminationReason = REPLAY_TELEMETRY_TERMINATION_INTERRUPTED;
 	Bool s_ownsTempPath = FALSE;
 	UnsignedInt s_tempCounter = 0;
 	char s_outputBuffer[64 * 1024];
@@ -381,12 +382,12 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 {
 	if (s_output != nullptr)
 	{
-		finish(0, FALSE);
+		ReplayTelemetry::discard();
 	}
 	s_tracePath = tracePath;
 	s_runId = runId;
 	s_movementSampleFrames = movementSampleFrames;
-	s_cleanFinishDeferred = FALSE;
+	s_finishDeferred = FALSE;
 	s_engineDataIdentity.clear();
 	s_catalogPath.clear();
 	s_catalogSha256.clear();
@@ -461,7 +462,7 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	s_traceDigest = Sha256();
 	s_writerError.clear();
 	s_outputFailed = FALSE;
-	s_cleanFinishDeferred = FALSE;
+	s_finishDeferred = FALSE;
 	s_ownsTempPath = FALSE;
 	s_tempPath.clear();
 	for (Int attempt = 0; attempt < 100 && s_output == nullptr; ++attempt)
@@ -577,27 +578,29 @@ void ReplayTelemetry::observeExecutedCommand()
 	}
 }
 
-void ReplayTelemetry::deferCleanFinish()
+void ReplayTelemetry::deferFinish(ReplayTelemetryTerminationReason reason)
 {
 	if (s_output != nullptr && s_initialized)
 	{
-		s_cleanFinishDeferred = TRUE;
+		s_finishDeferred = TRUE;
+		s_deferredTerminationReason = reason;
 	}
 }
 
 void ReplayTelemetry::finishDeferred(UnsignedInt finalFrame)
 {
-	if (s_cleanFinishDeferred)
+	if (s_finishDeferred)
 	{
 		// TheSuperHackers @feature Leex 18/08/2026 Recheck CRC after the terminal logic update before publishing clean completion. (#TBD)
-		const Bool cleanShutdown = TheRecorder == nullptr || !TheRecorder->sawCRCMismatch();
-		finish(finalFrame, cleanShutdown);
+		const ReplayTelemetryTerminationReason reason = TheRecorder != nullptr && TheRecorder->sawCRCMismatch()
+			? REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH : s_deferredTerminationReason;
+		finish(finalFrame, reason);
 	}
 }
 
-void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
+void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason)
 {
-	s_cleanFinishDeferred = FALSE;
+	s_finishDeferred = FALSE;
 	if (s_output == nullptr)
 	{
 		return;
@@ -608,16 +611,17 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 		return;
 	}
 
-	const Bool crcMismatch = TheRecorder != nullptr && TheRecorder->sawCRCMismatch();
-	const Bool replayTruncated = !cleanShutdown && !crcMismatch;
 	// TheSuperHackers @feature Leex 20/08/2026 Emit exactly one authoritative outcome immediately before trace completion. (#TBD)
-	ReplayCombat::emitMatchOutcome(finalFrame, cleanShutdown, replayTruncated, crcMismatch);
+	ReplayCombat::emitMatchOutcome(finalFrame, reason);
 	flushOutput();
 	++s_eventCounts["complete"];
 	const std::string writerError = s_writerError.isEmpty() ? "null" : jsonString(s_writerError);
 	// TheSuperHackers @feature Leex 20/08/2026 Reconcile every observed cash chain against terminal engine Money state. (#TBD)
 	const AsciiString finalCashBalances = ReplayEconomy::finalCashBalancesJson();
-	const AsciiString combatCompletionFields = ReplayCombat::completionFieldsJson(cleanShutdown, replayTruncated, crcMismatch);
+	const AsciiString combatCompletionFields = ReplayCombat::completionFieldsJson(reason);
+	const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
+	const Bool replayTruncated = reason == REPLAY_TELEMETRY_TERMINATION_TRUNCATED_INPUT;
+	const Bool cleanShutdown = reason == REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF;
 	const std::string payload = "{\"final_frame\":" + std::to_string(finalFrame)
 		+ ",\"command_count\":" + std::to_string(s_commandCount)
 		+ ",\"event_counts\":" + eventCountsJson()
@@ -650,6 +654,16 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 	else
 	{
 		publishTemporaryOutput();
+	}
+}
+
+void ReplayTelemetry::discard()
+{
+	// TheSuperHackers @feature Leex 20/08/2026 Discard reset and reconfiguration transactions that have no replay termination boundary. (#TBD)
+	s_finishDeferred = FALSE;
+	if (s_output != nullptr)
+	{
+		discardPendingOutput("could not close discarded telemetry output");
 	}
 }
 

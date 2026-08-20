@@ -7,6 +7,15 @@
 
 #include <cstddef>
 
+// TheSuperHackers @feature Leex 20/08/2026 Carry the recorder's exact termination boundary into terminal telemetry. (#TBD)
+enum ReplayTelemetryTerminationReason
+{
+	REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF,
+	REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH,
+	REPLAY_TELEMETRY_TERMINATION_TRUNCATED_INPUT,
+	REPLAY_TELEMETRY_TERMINATION_INTERRUPTED
+};
+
 // TheSuperHackers @feature Leex 18/08/2026 Provide one passive modern-only sink for authoritative replay telemetry. (#TBD)
 class ReplayTelemetry
 {
@@ -24,9 +33,10 @@ public:
 	static void initialize();
 	static void observeExecutedCommand();
 	static void emit(UnsignedInt frame, const char *eventType, const AsciiString &payloadJson);
-	static void deferCleanFinish();
+	static void deferFinish(ReplayTelemetryTerminationReason reason);
 	static void finishDeferred(UnsignedInt finalFrame);
-	static void finish(UnsignedInt finalFrame, Bool cleanShutdown);
+	static void finish(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason);
+	static void discard();
 	static void fail(const char *code, const char *message);
 };
 

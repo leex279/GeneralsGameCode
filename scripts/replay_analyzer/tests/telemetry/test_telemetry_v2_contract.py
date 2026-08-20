@@ -47,6 +47,7 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "final_frame": 0,
         "command_count": 0,
         "event_counts": counts,
+        "terminal_reason": "clean_completion",
         "crc_mismatch": False,
         "replay_truncated": False,
         "clean_shutdown": True,

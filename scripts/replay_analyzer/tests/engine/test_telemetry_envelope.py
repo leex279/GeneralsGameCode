@@ -344,6 +344,44 @@ def test_clean_eof_completion_is_published_after_the_terminal_logic_update(
     assert complete.payload.final_frame == terminal_command_frame + 1
 
 
+def test_partial_replay_input_has_explicit_truncated_termination(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Distinguish a partial command from clean EOF and an intact-file interruption."""
+    complete_replay = tmp_path / "crc-free-complete.rep"
+    _write_crc_free_replay(pinned_replay, complete_replay)
+    source = complete_replay.read_bytes()
+    assert len(source) > 1
+    truncated_replay = tmp_path / "crc-free-partial.rep"
+    truncated_replay.write_bytes(source[:-1])
+    trace_path = (tmp_path / "truncated.ndjson").resolve()
+
+    completed = _run_engine(
+        [
+            *_base_command(zero_hour_runtime_executable, truncated_replay),
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+        ],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert trace_path.is_file(), completed.stdout[-2000:] + completed.stderr[-2000:]
+    records = tuple(iter_validated_trace(trace_path))
+    outcome = records[-2]
+    complete = records[-1]
+    assert outcome.payload.terminal_reason == "replay_truncated"
+    assert complete.payload.terminal_reason == "replay_truncated"
+    assert complete.payload.replay_truncated is True
+    assert complete.payload.clean_shutdown is False
+    assert complete.payload.crc_mismatch is False
+
+
 def test_late_writer_failure_never_publishes_an_apparently_successful_trace(
     tmp_path: Path,
     repository_root: Path,

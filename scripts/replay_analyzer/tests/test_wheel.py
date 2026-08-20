@@ -30,8 +30,10 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     with zipfile.ZipFile(wheel) as archive:
         packaged_v1_schema = archive.read("generals_replay_analyzer/data/telemetry-v1.schema.json")
         packaged_v2_schema = archive.read("generals_replay_analyzer/data/telemetry-v2.schema.json")
+        packaged_combat_types = archive.read("generals_replay_analyzer/data/zero-hour-combat-types-v1.json")
     assert packaged_v1_schema == (PROJECT_ROOT / "contracts" / "telemetry-v1.schema.json").read_bytes()
     assert packaged_v2_schema == (PROJECT_ROOT / "contracts" / "telemetry-v2.schema.json").read_bytes()
+    assert packaged_combat_types == (PROJECT_ROOT / "contracts" / "zero-hour-combat-types-v1.json").read_bytes()
 
     environment_directory = tmp_path / "wheel-environment"
     _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
@@ -167,6 +169,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                     "match_outcome": 1,
                     "complete": 1,
                 },
+                "terminal_reason": "clean_completion",
                 "crc_mismatch": False,
                 "crc_mismatch_frame": None,
                 "replay_truncated": False,

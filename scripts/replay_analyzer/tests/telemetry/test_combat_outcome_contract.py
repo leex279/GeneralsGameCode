@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -127,7 +128,8 @@ def _damage(*, prior: float = 100.0, new: float = 60.0, killing: bool = False) -
         "victim_object_id": 20,
         "victim_player_index": 1,
         "attacker_object_id": 10,
-        "attacker_player_index": 0,
+        "source_player_mask": 1,
+        "source_player_indices": [0],
         "attacker_template_name": "AmericaTankCrusader",
         "weapon_name": None,
         "attempted_amount": 50.0,
@@ -144,20 +146,30 @@ def _damage(*, prior: float = 100.0, new: float = 60.0, killing: bool = False) -
     }
 
 
-def _outcome(*, status: str = "unknown", winners: list[int] | None = None, losers: list[int] | None = None) -> dict[str, object]:
+def _outcome(
+    *,
+    status: str = "unknown",
+    winners: list[int] | None = None,
+    losers: list[int] | None = None,
+    terminal_reason: str = "crc_mismatch",
+    quit_early: bool = False,
+    replay_header_desync: bool = False,
+    disconnected_slots: list[int] | None = None,
+) -> dict[str, object]:
+    crc_mismatch = terminal_reason == "crc_mismatch"
     return {
         "status": status,
         "source": "victory_conditions" if status == "decided" else "unavailable",
         "winner_player_indices": winners or [],
         "loser_player_indices": losers or [],
         "engine_player_indices": [0, 1, 9],
-        "terminal_reason": "crc_mismatch",
-        "quit_early": False,
-        "replay_header_desync": False,
-        "replay_header_disconnected_slots": [],
-        "crc_mismatch": True,
-        "crc_mismatch_frame": 108,
-        "clean_shutdown": False,
+        "terminal_reason": terminal_reason,
+        "quit_early": quit_early,
+        "replay_header_desync": replay_header_desync,
+        "replay_header_disconnected_slots": disconnected_slots or [],
+        "crc_mismatch": crc_mismatch,
+        "crc_mismatch_frame": 108 if crc_mismatch else None,
+        "clean_shutdown": terminal_reason == "clean_completion",
     }
 
 
@@ -182,7 +194,13 @@ def _base(directory: Path) -> list[dict[str, object]]:
     ]
 
 
-def _finish(path: Path, records: list[dict[str, object]], *, outcome: dict[str, object] | None = None) -> Path:
+def _finish(
+    path: Path,
+    records: list[dict[str, object]],
+    *,
+    outcome: dict[str, object] | None = None,
+    completion: dict[str, object] | None = None,
+) -> Path:
     if outcome is not None:
         records.append(_record(len(records), "match_outcome", outcome, frame=108))
     prior = b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
@@ -191,6 +209,7 @@ def _finish(path: Path, records: list[dict[str, object]], *, outcome: dict[str, 
         event_type = str(record["event_type"])
         counts[event_type] = counts.get(event_type, 0) + 1
     counts["complete"] = 1
+    terminal = completion or _outcome()
     records.append(
         _record(
             len(records),
@@ -199,13 +218,14 @@ def _finish(path: Path, records: list[dict[str, object]], *, outcome: dict[str, 
                 "final_frame": 108,
                 "command_count": 16,
                 "event_counts": counts,
-                "crc_mismatch": True,
-                "crc_mismatch_frame": 108,
-                "replay_truncated": False,
-                "quit_early": False,
-                "replay_header_desync": False,
-                "replay_header_disconnected_slots": [],
-                "clean_shutdown": False,
+                "terminal_reason": terminal["terminal_reason"],
+                "crc_mismatch": terminal["crc_mismatch"],
+                "crc_mismatch_frame": terminal["crc_mismatch_frame"],
+                "replay_truncated": terminal["terminal_reason"] == "replay_truncated",
+                "quit_early": terminal["quit_early"],
+                "replay_header_desync": terminal["replay_header_desync"],
+                "replay_header_disconnected_slots": terminal["replay_header_disconnected_slots"],
+                "clean_shutdown": terminal["clean_shutdown"],
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
                 "map_assets": [],
@@ -297,6 +317,18 @@ def test_task6_pydantic_payloads_are_closed_for_v2_without_tightening_v1() -> No
     damage["schema_version"] = 1
     assert DamageAppliedRecord.model_validate(damage).payload.model_extra == {"unexpected": "rejected-in-v2"}
 
+    legacy_payload = damage["payload"]
+    assert isinstance(legacy_payload, dict)
+    legacy_payload["attempted_amount"] = 3.5e38
+    legacy_payload["calculated_amount"] = 3.5e38
+    legacy_payload["applied_amount"] = 3.5e38
+    legacy_payload["prior_health"] = 3.5e38
+    legacy_payload["new_health"] = 0.0
+    legacy_location = legacy_payload["location"]
+    assert isinstance(legacy_location, dict)
+    legacy_location["x"] = 3.5e38
+    assert DamageAppliedRecord.model_validate(damage).payload.attempted_amount == 3.5e38
+
     outcome = _record(4, "match_outcome", _outcome(), frame=108)
     outcome_payload = outcome["payload"]
     assert isinstance(outcome_payload, dict)
@@ -312,7 +344,6 @@ def test_task6_pydantic_payloads_are_closed_for_v2_without_tightening_v1() -> No
         (lambda damage: damage.update({"new_health": 101.0}), "health arithmetic"),
         (lambda damage: damage.update({"killing_blow": True}), "killing_blow"),
         (lambda damage: damage.update({"victim_player_index": 0}), "victim_player_index"),
-        (lambda damage: damage.update({"attacker_player_index": 1}), "attacker_player_index"),
     ],
 )
 def test_reader_rejects_impossible_damage_or_owner_attribution(
@@ -357,6 +388,104 @@ def test_reader_requires_killing_damage_before_destruction_and_rejects_later_hea
         tuple(iter_validated_trace(trace))
 
 
+def test_health_events_are_independent_transitions_not_a_complete_health_ledger(tmp_path: Path) -> None:
+    records = _base(tmp_path)
+    records.extend(
+        [
+            _record(4, "damage_applied", _damage(prior=100.0, new=60.0), frame=10),
+            _record(
+                5,
+                "veterancy_changed",
+                {
+                    "object_id": 20,
+                    "owner_player_index": 1,
+                    "previous_level_id": 0,
+                    "previous_level": "REGULAR",
+                    "new_level_id": 1,
+                    "new_level": "VETERAN",
+                },
+                frame=11,
+            ),
+            _record(6, "damage_applied", _damage(prior=80.0, new=70.0), frame=12),
+        ]
+    )
+
+    records = tuple(iter_validated_trace(_finish(tmp_path / "unobserved-rescale.ndjson", records, outcome=_outcome())))
+
+    assert [record.payload.prior_health for record in records if record.event_type == "damage_applied"] == [100.0, 80.0]
+
+
+def test_bridge_style_healing_after_killing_damage_is_allowed_until_object_destroyed(tmp_path: Path) -> None:
+    records = _base(tmp_path)
+    records.extend(
+        [
+            _record(4, "damage_applied", _damage(prior=50.0, new=0.0, killing=True), frame=10),
+            _record(
+                5,
+                "healing_applied",
+                {
+                    "target_object_id": 20,
+                    "target_player_index": 1,
+                    "source_object_id": None,
+                    "source_player_index": None,
+                    "attempted_amount": 10.0,
+                    "calculated_amount": 10.0,
+                    "applied_amount": 10.0,
+                    "prior_health": 0.0,
+                    "new_health": 10.0,
+                    "location": {"x": 20.0, "y": 5.0, "z": 0.0},
+                },
+                frame=11,
+            ),
+        ]
+    )
+
+    validated = tuple(iter_validated_trace(_finish(tmp_path / "bridge-repair.ndjson", records, outcome=_outcome())))
+
+    assert [record.event_type for record in validated[4:6]] == ["damage_applied", "healing_applied"]
+
+
+def test_healing_requires_its_current_source_to_remain_alive(tmp_path: Path) -> None:
+    records = _base(tmp_path)
+    records.extend(
+        [
+            _record(
+                4,
+                "object_destroyed",
+                {
+                    "object_id": 10,
+                    "previous_state": "alive",
+                    "new_state": "destroyed",
+                    "owner_player_index": 0,
+                    "team_id": 0,
+                    "destruction_source": "destroy_object",
+                },
+                frame=10,
+            ),
+            _record(
+                5,
+                "healing_applied",
+                {
+                    "target_object_id": 20,
+                    "target_player_index": 1,
+                    "source_object_id": 10,
+                    "source_player_index": 0,
+                    "attempted_amount": 10.0,
+                    "calculated_amount": 10.0,
+                    "applied_amount": 10.0,
+                    "prior_health": 50.0,
+                    "new_health": 60.0,
+                    "location": {"x": 20.0, "y": 5.0, "z": 0.0},
+                },
+                frame=11,
+            ),
+        ]
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="after object_destroyed"):
+        tuple(iter_validated_trace(_finish(tmp_path / "destroyed-healer.ndjson", records, outcome=_outcome())))
+
+
 def test_reader_rejects_duplicate_veterancy_transition_without_intervening_level(tmp_path: Path) -> None:
     records = _base(tmp_path)
     veterancy = {
@@ -390,9 +519,9 @@ def test_reader_rejects_duplicate_or_conflicting_player_terminal_transitions(tmp
         "source": (
             "victory_conditions"
             if status == "defeated"
-            else "replay_header_disconnect_plus_executed_surrender"
+            else "replay_header_disconnect_plus_executed_false_self_destruct"
             if status == "disconnected"
-            else "replay_command"
+            else "executed_true_self_destruct"
         ),
         "replay_slot_index": 1,
     }
@@ -402,10 +531,236 @@ def test_reader_rejects_duplicate_or_conflicting_player_terminal_transitions(tmp
             _record(5, event_type, payload, frame=51),
         ]
     )
-    trace = _finish(tmp_path / f"duplicate-{event_type}.ndjson", records, outcome=_outcome())
+    terminal = _outcome(disconnected_slots=[1] if event_type == "player_disconnected" else [])
+    trace = _finish(
+        tmp_path / f"duplicate-{event_type}.ndjson",
+        records,
+        outcome=terminal,
+        completion=terminal,
+    )
 
     with pytest.raises(TelemetryTraceValidationError, match="terminal player transition"):
         tuple(iter_validated_trace(trace))
+
+
+def test_decided_team_outcome_keeps_eliminated_victorious_ally_out_of_losers(tmp_path: Path) -> None:
+    records = _base(tmp_path)
+    records.append(
+        _record(
+            4,
+            "player_defeated",
+            {
+                "player_index": 1,
+                "previous_status": "active",
+                "new_status": "defeated",
+                "source": "victory_conditions",
+                "replay_slot_index": 1,
+            },
+            frame=80,
+        )
+    )
+    outcome = _outcome(status="decided", winners=[0, 1], losers=[9])
+
+    validated = tuple(iter_validated_trace(_finish(tmp_path / "team-outcome.ndjson", records, outcome=outcome)))
+
+    assert validated[-2].payload.winner_player_indices == [0, 1]
+    assert validated[-2].payload.loser_player_indices == [9]
+
+
+def test_disconnect_requires_matching_header_slot_while_header_only_metadata_is_allowed(tmp_path: Path) -> None:
+    disconnected = {
+        "player_index": 1,
+        "previous_status": "active",
+        "new_status": "disconnected",
+        "source": "replay_header_disconnect_plus_executed_false_self_destruct",
+        "replay_slot_index": 1,
+    }
+    mismatched = _base(tmp_path)
+    mismatched.append(_record(4, "player_disconnected", disconnected, frame=50))
+    with pytest.raises(TelemetryTraceValidationError, match="disconnect metadata"):
+        tuple(iter_validated_trace(_finish(tmp_path / "disconnect-without-header.ndjson", mismatched, outcome=_outcome())))
+
+    header_only = _outcome(disconnected_slots=[1])
+    validated = tuple(
+        iter_validated_trace(
+            _finish(
+                tmp_path / "header-only-disconnect.ndjson",
+                _base(tmp_path),
+                outcome=header_only,
+                completion=header_only,
+            )
+        )
+    )
+    assert all(record.event_type != "player_disconnected" for record in validated)
+
+
+def test_true_surrender_stays_surrender_even_when_header_later_marks_slot_disconnected(tmp_path: Path) -> None:
+    records = _base(tmp_path)
+    records.append(
+        _record(
+            4,
+            "player_surrendered",
+            {
+                "player_index": 1,
+                "previous_status": "active",
+                "new_status": "surrendered",
+                "source": "executed_true_self_destruct",
+                "replay_slot_index": 1,
+            },
+            frame=50,
+        )
+    )
+    terminal = _outcome(disconnected_slots=[1])
+
+    validated = tuple(
+        iter_validated_trace(
+            _finish(tmp_path / "surrender-before-later-disconnect.ndjson", records, outcome=terminal, completion=terminal)
+        )
+    )
+
+    assert validated[4].event_type == "player_surrendered"
+
+
+@pytest.mark.parametrize("terminal_reason", ["clean_completion", "replay_truncated", "interrupted"])
+def test_complete_carries_explicit_non_crc_termination_reason(tmp_path: Path, terminal_reason: str) -> None:
+    terminal = _outcome(
+        terminal_reason=terminal_reason,
+        quit_early=terminal_reason == "clean_completion",
+        replay_header_desync=terminal_reason == "interrupted",
+    )
+
+    validated = tuple(
+        iter_validated_trace(
+            _finish(
+                tmp_path / f"{terminal_reason}.ndjson",
+                _base(tmp_path),
+                outcome=terminal,
+                completion=terminal,
+            )
+        )
+    )
+
+    assert validated[-1].payload.terminal_reason == terminal_reason
+    assert validated[-2].payload.terminal_reason == terminal_reason
+
+
+def test_reader_rejects_termination_reason_that_contradicts_completion_flags(tmp_path: Path) -> None:
+    terminal = _outcome(terminal_reason="interrupted")
+    terminal["clean_shutdown"] = True
+    trace = _finish(tmp_path / "contradictory-interruption.ndjson", _base(tmp_path), outcome=terminal, completion=terminal)
+
+    with pytest.raises(TelemetryTraceValidationError, match="terminal_reason"):
+        tuple(iter_validated_trace(trace))
+
+
+@pytest.mark.parametrize("destroy_source", [False, True])
+def test_damage_provenance_uses_immutable_mask_after_attacker_transfer_or_destroy(
+    tmp_path: Path, destroy_source: bool
+) -> None:
+    records = _base(tmp_path)
+    records.append(
+        _record(
+            4,
+            "owner_changed",
+            {
+                "object_id": 10,
+                "previous_owner_player_index": 0,
+                "new_owner_player_index": 1,
+                "previous_team_id": 0,
+                "new_team_id": 1,
+            },
+            frame=10,
+        )
+    )
+    if destroy_source:
+        records.append(
+            _record(
+                5,
+                "object_destroyed",
+                {
+                    "object_id": 10,
+                    "previous_state": "alive",
+                    "new_state": "destroyed",
+                    "owner_player_index": 1,
+                    "team_id": 1,
+                    "destruction_source": "destroy_object",
+                },
+                frame=11,
+            )
+        )
+    records.append(_record(len(records), "damage_applied", _damage(), frame=12))
+
+    validated = tuple(iter_validated_trace(_finish(tmp_path / f"delayed-{destroy_source}.ndjson", records, outcome=_outcome())))
+    damage = next(record for record in validated if record.event_type == "damage_applied")
+
+    assert damage.payload.source_player_mask == 1
+    assert damage.payload.source_player_indices == [0]
+
+
+@pytest.mark.parametrize(
+    ("mask", "indices", "diagnostic"),
+    [
+        (1, [1], "source_player_mask"),
+        (1 << 5, [5], "engine player domain"),
+    ],
+)
+def test_reader_rejects_damage_source_mask_mismatch_or_unknown_player_bit(
+    tmp_path: Path, mask: int, indices: list[int], diagnostic: str
+) -> None:
+    records = _base(tmp_path)
+    damage = _damage()
+    damage["source_player_mask"] = mask
+    damage["source_player_indices"] = indices
+    records.append(_record(4, "damage_applied", damage, frame=10))
+
+    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
+        tuple(iter_validated_trace(_finish(tmp_path / f"bad-mask-{mask}.ndjson", records, outcome=_outcome())))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "diagnostic"),
+    [
+        (lambda payload: payload.update({"damage_type_id": 3, "damage_type": "ARMOR_PIERCING"}), "damage type"),
+        (lambda payload: payload.update({"death_type_id": 4, "death_type": "NORMAL"}), "death type"),
+        (lambda payload: payload["location"].update({"x": 3.5e38}), "float32"),
+    ],
+)
+def test_reader_rejects_combat_type_pair_drift_and_non_float32_real(
+    tmp_path: Path,
+    mutate: Callable[[dict[str, object]], object],
+    diagnostic: str,
+) -> None:
+    records = _base(tmp_path)
+    damage = _damage()
+    mutate(damage)
+    records.append(_record(4, "damage_applied", damage, frame=10))
+
+    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
+        tuple(iter_validated_trace(_finish(tmp_path / f"bad-combat-{diagnostic}.ndjson", records, outcome=_outcome())))
+
+
+def test_zero_hour_combat_type_contract_matches_authoritative_engine_sources() -> None:
+    project_root = Path(__file__).parents[2]
+    repository_root = project_root.parents[1]
+    contract = json.loads((project_root / "contracts" / "zero-hour-combat-types-v1.json").read_text(encoding="utf-8"))
+    damage_source = (
+        repository_root / "Core/GameEngine/Source/GameLogic/System/Damage.cpp"
+    ).read_text(encoding="utf-8")
+    damage_block = damage_source.split("DamageTypeFlags::s_bitNameList[] =", maxsplit=1)[1].split(
+        "nullptr", maxsplit=1
+    )[0]
+    damage_block = re.sub(r"#if RTS_GENERALS.*?#endif", "", damage_block, flags=re.DOTALL)
+    damage_names = re.findall(r'"([A-Z0-9_]+)"', damage_block)
+    death_source = (repository_root / "Core/GameEngine/Include/GameLogic/Damage.h").read_text(encoding="utf-8")
+    death_block = death_source.split("TheDeathNames[] =", maxsplit=1)[1].split("nullptr", maxsplit=1)[0]
+    death_names = re.findall(r'"([A-Z0-9_]+)"', death_block)
+
+    assert contract == {
+        "schema_version": 1,
+        "game": "zero_hour",
+        "damage_types": [{"id": index, "name": name} for index, name in enumerate(damage_names)],
+        "death_types": [{"id": index, "name": name} for index, name in enumerate(death_names)],
+    }
 
 
 def test_reader_requires_exactly_one_outcome_immediately_before_complete(tmp_path: Path) -> None:

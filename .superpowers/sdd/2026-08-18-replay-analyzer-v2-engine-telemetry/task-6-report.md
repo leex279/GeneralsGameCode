@@ -14,26 +14,28 @@ Implemented passive, deterministic, modern-only Zero Hour telemetry for:
 - exactly one authoritative `match_outcome` immediately before every published v2 `complete` record.
 
 The implementation does not change replay commands, health/veterancy/player state, RNG, client state, gameplay
-returns, or the base `Generals/` target. Every C++ helper and call site is guarded by
-`RTS_REPLAY_ANALYZER && !IS_VS6_BUILD`, and telemetry return values remain ignored.
+returns, or the base `Generals/` target. Dedicated C++ helpers and shared call sites are directly guarded by
+`RTS_REPLAY_ANALYZER && !IS_VS6_BUILD`; recorder-only code is compiled solely in the modern non-VC6 analyzer source
+set. Telemetry return values remain ignored.
 
 ## Authoritative seams and available evidence
 
 | Observation | Seam | Evidence carried |
 |---|---|---|
-| Damage applied | `ActiveBody::attemptDamage`, after armor/scalar/kill/clipping and health mutation, before callbacks and `Object::onDie` | Victim and observed owner; raw source object ID and observed source owner when available; raw source template from `DamageInfo`; attempted, calculated, and actually applied amount; prior/new health; numeric and stable raw damage/death names; raw victim location; killing-blow flag. |
+| Damage applied | `ActiveBody::attemptDamage`, after armor/scalar/kill/clipping and health mutation, before callbacks and `Object::onDie` | Victim and observed owner; raw historical source object ID; authoritative raw `DamageInfo::m_sourcePlayerMask` and its exact sorted player bits; raw source template from `DamageInfo`; attempted, calculated, and actually applied amount; prior/new health; exact numeric/stable damage and death type pair; raw victim location; killing-blow flag. |
 | Healing applied | `ActiveBody::attemptHealing`, after authoritative health clipping, before healing callbacks | Target and owner, raw optional source ID/owner, attempted/calculated/applied amount, prior/new health, and raw target location. |
 | Veterancy changed | `Object::onVeterancyLevelChanged`, after the tracker has changed level and the object has applied body/weapon/upgrade state | Object/current owner plus prior/new numeric level and stable level name. |
 | Player defeated | `Player::killPlayer` at the actual active-to-dead assignment, scoped only by `VictoryConditions::update` or `ScriptActions::doPlayerKill` | Player, prior/new status, exact victory-condition or script source, and replay slot when one exists. |
-| Player surrendered | The same `killPlayer` transition scoped by executed `GameLogic::onSelfDestruct` | Player, active-to-surrendered status, replay-command source, and replay slot. |
-| Player disconnected | Executed surrender plus matching replay-header `playerDiscons[slot]` | Player, disconnected status, combined corroborating source, and required replay slot. Header metadata alone never emits a transition. |
+| Player surrendered | The same `killPlayer` transition scoped by executed `GameLogic::onSelfDestruct(TRUE)` | Player, active-to-surrendered status, exact executed-true source, and replay slot. |
+| Player disconnected | Executed `GameLogic::onSelfDestruct(FALSE)` plus matching replay-header `playerDiscons[slot]` | Player, disconnected status, combined corroborating source, and required replay slot. False commands without header support and header metadata without an executed transition do not emit one. |
 | CRC mismatch | `RecorderClass::handleCRCMessage`, using the recorder's authoritative queue-offset formula | First mismatch frame only. |
 | Match outcome | `ReplayTelemetry::finish`, immediately before `complete` | Decided victory-condition winners/losers only when an authoritative end frame and winner exist; otherwise explicit unknown with empty winner/loser arrays. Includes the exact initialized engine-player domain and terminal facts. |
 
 `DamageInfo` exposes no authoritative weapon identity at the post-calculation body seam. `weapon_name` is therefore
 explicitly `null`; no weapon is inferred from the attacker/template. A missing source object is not reconstructed.
-Its raw source ID/template are preserved only when the engine supplied them. The helper retains copied scalar,
-string, set, and vector state only; it retains no `Object *` or `Player *`.
+Its raw source ID/template are preserved only when the engine supplied them. Player attribution never consults the
+attacker's current controller: ownership transfer or source destruction cannot rewrite the immutable source mask.
+The helper retains copied scalar, string, set, and vector state only; it retains no `Object *` or `Player *`.
 
 ## Terminal-state policy
 
@@ -41,7 +43,9 @@ The replay header is copied when telemetry begins and survives the later new-gam
 `PlayerList` domain is frozen after `players_initialized`; terminal output must match that domain even if teardown no
 longer exposes `PlayerList`.
 
-Terminal precedence is CRC mismatch, replay truncation, interrupted header/engine state, then clean completion.
+Recorder call sites carry an explicit modern-only termination enum: clean parsed EOF, CRC mismatch, partial/truncated
+input, or intact-file interruption. Reset/reconfigure transactions are discarded rather than reclassified. Header
+quit/desync/disconnect facts remain independent metadata and do not choose the termination reason.
 `match_outcome` and `complete` must agree exactly on CRC state/frame, quit-early, replay-header desync,
 header-disconnected slots, and clean shutdown. A CRC mismatch without the recorder's exact mismatch frame fails
 closed and discards the owned transaction. Unknown outcomes always have empty winner/loser arrays; entity survival is
@@ -59,22 +63,31 @@ outcome fields, while frozen telemetry v1 remains permissive and byte-unchanged 
 `BFAA0279A9BAA9264121709063F0DD763C534333926CBC2846DD4E4D56761350`). Illegal/nonfinite/float-overflow numbers are
 rejected before any record is exposed.
 
+Exact Zero Hour damage/death identifiers live in packaged `zero-hour-combat-types-v1.json`. Tests compare it with
+the authoritative C++ arrays and with the installed-wheel bytes; Pydantic rejects unknown IDs and any ID/name drift.
+Every health and coordinate `Real` in these events must be finite and within the IEEE-754 float32 range.
+
 Before returning any record, the atomic reader validates:
 
 - every explicit player index belongs to the immutable `engine_player_indices` domain;
-- current victims, healing targets, and veterancy subjects exist and are alive, while historical attacker/healing
-  provenance requires prior creation and may already be destroyed;
-- explicit current owners match lifecycle state and historical source owners match when supplied;
-- damage/healing arithmetic, positive applied/calculated values, health continuity, and killing-blow state;
-- no health transition after a killing blow or object destruction;
+- current victims, healing targets/sources, and veterancy subjects exist and are alive, while a delayed damage
+  attacker is historical provenance requiring prior creation and may already be transferred or destroyed;
+- explicit current victim/target/source owners match lifecycle state;
+- strict event-local damage/healing arithmetic, positive applied/calculated values, and killing-blow state;
+- no health transition after `object_destroyed`; a killing blow alone is not treated as lifecycle destruction;
 - veterancy numeric/name agreement and observed transition continuity, rejecting duplicate impossible transitions;
-- at most one defeat/surrender/disconnect transition per player and coherent replay-slot mapping;
+- at most one defeat/surrender/disconnect transition per player, coherent replay-slot mapping, and terminal-header
+  corroboration for every emitted disconnect;
 - exactly one `match_outcome`, immediately before `complete`, at the final frame;
 - sorted unique disjoint authoritative winner/loser sets within the exact initialized full player domain; and
 - recomputed terminal `event_counts`, including exactly one outcome and exactly one completion.
 
 Validation remains whole-trace atomic: malformed terminal, arithmetic, reference, ordering, or provenance evidence
 discards the buffered trace rather than exposing a valid prefix.
+
+Damage and healing records are transition observations, not a complete health ledger. Veterancy ratio preservation,
+construction/internal health changes, and bridge repair can change health between observed events, so cross-event
+health continuity and a permanent post-killing-blow lock would be false claims and are intentionally absent.
 
 ## TDD evidence
 
@@ -89,9 +102,15 @@ The final audit captured two additional focused RED cases before their fixes:
 - direct Pydantic v2 models accepted unknown and legacy Task 6 fields: **1 failed**, then the final focused contract
   was **18 passed** while direct v1 behavior remained unchanged.
 
-The focused real-engine Task 6 file is **6 passed** against the rebuilt executable. It checks the natural CRC boundary,
+Before corrective review, the focused real-engine Task 6 file was **6 passed** against the rebuilt executable. It checked the natural CRC boundary,
 mechanics-only combat reachability, killing-blow ordering, header/reset ordering, modern guards/no retained engine
 pointers, and explicit player-transition sources.
+
+The corrective review began with **26 failed, 18 passed** focused cases covering team victory overlap, independent
+health transitions, exact self-destruct sources, explicit termination, immutable player-mask attribution, closed
+combat types, and float32 bounds. The contract then reached **34 passed**; a final current-healing-source liveness
+case was captured **1 failed** and fixed to reach **35 passed**. Focused real/static engine coverage is now **9 passed**,
+including a real partial replay that ends explicitly as `replay_truncated`.
 
 ## Replay evidence
 
@@ -123,20 +142,20 @@ winner, or match-history claims.
 Final commands and results (Python commands run from `scripts/replay_analyzer/`):
 
 - `uv run --project . pytest tests/telemetry/test_combat_outcome_contract.py -q`
-  - **18 passed**
+  - **35 passed**
 - `uv run --project . pytest tests/engine/test_combat_outcome.py -q`
-  - **6 passed**
-- `uv run --project . pytest -m "not engine and not ollama" -q`
-  - **421 passed, 50 deselected**
-- `uv run --project . pytest tests/engine -q`
-  - **49 passed, 1 skipped**
+  - **9 passed**
+- `uv run --project . pytest -m "not engine" -q`
+  - **438 passed, 54 deselected**
+- `uv run --project . pytest -m engine -q`
+  - **53 passed, 1 skipped, 438 deselected**
   - the skip is the existing Windows symlink-alias case when this host cannot create an unprivileged symlink
 - `uv run --project . ruff check src tests`
   - **passed**
-- configured strict `uv run --project . mypy`
-  - **passed, 15 source files**
-- x86 VS 2022 `VsDevCmd` environment plus
-  `cmake --build build/win32 --target z_generals --config Release -- -j 4`
+- `uv run --project . mypy --strict src`
+  - **passed, 16 source files**
+- x86 VS 2022 `vcvars32.bat` environment plus
+  `cmake --build build/win32 --target z_generals --config Release`
   - **passed and linked `generalszh.exe`** after the final C++ changes
 
 The full engine suite includes deterministic normalized double runs, telemetry-enabled versus disabled replay
@@ -147,7 +166,9 @@ not copy or replace user game data.
 VC6 and MinGW could not be built on this host. `Get-Command` finds no VC6/MinGW compiler or build tool; the VC6 cache
 reports `CMAKE_CXX_COMPILER-NOTFOUND`, while the MinGW Makefiles cache reports
 `CMAKE_MAKE_PROGRAM-NOTFOUND` and the Ninja cache has no configured C++ compiler. No unavailable compiler pass is
-claimed. Modern-only guards, CMake exclusion, and focused static tests are the available compatibility evidence.
+claimed. The final corrective attempt produced missing `build.ninja` for `build/vc6` and a missing Makefile build tool
+for `build/mingw-w64-i686`. Modern-only guards, CMake exclusion, and focused static tests are the available
+compatibility evidence.
 
 ## Minimal scope extensions and limitations
 

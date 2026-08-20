@@ -165,6 +165,18 @@ def test_replay_combat_state_is_modern_only_and_retains_no_engine_pointers(repos
     state = source.split("struct ReplayCombatState", maxsplit=1)[1].split("};", maxsplit=1)[0]
     assert "Object *" not in state
     assert "Player *" not in state
+    reset = source.split("void ReplayCombat::reset", maxsplit=1)[1].split(
+        "void ReplayCombat::observeReplayHeader", maxsplit=1
+    )[0]
+    push = source.split("void ReplayCombat::pushPlayerTransition", maxsplit=1)[1].split(
+        "void ReplayCombat::popPlayerTransition", maxsplit=1
+    )[0]
+    pop = source.split("void ReplayCombat::popPlayerTransition", maxsplit=1)[1].split(
+        "#endif", maxsplit=1
+    )[0]
+    assert "s_state = ReplayCombatState()" in reset
+    assert "playerTransitionStack.push_back" in push
+    assert "playerTransitionStack.pop_back" in pop
 
 
 def test_replay_header_and_frozen_player_domain_survive_new_game_reset(repository_root: Path) -> None:
@@ -205,10 +217,71 @@ def test_player_terminal_sources_are_explicit_and_replay_disconnect_metadata_is_
         "Player* VictoryConditions::findFirstUndefeatedPlayer", maxsplit=1
     )[0]
 
-    assert "ReplayPlayerTransitionScope" in surrender
-    assert "REPLAY_PLAYER_SURRENDERED" in surrender
+    assert "const Bool replayTransferAssets = msg->getArgument(0)->boolean" in surrender
+    assert "replayTransferAssets ? REPLAY_PLAYER_SURRENDERED : REPLAY_PLAYER_DISCONNECTED" in surrender
     assert "ReplayPlayerTransitionScope" in update
     assert "REPLAY_PLAYER_DEFEATED" in update
-    assert "replay_header_disconnect_plus_executed_surrender" in (
+    combat = (
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
     ).read_text(encoding="utf-8")
+    assert "executed_true_self_destruct" in combat
+    assert "replay_header_disconnect_plus_executed_false_self_destruct" in combat
+
+
+def test_team_outcome_excludes_victorious_players_from_losers(repository_root: Path) -> None:
+    combat = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
+    ).read_text(encoding="utf-8")
+    player_loop = combat.split("for (Int index = 0; index < ThePlayerList->getPlayerCount(); ++index)", maxsplit=1)[
+        1
+    ].split("if (indices.empty())", maxsplit=1)[0]
+
+    assert "const Bool achievedVictory" in player_loop
+    assert "else if" in player_loop
+    assert "hasBeenDefeated" in player_loop
+
+
+def test_recorder_carries_explicit_termination_reasons_and_discards_reset_transactions(repository_root: Path) -> None:
+    recorder = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    reset = recorder.split("void RecorderClass::reset()", maxsplit=1)[1].split(
+        "void RecorderClass::update()", maxsplit=1
+    )[0]
+    stop = recorder.split("void RecorderClass::stopPlayback()", maxsplit=1)[1].split(
+        "void RecorderClass::updateRecord", maxsplit=1
+    )[0]
+    parse_drain = recorder.split("void RecorderClass::completeReplayParseDump()", maxsplit=1)[1].split(
+        "Bool RecorderClass::isPlaybackInProgress", maxsplit=1
+    )[0]
+    telemetry = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
+    ).read_text(encoding="utf-8")
+    configure = telemetry.split("void ReplayTelemetry::configure", maxsplit=1)[1].split(
+        "Bool ReplayTelemetry::isEnabled", maxsplit=1
+    )[0]
+
+    assert "ReplayTelemetry::discard" in reset
+    assert "ReplayTelemetry::discard" in configure
+    for reason in (
+        "REPLAY_TELEMETRY_TERMINATION_CLEAN_EOF",
+        "REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH",
+        "REPLAY_TELEMETRY_TERMINATION_TRUNCATED_INPUT",
+        "REPLAY_TELEMETRY_TERMINATION_INTERRUPTED",
+    ):
+        assert reason in stop
+    assert "REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH" in parse_drain
+
+
+def test_damage_writer_uses_raw_source_player_mask_not_attacker_current_owner(repository_root: Path) -> None:
+    combat = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
+    ).read_text(encoding="utf-8")
+    damage = combat.split("void ReplayCombat::observeDamage", maxsplit=1)[1].split(
+        "void ReplayCombat::observeHealing", maxsplit=1
+    )[0]
+
+    assert "damageInfo->in.m_sourcePlayerMask" in damage
+    assert "source_player_mask" in damage
+    assert "source_player_indices" in damage
+    assert "objectPlayerIndex(attacker" not in damage

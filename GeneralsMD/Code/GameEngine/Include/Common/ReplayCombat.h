@@ -5,6 +5,7 @@
 #include "Common/AsciiString.h"
 #include "Common/GameCommon.h"
 #include "Common/Recorder.h"
+#include "Common/ReplayTelemetry.h"
 
 class DamageInfo;
 class Object;
@@ -15,7 +16,8 @@ enum ReplayPlayerTransitionType
 	REPLAY_PLAYER_TRANSITION_NONE,
 	REPLAY_PLAYER_DEFEATED,
 	REPLAY_PLAYER_SCRIPT_DEFEATED,
-	REPLAY_PLAYER_SURRENDERED
+	REPLAY_PLAYER_SURRENDERED,
+	REPLAY_PLAYER_DISCONNECTED
 };
 
 // TheSuperHackers @feature Leex 20/08/2026 Carry one authoritative player-terminal cause across the existing killPlayer transition. (#TBD)
@@ -44,8 +46,8 @@ public:
 		Real priorHealth, Real newHealth);
 	static void observeVeterancy(const Object *object, VeterancyLevel previousLevel, VeterancyLevel newLevel);
 	static void observePlayerTerminalTransition(const Player *player);
-	static void emitMatchOutcome(UnsignedInt finalFrame, Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch);
-	static AsciiString completionFieldsJson(Bool cleanShutdown, Bool replayTruncated, Bool crcMismatch);
+	static void emitMatchOutcome(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason);
+	static AsciiString completionFieldsJson(ReplayTelemetryTerminationReason reason);
 
 private:
 	friend class ReplayPlayerTransitionScope;
