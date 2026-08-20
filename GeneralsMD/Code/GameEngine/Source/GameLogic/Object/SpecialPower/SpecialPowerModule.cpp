@@ -36,6 +36,9 @@
 #include "Common/INI.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "Common/Science.h"
 #include "Common/SpecialPower.h"
 #include "Common/ThingFactory.h"
@@ -497,9 +500,17 @@ Bool SpecialPowerModule::initiateIntentToDoSpecialPower( const Object *targetObj
 
 //-------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------
-void SpecialPowerModule::triggerSpecialPower( const Coord3D *location )
+void SpecialPowerModule::triggerSpecialPower( const Coord3D *location
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	, const Object *targetObject
+#endif
+)
 {
 	aboutToDoSpecialPower( location );	// do BEFORE recharge
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Observe only the committed trigger shared by immediate and deferred special powers. (#TBD)
+	ReplayEconomy::observeSpecialPowerUsed(getObject(), targetObject, getPowerName(), location);
+#endif
 
 	createViewObject(location);
 
@@ -726,7 +737,12 @@ void SpecialPowerModule::doSpecialPowerAtObject( Object *obj, UnsignedInt comman
 	//is the napalm strike. If we don't call this now, it's up to the update module to do so.
 	if( !getSpecialPowerModuleData()->m_updateModuleStartsAttack )
 	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Preserve an already-resolved object target at the irreversible trigger. (#TBD)
+		triggerSpecialPower( obj->getPosition(), obj );
+#else
 		triggerSpecialPower( obj->getPosition() );
+#endif
 	}
 }
 

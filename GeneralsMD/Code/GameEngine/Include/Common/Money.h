@@ -61,7 +61,10 @@ class Money : public Snapshot
 
 public:
 
-	Money() : m_playerIndex(0)
+	Money() : m_money(0), m_playerIndex(0)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		, m_replayAnalyzerHasPlayerIndex(FALSE)
+#endif
 	{
 		init();
 	}
@@ -84,7 +87,7 @@ public:
 	void updateIncomeBucket();
 	UnsignedInt getCashPerMinute() const;
 
-	void setPlayerIndex(Int ndx) { m_playerIndex = ndx; }
+	void setPlayerIndex(Int ndx);
 
   static void parseMoneyAmount( INI *ini, void *instance, void *store, const void* userData );
 
@@ -107,6 +110,9 @@ private:
 
 	UnsignedInt m_money;	///< amount of money
 	Int m_playerIndex;	///< what is my player index?
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	Bool m_replayAnalyzerHasPlayerIndex;	///< true only after this Money belongs to an engine Player
+#endif
 	UnsignedInt m_incomeBuckets[60];	///< circular buffer of 60 seconds for income tracking
 	UnsignedInt m_currentBucket;
 	UnsignedInt m_cashPerMinute;

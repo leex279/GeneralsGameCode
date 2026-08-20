@@ -39,6 +39,9 @@
 #include "Common/Player.h"
 #include "Common/Money.h"
 #include "Common/Radar.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "Common/RandomValue.h"
 #include "Common/GameState.h"
 #include "Common/GlobalData.h"
@@ -1717,7 +1720,10 @@ Object *DozerAIUpdate::construct( const ThingTemplate *what,
 	if( isRebuild == FALSE )
 	{
 		Money *money = owningPlayer->getMoney();
-
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Scope the proven dozer construction charge to one withdrawal. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_CONSTRUCTION_COST);
+#endif
 		money->withdraw( what->calcCostToBuild( owningPlayer ) );
 
 	}

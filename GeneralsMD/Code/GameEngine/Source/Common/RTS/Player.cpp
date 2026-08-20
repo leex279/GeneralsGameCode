@@ -61,6 +61,9 @@
 #include "Common/ProductionPrerequisite.h"
 #include "Common/Radar.h"
 #include "Common/ResourceGatheringManager.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "Common/Team.h"
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
@@ -431,6 +434,10 @@ void Player::init(const PlayerTemplate* pt)
 
 		if( m_money.countMoney() == 0 )
 		{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 20/08/2026 Attribute only the fallback starting-cash deposit owned by this initialization. (#TBD)
+			ReplayCashReasonScope replayCashReason(REPLAY_CASH_STARTING);
+#endif
 			// TheSuperHackers @bugfix Now correctly deposits the money and fixes its audio and academy issues.
 			// Note that copying the entire Money class instead would also copy the player index inside of it.
 			if ( TheGameInfo )
@@ -462,6 +469,7 @@ void Player::init(const PlayerTemplate* pt)
 		m_color = NEUTRAL_PLAYER_COLOR;
 		m_nightColor = NEUTRAL_PLAYER_COLOR;
 		m_money.init();
+		m_money.setPlayerIndex(getPlayerIndex());
 		m_handicap.init();
 
 		m_playerDisplayName = UnicodeString::TheEmptyString;
@@ -1003,7 +1011,13 @@ void Player::initFromDict(const Dict* d)
 
 	Int m = d->getInt(TheKey_playerStartMoney, &exists);
 	if (exists)
+	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Attribute one map-defined starting-cash operation without leaking context. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_STARTING);
+#endif
 		m_money.deposit(m);
+	}
 
 	for ( i = 0; i < NUM_HOTKEY_SQUADS; ++i ) {
 		deleteInstance(m_squads[i]);
@@ -2638,8 +2652,17 @@ Bool Player::attemptToPurchaseScience(ScienceType science)
 	}
 
 	Int cost = TheScienceStore->getSciencePurchaseCost(science);
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	const Int replayAnalyzerPointsBefore = m_sciencePurchasePoints;
+#endif
 	addSciencePurchasePoints(-cost);
 	addScience(science);
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Emit science only after the authoritative purchase transition, never from grants. (#TBD)
+	ReplayEconomy::observeSciencePurchased(getPlayerIndex(), TheScienceStore->getInternalNameForScience(science),
+		cost, replayAnalyzerPointsBefore, m_sciencePurchasePoints);
+#endif
 
 	getAcademyStats()->recordGeneralsPointsSpent( cost );
 

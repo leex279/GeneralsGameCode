@@ -137,6 +137,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
                 "map_assets": [],
+                "final_cash_balances": [{"player_index": 0, "has_money": False, "balance": None}],
             },
         }
         trace = directory / "trace.ndjson"

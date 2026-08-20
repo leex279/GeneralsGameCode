@@ -37,6 +37,7 @@
 #include "Common/Player.h"
 #include "Common/Radar.h"
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
 #endif
 #include "Common/ThingFactory.h"
@@ -300,7 +301,16 @@ Bool ProductionUpdate::queueUpgrade( const UpgradeTemplate *upgrade )
 
 	// take the cost for the build away from the player
 	Money *money = player->getMoney();
-	money->withdraw( upgrade->calcCostToBuild( player ) );
+	const UnsignedInt upgradeCost = upgrade->calcCostToBuild( player );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Scope one authoritative upgrade charge to its central Money withdrawal. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_UPGRADE_COST);
+		money->withdraw( upgradeCost );
+	}
+#else
+	money->withdraw( upgradeCost );
+#endif
 
 	// allocate a new production entry
 	ProductionEntry *production = newInstance(ProductionEntry);
@@ -313,6 +323,11 @@ Bool ProductionUpdate::queueUpgrade( const UpgradeTemplate *upgrade )
 
 	// tie to the end of the production queue
 	addToProductionQueue( production );
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Assign a trace-global upgrade queue identity only after insertion succeeds. (#TBD)
+	ReplayEconomy::observeUpgradeQueued(getObject(), upgrade->getUpgradeName(), m_productionCount - 1, upgradeCost);
+#endif
 
 	// add this upgrade as in progress in the player
 	player->addUpgrade( upgrade, UPGRADE_STATUS_IN_PRODUCTION );
@@ -360,10 +375,24 @@ void ProductionUpdate::cancelUpgrade( const UpgradeTemplate *upgrade )
 
 	// refund money back to the player
 	Money *money = player->getMoney();
-	money->deposit( production->m_upgradeToResearch->calcCostToBuild( player ), TRUE, FALSE );
+	const UnsignedInt upgradeRefund = production->m_upgradeToResearch->calcCostToBuild( player );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Scope one authoritative upgrade refund without ambient attribution. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_UPGRADE_REFUND);
+		money->deposit( upgradeRefund, TRUE, FALSE );
+	}
+#else
+	money->deposit( upgradeRefund, TRUE, FALSE );
+#endif
 
 	// remove this production from the queue
 	removeFromProductionQueue( production );
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Emit cancellation only after the upgrade leaves the authoritative queue. (#TBD)
+	ReplayEconomy::observeUpgradeCancelled(getObject(), upgrade->getUpgradeName());
+#endif
 
 	// delete production instance
 	deleteInstance(production);
@@ -424,7 +453,16 @@ Bool ProductionUpdate::queueCreateUnit( const ThingTemplate *unitType, Productio
 	// take the cost for the build away from the player
 	Player *player = getObject()->getControllingPlayer();
 	Money *money = player->getMoney();
-	money->withdraw( unitType->calcCostToBuild( player ) );
+	const UnsignedInt unitCost = unitType->calcCostToBuild( player );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Scope one authoritative unit charge to its central Money withdrawal. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_UNIT_COST);
+		money->withdraw( unitCost );
+	}
+#else
+	money->withdraw( unitCost );
+#endif
 
 	// allocate a new production entry
 	ProductionEntry *production = newInstance(ProductionEntry);
@@ -454,6 +492,12 @@ Bool ProductionUpdate::queueCreateUnit( const ThingTemplate *unitType, Productio
 	// tie to the end of the production queue
 	addToProductionQueue( production );
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Bind producer-local engine production identity to one trace-global queue identity. (#TBD)
+	ReplayEconomy::observeProductionQueued(getObject(), productionID, unitType->getName(),
+		m_productionCount - 1, unitCost, production->m_productionQuantityTotal);
+#endif
+
 	return TRUE;  // unit queued
 
 }
@@ -476,10 +520,24 @@ void ProductionUpdate::cancelUnitCreate( ProductionID productionID )
 			// give the player the cost of the object back
 			Player *player = getObject()->getControllingPlayer();
 			Money *money = player->getMoney();
-			money->deposit( production->m_objectToProduce->calcCostToBuild( player ), TRUE, FALSE );
+			const UnsignedInt unitRefund = production->m_objectToProduce->calcCostToBuild( player );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			{
+				// TheSuperHackers @feature Leex 20/08/2026 Scope one authoritative unit refund without nested leakage. (#TBD)
+				ReplayCashReasonScope replayCashReason(REPLAY_CASH_UNIT_REFUND);
+				money->deposit( unitRefund, TRUE, FALSE );
+			}
+#else
+			money->deposit( unitRefund, TRUE, FALSE );
+#endif
 
 			// remove from queue list
 			removeFromProductionQueue( production );
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 20/08/2026 Emit cancellation only after the unit leaves the authoritative queue. (#TBD)
+			ReplayEconomy::observeProductionCancelled(getObject(), productionID);
+#endif
 
 			// delete the production entry
 			deleteInstance(production);
@@ -882,6 +940,11 @@ UpdateSleepTime ProductionUpdate::update()
 					// remove this production entry so we can go on to the next if we are totally finished
 					removeFromProductionQueue( production );
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+					// TheSuperHackers @feature Leex 20/08/2026 Emit one completion only after every quantity-modified unit succeeds. (#TBD)
+					ReplayEconomy::observeProductionCompleted(getObject(), production->getProductionID());
+#endif
+
 					// delete the production entry
 					deleteInstance(production);
 				}
@@ -984,6 +1047,11 @@ UpdateSleepTime ProductionUpdate::update()
 
 			// remove this production entry so we can go on to the next
 			removeFromProductionQueue( production );
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 20/08/2026 Emit upgrade completion after the grant and authoritative queue removal. (#TBD)
+			ReplayEconomy::observeUpgradeCompleted(getObject(), upgrade->getUpgradeName());
+#endif
 
 			// delete the production entry
 			deleteInstance(production);

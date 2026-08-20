@@ -17,6 +17,7 @@ from generals_replay_analyzer.telemetry.model import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     CompleteRecord,
+    FinalCashBalance,
     GameDataCatalogReference,
     ManifestRecord,
     PlayersInitializedRecord,
@@ -73,6 +74,23 @@ class _EntityLifecycleState:
     destroyed: bool = False
 
 
+@dataclass(frozen=True)
+class _CatalogIdentities:
+    """Stable semantic names available to task-specific observations."""
+
+    thing_templates: frozenset[str]
+    upgrades: frozenset[str]
+    sciences: frozenset[str]
+
+
+@dataclass
+class _QueueState:
+    """Immutable queued identity and its optional mutually-exclusive terminal."""
+
+    identity: tuple[object, ...]
+    terminal: str | None = None
+
+
 class _ReferenceRequirement(Enum):
     """Distinguish current-state subjects from immutable historical provenance."""
 
@@ -97,9 +115,18 @@ _OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
     "production_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
     "production_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
     "production_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "upgrade_queued": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "upgrade_cancelled": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "upgrade_completed": {"producer_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "science_purchased": {"source_object_id": _ReferenceRequirement.REQUIRES_CREATION},
+    "special_power_used": {
+        "source_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+        "target_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
+    },
     "supply_collected": {
         "collector_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
         "source_object_id": _ReferenceRequirement.REQUIRES_CREATION,
+        "dropoff_object_id": _ReferenceRequirement.REQUIRES_CREATION,
     },
     "damage_applied": {
         "victim_object_id": _ReferenceRequirement.REQUIRES_ALIVE,
@@ -208,7 +235,9 @@ def _parse_finite_float(value: str) -> float:
     return parsed
 
 
-def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, engine_build: str) -> None:
+def _validate_catalog_asset(
+    path: Path, reference: GameDataCatalogReference, engine_build: str
+) -> _CatalogIdentities:
     """Resolve and validate the exact content-bound v2 catalog before records escape."""
     catalog_path_text = reference.path
     relative_path = Path(catalog_path_text)
@@ -247,6 +276,14 @@ def _validate_catalog_asset(path: Path, reference: GameDataCatalogReference, eng
         raise TelemetryTraceValidationError(
             f"trace '{path}': catalog engine_data_identity differs from manifest engine_build"
         )
+    thing_templates = cast(list[dict[str, object]], catalog["thing_templates"])
+    upgrades = cast(list[dict[str, object]], catalog["upgrades"])
+    sciences = cast(list[dict[str, object]], catalog["sciences"])
+    return _CatalogIdentities(
+        thing_templates=frozenset(cast(str, entry["name"]) for entry in thing_templates),
+        upgrades=frozenset(cast(str, entry["name"]) for entry in upgrades),
+        sciences=frozenset(cast(str, entry["name"]) for entry in sciences),
+    )
 
 
 def _referenced_object_ids(
@@ -423,6 +460,197 @@ def _validate_v2_entity_lifecycle(
         state.destroyed = True
 
 
+_TASK5_EVENTS = {
+    "production_queued",
+    "production_cancelled",
+    "production_completed",
+    "upgrade_queued",
+    "upgrade_cancelled",
+    "upgrade_completed",
+    "science_purchased",
+    "special_power_used",
+    "cash_changed",
+    "supply_collected",
+}
+
+
+def _production_identity(payload: Mapping[str, object]) -> tuple[object, ...]:
+    return tuple(
+        payload[field]
+        for field in (
+            "engine_production_id",
+            "producer_object_id",
+            "player_index",
+            "template_name",
+            "queue_position",
+            "queued_frame",
+            "cost",
+            "quantity",
+        )
+    )
+
+
+def _upgrade_identity(payload: Mapping[str, object]) -> tuple[object, ...]:
+    return tuple(
+        payload[field]
+        for field in (
+            "producer_object_id",
+            "player_index",
+            "upgrade_name",
+            "queue_position",
+            "queued_frame",
+            "cost",
+        )
+    )
+
+
+def _validate_queue_transition(
+    path: Path,
+    line_number: int,
+    sequence: int,
+    event_type: str,
+    payload: Mapping[str, object],
+    queue_id_field: str,
+    identity: tuple[object, ...],
+    queues: dict[int, _QueueState],
+    label: str,
+) -> None:
+    queue_id = cast(int, payload[queue_id_field])
+    terminal = event_type.rsplit("_", maxsplit=1)[1]
+    if terminal == "queued":
+        if queue_id in queues:
+            raise _error(path, line_number, sequence, f"duplicate {label}_queued for {queue_id_field} {queue_id}")
+        queues[queue_id] = _QueueState(identity=identity)
+        return
+    state = queues.get(queue_id)
+    if state is None:
+        raise _error(path, line_number, sequence, f"{event_type} requires {label}_queued for {queue_id_field} {queue_id}")
+    if state.identity != identity:
+        raise _error(path, line_number, sequence, f"{label} identity changed for {queue_id_field} {queue_id}")
+    if cast(int, payload["terminal_frame"]) < cast(int, payload["queued_frame"]):
+        raise _error(path, line_number, sequence, f"{label} terminal_frame precedes queued_frame")
+    if state.terminal is not None:
+        raise _error(
+            path,
+            line_number,
+            sequence,
+            f"{label} {queue_id_field} {queue_id} has mutually exclusive terminal {state.terminal} and {terminal}",
+        )
+    state.terminal = terminal
+
+
+def _validate_v2_economy_production(
+    path: Path,
+    line_number: int,
+    record: TelemetryRecord,
+    players_initialized_count: int,
+    production_queues: dict[int, _QueueState],
+    upgrade_queues: dict[int, _QueueState],
+    cash_after_by_player: dict[int, int],
+) -> None:
+    """Validate task-specific state transitions without exposing partial records."""
+    event_type = record.event_type
+    if event_type not in _TASK5_EVENTS:
+        return
+    if players_initialized_count != 1:
+        raise _error(path, line_number, record.sequence, f"event {event_type} must follow players_initialized")
+    payload = cast(dict[str, object], record.payload.model_dump())
+    if event_type.startswith("production_"):
+        if event_type == "production_queued" and payload["queued_frame"] != record.frame:
+            raise _error(path, line_number, record.sequence, "production queued_frame must equal envelope frame")
+        if event_type != "production_queued" and payload["terminal_frame"] != record.frame:
+            raise _error(path, line_number, record.sequence, "production terminal_frame must equal envelope frame")
+        _validate_queue_transition(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            payload,
+            "production_id",
+            _production_identity(payload),
+            production_queues,
+            "production",
+        )
+    elif event_type.startswith("upgrade_"):
+        if event_type == "upgrade_queued" and payload["queued_frame"] != record.frame:
+            raise _error(path, line_number, record.sequence, "upgrade queued_frame must equal envelope frame")
+        if event_type != "upgrade_queued" and payload["terminal_frame"] != record.frame:
+            raise _error(path, line_number, record.sequence, "upgrade terminal_frame must equal envelope frame")
+        _validate_queue_transition(
+            path,
+            line_number,
+            record.sequence,
+            event_type,
+            payload,
+            "upgrade_queue_id",
+            _upgrade_identity(payload),
+            upgrade_queues,
+            "upgrade",
+        )
+    elif event_type == "cash_changed":
+        player_index = cast(int, payload["player_index"])
+        before = cast(int, payload["before"])
+        delta = cast(int, payload["delta"])
+        after = cast(int, payload["after"])
+        if before + delta != after:
+            raise _error(path, line_number, record.sequence, "cash_changed violates exact cash delta")
+        prior_after = cash_after_by_player.get(player_index)
+        if prior_after is not None and before != prior_after:
+            raise _error(path, line_number, record.sequence, f"cash continuity failed for player_index {player_index}")
+        cash_after_by_player[player_index] = after
+    elif event_type == "science_purchased":
+        before = cast(int, payload["points_before"])
+        cost = cast(int, payload["purchase_cost_points"])
+        after = cast(int, payload["points_after"])
+        if before - cost != after:
+            raise _error(path, line_number, record.sequence, "science point transition does not match purchase cost")
+
+
+def _validate_v2_final_cash_balances(
+    path: Path,
+    complete: CompleteRecord,
+    cash_after_by_player: Mapping[int, int],
+) -> None:
+    balances = complete.payload.final_cash_balances
+    if not balances:
+        raise TelemetryTraceValidationError(f"trace '{path}': v2 requires at least one final cash balance")
+    previous_index: int | None = None
+    by_player: dict[int, FinalCashBalance] = {}
+    for balance in balances:
+        player_index = balance.player_index
+        if previous_index is not None and player_index == previous_index:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': final cash balances contain duplicate player_index {player_index}"
+            )
+        if previous_index is not None and player_index < previous_index:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': final cash balances must be ordered by player_index"
+            )
+        previous_index = player_index
+        by_player[player_index] = balance
+    for player_index, last_after in cash_after_by_player.items():
+        final_balance = by_player.get(player_index)
+        if final_balance is None or not final_balance.has_money or final_balance.balance != last_after:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': final cash balance does not reconcile player_index {player_index}"
+            )
+
+
+def _validate_v2_catalog_identities(
+    path: Path,
+    records: tuple[TelemetryRecord, ...],
+    identities: _CatalogIdentities,
+) -> None:
+    for line_number, record in enumerate(records, start=1):
+        payload = record.payload.model_dump()
+        if record.event_type.startswith("production_") and payload["template_name"] not in identities.thing_templates:
+            raise _error(path, line_number, record.sequence, "template_name is absent from game data catalog")
+        if record.event_type.startswith("upgrade_") and payload["upgrade_name"] not in identities.upgrades:
+            raise _error(path, line_number, record.sequence, "upgrade_name is absent from game data catalog")
+        if record.event_type == "science_purchased" and payload["science_name"] not in identities.sciences:
+            raise _error(path, line_number, record.sequence, "science_name is absent from game data catalog")
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Validate immutable observed telemetry before later import stages consume it. (#TBD)
 def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     """Return an iterator only after the complete trace is validated as immutable evidence."""
@@ -450,6 +678,10 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     entity_lifecycles: dict[int, _EntityLifecycleState] = {}
     sold_object_ids: set[int] = set()
     destroyed_object_ids: set[int] = set()
+    production_queues: dict[int, _QueueState] = {}
+    upgrade_queues: dict[int, _QueueState] = {}
+    cash_after_by_player: dict[int, int] = {}
+    complete_record: CompleteRecord | None = None
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
         try:
@@ -534,6 +766,15 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 destroyed_object_ids,
                 players_initialized_count,
             )
+            _validate_v2_economy_production(
+                path,
+                line_number,
+                validated,
+                players_initialized_count,
+                production_queues,
+                upgrade_queues,
+                cash_after_by_player,
+            )
 
         records_seen += 1
         prior_sequence = validated.sequence
@@ -549,6 +790,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                     "schema path payload.event_counts: must exactly equal counts recomputed from buffered records",
                 )
             complete_seen = True
+            complete_record = validated
         else:
             digest.update(raw_line)
         validated_records.append(validated)
@@ -575,5 +817,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 f"trace '{path}': object_id {missing_construction[0]} initial UNDER_CONSTRUCTION status is missing "
                 "construction_started"
             )
-        _validate_catalog_asset(path, expected_catalog, expected_engine_build)
+        assert complete_record is not None
+        _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player)
+        catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
+        _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
     return tuple(validated_records)

@@ -40,6 +40,9 @@
 #include "Common/Team.h"
 #include "Common/TerrainTypes.h"
 #include "Common/MapObject.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "GameClient/ControlBar.h"
 #include "GameClient/Drawable.h"
 #include "GameClient/InGameUI.h"
@@ -249,7 +252,15 @@ void BuildAssistant::update()
 					sellValue = REAL_TO_UNSIGNEDINT( obj->getTemplate()->calcCostToBuild( player ) *
 																										 TheGlobalData->m_sellPercentage );
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+				{
+					// TheSuperHackers @feature Leex 20/08/2026 Scope the proven object-sale refund to one Money operation. (#TBD)
+					ReplayCashReasonScope replayCashReason(REPLAY_CASH_SELL_REFUND);
+					player->getMoney()->deposit( sellValue, TRUE, FALSE );
+				}
+#else
 				player->getMoney()->deposit( sellValue, TRUE, FALSE );
+#endif
 				// this money shouldn't be scored since it wasn't really "earned."
 //				player->getScoreKeeper()->addMoneyEarned( sellValue );
 

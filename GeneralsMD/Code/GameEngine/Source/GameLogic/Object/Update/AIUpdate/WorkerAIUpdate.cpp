@@ -43,6 +43,9 @@
 #include "Common/RandomValue.h"
 #include "Common/GlobalData.h"
 #include "Common/ResourceGatheringManager.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "Common/Upgrade.h"
 
 #include "GameClient/Drawable.h"
@@ -401,7 +404,10 @@ Object *WorkerAIUpdate::construct( const ThingTemplate *what,
 	if( isRebuild == FALSE )
 	{
 		Money *money = owningPlayer->getMoney();
-
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Scope the proven worker construction charge to one withdrawal. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_CONSTRUCTION_COST);
+#endif
 		money->withdraw( what->calcCostToBuild( owningPlayer ) );
 
 	}

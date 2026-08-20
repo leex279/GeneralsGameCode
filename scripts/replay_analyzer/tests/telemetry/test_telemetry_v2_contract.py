@@ -43,21 +43,24 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         event_type = str(record["event_type"])
         counts[event_type] = counts.get(event_type, 0) + 1
     counts["complete"] = 1
+    payload: dict[str, object] = {
+        "final_frame": 0,
+        "command_count": 0,
+        "event_counts": counts,
+        "crc_mismatch": False,
+        "replay_truncated": False,
+        "clean_shutdown": True,
+        "writer_error": None,
+        "trace_sha256": hashlib.sha256(prior_bytes).hexdigest(),
+        "map_assets": [],
+    }
+    if version == 2:
+        payload["final_cash_balances"] = [{"player_index": 0, "has_money": True, "balance": 0}]
     return _record(
         version,
         len(prior_records),
         "complete",
-        {
-            "final_frame": 0,
-            "command_count": 0,
-            "event_counts": counts,
-            "crc_mismatch": False,
-            "replay_truncated": False,
-            "clean_shutdown": True,
-            "writer_error": None,
-            "trace_sha256": hashlib.sha256(prior_bytes).hexdigest(),
-            "map_assets": [],
-        },
+        payload,
     )
 
 

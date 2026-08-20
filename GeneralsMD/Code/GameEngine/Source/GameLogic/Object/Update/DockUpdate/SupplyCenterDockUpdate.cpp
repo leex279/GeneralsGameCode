@@ -31,6 +31,9 @@
 
 #include "Common/Player.h"
 #include "Common/Xfer.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "GameLogic/Module/SupplyCenterDockUpdate.h"
 #include "GameLogic/Module/SupplyTruckAIUpdate.h"
 #include "GameClient/Color.h"
@@ -112,6 +115,7 @@ Bool SupplyCenterDockUpdate::action( Object* docker, Object *drone )
 		return FALSE;
 
 	UnsignedInt value = 0;
+	const Int deliveredBoxes = supplyTruckAI->getNumberBoxes();
 
 	value += getUpgradedSupplyBoostValue( supplyTruckAI );
 
@@ -122,7 +126,19 @@ Bool SupplyCenterDockUpdate::action( Object* docker, Object *drone )
 	if( value > 0)
 	{
 		Money *ownerPlayerMoney = ownerPlayer->getMoney();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Emit pickup-sourced supply before its same-value cash deposit at the handoff seam. (#TBD)
+		Object *dropoff = getObject();
+		ReplayEconomy::observeSupplyCollected(docker, dropoff, ownerPlayer->getPlayerIndex(),
+			value, deliveredBoxes, docker->getPosition());
+		{
+			// TheSuperHackers @feature Leex 20/08/2026 Scope exactly the cash operation caused by this resource handoff. (#TBD)
+			ReplayCashReasonScope replayCashReason(REPLAY_CASH_SUPPLY_INCOME);
+			ownerPlayerMoney->deposit(value);
+		}
+#else
 		ownerPlayerMoney->deposit(value);
+#endif
 		ownerPlayer->getScoreKeeper()->addMoneyEarned(value);
 
 

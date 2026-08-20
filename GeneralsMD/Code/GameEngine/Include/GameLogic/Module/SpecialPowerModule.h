@@ -168,7 +168,12 @@ public:
 protected:
 
 	Bool initiateIntentToDoSpecialPower( const Object *targetObj, const Coord3D *targetPos, const Waypoint *way, UnsignedInt commandOptions );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Carry a resolved object target only through its immediate committed activation. (#TBD)
+	void triggerSpecialPower( const Coord3D *location, const Object *targetObject = nullptr );
+#else
 	void triggerSpecialPower( const Coord3D *location );
+#endif
 	void createViewObject( const Coord3D *location );
 	void resolveSpecialPower();
 	void aboutToDoSpecialPower( const Coord3D *location );

@@ -39,6 +39,9 @@
 #include "Common/PlayerList.h"
 #include "Common/PlayerTemplate.h"
 #include "Common/Radar.h"									// For TheRadar
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 #include "Common/SpecialPower.h"
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
@@ -4075,8 +4078,21 @@ void ScriptActions::doSetMoney(const AsciiString& playerName, Int money)
 	if (!m)
 		return;
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Attribute only the script's clearing withdrawal. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_SCRIPT);
+		m->withdraw(m->countMoney());
+	}
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Attribute only the script's replacement deposit. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_SCRIPT);
+		m->deposit(money, FALSE, FALSE);
+	}
+#else
 	m->withdraw(m->countMoney());
 	m->deposit(money, FALSE, FALSE);
+#endif
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -4095,9 +4111,21 @@ void ScriptActions::doGiveMoney(const AsciiString& playerName, Int money)
 		return;
 
 	if (money < 0)
+	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Attribute one script withdrawal without leaking its reason. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_SCRIPT);
+#endif
 		m->withdraw(-money);
+	}
 	else
+	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Attribute one script deposit without leaking its reason. (#TBD)
+		ReplayCashReasonScope replayCashReason(REPLAY_CASH_SCRIPT);
+#endif
 		m->deposit(money);
+	}
 }
 
 //-------------------------------------------------------------------------------------------------

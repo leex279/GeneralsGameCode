@@ -1152,11 +1152,13 @@ if(NOT IS_VS6_BUILD)
     # TheSuperHackers @feature Leex 18/08/2026 Compile passive replay telemetry and its semantic catalog only in the modern analyzer block. (#TBD)
     list(APPEND GAMEENGINE_SRC
         Include/Common/ReplayGameDataExport.h
-		Include/Common/ReplayEntityLifecycle.h
+        Include/Common/ReplayEconomy.h
+        Include/Common/ReplayEntityLifecycle.h
         Include/Common/ReplayParseDump.h
         Include/Common/ReplayTelemetry.h
         Source/Common/ReplayGameDataExport.cpp
-		Source/Common/ReplayEntityLifecycle.cpp
+        Source/Common/ReplayEconomy.cpp
+        Source/Common/ReplayEntityLifecycle.cpp
         Source/Common/ReplayParseDump.cpp
         Source/Common/ReplayTelemetry.cpp
     )

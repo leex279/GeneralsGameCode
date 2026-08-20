@@ -53,6 +53,7 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 #include "Common/ReplayEntityLifecycle.h"
+#include "Common/ReplayEconomy.h"
 #endif
 #include "Common/StatsCollector.h"
 #include "Common/ThingFactory.h"
@@ -421,6 +422,8 @@ void GameLogic::init()
 void GameLogic::reset()
 {
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Clear trace-local queue and supply provenance before object ID reuse. (#TBD)
+	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Clear trace-local entity identity before destroying objects from the prior game. (#TBD)
 	ReplayEntityLifecycle::reset();
 #endif

@@ -41,21 +41,24 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         event_type = str(record["event_type"])
         counts[event_type] = counts.get(event_type, 0) + 1
     counts["complete"] = 1
+    payload: dict[str, object] = {
+        "final_frame": 0,
+        "command_count": 0,
+        "event_counts": counts,
+        "crc_mismatch": False,
+        "replay_truncated": False,
+        "clean_shutdown": True,
+        "writer_error": None,
+        "trace_sha256": hashlib.sha256(prior).hexdigest(),
+        "map_assets": [],
+    }
+    if version == 2:
+        payload["final_cash_balances"] = [{"player_index": 0, "has_money": True, "balance": 0}]
     return _record(
         version,
         len(prior_records),
         "complete",
-        {
-            "final_frame": 0,
-            "command_count": 0,
-            "event_counts": counts,
-            "crc_mismatch": False,
-            "replay_truncated": False,
-            "clean_shutdown": True,
-            "writer_error": None,
-            "trace_sha256": hashlib.sha256(prior).hexdigest(),
-            "map_assets": [],
-        },
+        payload,
     )
 
 
@@ -66,7 +69,25 @@ def _write_catalog(directory: Path) -> dict[str, object]:
         "engine_data_identity": ENGINE_IDENTITY,
         "weapon_scope": "referenced_by_thing_templates",
         "locomotor_scope": "referenced_by_thing_templates",
-        "thing_templates": [],
+        "thing_templates": [
+            {
+                "ordinal": ordinal,
+                "name": name,
+                "faction": None,
+                "kind_of_flags": [],
+                "build_cost": 0,
+                "configured_build_time_seconds": 0.0,
+                "prerequisites": [],
+                "locomotor_sets": [],
+                "production_capable": False,
+                "weapon_sets": [],
+                "derived_weapon_names": [],
+                "category_tags": [],
+            }
+            for ordinal, name in enumerate(
+                ["AmericaVehicleHumvee", "TargetTemplate", "DifferentTargetTemplate"]
+            )
+        ],
         "upgrades": [],
         "sciences": [],
         "weapons": [],
@@ -285,7 +306,18 @@ def test_v2_rejects_ambiguous_or_invalid_creation_identity(
         ),
         (
             "production_queued",
-            {"production_id": 1, "producer_object_id": 101, "player_index": 0, "template_name": "TargetTemplate"},
+            {
+                "production_id": 1,
+                "engine_production_id": 1,
+                "producer_object_id": 101,
+                "player_index": 0,
+                "template_name": "TargetTemplate",
+                "queue_position": 0,
+                "queued_frame": 0,
+                "cost": 0,
+                "quantity": 1,
+                "state": "queued",
+            },
         ),
         (
             "damage_applied",
@@ -364,9 +396,15 @@ def test_v2_checks_template_identity_only_for_direct_object_identity_fields(tmp_
 
     production = {
         "production_id": 1,
+        "engine_production_id": 1,
         "producer_object_id": 101,
         "player_index": 0,
         "template_name": "DifferentTargetTemplate",
+        "queue_position": 0,
+        "queued_frame": 0,
+        "cost": 0,
+        "quantity": 1,
+        "state": "queued",
     }
     assert tuple(iter_validated_trace(_trace(tmp_path, [("object_created", direct), ("production_queued", production)])))
 
@@ -539,18 +577,26 @@ def _destroyed_provenance_events() -> list[tuple[str, dict[str, object]]]:
             {
                 "collector_object_id": 202,
                 "source_object_id": 101,
+                "source_status": "resolved",
+                "dropoff_object_id": 202,
                 "player_index": 0,
-                "amount": 75.0,
+                "amount": 75,
                 "location": {"x": 0.0, "y": 0.0, "z": 0.0},
             },
         ),
         (
-            "production_completed",
+            "production_queued",
             {
                 "production_id": 7,
+                "engine_production_id": 7,
                 "producer_object_id": 101,
                 "player_index": 0,
                 "template_name": "AmericaVehicleHumvee",
+                "queue_position": 0,
+                "queued_frame": 0,
+                "cost": 0,
+                "quantity": 1,
+                "state": "queued",
             },
         ),
         (
@@ -605,8 +651,10 @@ def test_v2_accepts_destroyed_objects_as_historical_provenance(
             {
                 "collector_object_id": 101,
                 "source_object_id": 202,
+                "source_status": "resolved",
+                "dropoff_object_id": 202,
                 "player_index": 0,
-                "amount": 75.0,
+                "amount": 75,
                 "location": {"x": 0.0, "y": 0.0, "z": 0.0},
             },
         ),

@@ -218,21 +218,42 @@ class ProductionPayload(OpenPayload):
     producer_object_id: NonNegativeInt
     player_index: NonNegativeInt
     template_name: str = Field(min_length=1)
+    engine_production_id: NonNegativeInt | None = None
+    queue_position: NonNegativeInt | None = None
+    queued_frame: NonNegativeInt | None = None
+    cost: NonNegativeInt | None = None
+    quantity: NonNegativeInt | None = None
+    state: Literal["queued", "cancelled", "completed"] | None = None
+    terminal_frame: NonNegativeInt | None = None
 
 
 class UpgradePayload(OpenPayload):
     upgrade_name: str = Field(min_length=1)
     player_index: NonNegativeInt
+    upgrade_queue_id: NonNegativeInt | None = None
+    producer_object_id: NonNegativeInt | None = None
+    queue_position: NonNegativeInt | None = None
+    queued_frame: NonNegativeInt | None = None
+    cost: NonNegativeInt | None = None
+    state: Literal["queued", "cancelled", "completed"] | None = None
+    terminal_frame: NonNegativeInt | None = None
 
 
 class SciencePurchasedPayload(OpenPayload):
     science_name: str = Field(min_length=1)
     player_index: NonNegativeInt
+    purchase_cost_points: NonNegativeInt | None = None
+    points_before: NonNegativeInt | None = None
+    points_after: NonNegativeInt | None = None
+    source_object_id: NonNegativeInt | None = None
 
 
 class SpecialPowerUsedPayload(OpenPayload):
     special_power_name: str = Field(min_length=1)
     player_index: NonNegativeInt
+    source_object_id: NonNegativeInt | None = None
+    target_object_id: NonNegativeInt | None = None
+    target_location: RawPosition | None = None
 
 
 class CashChangedPayload(OpenPayload):
@@ -246,7 +267,9 @@ class CashChangedPayload(OpenPayload):
 
 class SupplyCollectedPayload(OpenPayload):
     collector_object_id: NonNegativeInt
-    source_object_id: NonNegativeInt
+    source_object_id: NonNegativeInt | None
+    source_status: Literal["resolved", "unknown", "mixed"] | None = None
+    dropoff_object_id: NonNegativeInt | None = None
     player_index: NonNegativeInt
     amount: NonNegativeFloat
     location: RawPosition
@@ -355,6 +378,21 @@ class GameDataCatalogReference(BaseModel):
         return self
 
 
+class FinalCashBalance(BaseModel):
+    """One engine-observed terminal Money state, including explicit absence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    player_index: NonNegativeInt
+    has_money: bool
+    balance: NonNegativeInt | None
+
+    @model_validator(mode="after")
+    def _require_balance_presence(self) -> "FinalCashBalance":
+        if self.has_money != (self.balance is not None):
+            raise ValueError("balance must be present exactly when has_money is true")
+        return self
+
+
 class CompletePayload(OpenPayload):
     final_frame: NonNegativeInt
     command_count: NonNegativeInt
@@ -365,6 +403,7 @@ class CompletePayload(OpenPayload):
     writer_error: str | None
     trace_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     map_assets: list[MapAssetReference]
+    final_cash_balances: list[FinalCashBalance] | None = None
 
 
 class TelemetryEnvelope(BaseModel):

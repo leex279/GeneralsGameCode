@@ -52,6 +52,9 @@
 #include "Common/PlayerList.h"
 #include "Common/Xfer.h"
 #include "GameLogic/GameLogic.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 
 // ------------------------------------------------------------------------------------------------
 UnsignedInt Money::withdraw(UnsignedInt amountToWithdraw, Bool playSound)
@@ -67,6 +70,7 @@ UnsignedInt Money::withdraw(UnsignedInt amountToWithdraw, Bool playSound)
 
 	if (amountToWithdraw == 0)
 		return amountToWithdraw;
+	const UnsignedInt replayAnalyzerBefore = m_money;
 
 	if (playSound)
 	{
@@ -74,6 +78,14 @@ UnsignedInt Money::withdraw(UnsignedInt amountToWithdraw, Bool playSound)
 	}
 
 	m_money -= amountToWithdraw;
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_replayAnalyzerHasPlayerIndex)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Observe the exact clamped engine withdrawal without changing its result. (#TBD)
+		ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money, FALSE);
+	}
+#endif
 
 	return amountToWithdraw;
 }
@@ -83,6 +95,7 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 {
 	if (amountToDeposit == 0)
 		return;
+	const UnsignedInt replayAnalyzerBefore = m_money;
 
 	if (playSound)
 	{
@@ -97,6 +110,14 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 
 	m_money += amountToDeposit;
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_replayAnalyzerHasPlayerIndex)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Observe exact engine deposit arithmetic and income tracking at the central mutation. (#TBD)
+		ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money, trackIncome);
+	}
+#endif
+
 	if( amountToDeposit > 0 )
 	{
 		Player *player = ThePlayerList->getNthPlayer( m_playerIndex );
@@ -110,10 +131,32 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 // ------------------------------------------------------------------------------------------------
 void Money::setStartingCash(UnsignedInt amount)
 {
+	const UnsignedInt replayAnalyzerBefore = m_money;
 	m_money = amount;
 	std::fill(m_incomeBuckets, m_incomeBuckets + ARRAY_SIZE(m_incomeBuckets), 0u);
 	m_currentBucket = 0u;
 	m_cashPerMinute = 0u;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_replayAnalyzerHasPlayerIndex)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Observe direct owned Money assignment while ignoring unowned template values. (#TBD)
+		ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money, FALSE);
+	}
+#endif
+}
+
+// ------------------------------------------------------------------------------------------------
+void Money::setPlayerIndex(Int ndx)
+{
+	m_playerIndex = ndx;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (!m_replayAnalyzerHasPlayerIndex)
+	{
+		m_replayAnalyzerHasPlayerIndex = TRUE;
+		// TheSuperHackers @feature Leex 20/08/2026 Attach copied starting cash only after authoritative Player ownership is known. (#TBD)
+		ReplayEconomy::observeMoneyAttached(m_playerIndex, m_money);
+	}
+#endif
 }
 
 // ------------------------------------------------------------------------------------------------

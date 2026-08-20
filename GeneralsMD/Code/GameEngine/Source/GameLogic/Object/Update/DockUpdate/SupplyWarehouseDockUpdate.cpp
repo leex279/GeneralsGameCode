@@ -37,6 +37,9 @@
 #include "GameLogic/Object.h"
 #include "GameLogic/PartitionManager.h"
 #include "GameLogic/AIPathfind.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEconomy.h"
+#endif
 
 // ------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------
@@ -110,6 +113,10 @@ Bool SupplyWarehouseDockUpdate::action( Object* docker, Object *drone )
 	SupplyTruckAIInterface *ai = docker->getAIUpdateInterface()->getSupplyTruckAIInterface();
 	if( ai && ai->gainOneBox( m_boxesStored ) )
 	{
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Preserve the authoritative warehouse source after a box pickup succeeds. (#TBD)
+		ReplayEconomy::observeSupplyPickup(docker, getObject());
+#endif
 		if( m_boxesStored == 0 && getSupplyWarehouseDockUpdateModuleData()->m_deleteWhenEmpty )
 		{
 			TheGameLogic->destroyObject( getObject() );

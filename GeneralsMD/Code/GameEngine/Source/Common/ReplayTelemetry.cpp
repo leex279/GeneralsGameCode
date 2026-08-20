@@ -6,6 +6,7 @@
 
 #include "Common/GlobalData.h"
 #include "Common/ReplayGameDataExport.h"
+#include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/version.h"
 #include "GameNetwork/GameInfo.h"
@@ -395,6 +396,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_replayLocalSlotIndex = -1;
 	s_initialized = FALSE;
 	ReplayGameDataExport::reset();
+	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local economy and queue identities before a new replay. (#TBD)
+	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local entity snapshots whenever telemetry is reconfigured. (#TBD)
 	ReplayEntityLifecycle::reset();
 }
@@ -536,6 +539,8 @@ void ReplayTelemetry::initialize()
 	ReplayGameDataExport::emitPlayersInitialized();
 	// TheSuperHackers @feature Leex 20/08/2026 Preserve manifest-first ordering while flushing pre-initialization entity snapshots. (#TBD)
 	ReplayEntityLifecycle::initialize();
+	// TheSuperHackers @feature Leex 20/08/2026 Flush immutable pre-initialization cash only after entity creation evidence. (#TBD)
+	ReplayEconomy::initialize();
 	if (s_outputFailed)
 	{
 		discardPendingOutput("could not close telemetry output after player snapshot failure");
@@ -600,6 +605,8 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 	const Bool crcMismatch = TheRecorder != nullptr && TheRecorder->sawCRCMismatch();
 	const Bool replayTruncated = !cleanShutdown && !crcMismatch;
 	const std::string writerError = s_writerError.isEmpty() ? "null" : jsonString(s_writerError);
+	// TheSuperHackers @feature Leex 20/08/2026 Reconcile every observed cash chain against terminal engine Money state. (#TBD)
+	const AsciiString finalCashBalances = ReplayEconomy::finalCashBalancesJson();
 	const std::string payload = "{\"final_frame\":" + std::to_string(finalFrame)
 		+ ",\"command_count\":" + std::to_string(s_commandCount)
 		+ ",\"event_counts\":" + eventCountsJson()
@@ -608,7 +615,7 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, Bool cleanShutdown)
 		+ ",\"clean_shutdown\":" + (cleanShutdown ? "true" : "false")
 		+ ",\"writer_error\":" + writerError
 		+ ",\"trace_sha256\":\"" + s_traceDigest.hexDigest()
-		+ "\",\"map_assets\":[]}";
+		+ "\",\"map_assets\":[],\"final_cash_balances\":" + finalCashBalances.str() + "}";
 	writeLine(envelope(s_sequence++, finalFrame, "complete", payload), FALSE);
 	// TheSuperHackers @feature Leex 18/08/2026 Exercise late transaction failure without feeding the result into replay execution. (#TBD)
 	const char *injectedFailure = getenv("GENERALS_REPLAY_TELEMETRY_TEST_FAIL_AFTER_COMPLETE_WRITE");
