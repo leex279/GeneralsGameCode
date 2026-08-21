@@ -89,7 +89,9 @@ namespace
 	// TheSuperHackers @feature Leex 20/08/2026 Serialize playback readiness with every terminal outcome transaction. (#TBD)
 	void publishFinishedOutcome(UnsignedInt finalFrame, const char *reason, Bool crcMismatch)
 	{
-		const std::string payload = "{\"playback_started\":" + std::string(s_playbackStarted ? "true" : "false")
+		// TheSuperHackers @feature Leex 21/08/2026 Version the independent outcome contract before strict runner ingestion. (#TBD)
+		const std::string payload = "{\"schema_version\":1,\"playback_started\":"
+			+ std::string(s_playbackStarted ? "true" : "false")
 			+ ",\"final_frame\":" + std::to_string(finalFrame)
 			+ ",\"command_count\":" + std::to_string(s_commandCount)
 			+ ",\"terminal_reason\":\"" + reason + "\""

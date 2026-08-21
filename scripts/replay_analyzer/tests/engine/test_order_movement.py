@@ -234,6 +234,7 @@ def test_natural_pinned_replay_retains_frame_108_crc_boundary(
     assert _read_outcome(telemetry_outcome) == _read_outcome(baseline_outcome)
     outcome = _read_outcome(baseline_outcome)
     assert outcome == {
+        "schema_version": 1,
         "playback_started": True,
         "final_frame": 108,
         "command_count": terminal.payload.command_count,
@@ -315,6 +316,7 @@ def test_crc_free_mechanics_trace_is_deterministic_and_only_interval_changes_sam
     assert complete_15.payload.crc_mismatch is complete_30.payload.crc_mismatch is False
     assert complete_15.payload.command_count == complete_30.payload.command_count
     assert _read_outcome(baseline_outcome) == {
+        "schema_version": 1,
         "playback_started": True,
         "final_frame": final_command_frame + 1,
         "command_count": complete_15.payload.command_count,

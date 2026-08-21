@@ -844,6 +844,7 @@ def test_replay_outcome_settles_every_preplayback_failure_attempt(
         assert completed.stdout == baseline.stdout
         assert completed.stderr == baseline.stderr
         assert json.loads(outcome.read_text(encoding="utf-8")) == {
+            "schema_version": 1,
             "playback_started": False,
             "final_frame": 0,
             "command_count": 0,
@@ -875,6 +876,7 @@ def test_short_fixed_replay_timestamps_settle_as_truncated_without_partial_facts
     assert "Cannot open replay" in completed.stdout
     assert completed.stderr == ""
     assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
         "playback_started": False,
         "final_frame": 0,
         "command_count": 0,
@@ -913,6 +915,7 @@ def test_malformed_local_replay_slot_fails_cleanly_with_one_outcome(
     assert "Cannot open replay" in completed.stdout
     assert completed.stderr == ""
     assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
         "playback_started": False,
         "final_frame": 0,
         "command_count": 0,
@@ -1018,6 +1021,7 @@ def test_malformed_header_strings_fail_bounded_with_source_grounded_reason(
     assert "Cannot open replay" in completed.stdout
     assert completed.stderr == ""
     assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
         "playback_started": False,
         "final_frame": 0,
         "command_count": 0,

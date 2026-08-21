@@ -51,6 +51,9 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     assert lookup.stdout.strip() == "MSG_CREATE_SELECTED_GROUP"
 
     executable = environment_directory / "Scripts" / "replay-analyzer.exe"
+    export_help = _run([str(executable), "export-telemetry", "--help"], tmp_path)
+    assert "--engine ENGINE" in export_help.stdout
+    assert "--movement-sample-frames" in export_help.stdout
     inspection = _run([str(executable), "inspect", str(FIXTURE_PATH), "--format", "json"], tmp_path)
     output = json.loads(inspection.stdout)
     assert output["command_stream_offset"] == 342
