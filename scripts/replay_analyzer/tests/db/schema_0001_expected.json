@@ -1,0 +1,4063 @@
+{
+  "checks": [
+    {
+      "name": "ck_analysis_runs_cache_key_lowercase_sha256",
+      "sqltext": "length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_input_digest_lowercase_sha256",
+      "sqltext": "length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_model_digest_lowercase_sha256",
+      "sqltext": "length(model_digest) = 64 AND model_digest = lower(model_digest) AND model_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_prompt_digest_lowercase_sha256",
+      "sqltext": "length(prompt_digest) = 64 AND prompt_digest = lower(prompt_digest) AND prompt_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_response_schema_digest_lowercase_sha256",
+      "sqltext": "length(response_schema_digest) = 64 AND response_schema_digest = lower(response_schema_digest) AND response_schema_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_run_id_lowercase_uuid",
+      "sqltext": "length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_settings_digest_lowercase_sha256",
+      "sqltext": "length(settings_digest) = 64 AND settings_digest = lower(settings_digest) AND settings_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_analysis_runs_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed','invalid','unavailable')",
+      "table": "analysis_runs"
+    },
+    {
+      "name": "ck_assessment_evidence_role_valid",
+      "sqltext": "role IN ('supporting','contradicting')",
+      "table": "assessment_evidence"
+    },
+    {
+      "name": "ck_combat_events_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "combat_events"
+    },
+    {
+      "name": "ck_combat_events_killing_blow_boolean",
+      "sqltext": "killing_blow IS NULL OR killing_blow IN (0, 1)",
+      "table": "combat_events"
+    },
+    {
+      "name": "ck_commands_command_index_nonnegative",
+      "sqltext": "command_index >= 0",
+      "table": "commands"
+    },
+    {
+      "name": "ck_commands_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "commands"
+    },
+    {
+      "name": "ck_commands_message_type_nonnegative",
+      "sqltext": "message_type >= 0",
+      "table": "commands"
+    },
+    {
+      "name": "ck_commands_offsets_valid",
+      "sqltext": "start_offset >= 0 AND end_offset > start_offset",
+      "table": "commands"
+    },
+    {
+      "name": "ck_commands_player_index_nonnegative",
+      "sqltext": "player_index >= 0",
+      "table": "commands"
+    },
+    {
+      "name": "ck_economy_events_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "economy_events"
+    },
+    {
+      "name": "ck_entities_creation_frame_nonnegative",
+      "sqltext": "creation_frame IS NULL OR creation_frame >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_creation_sequence_nonnegative",
+      "sqltext": "creation_sequence IS NULL OR creation_sequence >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_destruction_frame_nonnegative",
+      "sqltext": "destruction_frame IS NULL OR destruction_frame >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_destruction_sequence_nonnegative",
+      "sqltext": "destruction_sequence IS NULL OR destruction_sequence >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_initial_owner_nonnegative",
+      "sqltext": "initial_owner_player_index IS NULL OR initial_owner_player_index >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_initial_team_nonnegative",
+      "sqltext": "initial_team_id IS NULL OR initial_team_id >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_object_id_nonnegative",
+      "sqltext": "object_id >= 0",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entities_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "entities"
+    },
+    {
+      "name": "ck_entity_samples_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "entity_samples"
+    },
+    {
+      "name": "ck_entity_samples_sequence_nonnegative",
+      "sqltext": "sequence >= 0",
+      "table": "entity_samples"
+    },
+    {
+      "name": "ck_evidence_items_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "evidence_items"
+    },
+    {
+      "name": "ck_evidence_items_schema_version_nonnegative",
+      "sqltext": "schema_version >= 0",
+      "table": "evidence_items"
+    },
+    {
+      "name": "ck_evidence_items_tier_valid",
+      "sqltext": "tier IN ('observed','derived','inferred')",
+      "table": "evidence_items"
+    },
+    {
+      "name": "ck_feature_evidence_role_valid",
+      "sqltext": "role IN ('input','supporting','contradicting')",
+      "table": "feature_evidence"
+    },
+    {
+      "name": "ck_feature_sets_cache_key_lowercase_sha256",
+      "sqltext": "length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'",
+      "table": "feature_sets"
+    },
+    {
+      "name": "ck_feature_sets_input_digest_lowercase_sha256",
+      "sqltext": "length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "feature_sets"
+    },
+    {
+      "name": "ck_feature_sets_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "feature_sets"
+    },
+    {
+      "name": "ck_feature_sets_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed')",
+      "table": "feature_sets"
+    },
+    {
+      "name": "ck_features_boolean_value_boolean",
+      "sqltext": "boolean_value IS NULL OR boolean_value IN (0, 1)",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_confidence_bounded",
+      "sqltext": "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_frame_window_valid",
+      "sqltext": "frame_start >= 0 AND frame_end >= frame_start",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_quality_valid",
+      "sqltext": "quality IN ('available','unavailable','partial')",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_typed_value_matches_quality",
+      "sqltext": "(quality = 'unavailable' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL AND quality_reason IS NOT NULL) OR (quality != 'unavailable' AND quality_reason IS NULL AND ((value_type = 'integer' AND integer_value IS NOT NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'real' AND integer_value IS NULL AND real_value IS NOT NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'text' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NOT NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'boolean' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NOT NULL AND json_value IS NULL) OR (value_type = 'json' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NOT NULL)))",
+      "table": "features"
+    },
+    {
+      "name": "ck_features_value_type_valid",
+      "sqltext": "value_type IN ('integer','real','text','boolean','json')",
+      "table": "features"
+    },
+    {
+      "name": "ck_job_dependencies_not_self_edge",
+      "sqltext": "job_id != depends_on_job_id",
+      "table": "job_dependencies"
+    },
+    {
+      "name": "ck_jobs_attempt_count_within_maximum",
+      "sqltext": "attempt_count <= max_attempts",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_attempts_nonnegative",
+      "sqltext": "attempt_count >= 0 AND max_attempts >= 0",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_lease_state_valid",
+      "sqltext": "(status = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR (status != 'running' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_priority_nonnegative",
+      "sqltext": "priority >= 0",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_retryable_boolean",
+      "sqltext": "retryable IN (0, 1)",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_jobs_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed')",
+      "table": "jobs"
+    },
+    {
+      "name": "ck_longitudinal_results_counts_nonnegative",
+      "sqltext": "sample_count >= 0 AND missing_count >= 0",
+      "table": "longitudinal_results"
+    },
+    {
+      "name": "ck_longitudinal_results_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "longitudinal_results"
+    },
+    {
+      "name": "ck_longitudinal_results_quality_valid",
+      "sqltext": "quality IN ('available','unavailable','partial')",
+      "table": "longitudinal_results"
+    },
+    {
+      "name": "ck_longitudinal_results_unavailable_reason_required",
+      "sqltext": "(quality = 'unavailable' AND quality_reason IS NOT NULL) OR quality != 'unavailable'",
+      "table": "longitudinal_results"
+    },
+    {
+      "name": "ck_longitudinal_runs_cache_key_lowercase_sha256",
+      "sqltext": "length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'",
+      "table": "longitudinal_runs"
+    },
+    {
+      "name": "ck_longitudinal_runs_identity_revision_nonnegative",
+      "sqltext": "identity_revision >= 0",
+      "table": "longitudinal_runs"
+    },
+    {
+      "name": "ck_longitudinal_runs_input_digest_lowercase_sha256",
+      "sqltext": "length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "longitudinal_runs"
+    },
+    {
+      "name": "ck_longitudinal_runs_run_id_lowercase_uuid",
+      "sqltext": "length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "longitudinal_runs"
+    },
+    {
+      "name": "ck_longitudinal_runs_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed')",
+      "table": "longitudinal_runs"
+    },
+    {
+      "name": "ck_managed_assets_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "managed_assets"
+    },
+    {
+      "name": "ck_managed_assets_relative_path_product_relative",
+      "sqltext": "length(relative_path) > 0 AND substr(relative_path, 1, 1) <> '/' AND substr(relative_path, -1, 1) <> '/' AND instr(relative_path, '\\') = 0 AND instr(relative_path, ':') = 0 AND instr(relative_path, char(0)) = 0 AND instr(relative_path, '//') = 0 AND relative_path NOT IN ('.', '..') AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%' AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%' AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'",
+      "table": "managed_assets"
+    },
+    {
+      "name": "ck_managed_assets_sha256_lowercase_sha256",
+      "sqltext": "length(sha256) = 64 AND sha256 = lower(sha256) AND sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "managed_assets"
+    },
+    {
+      "name": "ck_managed_assets_size_bytes_nonnegative",
+      "sqltext": "size_bytes >= 0",
+      "table": "managed_assets"
+    },
+    {
+      "name": "ck_map_resources_amount_nonnegative",
+      "sqltext": "amount IS NULL OR amount >= 0",
+      "table": "map_resources"
+    },
+    {
+      "name": "ck_map_resources_owner_player_index_nonnegative",
+      "sqltext": "owner_player_index IS NULL OR owner_player_index >= 0",
+      "table": "map_resources"
+    },
+    {
+      "name": "ck_map_resources_source_object_id_nonnegative",
+      "sqltext": "source_object_id IS NULL OR source_object_id >= 0",
+      "table": "map_resources"
+    },
+    {
+      "name": "ck_maps_cell_sizes_positive",
+      "sqltext": "pathing_cell_size > 0 AND terrain_cell_size > 0",
+      "table": "maps"
+    },
+    {
+      "name": "ck_maps_content_sha256_lowercase_sha256",
+      "sqltext": "length(content_sha256) = 64 AND content_sha256 = lower(content_sha256) AND content_sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "maps"
+    },
+    {
+      "name": "ck_maps_pathing_dimensions_nonnegative",
+      "sqltext": "pathing_width >= 0 AND pathing_height >= 0",
+      "table": "maps"
+    },
+    {
+      "name": "ck_maps_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "maps"
+    },
+    {
+      "name": "ck_maps_schema_version_nonnegative",
+      "sqltext": "schema_version >= 0",
+      "table": "maps"
+    },
+    {
+      "name": "ck_maps_terrain_dimensions_nonnegative",
+      "sqltext": "terrain_width >= 0 AND terrain_height >= 0",
+      "table": "maps"
+    },
+    {
+      "name": "ck_parser_runs_command_stream_offset_nonnegative",
+      "sqltext": "command_stream_offset IS NULL OR command_stream_offset >= 0",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_completion_status_valid",
+      "sqltext": "completion_status IS NULL OR completion_status IN ('complete','truncated','unsupported','failed')",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_end_offset_nonnegative",
+      "sqltext": "end_offset IS NULL OR end_offset >= 0",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_input_sha256_lowercase_sha256",
+      "sqltext": "length(input_sha256) = 64 AND input_sha256 = lower(input_sha256) AND input_sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_result_sha256_lowercase_sha256",
+      "sqltext": "length(result_sha256) = 64 AND result_sha256 = lower(result_sha256) AND result_sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_run_id_lowercase_uuid",
+      "sqltext": "length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_schema_version_nonnegative",
+      "sqltext": "schema_version >= 0",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_parser_runs_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed')",
+      "table": "parser_runs"
+    },
+    {
+      "name": "ck_player_aliases_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "player_aliases"
+    },
+    {
+      "name": "ck_players_identity_revision_nonnegative",
+      "sqltext": "identity_revision >= 0",
+      "table": "players"
+    },
+    {
+      "name": "ck_players_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "players"
+    },
+    {
+      "name": "ck_production_events_cost_nonnegative",
+      "sqltext": "cost IS NULL OR cost >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_production_events_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_production_events_quantity_nonnegative",
+      "sqltext": "quantity >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_production_events_queue_position_nonnegative",
+      "sqltext": "queue_position IS NULL OR queue_position >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_production_events_queued_frame_nonnegative",
+      "sqltext": "queued_frame IS NULL OR queued_frame >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_production_events_terminal_frame_nonnegative",
+      "sqltext": "terminal_frame IS NULL OR terminal_frame >= 0",
+      "table": "production_events"
+    },
+    {
+      "name": "ck_replay_players_player_index_nonnegative",
+      "sqltext": "player_index IS NULL OR player_index >= 0",
+      "table": "replay_players"
+    },
+    {
+      "name": "ck_replay_players_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "replay_players"
+    },
+    {
+      "name": "ck_replay_players_slot_index_nonnegative",
+      "sqltext": "slot_index >= 0",
+      "table": "replay_players"
+    },
+    {
+      "name": "ck_replay_quality_issues_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "replay_quality_issues"
+    },
+    {
+      "name": "ck_replays_frame_count_nonnegative",
+      "sqltext": "frame_count >= 0",
+      "table": "replays"
+    },
+    {
+      "name": "ck_replays_lifecycle_state_valid",
+      "sqltext": "lifecycle_state IN ('discovered','parsed','engine_verified','partial','desynced','unsupported','failed')",
+      "table": "replays"
+    },
+    {
+      "name": "ck_replays_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "replays"
+    },
+    {
+      "name": "ck_replays_sha256_lowercase_sha256",
+      "sqltext": "length(sha256) = 64 AND sha256 = lower(sha256) AND sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "replays"
+    },
+    {
+      "name": "ck_replays_starting_cash_nonnegative",
+      "sqltext": "starting_cash IS NULL OR starting_cash >= 0",
+      "table": "replays"
+    },
+    {
+      "name": "ck_replays_version_number_nonnegative",
+      "sqltext": "version_number >= 0",
+      "table": "replays"
+    },
+    {
+      "name": "ck_reports_cache_key_lowercase_sha256",
+      "sqltext": "length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'",
+      "table": "reports"
+    },
+    {
+      "name": "ck_reports_input_digest_lowercase_sha256",
+      "sqltext": "length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'",
+      "table": "reports"
+    },
+    {
+      "name": "ck_reports_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "reports"
+    },
+    {
+      "name": "ck_sources_file_size_bytes_nonnegative",
+      "sqltext": "file_size_bytes IS NULL OR file_size_bytes >= 0",
+      "table": "sources"
+    },
+    {
+      "name": "ck_sources_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "sources"
+    },
+    {
+      "name": "ck_strategy_assessments_confidence_bounded",
+      "sqltext": "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+      "table": "strategy_assessments"
+    },
+    {
+      "name": "ck_strategy_assessments_frame_window_valid",
+      "sqltext": "frame_start >= 0 AND frame_end >= frame_start",
+      "table": "strategy_assessments"
+    },
+    {
+      "name": "ck_strategy_assessments_method_valid",
+      "sqltext": "method IN ('rule','statistical','llm','manual')",
+      "table": "strategy_assessments"
+    },
+    {
+      "name": "ck_strategy_assessments_public_id_lowercase_uuid",
+      "sqltext": "length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "strategy_assessments"
+    },
+    {
+      "name": "ck_strategy_assessments_quality_valid",
+      "sqltext": "quality IN ('available','unavailable','partial')",
+      "table": "strategy_assessments"
+    },
+    {
+      "name": "ck_telemetry_events_frame_nonnegative",
+      "sqltext": "frame >= 0",
+      "table": "telemetry_events"
+    },
+    {
+      "name": "ck_telemetry_events_logic_time_seconds_nonnegative",
+      "sqltext": "logic_time_seconds >= 0",
+      "table": "telemetry_events"
+    },
+    {
+      "name": "ck_telemetry_events_schema_version_nonnegative",
+      "sqltext": "schema_version >= 0",
+      "table": "telemetry_events"
+    },
+    {
+      "name": "ck_telemetry_events_sequence_nonnegative",
+      "sqltext": "sequence >= 0",
+      "table": "telemetry_events"
+    },
+    {
+      "name": "ck_telemetry_runs_command_count_nonnegative",
+      "sqltext": "command_count IS NULL OR command_count >= 0",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_engine_executable_sha256_lowercase_sha256",
+      "sqltext": "length(engine_executable_sha256) = 64 AND engine_executable_sha256 = lower(engine_executable_sha256) AND engine_executable_sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_final_frame_nonnegative",
+      "sqltext": "final_frame IS NULL OR final_frame >= 0",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_process_exit_code_nonnegative",
+      "sqltext": "process_exit_code IS NULL OR process_exit_code >= 0",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_run_id_lowercase_uuid",
+      "sqltext": "length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_schema_version_nonnegative",
+      "sqltext": "schema_version >= 0",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_status_valid",
+      "sqltext": "status IN ('pending','running','succeeded','failed')",
+      "table": "telemetry_runs"
+    },
+    {
+      "name": "ck_telemetry_runs_trace_sha256_lowercase_sha256",
+      "sqltext": "length(trace_sha256) = 64 AND trace_sha256 = lower(trace_sha256) AND trace_sha256 NOT GLOB '*[^0-9a-f]*'",
+      "table": "telemetry_runs"
+    }
+  ],
+  "foreign_keys": [
+    {
+      "columns": [
+        "raw_response_asset_id"
+      ],
+      "name": "fk_analysis_runs_raw_response_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "analysis_runs"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_analysis_runs_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "analysis_runs"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_analysis_runs_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "analysis_runs"
+    },
+    {
+      "columns": [
+        "assessment_id"
+      ],
+      "name": "fk_assessment_evidence_assessment_id_strategy_assessments",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "strategy_assessments",
+      "table": "assessment_evidence"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_assessment_evidence_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "assessment_evidence"
+    },
+    {
+      "columns": [
+        "attacker_entity_id"
+      ],
+      "name": "fk_combat_events_attacker_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "attacker_replay_player_id"
+      ],
+      "name": "fk_combat_events_attacker_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_combat_events_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "source_entity_id"
+      ],
+      "name": "fk_combat_events_source_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "fk_combat_events_telemetry_event_id_telemetry_events",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_events",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_combat_events_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "victim_entity_id"
+      ],
+      "name": "fk_combat_events_victim_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "victim_replay_player_id"
+      ],
+      "name": "fk_combat_events_victim_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "combat_events"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_commands_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "commands"
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "fk_commands_parser_run_id_parser_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "parser_runs",
+      "table": "commands"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_commands_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "commands"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_commands_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "commands"
+    },
+    {
+      "columns": [
+        "collector_entity_id"
+      ],
+      "name": "fk_economy_events_collector_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "dropoff_entity_id"
+      ],
+      "name": "fk_economy_events_dropoff_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_economy_events_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_economy_events_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "source_entity_id"
+      ],
+      "name": "fk_economy_events_source_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "fk_economy_events_telemetry_event_id_telemetry_events",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_events",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_economy_events_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "economy_events"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_entities_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "entities"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_entities_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "entities"
+    },
+    {
+      "columns": [
+        "entity_id"
+      ],
+      "name": "fk_entity_samples_entity_id_entities",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "entity_samples"
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "fk_entity_samples_telemetry_event_id_telemetry_events",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_events",
+      "table": "entity_samples"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_entity_samples_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "entity_samples"
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "fk_evidence_items_parser_run_id_parser_runs",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "parser_runs",
+      "table": "evidence_items"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_evidence_items_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "evidence_items"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_evidence_items_telemetry_run_id_telemetry_runs",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "evidence_items"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_feature_evidence_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "feature_evidence"
+    },
+    {
+      "columns": [
+        "feature_id"
+      ],
+      "name": "fk_feature_evidence_feature_id_features",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "features",
+      "table": "feature_evidence"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_feature_sets_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "feature_sets"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_feature_sets_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "feature_sets"
+    },
+    {
+      "columns": [
+        "entity_id"
+      ],
+      "name": "fk_features_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "features"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_features_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "features"
+    },
+    {
+      "columns": [
+        "feature_set_id"
+      ],
+      "name": "fk_features_feature_set_id_feature_sets",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "feature_sets",
+      "table": "features"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_features_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "features"
+    },
+    {
+      "columns": [
+        "depends_on_job_id"
+      ],
+      "name": "fk_job_dependencies_depends_on_job_id_jobs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "jobs",
+      "table": "job_dependencies"
+    },
+    {
+      "columns": [
+        "job_id"
+      ],
+      "name": "fk_job_dependencies_job_id_jobs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "jobs",
+      "table": "job_dependencies"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_jobs_replay_id_replays",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "jobs"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_longitudinal_members_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "feature_id"
+      ],
+      "name": "fk_longitudinal_members_feature_id_features",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "features",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "feature_set_id"
+      ],
+      "name": "fk_longitudinal_members_feature_set_id_feature_sets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "feature_sets",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "longitudinal_result_id"
+      ],
+      "name": "fk_longitudinal_members_longitudinal_result_id_longitudinal_results",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "longitudinal_results",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_longitudinal_members_replay_id_replays",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_longitudinal_members_replay_player_id_replay_players",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "strategy_assessment_id"
+      ],
+      "name": "fk_longitudinal_members_strategy_assessment_id_strategy_assessments",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "strategy_assessments",
+      "table": "longitudinal_members"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_longitudinal_results_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "longitudinal_results"
+    },
+    {
+      "columns": [
+        "longitudinal_run_id"
+      ],
+      "name": "fk_longitudinal_results_longitudinal_run_id_longitudinal_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "longitudinal_runs",
+      "table": "longitudinal_results"
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "fk_longitudinal_runs_player_id_players",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "players",
+      "table": "longitudinal_runs"
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "fk_map_regions_map_id_maps",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "maps",
+      "table": "map_regions"
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "fk_map_resources_map_id_maps",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "maps",
+      "table": "map_resources"
+    },
+    {
+      "columns": [
+        "manifest_asset_id"
+      ],
+      "name": "fk_maps_manifest_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "maps"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_parser_runs_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "parser_runs"
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "fk_player_aliases_player_id_players",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "players",
+      "table": "player_aliases"
+    },
+    {
+      "columns": [
+        "producer_entity_id"
+      ],
+      "name": "fk_production_events_producer_entity_id_entities",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "entities",
+      "table": "production_events"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_production_events_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "production_events"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_production_events_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "production_events"
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "fk_production_events_telemetry_event_id_telemetry_events",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_events",
+      "table": "production_events"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_production_events_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "production_events"
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "fk_replay_players_parser_run_id_parser_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "parser_runs",
+      "table": "replay_players"
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "fk_replay_players_player_id_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "players",
+      "table": "replay_players"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_replay_players_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "replay_players"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_replay_quality_issues_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "replay_quality_issues"
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "fk_replay_quality_issues_parser_run_id_parser_runs",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "parser_runs",
+      "table": "replay_quality_issues"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_replay_quality_issues_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "replay_quality_issues"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_replay_quality_issues_telemetry_run_id_telemetry_runs",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "replay_quality_issues"
+    },
+    {
+      "columns": [
+        "managed_asset_id"
+      ],
+      "name": "fk_replays_managed_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "replays"
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "fk_replays_map_id_maps",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "maps",
+      "table": "replays"
+    },
+    {
+      "columns": [
+        "analysis_run_id"
+      ],
+      "name": "fk_reports_analysis_run_id_analysis_runs",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "analysis_runs",
+      "table": "reports"
+    },
+    {
+      "columns": [
+        "rendered_asset_id"
+      ],
+      "name": "fk_reports_rendered_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "reports"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_reports_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "reports"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_reports_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "reports"
+    },
+    {
+      "columns": [
+        "structured_asset_id"
+      ],
+      "name": "fk_reports_structured_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "reports"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_sources_replay_id_replays",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "sources"
+    },
+    {
+      "columns": [
+        "analysis_run_id"
+      ],
+      "name": "fk_strategy_assessments_analysis_run_id_analysis_runs",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "analysis_runs",
+      "table": "strategy_assessments"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_strategy_assessments_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "strategy_assessments"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_strategy_assessments_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "strategy_assessments"
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "fk_strategy_assessments_replay_player_id_replay_players",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replay_players",
+      "table": "strategy_assessments"
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "fk_telemetry_events_evidence_item_id_evidence_items",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "evidence_items",
+      "table": "telemetry_events"
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "fk_telemetry_events_telemetry_run_id_telemetry_runs",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "telemetry_runs",
+      "table": "telemetry_events"
+    },
+    {
+      "columns": [
+        "catalog_asset_id"
+      ],
+      "name": "fk_telemetry_runs_catalog_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "telemetry_runs"
+    },
+    {
+      "columns": [
+        "map_asset_id"
+      ],
+      "name": "fk_telemetry_runs_map_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "telemetry_runs"
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "fk_telemetry_runs_map_id_maps",
+      "ondelete": "SET NULL",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "maps",
+      "table": "telemetry_runs"
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "fk_telemetry_runs_replay_id_replays",
+      "ondelete": "CASCADE",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "replays",
+      "table": "telemetry_runs"
+    },
+    {
+      "columns": [
+        "trace_asset_id"
+      ],
+      "name": "fk_telemetry_runs_trace_asset_id_managed_assets",
+      "ondelete": "RESTRICT",
+      "referred_columns": [
+        "id"
+      ],
+      "referred_table": "managed_assets",
+      "table": "telemetry_runs"
+    }
+  ],
+  "indexes": [
+    {
+      "columns": [
+        "raw_response_asset_id"
+      ],
+      "name": "ix_analysis_runs_raw_response_asset_id",
+      "partial_where": null,
+      "table": "analysis_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_analysis_runs_replay_id",
+      "partial_where": null,
+      "table": "analysis_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_analysis_runs_replay_player_id",
+      "partial_where": null,
+      "table": "analysis_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "status",
+        "created_at"
+      ],
+      "name": "ix_analysis_runs_replay_status_created",
+      "partial_where": null,
+      "table": "analysis_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "cache_key"
+      ],
+      "name": "uq_analysis_runs_successful_cache_key",
+      "partial_where": "status = 'succeeded'",
+      "table": "analysis_runs",
+      "unique": true
+    },
+    {
+      "columns": [
+        "assessment_id"
+      ],
+      "name": "ix_assessment_evidence_assessment_id",
+      "partial_where": null,
+      "table": "assessment_evidence",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_assessment_evidence_evidence_item_id",
+      "partial_where": null,
+      "table": "assessment_evidence",
+      "unique": false
+    },
+    {
+      "columns": [
+        "attacker_entity_id"
+      ],
+      "name": "ix_combat_events_attacker_entity_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "attacker_entity_id",
+        "frame"
+      ],
+      "name": "ix_combat_events_attacker_frame",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "attacker_replay_player_id"
+      ],
+      "name": "ix_combat_events_attacker_replay_player_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "frame",
+        "event_type"
+      ],
+      "name": "ix_combat_events_replay_frame_type",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_combat_events_replay_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "source_entity_id"
+      ],
+      "name": "ix_combat_events_source_entity_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "ix_combat_events_telemetry_event_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_combat_events_telemetry_run_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "victim_entity_id"
+      ],
+      "name": "ix_combat_events_victim_entity_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "victim_entity_id",
+        "frame"
+      ],
+      "name": "ix_combat_events_victim_frame",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "victim_replay_player_id"
+      ],
+      "name": "ix_combat_events_victim_replay_player_id",
+      "partial_where": null,
+      "table": "combat_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_commands_evidence_item_id",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "ix_commands_parser_run_id",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "parser_run_id",
+        "start_offset"
+      ],
+      "name": "ix_commands_parser_start_offset",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "frame",
+        "message_type"
+      ],
+      "name": "ix_commands_replay_frame_message_type",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_commands_replay_id",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "player_index",
+        "frame"
+      ],
+      "name": "ix_commands_replay_player_frame",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_commands_replay_player_id",
+      "partial_where": null,
+      "table": "commands",
+      "unique": false
+    },
+    {
+      "columns": [
+        "collector_entity_id"
+      ],
+      "name": "ix_economy_events_collector_entity_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "dropoff_entity_id"
+      ],
+      "name": "ix_economy_events_dropoff_entity_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_economy_events_replay_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "replay_player_id",
+        "frame"
+      ],
+      "name": "ix_economy_events_replay_player_frame",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_economy_events_replay_player_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id",
+        "event_type",
+        "frame"
+      ],
+      "name": "ix_economy_events_run_type_frame",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "source_entity_id"
+      ],
+      "name": "ix_economy_events_source_entity_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "ix_economy_events_telemetry_event_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_economy_events_telemetry_run_id",
+      "partial_where": null,
+      "table": "economy_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_entities_replay_id",
+      "partial_where": null,
+      "table": "entities",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "initial_owner_player_index"
+      ],
+      "name": "ix_entities_replay_initial_owner",
+      "partial_where": null,
+      "table": "entities",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "template_name"
+      ],
+      "name": "ix_entities_replay_template_name",
+      "partial_where": null,
+      "table": "entities",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_entities_telemetry_run_id",
+      "partial_where": null,
+      "table": "entities",
+      "unique": false
+    },
+    {
+      "columns": [
+        "entity_id",
+        "frame"
+      ],
+      "name": "ix_entity_samples_entity_frame",
+      "partial_where": null,
+      "table": "entity_samples",
+      "unique": false
+    },
+    {
+      "columns": [
+        "entity_id"
+      ],
+      "name": "ix_entity_samples_entity_id",
+      "partial_where": null,
+      "table": "entity_samples",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "ix_entity_samples_telemetry_event_id",
+      "partial_where": null,
+      "table": "entity_samples",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_entity_samples_telemetry_run_id",
+      "partial_where": null,
+      "table": "entity_samples",
+      "unique": false
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "ix_evidence_items_parser_run_id",
+      "partial_where": null,
+      "table": "evidence_items",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_evidence_items_replay_id",
+      "partial_where": null,
+      "table": "evidence_items",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "tier",
+        "source_kind"
+      ],
+      "name": "ix_evidence_items_replay_tier_source",
+      "partial_where": null,
+      "table": "evidence_items",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_evidence_items_telemetry_run_id",
+      "partial_where": null,
+      "table": "evidence_items",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_feature_evidence_evidence_item_id",
+      "partial_where": null,
+      "table": "feature_evidence",
+      "unique": false
+    },
+    {
+      "columns": [
+        "feature_id"
+      ],
+      "name": "ix_feature_evidence_feature_id",
+      "partial_where": null,
+      "table": "feature_evidence",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "extractor_name",
+        "extractor_version",
+        "status"
+      ],
+      "name": "ix_feature_sets_replay_extractor_status",
+      "partial_where": null,
+      "table": "feature_sets",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_feature_sets_replay_id",
+      "partial_where": null,
+      "table": "feature_sets",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_feature_sets_replay_player_id",
+      "partial_where": null,
+      "table": "feature_sets",
+      "unique": false
+    },
+    {
+      "columns": [
+        "cache_key"
+      ],
+      "name": "uq_feature_sets_successful_cache_key",
+      "partial_where": "status = 'succeeded'",
+      "table": "feature_sets",
+      "unique": true
+    },
+    {
+      "columns": [
+        "entity_id"
+      ],
+      "name": "ix_features_entity_id",
+      "partial_where": null,
+      "table": "features",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_features_evidence_item_id",
+      "partial_where": null,
+      "table": "features",
+      "unique": false
+    },
+    {
+      "columns": [
+        "feature_set_id"
+      ],
+      "name": "ix_features_feature_set_id",
+      "partial_where": null,
+      "table": "features",
+      "unique": false
+    },
+    {
+      "columns": [
+        "name",
+        "scope_type",
+        "scope_key",
+        "frame_start",
+        "frame_end"
+      ],
+      "name": "ix_features_name_scope_window",
+      "partial_where": null,
+      "table": "features",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_features_replay_player_id",
+      "partial_where": null,
+      "table": "features",
+      "unique": false
+    },
+    {
+      "columns": [
+        "depends_on_job_id"
+      ],
+      "name": "ix_job_dependencies_depends_on_job_id",
+      "partial_where": null,
+      "table": "job_dependencies",
+      "unique": false
+    },
+    {
+      "columns": [
+        "job_id"
+      ],
+      "name": "ix_job_dependencies_job_id",
+      "partial_where": null,
+      "table": "job_dependencies",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_jobs_replay_id",
+      "partial_where": null,
+      "table": "jobs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "status",
+        "available_at",
+        "priority"
+      ],
+      "name": "ix_jobs_status_available_priority",
+      "partial_where": null,
+      "table": "jobs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "status",
+        "lease_expires_at"
+      ],
+      "name": "ix_jobs_status_lease_expires",
+      "partial_where": null,
+      "table": "jobs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_longitudinal_members_evidence_item_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "feature_id"
+      ],
+      "name": "ix_longitudinal_members_feature_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "feature_set_id"
+      ],
+      "name": "ix_longitudinal_members_feature_set_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "longitudinal_result_id"
+      ],
+      "name": "ix_longitudinal_members_longitudinal_result_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_longitudinal_members_replay_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_longitudinal_members_replay_player_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "strategy_assessment_id"
+      ],
+      "name": "ix_longitudinal_members_strategy_assessment_id",
+      "partial_where": null,
+      "table": "longitudinal_members",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_longitudinal_results_evidence_item_id",
+      "partial_where": null,
+      "table": "longitudinal_results",
+      "unique": false
+    },
+    {
+      "columns": [
+        "longitudinal_run_id"
+      ],
+      "name": "ix_longitudinal_results_longitudinal_run_id",
+      "partial_where": null,
+      "table": "longitudinal_results",
+      "unique": false
+    },
+    {
+      "columns": [
+        "longitudinal_run_id",
+        "result_name"
+      ],
+      "name": "ix_longitudinal_results_run_result_name",
+      "partial_where": null,
+      "table": "longitudinal_results",
+      "unique": false
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "ix_longitudinal_runs_player_id",
+      "partial_where": null,
+      "table": "longitudinal_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "player_id",
+        "identity_revision",
+        "status"
+      ],
+      "name": "ix_longitudinal_runs_player_revision_status",
+      "partial_where": null,
+      "table": "longitudinal_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "cache_key"
+      ],
+      "name": "uq_longitudinal_runs_successful_cache_key",
+      "partial_where": "status = 'succeeded'",
+      "table": "longitudinal_runs",
+      "unique": true
+    },
+    {
+      "columns": [
+        "kind",
+        "created_at"
+      ],
+      "name": "ix_managed_assets_kind_created_at",
+      "partial_where": null,
+      "table": "managed_assets",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "ix_map_regions_map_id",
+      "partial_where": null,
+      "table": "map_regions",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id",
+        "region_kind"
+      ],
+      "name": "ix_map_regions_map_region_kind",
+      "partial_where": null,
+      "table": "map_regions",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "ix_map_resources_map_id",
+      "partial_where": null,
+      "table": "map_resources",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id",
+        "resource_kind"
+      ],
+      "name": "ix_map_resources_map_resource_kind",
+      "partial_where": null,
+      "table": "map_resources",
+      "unique": false
+    },
+    {
+      "columns": [
+        "engine_data_identity",
+        "map_identity"
+      ],
+      "name": "ix_maps_engine_data_map_identity",
+      "partial_where": null,
+      "table": "maps",
+      "unique": false
+    },
+    {
+      "columns": [
+        "manifest_asset_id"
+      ],
+      "name": "ix_maps_manifest_asset_id",
+      "partial_where": null,
+      "table": "maps",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_parser_runs_replay_id",
+      "partial_where": null,
+      "table": "parser_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "status",
+        "parser_version"
+      ],
+      "name": "ix_parser_runs_replay_status_version",
+      "partial_where": null,
+      "table": "parser_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "parser_version",
+        "schema_version",
+        "input_sha256"
+      ],
+      "name": "uq_parser_runs_successful_identity",
+      "partial_where": "status = 'succeeded'",
+      "table": "parser_runs",
+      "unique": true
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "ix_player_aliases_player_id",
+      "partial_where": null,
+      "table": "player_aliases",
+      "unique": false
+    },
+    {
+      "columns": [
+        "player_id",
+        "namespace"
+      ],
+      "name": "ix_player_aliases_player_namespace",
+      "partial_where": null,
+      "table": "player_aliases",
+      "unique": false
+    },
+    {
+      "columns": [
+        "producer_entity_id"
+      ],
+      "name": "ix_production_events_producer_entity_id",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_production_events_replay_id",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "replay_player_id",
+        "frame"
+      ],
+      "name": "ix_production_events_replay_player_frame",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_production_events_replay_player_id",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id",
+        "event_type",
+        "frame"
+      ],
+      "name": "ix_production_events_run_type_frame",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_event_id"
+      ],
+      "name": "ix_production_events_telemetry_event_id",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_production_events_telemetry_run_id",
+      "partial_where": null,
+      "table": "production_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "ix_replay_players_parser_run_id",
+      "partial_where": null,
+      "table": "replay_players",
+      "unique": false
+    },
+    {
+      "columns": [
+        "player_id"
+      ],
+      "name": "ix_replay_players_player_id",
+      "partial_where": null,
+      "table": "replay_players",
+      "unique": false
+    },
+    {
+      "columns": [
+        "player_id",
+        "replay_id"
+      ],
+      "name": "ix_replay_players_player_replay",
+      "partial_where": null,
+      "table": "replay_players",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_replay_players_replay_id",
+      "partial_where": null,
+      "table": "replay_players",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "player_index"
+      ],
+      "name": "ix_replay_players_replay_player_index",
+      "partial_where": null,
+      "table": "replay_players",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_replay_quality_issues_evidence_item_id",
+      "partial_where": null,
+      "table": "replay_quality_issues",
+      "unique": false
+    },
+    {
+      "columns": [
+        "parser_run_id"
+      ],
+      "name": "ix_replay_quality_issues_parser_run_id",
+      "partial_where": null,
+      "table": "replay_quality_issues",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "issue_code",
+        "detected_at"
+      ],
+      "name": "ix_replay_quality_issues_replay_code_detected",
+      "partial_where": null,
+      "table": "replay_quality_issues",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_replay_quality_issues_replay_id",
+      "partial_where": null,
+      "table": "replay_quality_issues",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_replay_quality_issues_telemetry_run_id",
+      "partial_where": null,
+      "table": "replay_quality_issues",
+      "unique": false
+    },
+    {
+      "columns": [
+        "lifecycle_state",
+        "map_id",
+        "version_number",
+        "start_time"
+      ],
+      "name": "ix_replays_lifecycle_map_version_start",
+      "partial_where": null,
+      "table": "replays",
+      "unique": false
+    },
+    {
+      "columns": [
+        "managed_asset_id"
+      ],
+      "name": "ix_replays_managed_asset_id",
+      "partial_where": null,
+      "table": "replays",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "ix_replays_map_id",
+      "partial_where": null,
+      "table": "replays",
+      "unique": false
+    },
+    {
+      "columns": [
+        "analysis_run_id"
+      ],
+      "name": "ix_reports_analysis_run_id",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "rendered_asset_id"
+      ],
+      "name": "ix_reports_rendered_asset_id",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "created_at"
+      ],
+      "name": "ix_reports_replay_created_at",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_reports_replay_id",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_reports_replay_player_id",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "structured_asset_id"
+      ],
+      "name": "ix_reports_structured_asset_id",
+      "partial_where": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "discovered_at"
+      ],
+      "name": "ix_sources_replay_discovered_at",
+      "partial_where": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_sources_replay_id",
+      "partial_where": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "columns": [
+        "strata_match_id",
+        "strata_source_user_token"
+      ],
+      "name": "ix_sources_strata_identity",
+      "partial_where": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "columns": [
+        "analysis_run_id"
+      ],
+      "name": "ix_strategy_assessments_analysis_run_id",
+      "partial_where": null,
+      "table": "strategy_assessments",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_strategy_assessments_evidence_item_id",
+      "partial_where": null,
+      "table": "strategy_assessments",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_strategy_assessments_replay_id",
+      "partial_where": null,
+      "table": "strategy_assessments",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "strategy_label",
+        "phase",
+        "method"
+      ],
+      "name": "ix_strategy_assessments_replay_label_phase_method",
+      "partial_where": null,
+      "table": "strategy_assessments",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_player_id"
+      ],
+      "name": "ix_strategy_assessments_replay_player_id",
+      "partial_where": null,
+      "table": "strategy_assessments",
+      "unique": false
+    },
+    {
+      "columns": [
+        "evidence_item_id"
+      ],
+      "name": "ix_telemetry_events_evidence_item_id",
+      "partial_where": null,
+      "table": "telemetry_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id",
+        "frame",
+        "event_type"
+      ],
+      "name": "ix_telemetry_events_run_frame_type",
+      "partial_where": null,
+      "table": "telemetry_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id",
+        "event_type",
+        "frame"
+      ],
+      "name": "ix_telemetry_events_run_type_frame",
+      "partial_where": null,
+      "table": "telemetry_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "telemetry_run_id"
+      ],
+      "name": "ix_telemetry_events_telemetry_run_id",
+      "partial_where": null,
+      "table": "telemetry_events",
+      "unique": false
+    },
+    {
+      "columns": [
+        "catalog_asset_id"
+      ],
+      "name": "ix_telemetry_runs_catalog_asset_id",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_asset_id"
+      ],
+      "name": "ix_telemetry_runs_map_asset_id",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "map_id"
+      ],
+      "name": "ix_telemetry_runs_map_id",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id"
+      ],
+      "name": "ix_telemetry_runs_replay_id",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "replay_id",
+        "status",
+        "started_at"
+      ],
+      "name": "ix_telemetry_runs_replay_status_started",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    },
+    {
+      "columns": [
+        "trace_asset_id"
+      ],
+      "name": "ix_telemetry_runs_trace_asset_id",
+      "partial_where": null,
+      "table": "telemetry_runs",
+      "unique": false
+    }
+  ],
+  "master": [
+    [
+      "index",
+      "ix_analysis_runs_raw_response_asset_id",
+      "CREATE INDEX ix_analysis_runs_raw_response_asset_id ON analysis_runs (raw_response_asset_id)"
+    ],
+    [
+      "index",
+      "ix_analysis_runs_replay_id",
+      "CREATE INDEX ix_analysis_runs_replay_id ON analysis_runs (replay_id)"
+    ],
+    [
+      "index",
+      "ix_analysis_runs_replay_player_id",
+      "CREATE INDEX ix_analysis_runs_replay_player_id ON analysis_runs (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_analysis_runs_replay_status_created",
+      "CREATE INDEX ix_analysis_runs_replay_status_created ON analysis_runs (replay_id, status, created_at)"
+    ],
+    [
+      "index",
+      "ix_assessment_evidence_assessment_id",
+      "CREATE INDEX ix_assessment_evidence_assessment_id ON assessment_evidence (assessment_id)"
+    ],
+    [
+      "index",
+      "ix_assessment_evidence_evidence_item_id",
+      "CREATE INDEX ix_assessment_evidence_evidence_item_id ON assessment_evidence (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_attacker_entity_id",
+      "CREATE INDEX ix_combat_events_attacker_entity_id ON combat_events (attacker_entity_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_attacker_frame",
+      "CREATE INDEX ix_combat_events_attacker_frame ON combat_events (attacker_entity_id, frame)"
+    ],
+    [
+      "index",
+      "ix_combat_events_attacker_replay_player_id",
+      "CREATE INDEX ix_combat_events_attacker_replay_player_id ON combat_events (attacker_replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_replay_frame_type",
+      "CREATE INDEX ix_combat_events_replay_frame_type ON combat_events (replay_id, frame, event_type)"
+    ],
+    [
+      "index",
+      "ix_combat_events_replay_id",
+      "CREATE INDEX ix_combat_events_replay_id ON combat_events (replay_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_source_entity_id",
+      "CREATE INDEX ix_combat_events_source_entity_id ON combat_events (source_entity_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_telemetry_event_id",
+      "CREATE INDEX ix_combat_events_telemetry_event_id ON combat_events (telemetry_event_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_telemetry_run_id",
+      "CREATE INDEX ix_combat_events_telemetry_run_id ON combat_events (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_victim_entity_id",
+      "CREATE INDEX ix_combat_events_victim_entity_id ON combat_events (victim_entity_id)"
+    ],
+    [
+      "index",
+      "ix_combat_events_victim_frame",
+      "CREATE INDEX ix_combat_events_victim_frame ON combat_events (victim_entity_id, frame)"
+    ],
+    [
+      "index",
+      "ix_combat_events_victim_replay_player_id",
+      "CREATE INDEX ix_combat_events_victim_replay_player_id ON combat_events (victim_replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_commands_evidence_item_id",
+      "CREATE INDEX ix_commands_evidence_item_id ON commands (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_commands_parser_run_id",
+      "CREATE INDEX ix_commands_parser_run_id ON commands (parser_run_id)"
+    ],
+    [
+      "index",
+      "ix_commands_parser_start_offset",
+      "CREATE INDEX ix_commands_parser_start_offset ON commands (parser_run_id, start_offset)"
+    ],
+    [
+      "index",
+      "ix_commands_replay_frame_message_type",
+      "CREATE INDEX ix_commands_replay_frame_message_type ON commands (replay_id, frame, message_type)"
+    ],
+    [
+      "index",
+      "ix_commands_replay_id",
+      "CREATE INDEX ix_commands_replay_id ON commands (replay_id)"
+    ],
+    [
+      "index",
+      "ix_commands_replay_player_frame",
+      "CREATE INDEX ix_commands_replay_player_frame ON commands (replay_id, player_index, frame)"
+    ],
+    [
+      "index",
+      "ix_commands_replay_player_id",
+      "CREATE INDEX ix_commands_replay_player_id ON commands (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_collector_entity_id",
+      "CREATE INDEX ix_economy_events_collector_entity_id ON economy_events (collector_entity_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_dropoff_entity_id",
+      "CREATE INDEX ix_economy_events_dropoff_entity_id ON economy_events (dropoff_entity_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_replay_id",
+      "CREATE INDEX ix_economy_events_replay_id ON economy_events (replay_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_replay_player_frame",
+      "CREATE INDEX ix_economy_events_replay_player_frame ON economy_events (replay_id, replay_player_id, frame)"
+    ],
+    [
+      "index",
+      "ix_economy_events_replay_player_id",
+      "CREATE INDEX ix_economy_events_replay_player_id ON economy_events (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_run_type_frame",
+      "CREATE INDEX ix_economy_events_run_type_frame ON economy_events (telemetry_run_id, event_type, frame)"
+    ],
+    [
+      "index",
+      "ix_economy_events_source_entity_id",
+      "CREATE INDEX ix_economy_events_source_entity_id ON economy_events (source_entity_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_telemetry_event_id",
+      "CREATE INDEX ix_economy_events_telemetry_event_id ON economy_events (telemetry_event_id)"
+    ],
+    [
+      "index",
+      "ix_economy_events_telemetry_run_id",
+      "CREATE INDEX ix_economy_events_telemetry_run_id ON economy_events (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_entities_replay_id",
+      "CREATE INDEX ix_entities_replay_id ON entities (replay_id)"
+    ],
+    [
+      "index",
+      "ix_entities_replay_initial_owner",
+      "CREATE INDEX ix_entities_replay_initial_owner ON entities (replay_id, initial_owner_player_index)"
+    ],
+    [
+      "index",
+      "ix_entities_replay_template_name",
+      "CREATE INDEX ix_entities_replay_template_name ON entities (replay_id, template_name)"
+    ],
+    [
+      "index",
+      "ix_entities_telemetry_run_id",
+      "CREATE INDEX ix_entities_telemetry_run_id ON entities (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_entity_samples_entity_frame",
+      "CREATE INDEX ix_entity_samples_entity_frame ON entity_samples (entity_id, frame)"
+    ],
+    [
+      "index",
+      "ix_entity_samples_entity_id",
+      "CREATE INDEX ix_entity_samples_entity_id ON entity_samples (entity_id)"
+    ],
+    [
+      "index",
+      "ix_entity_samples_telemetry_event_id",
+      "CREATE INDEX ix_entity_samples_telemetry_event_id ON entity_samples (telemetry_event_id)"
+    ],
+    [
+      "index",
+      "ix_entity_samples_telemetry_run_id",
+      "CREATE INDEX ix_entity_samples_telemetry_run_id ON entity_samples (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_evidence_items_parser_run_id",
+      "CREATE INDEX ix_evidence_items_parser_run_id ON evidence_items (parser_run_id)"
+    ],
+    [
+      "index",
+      "ix_evidence_items_replay_id",
+      "CREATE INDEX ix_evidence_items_replay_id ON evidence_items (replay_id)"
+    ],
+    [
+      "index",
+      "ix_evidence_items_replay_tier_source",
+      "CREATE INDEX ix_evidence_items_replay_tier_source ON evidence_items (replay_id, tier, source_kind)"
+    ],
+    [
+      "index",
+      "ix_evidence_items_telemetry_run_id",
+      "CREATE INDEX ix_evidence_items_telemetry_run_id ON evidence_items (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_feature_evidence_evidence_item_id",
+      "CREATE INDEX ix_feature_evidence_evidence_item_id ON feature_evidence (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_feature_evidence_feature_id",
+      "CREATE INDEX ix_feature_evidence_feature_id ON feature_evidence (feature_id)"
+    ],
+    [
+      "index",
+      "ix_feature_sets_replay_extractor_status",
+      "CREATE INDEX ix_feature_sets_replay_extractor_status ON feature_sets (replay_id, extractor_name, extractor_version, status)"
+    ],
+    [
+      "index",
+      "ix_feature_sets_replay_id",
+      "CREATE INDEX ix_feature_sets_replay_id ON feature_sets (replay_id)"
+    ],
+    [
+      "index",
+      "ix_feature_sets_replay_player_id",
+      "CREATE INDEX ix_feature_sets_replay_player_id ON feature_sets (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_features_entity_id",
+      "CREATE INDEX ix_features_entity_id ON features (entity_id)"
+    ],
+    [
+      "index",
+      "ix_features_evidence_item_id",
+      "CREATE INDEX ix_features_evidence_item_id ON features (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_features_feature_set_id",
+      "CREATE INDEX ix_features_feature_set_id ON features (feature_set_id)"
+    ],
+    [
+      "index",
+      "ix_features_name_scope_window",
+      "CREATE INDEX ix_features_name_scope_window ON features (name, scope_type, scope_key, frame_start, frame_end)"
+    ],
+    [
+      "index",
+      "ix_features_replay_player_id",
+      "CREATE INDEX ix_features_replay_player_id ON features (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_job_dependencies_depends_on_job_id",
+      "CREATE INDEX ix_job_dependencies_depends_on_job_id ON job_dependencies (depends_on_job_id)"
+    ],
+    [
+      "index",
+      "ix_job_dependencies_job_id",
+      "CREATE INDEX ix_job_dependencies_job_id ON job_dependencies (job_id)"
+    ],
+    [
+      "index",
+      "ix_jobs_replay_id",
+      "CREATE INDEX ix_jobs_replay_id ON jobs (replay_id)"
+    ],
+    [
+      "index",
+      "ix_jobs_status_available_priority",
+      "CREATE INDEX ix_jobs_status_available_priority ON jobs (status, available_at, priority)"
+    ],
+    [
+      "index",
+      "ix_jobs_status_lease_expires",
+      "CREATE INDEX ix_jobs_status_lease_expires ON jobs (status, lease_expires_at)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_evidence_item_id",
+      "CREATE INDEX ix_longitudinal_members_evidence_item_id ON longitudinal_members (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_feature_id",
+      "CREATE INDEX ix_longitudinal_members_feature_id ON longitudinal_members (feature_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_feature_set_id",
+      "CREATE INDEX ix_longitudinal_members_feature_set_id ON longitudinal_members (feature_set_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_longitudinal_result_id",
+      "CREATE INDEX ix_longitudinal_members_longitudinal_result_id ON longitudinal_members (longitudinal_result_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_replay_id",
+      "CREATE INDEX ix_longitudinal_members_replay_id ON longitudinal_members (replay_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_replay_player_id",
+      "CREATE INDEX ix_longitudinal_members_replay_player_id ON longitudinal_members (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_members_strategy_assessment_id",
+      "CREATE INDEX ix_longitudinal_members_strategy_assessment_id ON longitudinal_members (strategy_assessment_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_results_evidence_item_id",
+      "CREATE INDEX ix_longitudinal_results_evidence_item_id ON longitudinal_results (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_results_longitudinal_run_id",
+      "CREATE INDEX ix_longitudinal_results_longitudinal_run_id ON longitudinal_results (longitudinal_run_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_results_run_result_name",
+      "CREATE INDEX ix_longitudinal_results_run_result_name ON longitudinal_results (longitudinal_run_id, result_name)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_runs_player_id",
+      "CREATE INDEX ix_longitudinal_runs_player_id ON longitudinal_runs (player_id)"
+    ],
+    [
+      "index",
+      "ix_longitudinal_runs_player_revision_status",
+      "CREATE INDEX ix_longitudinal_runs_player_revision_status ON longitudinal_runs (player_id, identity_revision, status)"
+    ],
+    [
+      "index",
+      "ix_managed_assets_kind_created_at",
+      "CREATE INDEX ix_managed_assets_kind_created_at ON managed_assets (kind, created_at)"
+    ],
+    [
+      "index",
+      "ix_map_regions_map_id",
+      "CREATE INDEX ix_map_regions_map_id ON map_regions (map_id)"
+    ],
+    [
+      "index",
+      "ix_map_regions_map_region_kind",
+      "CREATE INDEX ix_map_regions_map_region_kind ON map_regions (map_id, region_kind)"
+    ],
+    [
+      "index",
+      "ix_map_resources_map_id",
+      "CREATE INDEX ix_map_resources_map_id ON map_resources (map_id)"
+    ],
+    [
+      "index",
+      "ix_map_resources_map_resource_kind",
+      "CREATE INDEX ix_map_resources_map_resource_kind ON map_resources (map_id, resource_kind)"
+    ],
+    [
+      "index",
+      "ix_maps_engine_data_map_identity",
+      "CREATE INDEX ix_maps_engine_data_map_identity ON maps (engine_data_identity, map_identity)"
+    ],
+    [
+      "index",
+      "ix_maps_manifest_asset_id",
+      "CREATE INDEX ix_maps_manifest_asset_id ON maps (manifest_asset_id)"
+    ],
+    [
+      "index",
+      "ix_parser_runs_replay_id",
+      "CREATE INDEX ix_parser_runs_replay_id ON parser_runs (replay_id)"
+    ],
+    [
+      "index",
+      "ix_parser_runs_replay_status_version",
+      "CREATE INDEX ix_parser_runs_replay_status_version ON parser_runs (replay_id, status, parser_version)"
+    ],
+    [
+      "index",
+      "ix_player_aliases_player_id",
+      "CREATE INDEX ix_player_aliases_player_id ON player_aliases (player_id)"
+    ],
+    [
+      "index",
+      "ix_player_aliases_player_namespace",
+      "CREATE INDEX ix_player_aliases_player_namespace ON player_aliases (player_id, namespace)"
+    ],
+    [
+      "index",
+      "ix_production_events_producer_entity_id",
+      "CREATE INDEX ix_production_events_producer_entity_id ON production_events (producer_entity_id)"
+    ],
+    [
+      "index",
+      "ix_production_events_replay_id",
+      "CREATE INDEX ix_production_events_replay_id ON production_events (replay_id)"
+    ],
+    [
+      "index",
+      "ix_production_events_replay_player_frame",
+      "CREATE INDEX ix_production_events_replay_player_frame ON production_events (replay_id, replay_player_id, frame)"
+    ],
+    [
+      "index",
+      "ix_production_events_replay_player_id",
+      "CREATE INDEX ix_production_events_replay_player_id ON production_events (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_production_events_run_type_frame",
+      "CREATE INDEX ix_production_events_run_type_frame ON production_events (telemetry_run_id, event_type, frame)"
+    ],
+    [
+      "index",
+      "ix_production_events_telemetry_event_id",
+      "CREATE INDEX ix_production_events_telemetry_event_id ON production_events (telemetry_event_id)"
+    ],
+    [
+      "index",
+      "ix_production_events_telemetry_run_id",
+      "CREATE INDEX ix_production_events_telemetry_run_id ON production_events (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_replay_players_parser_run_id",
+      "CREATE INDEX ix_replay_players_parser_run_id ON replay_players (parser_run_id)"
+    ],
+    [
+      "index",
+      "ix_replay_players_player_id",
+      "CREATE INDEX ix_replay_players_player_id ON replay_players (player_id)"
+    ],
+    [
+      "index",
+      "ix_replay_players_player_replay",
+      "CREATE INDEX ix_replay_players_player_replay ON replay_players (player_id, replay_id)"
+    ],
+    [
+      "index",
+      "ix_replay_players_replay_id",
+      "CREATE INDEX ix_replay_players_replay_id ON replay_players (replay_id)"
+    ],
+    [
+      "index",
+      "ix_replay_players_replay_player_index",
+      "CREATE INDEX ix_replay_players_replay_player_index ON replay_players (replay_id, player_index)"
+    ],
+    [
+      "index",
+      "ix_replay_quality_issues_evidence_item_id",
+      "CREATE INDEX ix_replay_quality_issues_evidence_item_id ON replay_quality_issues (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_replay_quality_issues_parser_run_id",
+      "CREATE INDEX ix_replay_quality_issues_parser_run_id ON replay_quality_issues (parser_run_id)"
+    ],
+    [
+      "index",
+      "ix_replay_quality_issues_replay_code_detected",
+      "CREATE INDEX ix_replay_quality_issues_replay_code_detected ON replay_quality_issues (replay_id, issue_code, detected_at)"
+    ],
+    [
+      "index",
+      "ix_replay_quality_issues_replay_id",
+      "CREATE INDEX ix_replay_quality_issues_replay_id ON replay_quality_issues (replay_id)"
+    ],
+    [
+      "index",
+      "ix_replay_quality_issues_telemetry_run_id",
+      "CREATE INDEX ix_replay_quality_issues_telemetry_run_id ON replay_quality_issues (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_replays_lifecycle_map_version_start",
+      "CREATE INDEX ix_replays_lifecycle_map_version_start ON replays (lifecycle_state, map_id, version_number, start_time)"
+    ],
+    [
+      "index",
+      "ix_replays_managed_asset_id",
+      "CREATE INDEX ix_replays_managed_asset_id ON replays (managed_asset_id)"
+    ],
+    [
+      "index",
+      "ix_replays_map_id",
+      "CREATE INDEX ix_replays_map_id ON replays (map_id)"
+    ],
+    [
+      "index",
+      "ix_reports_analysis_run_id",
+      "CREATE INDEX ix_reports_analysis_run_id ON reports (analysis_run_id)"
+    ],
+    [
+      "index",
+      "ix_reports_rendered_asset_id",
+      "CREATE INDEX ix_reports_rendered_asset_id ON reports (rendered_asset_id)"
+    ],
+    [
+      "index",
+      "ix_reports_replay_created_at",
+      "CREATE INDEX ix_reports_replay_created_at ON reports (replay_id, created_at)"
+    ],
+    [
+      "index",
+      "ix_reports_replay_id",
+      "CREATE INDEX ix_reports_replay_id ON reports (replay_id)"
+    ],
+    [
+      "index",
+      "ix_reports_replay_player_id",
+      "CREATE INDEX ix_reports_replay_player_id ON reports (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_reports_structured_asset_id",
+      "CREATE INDEX ix_reports_structured_asset_id ON reports (structured_asset_id)"
+    ],
+    [
+      "index",
+      "ix_sources_replay_discovered_at",
+      "CREATE INDEX ix_sources_replay_discovered_at ON sources (replay_id, discovered_at)"
+    ],
+    [
+      "index",
+      "ix_sources_replay_id",
+      "CREATE INDEX ix_sources_replay_id ON sources (replay_id)"
+    ],
+    [
+      "index",
+      "ix_sources_strata_identity",
+      "CREATE INDEX ix_sources_strata_identity ON sources (strata_match_id, strata_source_user_token)"
+    ],
+    [
+      "index",
+      "ix_strategy_assessments_analysis_run_id",
+      "CREATE INDEX ix_strategy_assessments_analysis_run_id ON strategy_assessments (analysis_run_id)"
+    ],
+    [
+      "index",
+      "ix_strategy_assessments_evidence_item_id",
+      "CREATE INDEX ix_strategy_assessments_evidence_item_id ON strategy_assessments (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_strategy_assessments_replay_id",
+      "CREATE INDEX ix_strategy_assessments_replay_id ON strategy_assessments (replay_id)"
+    ],
+    [
+      "index",
+      "ix_strategy_assessments_replay_label_phase_method",
+      "CREATE INDEX ix_strategy_assessments_replay_label_phase_method ON strategy_assessments (replay_id, strategy_label, phase, method)"
+    ],
+    [
+      "index",
+      "ix_strategy_assessments_replay_player_id",
+      "CREATE INDEX ix_strategy_assessments_replay_player_id ON strategy_assessments (replay_player_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_events_evidence_item_id",
+      "CREATE INDEX ix_telemetry_events_evidence_item_id ON telemetry_events (evidence_item_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_events_run_frame_type",
+      "CREATE INDEX ix_telemetry_events_run_frame_type ON telemetry_events (telemetry_run_id, frame, event_type)"
+    ],
+    [
+      "index",
+      "ix_telemetry_events_run_type_frame",
+      "CREATE INDEX ix_telemetry_events_run_type_frame ON telemetry_events (telemetry_run_id, event_type, frame)"
+    ],
+    [
+      "index",
+      "ix_telemetry_events_telemetry_run_id",
+      "CREATE INDEX ix_telemetry_events_telemetry_run_id ON telemetry_events (telemetry_run_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_catalog_asset_id",
+      "CREATE INDEX ix_telemetry_runs_catalog_asset_id ON telemetry_runs (catalog_asset_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_map_asset_id",
+      "CREATE INDEX ix_telemetry_runs_map_asset_id ON telemetry_runs (map_asset_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_map_id",
+      "CREATE INDEX ix_telemetry_runs_map_id ON telemetry_runs (map_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_replay_id",
+      "CREATE INDEX ix_telemetry_runs_replay_id ON telemetry_runs (replay_id)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_replay_status_started",
+      "CREATE INDEX ix_telemetry_runs_replay_status_started ON telemetry_runs (replay_id, status, started_at)"
+    ],
+    [
+      "index",
+      "ix_telemetry_runs_trace_asset_id",
+      "CREATE INDEX ix_telemetry_runs_trace_asset_id ON telemetry_runs (trace_asset_id)"
+    ],
+    [
+      "index",
+      "uq_analysis_runs_successful_cache_key",
+      "CREATE UNIQUE INDEX uq_analysis_runs_successful_cache_key ON analysis_runs (cache_key) WHERE status = 'succeeded'"
+    ],
+    [
+      "index",
+      "uq_feature_sets_successful_cache_key",
+      "CREATE UNIQUE INDEX uq_feature_sets_successful_cache_key ON feature_sets (cache_key) WHERE status = 'succeeded'"
+    ],
+    [
+      "index",
+      "uq_longitudinal_runs_successful_cache_key",
+      "CREATE UNIQUE INDEX uq_longitudinal_runs_successful_cache_key ON longitudinal_runs (cache_key) WHERE status = 'succeeded'"
+    ],
+    [
+      "index",
+      "uq_parser_runs_successful_identity",
+      "CREATE UNIQUE INDEX uq_parser_runs_successful_identity ON parser_runs (replay_id, parser_version, schema_version, input_sha256) WHERE status = 'succeeded'"
+    ],
+    [
+      "table",
+      "alembic_version",
+      "CREATE TABLE alembic_version (\n\tversion_num VARCHAR(32) NOT NULL, \n\tCONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)\n)"
+    ],
+    [
+      "table",
+      "analysis_runs",
+      "CREATE TABLE analysis_runs (\n\trun_id VARCHAR(36) NOT NULL CONSTRAINT ck_analysis_runs_run_id_lowercase_uuid CHECK (length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\treplay_id INTEGER,\n\treplay_player_id INTEGER,\n\tprovider VARCHAR(64) NOT NULL,\n\tmodel_name VARCHAR(255) NOT NULL,\n\tmodel_digest VARCHAR(64) NOT NULL,\n\tprompt_version VARCHAR(255) NOT NULL,\n\tprompt_digest VARCHAR(64) NOT NULL,\n\tresponse_schema_version VARCHAR(255) NOT NULL,\n\tresponse_schema_digest VARCHAR(64) NOT NULL,\n\tsettings_digest VARCHAR(64) NOT NULL,\n\tinput_digest VARCHAR(64) NOT NULL,\n\tcache_key VARCHAR(64) NOT NULL,\n\tstatus VARCHAR(32) NOT NULL,\n\traw_response_asset_id INTEGER,\n\tvalidated_response_json TEXT,\n\tdiagnostics_json TEXT NOT NULL,\n\terror_json TEXT,\n\tcreated_at DATETIME NOT NULL,\n\tcompleted_at DATETIME,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_analysis_runs PRIMARY KEY (id),\n\tCONSTRAINT ck_analysis_runs_model_digest_lowercase_sha256 CHECK (length(model_digest) = 64 AND model_digest = lower(model_digest) AND model_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_prompt_digest_lowercase_sha256 CHECK (length(prompt_digest) = 64 AND prompt_digest = lower(prompt_digest) AND prompt_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_response_schema_digest_lowercase_sha256 CHECK (length(response_schema_digest) = 64 AND response_schema_digest = lower(response_schema_digest) AND response_schema_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_settings_digest_lowercase_sha256 CHECK (length(settings_digest) = 64 AND settings_digest = lower(settings_digest) AND settings_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_input_digest_lowercase_sha256 CHECK (length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_cache_key_lowercase_sha256 CHECK (length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_analysis_runs_status_valid CHECK (status IN ('pending','running','succeeded','failed','invalid','unavailable')),\n\tCONSTRAINT uq_analysis_runs_run_id UNIQUE (run_id),\n\tCONSTRAINT fk_analysis_runs_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_analysis_runs_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_analysis_runs_raw_response_asset_id_managed_assets FOREIGN KEY(raw_response_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "assessment_evidence",
+      "CREATE TABLE assessment_evidence (\n\tassessment_id INTEGER NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\trole VARCHAR(32) NOT NULL,\n\tCONSTRAINT pk_assessment_evidence PRIMARY KEY (assessment_id, evidence_item_id, role),\n\tCONSTRAINT ck_assessment_evidence_role_valid CHECK (role IN ('supporting','contradicting')),\n\tCONSTRAINT fk_assessment_evidence_assessment_id_strategy_assessments FOREIGN KEY(assessment_id) REFERENCES strategy_assessments (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_assessment_evidence_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "combat_events",
+      "CREATE TABLE combat_events (\n\ttelemetry_run_id INTEGER NOT NULL,\n\ttelemetry_event_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\tframe INTEGER NOT NULL,\n\tevent_type VARCHAR(255) NOT NULL,\n\tattacker_entity_id INTEGER,\n\tvictim_entity_id INTEGER,\n\tsource_entity_id INTEGER,\n\tattacker_replay_player_id INTEGER,\n\tvictim_replay_player_id INTEGER,\n\tweapon_name VARCHAR(255),\n\tdamage_type VARCHAR(255),\n\tdeath_type VARCHAR(255),\n\tattempted_amount FLOAT,\n\tcalculated_amount FLOAT,\n\tapplied_amount FLOAT,\n\thealth_before FLOAT,\n\thealth_after FLOAT,\n\tkilling_blow BOOLEAN,\n\tlocation_x FLOAT,\n\tlocation_y FLOAT,\n\tlocation_z FLOAT,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_combat_events PRIMARY KEY (id),\n\tCONSTRAINT uq_combat_events_telemetry_event_id UNIQUE (telemetry_event_id),\n\tCONSTRAINT ck_combat_events_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT ck_combat_events_killing_blow_boolean CHECK (killing_blow IS NULL OR killing_blow IN (0, 1)),\n\tCONSTRAINT fk_combat_events_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_combat_events_telemetry_event_id_telemetry_events FOREIGN KEY(telemetry_event_id) REFERENCES telemetry_events (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_combat_events_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_combat_events_attacker_entity_id_entities FOREIGN KEY(attacker_entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_combat_events_victim_entity_id_entities FOREIGN KEY(victim_entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_combat_events_source_entity_id_entities FOREIGN KEY(source_entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_combat_events_attacker_replay_player_id_replay_players FOREIGN KEY(attacker_replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_combat_events_victim_replay_player_id_replay_players FOREIGN KEY(victim_replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL\n)"
+    ],
+    [
+      "table",
+      "commands",
+      "CREATE TABLE commands (\n\tparser_run_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\tcommand_index INTEGER NOT NULL,\n\tframe INTEGER NOT NULL,\n\tplayer_index INTEGER NOT NULL,\n\tmessage_type INTEGER NOT NULL,\n\tmessage_name VARCHAR(255),\n\tstart_offset INTEGER NOT NULL,\n\tend_offset INTEGER NOT NULL,\n\targuments_json TEXT NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_commands PRIMARY KEY (id),\n\tCONSTRAINT uq_commands_parser_command_index UNIQUE (parser_run_id, command_index),\n\tCONSTRAINT uq_commands_evidence_item_id UNIQUE (evidence_item_id),\n\tCONSTRAINT ck_commands_command_index_nonnegative CHECK (command_index >= 0),\n\tCONSTRAINT ck_commands_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT ck_commands_player_index_nonnegative CHECK (player_index >= 0),\n\tCONSTRAINT ck_commands_message_type_nonnegative CHECK (message_type >= 0),\n\tCONSTRAINT ck_commands_offsets_valid CHECK (start_offset >= 0 AND end_offset > start_offset),\n\tCONSTRAINT fk_commands_parser_run_id_parser_runs FOREIGN KEY(parser_run_id) REFERENCES parser_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_commands_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_commands_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_commands_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "economy_events",
+      "CREATE TABLE economy_events (\n\ttelemetry_run_id INTEGER NOT NULL,\n\ttelemetry_event_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\tcollector_entity_id INTEGER,\n\tsource_entity_id INTEGER,\n\tdropoff_entity_id INTEGER,\n\tframe INTEGER NOT NULL,\n\tevent_type VARCHAR(255) NOT NULL,\n\tbalance_before FLOAT,\n\tamount_delta FLOAT,\n\tbalance_after FLOAT,\n\tamount FLOAT,\n\treason VARCHAR(255),\n\tlocation_x FLOAT,\n\tlocation_y FLOAT,\n\tlocation_z FLOAT,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_economy_events PRIMARY KEY (id),\n\tCONSTRAINT uq_economy_events_telemetry_event_id UNIQUE (telemetry_event_id),\n\tCONSTRAINT ck_economy_events_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT fk_economy_events_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_economy_events_telemetry_event_id_telemetry_events FOREIGN KEY(telemetry_event_id) REFERENCES telemetry_events (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_economy_events_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_economy_events_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_economy_events_collector_entity_id_entities FOREIGN KEY(collector_entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_economy_events_source_entity_id_entities FOREIGN KEY(source_entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_economy_events_dropoff_entity_id_entities FOREIGN KEY(dropoff_entity_id) REFERENCES entities (id) ON DELETE SET NULL\n)"
+    ],
+    [
+      "table",
+      "entities",
+      "CREATE TABLE entities (\n\ttelemetry_run_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\tobject_id INTEGER NOT NULL,\n\ttemplate_name VARCHAR(255) NOT NULL,\n\tinitial_owner_player_index INTEGER,\n\tinitial_team_id INTEGER,\n\tkind_of_flags_json TEXT NOT NULL,\n\tcreation_sequence INTEGER,\n\tcreation_frame INTEGER,\n\tdestruction_sequence INTEGER,\n\tdestruction_frame INTEGER,\n\tobserved_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_entities_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_entities PRIMARY KEY (id),\n\tCONSTRAINT uq_entities_run_object_id UNIQUE (telemetry_run_id, object_id),\n\tCONSTRAINT ck_entities_object_id_nonnegative CHECK (object_id >= 0),\n\tCONSTRAINT ck_entities_initial_owner_nonnegative CHECK (initial_owner_player_index IS NULL OR initial_owner_player_index >= 0),\n\tCONSTRAINT ck_entities_initial_team_nonnegative CHECK (initial_team_id IS NULL OR initial_team_id >= 0),\n\tCONSTRAINT ck_entities_creation_sequence_nonnegative CHECK (creation_sequence IS NULL OR creation_sequence >= 0),\n\tCONSTRAINT ck_entities_creation_frame_nonnegative CHECK (creation_frame IS NULL OR creation_frame >= 0),\n\tCONSTRAINT ck_entities_destruction_sequence_nonnegative CHECK (destruction_sequence IS NULL OR destruction_sequence >= 0),\n\tCONSTRAINT ck_entities_destruction_frame_nonnegative CHECK (destruction_frame IS NULL OR destruction_frame >= 0),\n\tCONSTRAINT fk_entities_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_entities_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT uq_entities_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "entity_samples",
+      "CREATE TABLE entity_samples (\n\ttelemetry_run_id INTEGER NOT NULL,\n\tentity_id INTEGER NOT NULL,\n\ttelemetry_event_id INTEGER NOT NULL,\n\tsequence INTEGER NOT NULL,\n\tframe INTEGER NOT NULL,\n\tx FLOAT NOT NULL,\n\ty FLOAT NOT NULL,\n\tz FLOAT NOT NULL,\n\torientation FLOAT NOT NULL,\n\tspeed FLOAT,\n\tlayer VARCHAR(64),\n\tlocomotor_name VARCHAR(255),\n\torder_type VARCHAR(255),\n\tpath_goal_x FLOAT,\n\tpath_goal_y FLOAT,\n\tpath_goal_z FLOAT,\n\tcurrent_state VARCHAR(255) NOT NULL,\n\tsource VARCHAR(255) NOT NULL,\n\tsample_reason VARCHAR(255) NOT NULL,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_entity_samples PRIMARY KEY (id),\n\tCONSTRAINT uq_entity_samples_telemetry_event_id UNIQUE (telemetry_event_id),\n\tCONSTRAINT uq_entity_samples_entity_sequence UNIQUE (entity_id, sequence),\n\tCONSTRAINT ck_entity_samples_sequence_nonnegative CHECK (sequence >= 0),\n\tCONSTRAINT ck_entity_samples_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT fk_entity_samples_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_entity_samples_entity_id_entities FOREIGN KEY(entity_id) REFERENCES entities (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_entity_samples_telemetry_event_id_telemetry_events FOREIGN KEY(telemetry_event_id) REFERENCES telemetry_events (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "evidence_items",
+      "CREATE TABLE evidence_items (\n\treplay_id INTEGER NOT NULL,\n\tparser_run_id INTEGER,\n\ttelemetry_run_id INTEGER,\n\ttier VARCHAR(32) NOT NULL,\n\tsource_kind VARCHAR(64) NOT NULL,\n\tsource_key TEXT NOT NULL,\n\tschema_version INTEGER NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_evidence_items_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_evidence_items PRIMARY KEY (id),\n\tCONSTRAINT uq_evidence_items_source_identity UNIQUE (source_kind, source_key),\n\tCONSTRAINT ck_evidence_items_tier_valid CHECK (tier IN ('observed','derived','inferred')),\n\tCONSTRAINT ck_evidence_items_schema_version_nonnegative CHECK (schema_version >= 0),\n\tCONSTRAINT fk_evidence_items_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_evidence_items_parser_run_id_parser_runs FOREIGN KEY(parser_run_id) REFERENCES parser_runs (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_evidence_items_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE RESTRICT,\n\tCONSTRAINT uq_evidence_items_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "feature_evidence",
+      "CREATE TABLE feature_evidence (\n\tfeature_id INTEGER NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\trole VARCHAR(32) NOT NULL,\n\tCONSTRAINT pk_feature_evidence PRIMARY KEY (feature_id, evidence_item_id, role),\n\tCONSTRAINT ck_feature_evidence_role_valid CHECK (role IN ('input','supporting','contradicting')),\n\tCONSTRAINT fk_feature_evidence_feature_id_features FOREIGN KEY(feature_id) REFERENCES features (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_feature_evidence_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "feature_sets",
+      "CREATE TABLE feature_sets (\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\textractor_name VARCHAR(255) NOT NULL,\n\textractor_version VARCHAR(255) NOT NULL,\n\tinput_digest VARCHAR(64) NOT NULL,\n\tcache_key VARCHAR(64) NOT NULL,\n\tstatus VARCHAR(32) NOT NULL,\n\tsettings_json TEXT NOT NULL,\n\tcompleted_at DATETIME,\n\terror_json TEXT,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_feature_sets_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_feature_sets PRIMARY KEY (id),\n\tCONSTRAINT ck_feature_sets_input_digest_lowercase_sha256 CHECK (length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_feature_sets_cache_key_lowercase_sha256 CHECK (length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_feature_sets_status_valid CHECK (status IN ('pending','running','succeeded','failed')),\n\tCONSTRAINT fk_feature_sets_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_feature_sets_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_feature_sets_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "features",
+      "CREATE TABLE features (\n\tfeature_set_id INTEGER NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\tname VARCHAR(255) NOT NULL,\n\tvalue_type VARCHAR(32) NOT NULL,\n\tinteger_value INTEGER,\n\treal_value FLOAT,\n\ttext_value TEXT,\n\tboolean_value BOOLEAN,\n\tjson_value TEXT,\n\tunit VARCHAR(64),\n\tscope_type VARCHAR(64) NOT NULL,\n\tscope_key VARCHAR(255) NOT NULL,\n\treplay_player_id INTEGER,\n\tteam_id INTEGER,\n\tentity_id INTEGER,\n\tframe_start INTEGER NOT NULL,\n\tframe_end INTEGER NOT NULL,\n\tquality VARCHAR(32) NOT NULL,\n\tquality_reason TEXT,\n\tconfidence FLOAT,\n\texplanation TEXT,\n\tdetails_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_features_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_features PRIMARY KEY (id),\n\tCONSTRAINT uq_features_evidence_item_id UNIQUE (evidence_item_id),\n\tCONSTRAINT uq_features_logical_identity UNIQUE (feature_set_id, name, scope_type, scope_key, frame_start, frame_end),\n\tCONSTRAINT ck_features_value_type_valid CHECK (value_type IN ('integer','real','text','boolean','json')),\n\tCONSTRAINT ck_features_quality_valid CHECK (quality IN ('available','unavailable','partial')),\n\tCONSTRAINT ck_features_frame_window_valid CHECK (frame_start >= 0 AND frame_end >= frame_start),\n\tCONSTRAINT ck_features_confidence_bounded CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),\n\tCONSTRAINT ck_features_boolean_value_boolean CHECK (boolean_value IS NULL OR boolean_value IN (0, 1)),\n\tCONSTRAINT ck_features_typed_value_matches_quality CHECK ((quality = 'unavailable' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL AND quality_reason IS NOT NULL) OR (quality != 'unavailable' AND quality_reason IS NULL AND ((value_type = 'integer' AND integer_value IS NOT NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'real' AND integer_value IS NULL AND real_value IS NOT NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'text' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NOT NULL AND boolean_value IS NULL AND json_value IS NULL) OR (value_type = 'boolean' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NOT NULL AND json_value IS NULL) OR (value_type = 'json' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL AND boolean_value IS NULL AND json_value IS NOT NULL)))),\n\tCONSTRAINT fk_features_feature_set_id_feature_sets FOREIGN KEY(feature_set_id) REFERENCES feature_sets (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_features_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_features_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_features_entity_id_entities FOREIGN KEY(entity_id) REFERENCES entities (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_features_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "job_dependencies",
+      "CREATE TABLE job_dependencies (\n\tjob_id INTEGER NOT NULL,\n\tdepends_on_job_id INTEGER NOT NULL,\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_job_dependencies PRIMARY KEY (job_id, depends_on_job_id),\n\tCONSTRAINT ck_job_dependencies_not_self_edge CHECK (job_id != depends_on_job_id),\n\tCONSTRAINT fk_job_dependencies_job_id_jobs FOREIGN KEY(job_id) REFERENCES jobs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_job_dependencies_depends_on_job_id_jobs FOREIGN KEY(depends_on_job_id) REFERENCES jobs (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "jobs",
+      "CREATE TABLE jobs (\n\treplay_id INTEGER,\n\tstage VARCHAR(64) NOT NULL,\n\tcomponent_version VARCHAR(255) NOT NULL,\n\tidempotency_key TEXT NOT NULL,\n\tstatus VARCHAR(32) NOT NULL,\n\tpriority INTEGER NOT NULL,\n\tattempt_count INTEGER NOT NULL,\n\tmax_attempts INTEGER NOT NULL,\n\tavailable_at DATETIME NOT NULL,\n\tlease_owner VARCHAR(255),\n\tlease_expires_at DATETIME,\n\tstarted_at DATETIME,\n\tcompleted_at DATETIME,\n\tinput_json TEXT NOT NULL,\n\toutput_json TEXT,\n\terror_code VARCHAR(128),\n\terror_message TEXT,\n\terror_details_json TEXT,\n\tretryable BOOLEAN NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_jobs_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_jobs PRIMARY KEY (id),\n\tCONSTRAINT ck_jobs_status_valid CHECK (status IN ('pending','running','succeeded','failed')),\n\tCONSTRAINT ck_jobs_priority_nonnegative CHECK (priority >= 0),\n\tCONSTRAINT ck_jobs_attempts_nonnegative CHECK (attempt_count >= 0 AND max_attempts >= 0),\n\tCONSTRAINT ck_jobs_attempt_count_within_maximum CHECK (attempt_count <= max_attempts),\n\tCONSTRAINT ck_jobs_retryable_boolean CHECK (retryable IN (0, 1)),\n\tCONSTRAINT ck_jobs_lease_state_valid CHECK ((status = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR (status != 'running' AND lease_owner IS NULL AND lease_expires_at IS NULL)),\n\tCONSTRAINT fk_jobs_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_jobs_idempotency_key UNIQUE (idempotency_key),\n\tCONSTRAINT uq_jobs_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "longitudinal_members",
+      "CREATE TABLE longitudinal_members (\n\tlongitudinal_result_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER NOT NULL,\n\tfeature_set_id INTEGER NOT NULL,\n\tfeature_id INTEGER,\n\tstrategy_assessment_id INTEGER,\n\tevidence_item_id INTEGER NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_longitudinal_members PRIMARY KEY (id),\n\tCONSTRAINT uq_longitudinal_members_result_evidence UNIQUE (longitudinal_result_id, evidence_item_id),\n\tCONSTRAINT fk_longitudinal_members_longitudinal_result_id_longitudinal_results FOREIGN KEY(longitudinal_result_id) REFERENCES longitudinal_results (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_longitudinal_members_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_longitudinal_members_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_longitudinal_members_feature_set_id_feature_sets FOREIGN KEY(feature_set_id) REFERENCES feature_sets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_longitudinal_members_feature_id_features FOREIGN KEY(feature_id) REFERENCES features (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_longitudinal_members_strategy_assessment_id_strategy_assessments FOREIGN KEY(strategy_assessment_id) REFERENCES strategy_assessments (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_longitudinal_members_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "longitudinal_results",
+      "CREATE TABLE longitudinal_results (\n\tlongitudinal_run_id INTEGER NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\tresult_name VARCHAR(255) NOT NULL,\n\tresult_kind VARCHAR(64) NOT NULL,\n\tsample_count INTEGER NOT NULL,\n\tmissing_count INTEGER NOT NULL,\n\tquality VARCHAR(32) NOT NULL,\n\tquality_reason TEXT,\n\tstatistics_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_longitudinal_results_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_longitudinal_results PRIMARY KEY (id),\n\tCONSTRAINT uq_longitudinal_results_evidence_item_id UNIQUE (evidence_item_id),\n\tCONSTRAINT ck_longitudinal_results_counts_nonnegative CHECK (sample_count >= 0 AND missing_count >= 0),\n\tCONSTRAINT ck_longitudinal_results_quality_valid CHECK (quality IN ('available','unavailable','partial')),\n\tCONSTRAINT ck_longitudinal_results_unavailable_reason_required CHECK ((quality = 'unavailable' AND quality_reason IS NOT NULL) OR quality != 'unavailable'),\n\tCONSTRAINT fk_longitudinal_results_longitudinal_run_id_longitudinal_runs FOREIGN KEY(longitudinal_run_id) REFERENCES longitudinal_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_longitudinal_results_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT,\n\tCONSTRAINT uq_longitudinal_results_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "longitudinal_runs",
+      "CREATE TABLE longitudinal_runs (\n\trun_id VARCHAR(36) NOT NULL CONSTRAINT ck_longitudinal_runs_run_id_lowercase_uuid CHECK (length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tplayer_id INTEGER NOT NULL,\n\tidentity_revision INTEGER NOT NULL,\n\tanalyzer_name VARCHAR(255) NOT NULL,\n\tanalyzer_version VARCHAR(255) NOT NULL,\n\tsegment_key_json TEXT NOT NULL,\n\tsettings_json TEXT NOT NULL,\n\tinput_digest VARCHAR(64) NOT NULL,\n\tcache_key VARCHAR(64) NOT NULL,\n\tstatus VARCHAR(32) NOT NULL,\n\tcreated_at DATETIME NOT NULL,\n\tcompleted_at DATETIME,\n\terror_json TEXT,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_longitudinal_runs PRIMARY KEY (id),\n\tCONSTRAINT ck_longitudinal_runs_input_digest_lowercase_sha256 CHECK (length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_longitudinal_runs_cache_key_lowercase_sha256 CHECK (length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_longitudinal_runs_identity_revision_nonnegative CHECK (identity_revision >= 0),\n\tCONSTRAINT ck_longitudinal_runs_status_valid CHECK (status IN ('pending','running','succeeded','failed')),\n\tCONSTRAINT uq_longitudinal_runs_run_id UNIQUE (run_id),\n\tCONSTRAINT fk_longitudinal_runs_player_id_players FOREIGN KEY(player_id) REFERENCES players (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "managed_assets",
+      "CREATE TABLE managed_assets (\n\tsha256 VARCHAR(64) NOT NULL,\n\tkind VARCHAR(64) NOT NULL,\n\trelative_path TEXT NOT NULL,\n\tsize_bytes INTEGER NOT NULL,\n\tmedia_type VARCHAR(255),\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_managed_assets_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_managed_assets PRIMARY KEY (id),\n\tCONSTRAINT ck_managed_assets_sha256_lowercase_sha256 CHECK (length(sha256) = 64 AND sha256 = lower(sha256) AND sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_managed_assets_size_bytes_nonnegative CHECK (size_bytes >= 0),\n\tCONSTRAINT ck_managed_assets_relative_path_product_relative CHECK (length(relative_path) > 0 AND substr(relative_path, 1, 1) <> '/' AND substr(relative_path, -1, 1) <> '/' AND instr(relative_path, '\\') = 0 AND instr(relative_path, ':') = 0 AND instr(relative_path, char(0)) = 0 AND instr(relative_path, '//') = 0 AND relative_path NOT IN ('.', '..') AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%' AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%' AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'),\n\tCONSTRAINT uq_managed_assets_sha256 UNIQUE (sha256),\n\tCONSTRAINT uq_managed_assets_relative_path UNIQUE (relative_path),\n\tCONSTRAINT uq_managed_assets_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "map_regions",
+      "CREATE TABLE map_regions (\n\tmap_id INTEGER NOT NULL,\n\tstable_key VARCHAR(255) NOT NULL,\n\tregion_kind VARCHAR(64) NOT NULL,\n\tlabel TEXT,\n\tgeometry_json TEXT NOT NULL,\n\trelationships_json TEXT NOT NULL,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_map_regions PRIMARY KEY (id),\n\tCONSTRAINT uq_map_regions_map_stable_key UNIQUE (map_id, stable_key),\n\tCONSTRAINT fk_map_regions_map_id_maps FOREIGN KEY(map_id) REFERENCES maps (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "map_resources",
+      "CREATE TABLE map_resources (\n\tmap_id INTEGER NOT NULL,\n\tstable_key VARCHAR(255) NOT NULL,\n\tresource_kind VARCHAR(64) NOT NULL,\n\tsource_object_id INTEGER,\n\ttemplate_name VARCHAR(255),\n\towner_player_index INTEGER,\n\tamount FLOAT,\n\tx FLOAT,\n\ty FLOAT,\n\tz FLOAT,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_map_resources PRIMARY KEY (id),\n\tCONSTRAINT uq_map_resources_map_stable_key UNIQUE (map_id, stable_key),\n\tCONSTRAINT ck_map_resources_source_object_id_nonnegative CHECK (source_object_id IS NULL OR source_object_id >= 0),\n\tCONSTRAINT ck_map_resources_owner_player_index_nonnegative CHECK (owner_player_index IS NULL OR owner_player_index >= 0),\n\tCONSTRAINT ck_map_resources_amount_nonnegative CHECK (amount IS NULL OR amount >= 0),\n\tCONSTRAINT fk_map_resources_map_id_maps FOREIGN KEY(map_id) REFERENCES maps (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "maps",
+      "CREATE TABLE maps (\n\tcontent_sha256 VARCHAR(64) NOT NULL,\n\tmanifest_asset_id INTEGER NOT NULL,\n\tschema_version INTEGER NOT NULL,\n\tengine_data_identity VARCHAR(255) NOT NULL,\n\tmap_identity VARCHAR(255) NOT NULL,\n\tdisplay_name TEXT,\n\texporter_version VARCHAR(255) NOT NULL,\n\tmin_x FLOAT NOT NULL,\n\tmin_y FLOAT NOT NULL,\n\tmin_z FLOAT NOT NULL,\n\tmax_x FLOAT NOT NULL,\n\tmax_y FLOAT NOT NULL,\n\tmax_z FLOAT NOT NULL,\n\tpathing_width INTEGER NOT NULL,\n\tpathing_height INTEGER NOT NULL,\n\tpathing_cell_size FLOAT NOT NULL,\n\tterrain_width INTEGER NOT NULL,\n\tterrain_height INTEGER NOT NULL,\n\tterrain_cell_size FLOAT NOT NULL,\n\tmetadata_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_maps_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_maps PRIMARY KEY (id),\n\tCONSTRAINT ck_maps_content_sha256_lowercase_sha256 CHECK (length(content_sha256) = 64 AND content_sha256 = lower(content_sha256) AND content_sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_maps_schema_version_nonnegative CHECK (schema_version >= 0),\n\tCONSTRAINT ck_maps_pathing_dimensions_nonnegative CHECK (pathing_width >= 0 AND pathing_height >= 0),\n\tCONSTRAINT ck_maps_terrain_dimensions_nonnegative CHECK (terrain_width >= 0 AND terrain_height >= 0),\n\tCONSTRAINT ck_maps_cell_sizes_positive CHECK (pathing_cell_size > 0 AND terrain_cell_size > 0),\n\tCONSTRAINT uq_maps_content_sha256 UNIQUE (content_sha256),\n\tCONSTRAINT fk_maps_manifest_asset_id_managed_assets FOREIGN KEY(manifest_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT uq_maps_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "parser_runs",
+      "CREATE TABLE parser_runs (\n\trun_id VARCHAR(36) NOT NULL CONSTRAINT ck_parser_runs_run_id_lowercase_uuid CHECK (length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\treplay_id INTEGER NOT NULL,\n\tparser_version VARCHAR(255) NOT NULL,\n\tschema_version INTEGER NOT NULL,\n\tinput_sha256 VARCHAR(64) NOT NULL,\n\tresult_sha256 VARCHAR(64),\n\tstatus VARCHAR(32) NOT NULL,\n\tcompletion_status VARCHAR(32),\n\tcommand_stream_offset INTEGER,\n\tend_offset INTEGER,\n\twarnings_json TEXT NOT NULL,\n\terror_json TEXT,\n\tstarted_at DATETIME NOT NULL,\n\tcompleted_at DATETIME,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_parser_runs PRIMARY KEY (id),\n\tCONSTRAINT ck_parser_runs_input_sha256_lowercase_sha256 CHECK (length(input_sha256) = 64 AND input_sha256 = lower(input_sha256) AND input_sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_parser_runs_result_sha256_lowercase_sha256 CHECK (length(result_sha256) = 64 AND result_sha256 = lower(result_sha256) AND result_sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_parser_runs_status_valid CHECK (status IN ('pending','running','succeeded','failed')),\n\tCONSTRAINT ck_parser_runs_completion_status_valid CHECK (completion_status IS NULL OR completion_status IN ('complete','truncated','unsupported','failed')),\n\tCONSTRAINT ck_parser_runs_schema_version_nonnegative CHECK (schema_version >= 0),\n\tCONSTRAINT ck_parser_runs_command_stream_offset_nonnegative CHECK (command_stream_offset IS NULL OR command_stream_offset >= 0),\n\tCONSTRAINT ck_parser_runs_end_offset_nonnegative CHECK (end_offset IS NULL OR end_offset >= 0),\n\tCONSTRAINT uq_parser_runs_run_id UNIQUE (run_id),\n\tCONSTRAINT fk_parser_runs_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE\n)"
+    ],
+    [
+      "table",
+      "player_aliases",
+      "CREATE TABLE player_aliases (\n\tplayer_id INTEGER NOT NULL,\n\tnamespace VARCHAR(64) NOT NULL,\n\tnormalized_name TEXT NOT NULL,\n\toriginal_name TEXT NOT NULL,\n\texternal_subject TEXT,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_player_aliases_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_player_aliases PRIMARY KEY (id),\n\tCONSTRAINT uq_player_aliases_namespace_normalized_name UNIQUE (namespace, normalized_name),\n\tCONSTRAINT fk_player_aliases_player_id_players FOREIGN KEY(player_id) REFERENCES players (id) ON DELETE CASCADE,\n\tCONSTRAINT uq_player_aliases_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "players",
+      "CREATE TABLE players (\n\tdisplay_name TEXT NOT NULL,\n\tidentity_revision INTEGER NOT NULL,\n\tupdated_at DATETIME NOT NULL,\n\tretired_at DATETIME,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_players_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_players PRIMARY KEY (id),\n\tCONSTRAINT ck_players_identity_revision_nonnegative CHECK (identity_revision >= 0),\n\tCONSTRAINT uq_players_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "production_events",
+      "CREATE TABLE production_events (\n\ttelemetry_run_id INTEGER NOT NULL,\n\ttelemetry_event_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\tproducer_entity_id INTEGER,\n\tframe INTEGER NOT NULL,\n\tevent_type VARCHAR(255) NOT NULL,\n\titem_kind VARCHAR(64) NOT NULL,\n\titem_name VARCHAR(255) NOT NULL,\n\tproduction_id INTEGER,\n\tupgrade_id INTEGER,\n\tqueue_position INTEGER,\n\tqueued_frame INTEGER,\n\tterminal_frame INTEGER,\n\tcost FLOAT,\n\tquantity INTEGER NOT NULL,\n\tstate VARCHAR(64) NOT NULL,\n\tpayload_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_production_events PRIMARY KEY (id),\n\tCONSTRAINT uq_production_events_telemetry_event_id UNIQUE (telemetry_event_id),\n\tCONSTRAINT ck_production_events_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT ck_production_events_queue_position_nonnegative CHECK (queue_position IS NULL OR queue_position >= 0),\n\tCONSTRAINT ck_production_events_queued_frame_nonnegative CHECK (queued_frame IS NULL OR queued_frame >= 0),\n\tCONSTRAINT ck_production_events_terminal_frame_nonnegative CHECK (terminal_frame IS NULL OR terminal_frame >= 0),\n\tCONSTRAINT ck_production_events_cost_nonnegative CHECK (cost IS NULL OR cost >= 0),\n\tCONSTRAINT ck_production_events_quantity_nonnegative CHECK (quantity >= 0),\n\tCONSTRAINT fk_production_events_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_production_events_telemetry_event_id_telemetry_events FOREIGN KEY(telemetry_event_id) REFERENCES telemetry_events (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_production_events_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_production_events_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_production_events_producer_entity_id_entities FOREIGN KEY(producer_entity_id) REFERENCES entities (id) ON DELETE SET NULL\n)"
+    ],
+    [
+      "table",
+      "replay_players",
+      "CREATE TABLE replay_players (\n\treplay_id INTEGER NOT NULL,\n\tparser_run_id INTEGER NOT NULL,\n\tplayer_id INTEGER,\n\tslot_index INTEGER NOT NULL,\n\tslot_kind VARCHAR(64) NOT NULL,\n\toriginal_name TEXT,\n\tnormalized_name TEXT,\n\tplayer_index INTEGER,\n\tteam_id INTEGER,\n\tfaction VARCHAR(255),\n\tcolor VARCHAR(255),\n\tstart_position INTEGER,\n\tresult VARCHAR(64),\n\tobserved_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_replay_players_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_replay_players PRIMARY KEY (id),\n\tCONSTRAINT uq_replay_players_parser_slot UNIQUE (parser_run_id, slot_index),\n\tCONSTRAINT ck_replay_players_slot_index_nonnegative CHECK (slot_index >= 0),\n\tCONSTRAINT ck_replay_players_player_index_nonnegative CHECK (player_index IS NULL OR player_index >= 0),\n\tCONSTRAINT fk_replay_players_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_replay_players_parser_run_id_parser_runs FOREIGN KEY(parser_run_id) REFERENCES parser_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_replay_players_player_id_players FOREIGN KEY(player_id) REFERENCES players (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_replay_players_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "replay_quality_issues",
+      "CREATE TABLE replay_quality_issues (\n\treplay_id INTEGER NOT NULL,\n\tparser_run_id INTEGER,\n\ttelemetry_run_id INTEGER,\n\tevidence_item_id INTEGER,\n\tstage VARCHAR(64) NOT NULL,\n\tissue_code VARCHAR(128) NOT NULL,\n\tseverity VARCHAR(32) NOT NULL,\n\tdetails_json TEXT NOT NULL,\n\tdetected_at DATETIME NOT NULL,\n\tresolved_at DATETIME,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_replay_quality_issues_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_replay_quality_issues PRIMARY KEY (id),\n\tCONSTRAINT fk_replay_quality_issues_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_replay_quality_issues_parser_run_id_parser_runs FOREIGN KEY(parser_run_id) REFERENCES parser_runs (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_replay_quality_issues_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_replay_quality_issues_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT,\n\tCONSTRAINT uq_replay_quality_issues_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "replays",
+      "CREATE TABLE replays (\n\tsha256 VARCHAR(64) NOT NULL,\n\tmanaged_asset_id INTEGER,\n\tmap_id INTEGER,\n\treplay_name TEXT NOT NULL,\n\tversion_string VARCHAR(64) NOT NULL,\n\tversion_number INTEGER NOT NULL,\n\tframe_count INTEGER NOT NULL,\n\tstart_time INTEGER NOT NULL,\n\tend_time INTEGER NOT NULL,\n\texe_crc INTEGER NOT NULL,\n\tini_crc INTEGER NOT NULL,\n\tmap_crc INTEGER NOT NULL,\n\tmap_name TEXT NOT NULL,\n\tseed INTEGER NOT NULL,\n\tstarting_cash INTEGER,\n\theader_json TEXT NOT NULL,\n\tlifecycle_state VARCHAR(32) NOT NULL,\n\tupdated_at DATETIME NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_replays_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_replays PRIMARY KEY (id),\n\tCONSTRAINT ck_replays_sha256_lowercase_sha256 CHECK (length(sha256) = 64 AND sha256 = lower(sha256) AND sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_replays_version_number_nonnegative CHECK (version_number >= 0),\n\tCONSTRAINT ck_replays_frame_count_nonnegative CHECK (frame_count >= 0),\n\tCONSTRAINT ck_replays_starting_cash_nonnegative CHECK (starting_cash IS NULL OR starting_cash >= 0),\n\tCONSTRAINT ck_replays_lifecycle_state_valid CHECK (lifecycle_state IN ('discovered','parsed','engine_verified','partial','desynced','unsupported','failed')),\n\tCONSTRAINT uq_replays_sha256 UNIQUE (sha256),\n\tCONSTRAINT fk_replays_managed_asset_id_managed_assets FOREIGN KEY(managed_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_replays_map_id_maps FOREIGN KEY(map_id) REFERENCES maps (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_replays_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "reports",
+      "CREATE TABLE reports (\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\tanalysis_run_id INTEGER,\n\treport_version VARCHAR(255) NOT NULL,\n\tinput_digest VARCHAR(64) NOT NULL,\n\tcache_key VARCHAR(64) NOT NULL,\n\treport_json TEXT NOT NULL,\n\tstructured_asset_id INTEGER,\n\trendered_asset_id INTEGER,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_reports_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_reports PRIMARY KEY (id),\n\tCONSTRAINT ck_reports_input_digest_lowercase_sha256 CHECK (length(input_digest) = 64 AND input_digest = lower(input_digest) AND input_digest NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_reports_cache_key_lowercase_sha256 CHECK (length(cache_key) = 64 AND cache_key = lower(cache_key) AND cache_key NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT uq_reports_replay_version_input UNIQUE (replay_id, report_version, input_digest),\n\tCONSTRAINT fk_reports_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_reports_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_reports_analysis_run_id_analysis_runs FOREIGN KEY(analysis_run_id) REFERENCES analysis_runs (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_reports_structured_asset_id_managed_assets FOREIGN KEY(structured_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_reports_rendered_asset_id_managed_assets FOREIGN KEY(rendered_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT uq_reports_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "sources",
+      "CREATE TABLE sources (\n\treplay_id INTEGER,\n\tsource_kind VARCHAR(64) NOT NULL,\n\toriginal_locator TEXT NOT NULL,\n\toriginal_filename TEXT NOT NULL,\n\tstrata_match_id VARCHAR(255),\n\tstrata_source_user_token VARCHAR(255),\n\tfile_size_bytes INTEGER,\n\tsource_modified_at DATETIME,\n\tdiscovered_at DATETIME NOT NULL,\n\tprovenance_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_sources_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT pk_sources PRIMARY KEY (id),\n\tCONSTRAINT ck_sources_file_size_bytes_nonnegative CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0),\n\tCONSTRAINT fk_sources_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_sources_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "strategy_assessments",
+      "CREATE TABLE strategy_assessments (\n\tevidence_item_id INTEGER NOT NULL,\n\treplay_id INTEGER NOT NULL,\n\treplay_player_id INTEGER,\n\tanalysis_run_id INTEGER,\n\tmethod VARCHAR(32) NOT NULL,\n\tstrategy_label VARCHAR(255) NOT NULL,\n\tphase VARCHAR(64) NOT NULL,\n\ttaxonomy_version VARCHAR(255),\n\trule_version VARCHAR(255),\n\tmodel_version VARCHAR(255),\n\tframe_start INTEGER NOT NULL,\n\tframe_end INTEGER NOT NULL,\n\tquality VARCHAR(32) NOT NULL,\n\tconfidence FLOAT,\n\tdetails_json TEXT NOT NULL,\n\tid INTEGER NOT NULL,\n\tpublic_id VARCHAR(36) NOT NULL CONSTRAINT ck_strategy_assessments_public_id_lowercase_uuid CHECK (length(public_id) = 36 AND public_id = lower(public_id) AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' AND length(replace(public_id, '-', '')) = 32 AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\tcreated_at DATETIME NOT NULL,\n\tCONSTRAINT pk_strategy_assessments PRIMARY KEY (id),\n\tCONSTRAINT uq_strategy_assessments_evidence_item_id UNIQUE (evidence_item_id),\n\tCONSTRAINT ck_strategy_assessments_method_valid CHECK (method IN ('rule','statistical','llm','manual')),\n\tCONSTRAINT ck_strategy_assessments_frame_window_valid CHECK (frame_start >= 0 AND frame_end >= frame_start),\n\tCONSTRAINT ck_strategy_assessments_quality_valid CHECK (quality IN ('available','unavailable','partial')),\n\tCONSTRAINT ck_strategy_assessments_confidence_bounded CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),\n\tCONSTRAINT fk_strategy_assessments_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_strategy_assessments_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_strategy_assessments_replay_player_id_replay_players FOREIGN KEY(replay_player_id) REFERENCES replay_players (id) ON DELETE SET NULL,\n\tCONSTRAINT fk_strategy_assessments_analysis_run_id_analysis_runs FOREIGN KEY(analysis_run_id) REFERENCES analysis_runs (id) ON DELETE SET NULL,\n\tCONSTRAINT uq_strategy_assessments_public_id UNIQUE (public_id)\n)"
+    ],
+    [
+      "table",
+      "telemetry_events",
+      "CREATE TABLE telemetry_events (\n\ttelemetry_run_id INTEGER NOT NULL,\n\tsequence INTEGER NOT NULL,\n\tframe INTEGER NOT NULL,\n\tlogic_time_seconds FLOAT NOT NULL,\n\tschema_version INTEGER NOT NULL,\n\tevent_type VARCHAR(255) NOT NULL,\n\tpayload_json TEXT NOT NULL,\n\traw_record_json TEXT NOT NULL,\n\tevidence_item_id INTEGER NOT NULL,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_telemetry_events PRIMARY KEY (id),\n\tCONSTRAINT uq_telemetry_events_run_sequence UNIQUE (telemetry_run_id, sequence),\n\tCONSTRAINT uq_telemetry_events_evidence_item_id UNIQUE (evidence_item_id),\n\tCONSTRAINT ck_telemetry_events_sequence_nonnegative CHECK (sequence >= 0),\n\tCONSTRAINT ck_telemetry_events_frame_nonnegative CHECK (frame >= 0),\n\tCONSTRAINT ck_telemetry_events_logic_time_seconds_nonnegative CHECK (logic_time_seconds >= 0),\n\tCONSTRAINT ck_telemetry_events_schema_version_nonnegative CHECK (schema_version >= 0),\n\tCONSTRAINT fk_telemetry_events_telemetry_run_id_telemetry_runs FOREIGN KEY(telemetry_run_id) REFERENCES telemetry_runs (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_telemetry_events_evidence_item_id_evidence_items FOREIGN KEY(evidence_item_id) REFERENCES evidence_items (id) ON DELETE RESTRICT\n)"
+    ],
+    [
+      "table",
+      "telemetry_runs",
+      "CREATE TABLE telemetry_runs (\n\trun_id VARCHAR(36) NOT NULL CONSTRAINT ck_telemetry_runs_run_id_lowercase_uuid CHECK (length(run_id) = 36 AND run_id = lower(run_id) AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' AND length(replace(run_id, '-', '')) = 32 AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'),\n\treplay_id INTEGER NOT NULL,\n\ttrace_asset_id INTEGER,\n\tcatalog_asset_id INTEGER,\n\tmap_asset_id INTEGER,\n\tmap_id INTEGER,\n\tschema_version INTEGER NOT NULL,\n\tengine_build VARCHAR(255) NOT NULL,\n\tengine_executable_sha256 VARCHAR(64),\n\tsettings_json TEXT NOT NULL,\n\tstatus VARCHAR(32) NOT NULL,\n\trunner_status VARCHAR(64) NOT NULL,\n\tstrategy_analysis_scope VARCHAR(64),\n\tprocess_exit_code INTEGER,\n\tfinal_frame INTEGER,\n\tcommand_count INTEGER,\n\ttrace_sha256 VARCHAR(64),\n\tdiagnostics_json TEXT NOT NULL,\n\tstarted_at DATETIME NOT NULL,\n\tcompleted_at DATETIME,\n\tid INTEGER NOT NULL,\n\tCONSTRAINT pk_telemetry_runs PRIMARY KEY (id),\n\tCONSTRAINT ck_telemetry_runs_engine_executable_sha256_lowercase_sha256 CHECK (length(engine_executable_sha256) = 64 AND engine_executable_sha256 = lower(engine_executable_sha256) AND engine_executable_sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_telemetry_runs_trace_sha256_lowercase_sha256 CHECK (length(trace_sha256) = 64 AND trace_sha256 = lower(trace_sha256) AND trace_sha256 NOT GLOB '*[^0-9a-f]*'),\n\tCONSTRAINT ck_telemetry_runs_schema_version_nonnegative CHECK (schema_version >= 0),\n\tCONSTRAINT ck_telemetry_runs_status_valid CHECK (status IN ('pending','running','succeeded','failed')),\n\tCONSTRAINT ck_telemetry_runs_process_exit_code_nonnegative CHECK (process_exit_code IS NULL OR process_exit_code >= 0),\n\tCONSTRAINT ck_telemetry_runs_final_frame_nonnegative CHECK (final_frame IS NULL OR final_frame >= 0),\n\tCONSTRAINT ck_telemetry_runs_command_count_nonnegative CHECK (command_count IS NULL OR command_count >= 0),\n\tCONSTRAINT uq_telemetry_runs_run_id UNIQUE (run_id),\n\tCONSTRAINT fk_telemetry_runs_replay_id_replays FOREIGN KEY(replay_id) REFERENCES replays (id) ON DELETE CASCADE,\n\tCONSTRAINT fk_telemetry_runs_trace_asset_id_managed_assets FOREIGN KEY(trace_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_telemetry_runs_catalog_asset_id_managed_assets FOREIGN KEY(catalog_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_telemetry_runs_map_asset_id_managed_assets FOREIGN KEY(map_asset_id) REFERENCES managed_assets (id) ON DELETE RESTRICT,\n\tCONSTRAINT fk_telemetry_runs_map_id_maps FOREIGN KEY(map_id) REFERENCES maps (id) ON DELETE SET NULL\n)"
+    ],
+    [
+      "trigger",
+      "trg_combat_events_succeeded_no_delete",
+      "CREATE TRIGGER trg_combat_events_succeeded_no_delete BEFORE DELETE ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_combat_events_succeeded_no_insert",
+      "CREATE TRIGGER trg_combat_events_succeeded_no_insert BEFORE INSERT ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_combat_events_succeeded_no_update",
+      "CREATE TRIGGER trg_combat_events_succeeded_no_update BEFORE UPDATE ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_commands_succeeded_no_delete",
+      "CREATE TRIGGER trg_commands_succeeded_no_delete BEFORE DELETE ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_commands_succeeded_no_insert",
+      "CREATE TRIGGER trg_commands_succeeded_no_insert BEFORE INSERT ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_commands_succeeded_no_update",
+      "CREATE TRIGGER trg_commands_succeeded_no_update BEFORE UPDATE ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_economy_events_succeeded_no_delete",
+      "CREATE TRIGGER trg_economy_events_succeeded_no_delete BEFORE DELETE ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_economy_events_succeeded_no_insert",
+      "CREATE TRIGGER trg_economy_events_succeeded_no_insert BEFORE INSERT ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_economy_events_succeeded_no_update",
+      "CREATE TRIGGER trg_economy_events_succeeded_no_update BEFORE UPDATE ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_entities_succeeded_no_delete",
+      "CREATE TRIGGER trg_entities_succeeded_no_delete BEFORE DELETE ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_entities_succeeded_no_insert",
+      "CREATE TRIGGER trg_entities_succeeded_no_insert BEFORE INSERT ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_entities_succeeded_no_update",
+      "CREATE TRIGGER trg_entities_succeeded_no_update BEFORE UPDATE ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_entity_samples_succeeded_no_delete",
+      "CREATE TRIGGER trg_entity_samples_succeeded_no_delete BEFORE DELETE ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_entity_samples_succeeded_no_insert",
+      "CREATE TRIGGER trg_entity_samples_succeeded_no_insert BEFORE INSERT ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_entity_samples_succeeded_no_update",
+      "CREATE TRIGGER trg_entity_samples_succeeded_no_update BEFORE UPDATE ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_evidence_items_observed_no_delete",
+      "CREATE TRIGGER trg_evidence_items_observed_no_delete BEFORE DELETE ON evidence_items WHEN OLD.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded')) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_evidence_items_observed_no_insert",
+      "CREATE TRIGGER trg_evidence_items_observed_no_insert BEFORE INSERT ON evidence_items WHEN NEW.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded')) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_evidence_items_observed_no_update",
+      "CREATE TRIGGER trg_evidence_items_observed_no_update BEFORE UPDATE ON evidence_items WHEN (OLD.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded'))) OR (NEW.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded'))) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_parser_runs_succeeded_no_delete",
+      "CREATE TRIGGER trg_parser_runs_succeeded_no_delete BEFORE DELETE ON parser_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    ],
+    [
+      "trigger",
+      "trg_parser_runs_succeeded_no_update",
+      "CREATE TRIGGER trg_parser_runs_succeeded_no_update BEFORE UPDATE ON parser_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    ],
+    [
+      "trigger",
+      "trg_production_events_succeeded_no_delete",
+      "CREATE TRIGGER trg_production_events_succeeded_no_delete BEFORE DELETE ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_production_events_succeeded_no_insert",
+      "CREATE TRIGGER trg_production_events_succeeded_no_insert BEFORE INSERT ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_production_events_succeeded_no_update",
+      "CREATE TRIGGER trg_production_events_succeeded_no_update BEFORE UPDATE ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_replay_players_succeeded_no_delete",
+      "CREATE TRIGGER trg_replay_players_succeeded_no_delete BEFORE DELETE ON replay_players WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful parser player evidence cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_replay_players_succeeded_no_insert",
+      "CREATE TRIGGER trg_replay_players_succeeded_no_insert BEFORE INSERT ON replay_players WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful parser player evidence cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_replay_players_succeeded_no_observation_update",
+      "CREATE TRIGGER trg_replay_players_succeeded_no_observation_update BEFORE UPDATE ON replay_players WHEN (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded')) AND (NEW.public_id IS NOT OLD.public_id OR NEW.replay_id IS NOT OLD.replay_id OR NEW.parser_run_id IS NOT OLD.parser_run_id OR NEW.slot_index IS NOT OLD.slot_index OR NEW.slot_kind IS NOT OLD.slot_kind OR NEW.original_name IS NOT OLD.original_name OR NEW.normalized_name IS NOT OLD.normalized_name OR NEW.player_index IS NOT OLD.player_index OR NEW.team_id IS NOT OLD.team_id OR NEW.faction IS NOT OLD.faction OR NEW.color IS NOT OLD.color OR NEW.start_position IS NOT OLD.start_position OR NEW.result IS NOT OLD.result OR NEW.observed_json IS NOT OLD.observed_json) BEGIN SELECT RAISE(ABORT, 'successful parser player observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_telemetry_events_succeeded_no_delete",
+      "CREATE TRIGGER trg_telemetry_events_succeeded_no_delete BEFORE DELETE ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    ],
+    [
+      "trigger",
+      "trg_telemetry_events_succeeded_no_insert",
+      "CREATE TRIGGER trg_telemetry_events_succeeded_no_insert BEFORE INSERT ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    ],
+    [
+      "trigger",
+      "trg_telemetry_events_succeeded_no_update",
+      "CREATE TRIGGER trg_telemetry_events_succeeded_no_update BEFORE UPDATE ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    ],
+    [
+      "trigger",
+      "trg_telemetry_runs_succeeded_no_delete",
+      "CREATE TRIGGER trg_telemetry_runs_succeeded_no_delete BEFORE DELETE ON telemetry_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    ],
+    [
+      "trigger",
+      "trg_telemetry_runs_succeeded_no_update",
+      "CREATE TRIGGER trg_telemetry_runs_succeeded_no_update BEFORE UPDATE ON telemetry_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    ]
+  ],
+  "tables": [
+    "analysis_runs",
+    "assessment_evidence",
+    "combat_events",
+    "commands",
+    "economy_events",
+    "entities",
+    "entity_samples",
+    "evidence_items",
+    "feature_evidence",
+    "feature_sets",
+    "features",
+    "job_dependencies",
+    "jobs",
+    "longitudinal_members",
+    "longitudinal_results",
+    "longitudinal_runs",
+    "managed_assets",
+    "map_regions",
+    "map_resources",
+    "maps",
+    "parser_runs",
+    "player_aliases",
+    "players",
+    "production_events",
+    "replay_players",
+    "replay_quality_issues",
+    "replays",
+    "reports",
+    "sources",
+    "strategy_assessments",
+    "telemetry_events",
+    "telemetry_runs"
+  ],
+  "triggers": [
+    {
+      "name": "trg_combat_events_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_combat_events_succeeded_no_delete BEFORE DELETE ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_combat_events_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_combat_events_succeeded_no_insert BEFORE INSERT ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_combat_events_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_combat_events_succeeded_no_update BEFORE UPDATE ON combat_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_commands_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_commands_succeeded_no_delete BEFORE DELETE ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_commands_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_commands_succeeded_no_insert BEFORE INSERT ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_commands_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_commands_succeeded_no_update BEFORE UPDATE ON commands WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_economy_events_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_economy_events_succeeded_no_delete BEFORE DELETE ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_economy_events_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_economy_events_succeeded_no_insert BEFORE INSERT ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_economy_events_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_economy_events_succeeded_no_update BEFORE UPDATE ON economy_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_entities_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_entities_succeeded_no_delete BEFORE DELETE ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_entities_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_entities_succeeded_no_insert BEFORE INSERT ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_entities_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_entities_succeeded_no_update BEFORE UPDATE ON entities WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_entity_samples_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_entity_samples_succeeded_no_delete BEFORE DELETE ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_entity_samples_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_entity_samples_succeeded_no_insert BEFORE INSERT ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_entity_samples_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_entity_samples_succeeded_no_update BEFORE UPDATE ON entity_samples WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_evidence_items_observed_no_delete",
+      "sql": "CREATE TRIGGER trg_evidence_items_observed_no_delete BEFORE DELETE ON evidence_items WHEN OLD.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded')) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be deleted'); END"
+    },
+    {
+      "name": "trg_evidence_items_observed_no_insert",
+      "sql": "CREATE TRIGGER trg_evidence_items_observed_no_insert BEFORE INSERT ON evidence_items WHEN NEW.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded')) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be appended'); END"
+    },
+    {
+      "name": "trg_evidence_items_observed_no_update",
+      "sql": "CREATE TRIGGER trg_evidence_items_observed_no_update BEFORE UPDATE ON evidence_items WHEN (OLD.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded'))) OR (NEW.tier = 'observed' AND (EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded'))) BEGIN SELECT RAISE(ABORT, 'successful observed evidence cannot be updated'); END"
+    },
+    {
+      "name": "trg_parser_runs_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_parser_runs_succeeded_no_delete BEFORE DELETE ON parser_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    },
+    {
+      "name": "trg_parser_runs_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_parser_runs_succeeded_no_update BEFORE UPDATE ON parser_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    },
+    {
+      "name": "trg_production_events_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_production_events_succeeded_no_delete BEFORE DELETE ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_production_events_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_production_events_succeeded_no_insert BEFORE INSERT ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_production_events_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_production_events_succeeded_no_update BEFORE UPDATE ON production_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_replay_players_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_replay_players_succeeded_no_delete BEFORE DELETE ON replay_players WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful parser player evidence cannot be deleted'); END"
+    },
+    {
+      "name": "trg_replay_players_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_replay_players_succeeded_no_insert BEFORE INSERT ON replay_players WHEN EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful parser player evidence cannot be appended'); END"
+    },
+    {
+      "name": "trg_replay_players_succeeded_no_observation_update",
+      "sql": "CREATE TRIGGER trg_replay_players_succeeded_no_observation_update BEFORE UPDATE ON replay_players WHEN (EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded')) AND (NEW.public_id IS NOT OLD.public_id OR NEW.replay_id IS NOT OLD.replay_id OR NEW.parser_run_id IS NOT OLD.parser_run_id OR NEW.slot_index IS NOT OLD.slot_index OR NEW.slot_kind IS NOT OLD.slot_kind OR NEW.original_name IS NOT OLD.original_name OR NEW.normalized_name IS NOT OLD.normalized_name OR NEW.player_index IS NOT OLD.player_index OR NEW.team_id IS NOT OLD.team_id OR NEW.faction IS NOT OLD.faction OR NEW.color IS NOT OLD.color OR NEW.start_position IS NOT OLD.start_position OR NEW.result IS NOT OLD.result OR NEW.observed_json IS NOT OLD.observed_json) BEGIN SELECT RAISE(ABORT, 'successful parser player observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_telemetry_events_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_telemetry_events_succeeded_no_delete BEFORE DELETE ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be deleted'); END"
+    },
+    {
+      "name": "trg_telemetry_events_succeeded_no_insert",
+      "sql": "CREATE TRIGGER trg_telemetry_events_succeeded_no_insert BEFORE INSERT ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be appended'); END"
+    },
+    {
+      "name": "trg_telemetry_events_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_telemetry_events_succeeded_no_update BEFORE UPDATE ON telemetry_events WHEN EXISTS (SELECT 1 FROM telemetry_runs WHERE id = OLD.telemetry_run_id AND status = 'succeeded') OR EXISTS (SELECT 1 FROM telemetry_runs WHERE id = NEW.telemetry_run_id AND status = 'succeeded') BEGIN SELECT RAISE(ABORT, 'successful observations cannot be updated'); END"
+    },
+    {
+      "name": "trg_telemetry_runs_succeeded_no_delete",
+      "sql": "CREATE TRIGGER trg_telemetry_runs_succeeded_no_delete BEFORE DELETE ON telemetry_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    },
+    {
+      "name": "trg_telemetry_runs_succeeded_no_update",
+      "sql": "CREATE TRIGGER trg_telemetry_runs_succeeded_no_update BEFORE UPDATE ON telemetry_runs WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'successful observation run is immutable'); END"
+    }
+  ]
+}

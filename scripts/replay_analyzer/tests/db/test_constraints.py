@@ -97,6 +97,76 @@ def test_sha256_public_id_and_core_uniqueness_constraints(migrated_engine: objec
         )
 
 
+@pytest.mark.parametrize(
+    "malformed_uuid",
+    [
+        "0000000--0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-00000-000001",
+        "00000000-0000-4000-8000-00000000000-",
+    ],
+)
+def test_public_and_run_ids_reject_extra_hyphens(migrated_engine: object, malformed_uuid: str) -> None:
+    """Catch UUID-shaped values whose fifth hyphen replaces a required hexadecimal digit."""
+    with migrated_engine.connect() as connection, connection.begin():  # type: ignore[attr-defined]
+        replay_id = _insert_replay(connection)
+        _assert_integrity_error(
+            connection,
+            "INSERT INTO players (public_id, display_name, identity_revision, created_at, updated_at) "
+            "VALUES (:public_id, 'x', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            {"public_id": malformed_uuid},
+        )
+        _assert_integrity_error(
+            connection,
+            "INSERT INTO parser_runs (run_id, replay_id, parser_version, schema_version, input_sha256, status, "
+            "warnings_json, started_at) VALUES (:run_id, :replay, 'v1', 1, :sha, 'running', '[]', CURRENT_TIMESTAMP)",
+            {"run_id": malformed_uuid, "replay": replay_id, "sha": SHA_B},
+        )
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        ".",
+        "..",
+        "./replay.rep",
+        "../replay.rep",
+        "replays/./replay.rep",
+        "replays/../replay.rep",
+        "replays/.",
+        "replays/..",
+        "replays\\replay.rep",
+        "/replays/replay.rep",
+        "C:/replays/replay.rep",
+        "file:replays/replay.rep",
+        "replays//replay.rep",
+        "replays/",
+    ],
+)
+def test_managed_asset_rejects_non_product_relative_posix_paths(
+    migrated_engine: object, unsafe_path: str
+) -> None:
+    """Catch traversal, platform-specific, absolute, URI, and empty-segment asset paths."""
+    with migrated_engine.connect() as connection, connection.begin():  # type: ignore[attr-defined]
+        _assert_integrity_error(
+            connection,
+            "INSERT INTO managed_assets (public_id, sha256, kind, relative_path, size_bytes, created_at) "
+            "VALUES ('00000000-0000-4000-8000-000000000001', :sha, 'replay', :path, 1, CURRENT_TIMESTAMP)",
+            {"sha": SHA_A, "path": unsafe_path},
+        )
+
+
+def test_managed_asset_accepts_nested_product_relative_posix_paths(migrated_engine: object) -> None:
+    """Keep legitimate nested package paths available at the database boundary."""
+    with migrated_engine.connect() as connection, connection.begin():  # type: ignore[attr-defined]
+        _insert_asset(connection, path="replays/sha256/ab/cd.rep")
+        _insert_asset(
+            connection,
+            public_id=PUBLIC_B,
+            sha256=SHA_B,
+            path="maps/v1/manifests/map.json",
+        )
+
+
 def test_canonical_json_uses_stable_bytes_and_rejects_nonfinite_numbers() -> None:
     """Catch insertion-order-dependent cache inputs and nonstandard JSON numbers."""
     json_type = CanonicalJSON()

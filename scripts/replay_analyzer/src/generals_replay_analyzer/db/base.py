@@ -43,6 +43,7 @@ class PublicIdMixin:
             "length(public_id) = 36 AND public_id = lower(public_id) "
             "AND substr(public_id, 9, 1) = '-' AND substr(public_id, 14, 1) = '-' "
             "AND substr(public_id, 19, 1) = '-' AND substr(public_id, 24, 1) = '-' "
+            "AND length(replace(public_id, '-', '')) = 32 "
             "AND replace(public_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
             name="public_id_lowercase_uuid",
         ),

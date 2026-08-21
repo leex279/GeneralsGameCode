@@ -48,6 +48,7 @@ def _run_id_column() -> Mapped[str]:
             "length(run_id) = 36 AND run_id = lower(run_id) "
             "AND substr(run_id, 9, 1) = '-' AND substr(run_id, 14, 1) = '-' "
             "AND substr(run_id, 19, 1) = '-' AND substr(run_id, 24, 1) = '-' "
+            "AND length(replace(run_id, '-', '')) = 32 "
             "AND replace(run_id, '-', '') NOT GLOB '*[^0-9a-f]*'",
             name="run_id_lowercase_uuid",
         ),
@@ -63,8 +64,13 @@ class ManagedAsset(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
         lowercase_sha256_check("sha256"),
         CheckConstraint("size_bytes >= 0", name="size_bytes_nonnegative"),
         CheckConstraint(
-            "length(relative_path) > 0 AND substr(relative_path, 1, 1) NOT IN ('/', '\\') "
-            "AND relative_path NOT LIKE '%://%' AND relative_path NOT GLOB '[A-Za-z]:*'",
+            "length(relative_path) > 0 AND substr(relative_path, 1, 1) <> '/' "
+            "AND substr(relative_path, -1, 1) <> '/' AND instr(relative_path, '\\') = 0 "
+            "AND instr(relative_path, ':') = 0 AND instr(relative_path, char(0)) = 0 "
+            "AND instr(relative_path, '//') = 0 AND relative_path NOT IN ('.', '..') "
+            "AND relative_path NOT LIKE './%' AND relative_path NOT LIKE '../%' "
+            "AND relative_path NOT LIKE '%/./%' AND relative_path NOT LIKE '%/../%' "
+            "AND relative_path NOT LIKE '%/.' AND relative_path NOT LIKE '%/..'",
             name="relative_path_product_relative",
         ),
         Index("ix_managed_assets_kind_created_at", "kind", "created_at"),
@@ -1001,7 +1007,8 @@ def immutability_triggers() -> list[tuple[str, str]]:
         name = f"{evidence_stem}_no_{timing.lower()}"
         triggers.append((name, _abort_trigger(name, timing, "evidence_items", when, message)))
 
-    parent_succeeded = "EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded')"
+    old_parent_succeeded = "EXISTS (SELECT 1 FROM parser_runs WHERE id = OLD.parser_run_id AND status = 'succeeded')"
+    new_parent_succeeded = "EXISTS (SELECT 1 FROM parser_runs WHERE id = NEW.parser_run_id AND status = 'succeeded')"
     changed = " OR ".join(
         f"NEW.{column} IS NOT OLD.{column}"
         for column in (
@@ -1024,12 +1031,22 @@ def immutability_triggers() -> list[tuple[str, str]]:
     triggers.extend(
         [
             (
+                "trg_replay_players_succeeded_no_insert",
+                _abort_trigger(
+                    "trg_replay_players_succeeded_no_insert",
+                    "INSERT",
+                    "replay_players",
+                    new_parent_succeeded,
+                    "successful parser player evidence cannot be appended",
+                ),
+            ),
+            (
                 "trg_replay_players_succeeded_no_delete",
                 _abort_trigger(
                     "trg_replay_players_succeeded_no_delete",
                     "DELETE",
                     "replay_players",
-                    parent_succeeded,
+                    old_parent_succeeded,
                     "successful parser player evidence cannot be deleted",
                 ),
             ),
@@ -1039,7 +1056,7 @@ def immutability_triggers() -> list[tuple[str, str]]:
                     "trg_replay_players_succeeded_no_observation_update",
                     "UPDATE",
                     "replay_players",
-                    f"({parent_succeeded}) AND ({changed})",
+                    f"({old_parent_succeeded}) AND ({changed})",
                     "successful parser player observations cannot be updated",
                 ),
             ),

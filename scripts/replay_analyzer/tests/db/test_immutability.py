@@ -267,6 +267,13 @@ def test_successful_observations_reject_raw_append(observation_graph: tuple[Conn
     statements = [
         (
             (
+                "INSERT INTO replay_players (public_id, replay_id, parser_run_id, slot_index, slot_kind, observed_json) "
+                "VALUES ('00000000-0000-4000-8000-000000000098', :replay, :run, 1, 'human', '{}')"
+            ),
+            {"run": identities["parser"], "replay": identities["replay"]},
+        ),
+        (
+            (
                 "INSERT INTO commands (parser_run_id, replay_id, command_index, frame, player_index, message_type, "
                 "start_offset, end_offset, arguments_json, evidence_item_id) VALUES "
                 "(:run, :replay, 1, 2, 0, 1002, 20, 30, '{}', :evidence)"
