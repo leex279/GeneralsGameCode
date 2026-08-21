@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from platformdirs import PlatformDirs
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_PREFIX = "GENERALS_REPLAY_ANALYZER_"
+_ALLOW_REPOSITORY_OUTPUTS_FOR_TESTING: ContextVar[bool] = ContextVar(
+    "allow_repository_outputs_for_testing",
+    default=False,
+)
 
 
 def _default_data_root() -> Path:
@@ -39,7 +46,7 @@ class AnalyzerSettings(BaseSettings):
     """Frozen application configuration shared by import, analysis, and presentation stages."""
 
     model_config = SettingsConfigDict(
-        env_prefix="GENERALS_REPLAY_ANALYZER_",
+        env_prefix=_ENV_PREFIX,
         env_ignore_empty=True,
         extra="forbid",
         frozen=True,
@@ -57,7 +64,30 @@ class AnalyzerSettings(BaseSettings):
     watched_folders: tuple[Path, ...] = ()
     import_mode: Literal["copy", "reference"] = "copy"
     minimum_longitudinal_sample_size: int = Field(default=5, ge=1)
-    allow_repository_data_root: bool = False
+
+    @classmethod
+    def _for_testing_with_repository_outputs(cls, **values: Any) -> Self:
+        """Construct settings with checkout outputs enabled only for isolated tests."""
+        token = _ALLOW_REPOSITORY_OUTPUTS_FOR_TESTING.set(True)
+        try:
+            return cls(**values)
+        finally:
+            _ALLOW_REPOSITORY_OUTPUTS_FOR_TESTING.reset(token)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_prefixed_environment(cls, value: Any) -> Any:
+        """Fail fast on misspelled product environment settings."""
+        known_names = {f"{_ENV_PREFIX}{field_name}".upper() for field_name in cls.model_fields}
+        unknown_names = sorted(
+            name
+            for name in os.environ
+            if name.upper().startswith(_ENV_PREFIX) and name.upper() not in known_names
+        )
+        if unknown_names:
+            joined_names = ", ".join(unknown_names)
+            raise ValueError(f"Unknown {_ENV_PREFIX} environment setting(s): {joined_names}")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -90,7 +120,7 @@ class AnalyzerSettings(BaseSettings):
         for field_name in output_fields:
             normalized = _absolute_path(getattr(self, field_name))
             object.__setattr__(self, field_name, normalized)
-            if not self.allow_repository_data_root:
+            if not _ALLOW_REPOSITORY_OUTPUTS_FOR_TESTING.get():
                 checkout = _containing_git_checkout(normalized)
                 if checkout is not None:
                     raise ValueError(f"{field_name} points inside a Git checkout: {checkout}")

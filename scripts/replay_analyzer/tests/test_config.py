@@ -137,16 +137,64 @@ def test_runtime_output_override_inside_git_checkout_is_rejected(tmp_path: Path)
         _settings(tmp_path, database_path=PROJECT_ROOT / "runtime.sqlite3")
 
 
-def test_test_only_repository_override_is_explicit() -> None:
-    """Permit checkout-local paths only when a test deliberately opts into them."""
-    settings = AnalyzerSettings(
+def test_repository_protection_cannot_be_disabled_through_model_input() -> None:
+    """Keep the repository safety escape hatch outside the settings model surface."""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AnalyzerSettings(
+            _env_file=None,
+            data_root=PROJECT_ROOT / ".test-runtime-data",
+            allow_repository_data_root=True,
+        )
+
+
+def test_repository_protection_cannot_be_disabled_through_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent a process environment setting from authorizing checkout writes."""
+    monkeypatch.setenv(
+        "GENERALS_REPLAY_ANALYZER_DATA_ROOT",
+        str(PROJECT_ROOT / ".environment-runtime-data"),
+    )
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ALLOW_REPOSITORY_DATA_ROOT", "true")
+
+    with pytest.raises(ValidationError, match="ALLOW_REPOSITORY_DATA_ROOT"):
+        AnalyzerSettings(_env_file=None)
+
+
+def test_private_test_only_repository_override_is_explicit() -> None:
+    """Permit checkout-local paths only through an unmistakably private test helper."""
+    settings = AnalyzerSettings._for_testing_with_repository_outputs(
         _env_file=None,
         data_root=PROJECT_ROOT / ".test-runtime-data",
-        allow_repository_data_root=True,
     )
 
     assert settings.data_root == (PROJECT_ROOT / ".test-runtime-data").resolve()
     assert not settings.data_root.exists()
+    assert "allow_repository_data_root" not in AnalyzerSettings.model_fields
+
+
+def test_unknown_prefixed_environment_variable_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject misspelled analyzer settings instead of silently using a default."""
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_OLLAMA_MODLE", "misspelled-model")
+
+    with pytest.raises(ValidationError, match="OLLAMA_MODLE"):
+        AnalyzerSettings(_env_file=None)
+
+
+def test_unrelated_environment_variable_is_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep strict analyzer-prefix validation isolated from the host process environment."""
+    monkeypatch.setenv("UNRELATED_APPLICATION_SETTING", "unrelated")
+
+    settings = _settings(tmp_path)
+
+    assert settings.data_root == (tmp_path / "product-data").resolve()
 
 
 def test_run_directory_matches_accepted_runner_layout(tmp_path: Path) -> None:
