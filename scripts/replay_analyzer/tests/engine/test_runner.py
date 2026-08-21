@@ -888,7 +888,7 @@ def test_missing_or_corrupt_map_member_is_asset_invalid(tmp_path: Path, member: 
 
     def break_map(request: ProcessLaunchRequest) -> None:
         _publish_valid_evidence(request)
-        target = next((request.run_dir / "map-assets-v1").glob(f"*/{member}"))
+        target = next((request.run_dir / "map-assets-v2").glob(f"*/{member}"))
         if member == "manifest.json":
             target.write_bytes(b"not-json")
         else:
@@ -911,7 +911,7 @@ def test_unexpected_nested_map_output_is_asset_invalid_and_preserved(tmp_path: P
 
     def publish_extra_map_output(request: ProcessLaunchRequest) -> None:
         _publish_valid_evidence(request)
-        extra = request.run_dir / "map-assets-v1" / "unexpected-transaction"
+        extra = request.run_dir / "map-assets-v2" / "unexpected-transaction"
         extra.mkdir()
         (extra / "partial.bin").write_bytes(b"preserve")
 
@@ -924,7 +924,7 @@ def test_unexpected_nested_map_output_is_asset_invalid_and_preserved(tmp_path: P
 
     assert result.status is EngineRunStatus.ASSET_INVALID
     assert result.trace_path is None
-    assert (result.run_dir / "map-assets-v1" / "unexpected-transaction" / "partial.bin").read_bytes() == b"preserve"
+    assert (result.run_dir / "map-assets-v2" / "unexpected-transaction" / "partial.bin").read_bytes() == b"preserve"
 
 
 def test_runner_detects_replay_mutation_without_restoring_or_deleting_caller_bytes(tmp_path: Path) -> None:

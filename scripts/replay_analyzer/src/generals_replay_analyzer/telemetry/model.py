@@ -644,7 +644,7 @@ class MapAssetReference(BaseModel):
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     type: Literal["map_asset"] | None = None
-    schema_version: Literal[1] | None = None
+    schema_version: Literal[1, 2] | None = None
     content_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     engine_data_identity: str | None = Field(default=None, min_length=1)
     map_identity: str | None = Field(default=None, min_length=1)
@@ -661,7 +661,7 @@ class MapAssetReference(BaseModel):
         if any(value is not None for value in strict):
             if any(value is None for value in strict):
                 raise ValueError("map asset reference identity fields must be jointly present")
-            if self.path != f"map-assets-v1/{self.content_sha256}/manifest.json":
+            if self.path != f"map-assets-v{self.schema_version}/{self.content_sha256}/manifest.json":
                 raise ValueError("map asset path must embed its content_sha256 identity")
         return self
 

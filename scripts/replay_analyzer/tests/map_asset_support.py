@@ -114,23 +114,23 @@ def write_test_map_asset(
         "grids": {"pathing": grid, "terrain": grid},
         "map_identity": map_identity,
         "members": members,
-        "producer": {"name": "zero-hour-replay-map-export", "version": 1, "zlib_version": zlib.ZLIB_VERSION},
-        "schema_version": 1,
+        "producer": {"name": "zero-hour-replay-map-export", "version": 2, "zlib_version": zlib.ZLIB_VERSION},
+        "schema_version": 2,
         "type": "map_asset",
     }
     placeholder = (json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
     content_hash = hashlib.sha256(placeholder).hexdigest()
     manifest["content_sha256"] = content_hash
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
-    asset_dir = directory / "map-assets-v1" / content_hash
+    asset_dir = directory / "map-assets-v2" / content_hash
     asset_dir.mkdir(parents=True, exist_ok=True)
     for name, data in compressed.items():
         (asset_dir / name).write_bytes(data)
     (asset_dir / "manifest.json").write_bytes(manifest_bytes)
     return {
         "type": "map_asset",
-        "schema_version": 1,
-        "path": f"map-assets-v1/{content_hash}/manifest.json",
+        "schema_version": 2,
+        "path": f"map-assets-v2/{content_hash}/manifest.json",
         "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "content_sha256": content_hash,
         "engine_data_identity": engine_identity,

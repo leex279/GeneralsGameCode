@@ -523,6 +523,40 @@ def test_replay_user_data_root_is_modern_guarded_and_applied_before_map_discover
     )
 
 
+def test_default_user_data_identity_resolves_junction_targets_and_fails_closed(
+    tmp_path: Path,
+    repository_root: Path,
+) -> None:
+    """Catch alias validation rejecting the default junction before resolving it, or ignoring resolution failure."""
+    target = tmp_path / "default-target"
+    target.mkdir()
+    junction = tmp_path / "default-junction"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"host cannot create a directory junction: {created.stderr}")
+    assert os.path.normcase(str(junction.resolve())) == os.path.normcase(str(target.resolve()))
+
+    command_line = (repository_root / "Core/GameEngine/Source/Common/CommandLine.cpp").read_text(encoding="utf-8")
+    resolver = command_line.split("Bool canonicalExistingAnalyzerDirectory", maxsplit=1)[1].split(
+        "Bool analyzerPathIdentitiesMatch", maxsplit=1
+    )[0]
+    validator = command_line.split("void validateReplayUserDataRootOptions()", maxsplit=1)[1].split(
+        "Int parseReplayParseDump", maxsplit=1
+    )[0]
+
+    assert "requireDirectIdentity && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)" in resolver
+    assert "GetFinalPathNameByHandleA" in resolver
+    assert "defaultRootExists" in validator
+    assert "defaultRootExists && !canonicalExistingAnalyzerDirectory" in validator
+    assert "could not resolve the existing registry-derived user-data directory" in validator
+
+
 def test_terrain_road_bridge_creation_is_scoped_as_map_loaded(repository_root: Path) -> None:
     """Catch terrain-road GenericBridge roots missing the authoritative map-load lifecycle source."""
     terrain_logic = (

@@ -209,7 +209,7 @@ def _preflight_ansi_paths(
         ),
         (
             "map transaction",
-            run_dir / "map-assets-v1" / f"{hash_name}{transaction_suffix}" / "pathing-amphibious.u8.zlib",
+            run_dir / "map-assets-v2" / f"{hash_name}{transaction_suffix}" / "pathing-amphibious.u8.zlib",
         ),
         ("outcome transaction", run_dir / "replay-outcome.json.tmp.4294967295.100"),
     ]
@@ -321,7 +321,7 @@ def _preflight_output_layout(run_dir: Path, request_sha256: str) -> tuple[Path, 
         "stderr.log",
         "trace.ndjson",
         "replay-outcome.json",
-        "map-assets-v1",
+        "map-assets-v2",
     }
     catalogs: list[Path] = []
     seen: set[str] = set()
@@ -333,7 +333,7 @@ def _preflight_output_layout(run_dir: Path, request_sha256: str) -> tuple[Path, 
             continue
         if entry.name not in allowed_fixed:
             raise ValueError(f"unexpected run output: {entry.name}")
-        if entry.name == "map-assets-v1":
+        if entry.name == "map-assets-v2":
             try:
                 info = entry.lstat()
             except OSError as error:
@@ -479,7 +479,7 @@ def _validated_asset_paths(run_dir: Path, manifest: ManifestRecord) -> tuple[Pat
     _require_plain_output_file(catalog_path, "game-data catalog")
     map_manifest = run_dir / Path(*map_reference.path.split("/"))
     map_directory = map_manifest.parent
-    map_root = run_dir / "map-assets-v1"
+    map_root = run_dir / f"map-assets-v{map_reference.schema_version}"
     map_outputs = tuple(map_root.iterdir())
     if len(map_outputs) != 1 or map_outputs[0] != map_directory:
         raise ValueError("map asset root contains an unexpected output or transaction")
@@ -711,7 +711,7 @@ def export_telemetry(
 
     startup_status = _startup_status(outcome)
     if startup_status is not None:
-        playback_artifacts = trace_path.exists() or bool(catalog_candidates) or (run_dir / "map-assets-v1").exists()
+        playback_artifacts = trace_path.exists() or bool(catalog_candidates) or (run_dir / "map-assets-v2").exists()
         if playback_artifacts:
             diagnostics.append(
                 RunDiagnostic(

@@ -737,7 +737,7 @@ namespace
 		}
 		const DWORD attributes = GetFileAttributesA(absolute.c_str());
 		if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)
-			|| (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+			|| (requireDirectIdentity && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)))
 		{
 			return FALSE;
 		}
@@ -913,8 +913,23 @@ namespace
 			replayUserDataCommandLineError("-replay-user-data-root must name an existing direct non-reparse directory");
 		}
 		AsciiString defaultRootIdentity;
-		if (canonicalExistingAnalyzerDirectory(TheGlobalData->getPath_UserData().str(), defaultRootIdentity, FALSE)
-			&& _stricmp(canonicalRoot.str(), defaultRootIdentity.str()) == 0)
+		const Char *defaultRoot = TheGlobalData->getPath_UserData().str();
+		const DWORD defaultRootAttributes = GetFileAttributesA(defaultRoot);
+		const Bool defaultRootExists = defaultRootAttributes != INVALID_FILE_ATTRIBUTES;
+		if (!defaultRootExists)
+		{
+			const DWORD defaultRootError = GetLastError();
+			if (defaultRootError != ERROR_FILE_NOT_FOUND && defaultRootError != ERROR_PATH_NOT_FOUND)
+			{
+				replayUserDataCommandLineError("could not inspect the registry-derived user-data directory");
+			}
+		}
+		// TheSuperHackers @feature Leex 21/08/2026 Resolve an existing registry-root junction before excluding aliases to its final directory identity. (#TBD)
+		if (defaultRootExists && !canonicalExistingAnalyzerDirectory(defaultRoot, defaultRootIdentity, FALSE))
+		{
+			replayUserDataCommandLineError("could not resolve the existing registry-derived user-data directory");
+		}
+		if (defaultRootExists && _stricmp(canonicalRoot.str(), defaultRootIdentity.str()) == 0)
 		{
 			replayUserDataCommandLineError("-replay-user-data-root must not alias the registry-derived user-data directory");
 		}

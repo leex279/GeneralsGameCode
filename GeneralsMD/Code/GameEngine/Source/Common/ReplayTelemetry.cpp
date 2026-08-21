@@ -17,7 +17,6 @@
 
 #include <array>
 #include <cerrno>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,27 +25,79 @@
 
 namespace
 {
-	std::string canonicalPath(const char *value)
+	void normalizePathSeparators(std::string &path)
 	{
-		std::string result(value != nullptr ? value : "");
-		for (char &character : result)
+		for (char &character : path)
 		{
-			if (character == '\\') character = '/';
-			character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+			if (character == '/') character = '\\';
 		}
-		return result;
+		while (path.size() > 3 && path.back() == '\\') path.pop_back();
 	}
 
-	// TheSuperHackers @feature Leex 21/08/2026 Keep user-map telemetry identity stable across validated isolated profile roots. (#TBD)
-	AsciiString canonicalReplayMapIdentity(const AsciiString &loadedMap)
+	void asciiLowerPath(std::string &path)
 	{
-		if (TheGlobalData == nullptr) return loadedMap;
-		std::string userRoot = canonicalPath(TheGlobalData->getPath_UserData().str());
-		while (!userRoot.empty() && userRoot.back() == '/') userRoot.pop_back();
-		const std::string userMaps = userRoot + "/maps/";
-		const std::string mapPath = canonicalPath(loadedMap.str());
-		if (userRoot.empty() || mapPath.compare(0, userMaps.size(), userMaps) != 0) return loadedMap;
-		return AsciiString((std::string("userdata/maps/") + mapPath.substr(userMaps.size())).c_str());
+		for (char &character : path)
+		{
+			if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+		}
+	}
+
+	Bool canonicalAbsolutePath(const char *value, std::string &result)
+	{
+		char absolute[_MAX_PATH];
+		const DWORD length = GetFullPathNameA(value, ARRAY_SIZE(absolute), absolute, nullptr);
+		if (length == 0 || length >= ARRAY_SIZE(absolute)) return FALSE;
+		result.assign(absolute, length);
+		normalizePathSeparators(result);
+		asciiLowerPath(result);
+		return TRUE;
+	}
+
+	Bool isPathComponentWithin(const std::string &path, const std::string &parent)
+	{
+		return path.size() > parent.size() && path.compare(0, parent.size(), parent) == 0
+			&& path[parent.size()] == '\\';
+	}
+
+	Bool isTextualUserMapsCandidate(const std::string &path, const std::string &userRoot)
+	{
+		if (!isPathComponentWithin(path, userRoot)) return FALSE;
+		size_t cursor = userRoot.size() + 1;
+		while (path.compare(cursor, 2, ".\\") == 0) cursor += 2;
+		const size_t separator = path.find('\\', cursor);
+		return separator != std::string::npos && path.compare(cursor, separator - cursor, "maps") == 0;
+	}
+
+	// TheSuperHackers @feature Leex 21/08/2026 Canonicalize user-map identity by Win32 components and fail closed when a textual Maps candidate escapes. (#TBD)
+	Bool canonicalReplayMapIdentity(const AsciiString &loadedMap, AsciiString &identity)
+	{
+		identity = loadedMap;
+		if (TheGlobalData == nullptr) return TRUE;
+		std::string userRoot;
+		std::string mapPath;
+		if (!canonicalAbsolutePath(TheGlobalData->getPath_UserData().str(), userRoot)
+			|| !canonicalAbsolutePath(loadedMap.str(), mapPath))
+		{
+			return FALSE;
+		}
+		std::string userMaps;
+		if (!canonicalAbsolutePath((userRoot + "\\Maps").c_str(), userMaps)) return FALSE;
+
+		std::string textualMap(loadedMap.str());
+		normalizePathSeparators(textualMap);
+		asciiLowerPath(textualMap);
+		const Bool textualUserMapsCandidate = isTextualUserMapsCandidate(textualMap, userRoot);
+		const Bool candidateEscapesUserMaps = textualUserMapsCandidate && !isPathComponentWithin(mapPath, userMaps);
+		if (candidateEscapesUserMaps) return FALSE;
+		if (!isPathComponentWithin(mapPath, userMaps)) return TRUE;
+
+		std::string relative = mapPath.substr(userMaps.size() + 1);
+		for (char &character : relative)
+		{
+			if (character == '\\') character = '/';
+		}
+		identity = AsciiString((std::string("userdata/maps/") + relative).c_str());
+		return TRUE;
 	}
 
 	class Sha256
@@ -552,7 +603,12 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	ReplayCombat::observeReplayHeader(header);
 	if (TheRecorder != nullptr && TheRecorder->getGameInfo() != nullptr)
 	{
-		s_mapIdentity = canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap());
+		if (!canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap(), s_mapIdentity))
+		{
+			setWriterError("map_identity_path_escape", "loaded user-map path could not be contained below the selected Maps directory", TRUE);
+			discardPendingOutput("could not close telemetry output after map identity rejection");
+			return;
+		}
 		s_initialSeed = TheRecorder->getGameInfo()->getSeed();
 	}
 	// TheSuperHackers @feature Leex 18/08/2026 Keep the trace unpublished until map overrides and replay players are authoritative. (#TBD)

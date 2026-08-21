@@ -54,7 +54,8 @@ def _rebind_manifest(asset_dir: Path, reference: dict[str, str], manifest: dict[
     manifest_path.write_bytes(manifest_bytes)
     reference.update(
         content_sha256=content_hash,
-        path=f"map-assets-v1/{content_hash}/manifest.json",
+        path=f"map-assets-v{manifest['schema_version']}/{content_hash}/manifest.json",
+        schema_version=manifest["schema_version"],
         sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
     return manifest_path
@@ -76,7 +77,7 @@ def _compressed_member(raw: bytes, *, dtype: str, width: int = 2, height: int = 
     }
 
 
-def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
+def _write_asset(root: Path, *, schema_version: int = 2) -> tuple[Path, dict[str, str]]:
     """Write one hand-derived canonical 2x2 asset and return its strict trace reference."""
     raws = {
         "height.f32.zlib": struct.pack("<4f", 0.0, 1.5, 2.0, 3.25),
@@ -130,10 +131,14 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
                     "exempt_kindof_aircraft", "exempt_kindof_bridge",
                     "exempt_kindof_projectile", "exempt_kindof_parachutable",
                     "exempt_locomotor_air_surface",
-                    "exempt_map_loaded_unclassified_immobile",
+                    *(["exempt_map_loaded_unclassified_immobile"] if schema_version == 2 else []),
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
-                "policy_source": "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
+                "policy_source": (
+                    "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
+                    if schema_version == 2
+                    else "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
+                ),
             },
             "float_encoding": "IEEE-754-binary32",
             "units": "engine_world_unit",
@@ -184,15 +189,15 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
         },
         "map_identity": MAP_ID,
         "members": members,
-        "producer": {"name": "zero-hour-replay-map-export", "version": 1, "zlib_version": zlib.ZLIB_VERSION},
-        "schema_version": 1,
+        "producer": {"name": "zero-hour-replay-map-export", "version": schema_version, "zlib_version": zlib.ZLIB_VERSION},
+        "schema_version": schema_version,
         "type": "map_asset",
     }
     placeholder = _canonical_bytes(manifest)
     content_hash = hashlib.sha256(placeholder).hexdigest()
     manifest["content_sha256"] = content_hash
     manifest_bytes = _canonical_bytes(manifest)
-    asset_dir = root / "map-assets-v1" / content_hash
+    asset_dir = root / f"map-assets-v{schema_version}" / content_hash
     asset_dir.mkdir(parents=True)
     for name, data in compressed.items():
         (asset_dir / name).write_bytes(data)
@@ -201,8 +206,8 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
         "content_sha256": content_hash,
         "engine_data_identity": ENGINE_ID,
         "map_identity": MAP_ID,
-        "path": f"map-assets-v1/{content_hash}/manifest.json",
-        "schema_version": 1,
+        "path": f"map-assets-v{schema_version}/{content_hash}/manifest.json",
+        "schema_version": schema_version,
         "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "type": "map_asset",
     }
@@ -305,7 +310,7 @@ def test_loader_rejects_tampered_or_partial_assets(tmp_path: Path, mutation: str
         manifest_path.write_bytes(manifest_bytes)
         reference = dict(reference)
         reference["content_sha256"] = manifest["content_sha256"]
-        reference["path"] = f"map-assets-v1/{manifest['content_sha256']}/manifest.json"
+        reference["path"] = f"map-assets-v2/{manifest['content_sha256']}/manifest.json"
         reference["sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
         # Keep the directory binding valid so each case reaches the intended member validation.
         rebound = manifest_path.parents[1] / manifest["content_sha256"]
@@ -412,7 +417,7 @@ def test_loader_rejects_oob_features_and_never_clamps(tmp_path: Path) -> None:
     manifest_path.write_bytes(manifest_bytes)
     reference.update(
         content_sha256=manifest["content_sha256"],
-        path=f"map-assets-v1/{manifest['content_sha256']}/manifest.json",
+        path=f"map-assets-v2/{manifest['content_sha256']}/manifest.json",
         sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
 
@@ -736,7 +741,7 @@ def test_loader_rejects_reparse_parent_escape_from_trusted_trace_directory(tmp_p
     outside = tmp_path / "outside"
     trusted.mkdir()
     asset_dir, reference = _write_asset(outside)
-    linked_root = trusted / "map-assets-v1"
+    linked_root = trusted / "map-assets-v2"
     try:
         linked_root.symlink_to(asset_dir.parent, target_is_directory=True)
     except OSError:
@@ -754,7 +759,7 @@ def test_loader_rejects_reparse_parent_escape_from_trusted_trace_directory(tmp_p
 def test_loader_rejects_contained_but_noncanonical_cache_path_alias(tmp_path: Path) -> None:
     trusted = tmp_path / "trusted"
     asset_dir, reference = _write_asset(trusted)
-    aliased = trusted / "nested" / "map-assets-v1" / asset_dir.name
+    aliased = trusted / "nested" / "map-assets-v2" / asset_dir.name
     shutil.copytree(asset_dir, aliased)
 
     with pytest.raises(MapAssetValidationError, match="canonical map asset cache path"):
@@ -766,10 +771,39 @@ def test_loader_rejects_contained_but_noncanonical_cache_path_alias(tmp_path: Pa
 
 
 def test_map_schema_is_packaged_verbatim(repository_root: Path) -> None:
-    canonical = repository_root / "scripts/replay_analyzer/contracts/map-asset-v1.schema.json"
+    canonical_v1 = repository_root / "scripts/replay_analyzer/contracts/map-asset-v1.schema.json"
+    canonical_v2 = repository_root / "scripts/replay_analyzer/contracts/map-asset-v2.schema.json"
     pyproject = (repository_root / "scripts/replay_analyzer/pyproject.toml").read_text(encoding="utf-8")
-    assert canonical.is_file()
+    assert canonical_v1.is_file() and canonical_v2.is_file()
     assert '"contracts/map-asset-v1.schema.json" = "generals_replay_analyzer/data/map-asset-v1.schema.json"' in pyproject
+    assert '"contracts/map-asset-v2.schema.json" = "generals_replay_analyzer/data/map-asset-v2.schema.json"' in pyproject
+
+
+def test_v1_schema_remains_frozen_and_v2_owns_waypoint_id_links(repository_root: Path) -> None:
+    """Catch a producer extension silently redefining the already-published map-asset v1 contract."""
+    contracts = repository_root / "scripts/replay_analyzer/contracts"
+    v1_bytes = (contracts / "map-asset-v1.schema.json").read_bytes()
+    assert hashlib.sha256(v1_bytes).hexdigest() == "ff4fd20233e0e6d1e00502fef97b750875471a9335aa7f08f8740186b98afb29"
+    v1 = json.loads(v1_bytes)
+    v2 = json.loads((contracts / "map-asset-v2.schema.json").read_text(encoding="utf-8"))
+
+    v1_waypoint = v1["$defs"]["waypoint"]["allOf"][1]
+    v2_waypoint = v2["$defs"]["waypoint"]["allOf"][1]
+    assert v1["properties"]["schema_version"] == {"const": 1}
+    assert v2["properties"]["schema_version"] == {"const": 2}
+    assert "link_waypoint_ids" not in v1_waypoint["properties"]
+    assert "link_waypoint_ids" in v2_waypoint["required"]
+
+
+def test_loader_accepts_frozen_pre_task10_v1_shape(tmp_path: Path) -> None:
+    """Catch the dual-version loader requiring Task 10-only waypoint or movement-policy fields from v1."""
+    asset_dir, reference = _write_asset(tmp_path, schema_version=1)
+    frozen = Path(__file__).parents[1] / "fixtures/map-asset-v1-pre-task10-manifest.json"
+    assert (asset_dir / "manifest.json").read_bytes() == frozen.read_bytes()
+
+    asset = load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+    assert asset.schema_version == 1
 
 
 def test_map_export_sources_remain_modern_zero_hour_read_only(repository_root: Path) -> None:
@@ -864,7 +898,7 @@ def test_telemetry_disabled_replay_creates_no_map_asset(
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
 ) -> None:
-    existing_asset_cache = zero_hour_runtime_executable.parent / "map-assets-v1"
+    existing_asset_cache = zero_hour_runtime_executable.parent / "map-assets-v2"
     before = (
         {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in existing_asset_cache.rglob("*") if path.is_file()}
         if existing_asset_cache.exists()
@@ -879,7 +913,7 @@ def test_telemetry_disabled_replay_creates_no_map_asset(
         check=False,
     )
     assert completed.returncode != 0
-    assert not (tmp_path / "map-assets-v1").exists()
+    assert not (tmp_path / "map-assets-v2").exists()
     after = (
         {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in existing_asset_cache.rglob("*") if path.is_file()}
         if existing_asset_cache.exists()
@@ -977,7 +1011,7 @@ def test_corrupt_or_partial_map_cache_fails_closed_without_rewrite(
     assert member.exists() is (mutation == "corrupt")
     if changed is not None:
         assert member.read_bytes() == changed
-    assert not any(".tmp." in path.name for path in (tmp_path / "map-assets-v1").iterdir())
+    assert not any(".tmp." in path.name for path in (tmp_path / "map-assets-v2").iterdir())
 
 
 @pytest.mark.engine
@@ -1003,7 +1037,7 @@ def test_writer_failure_discards_trace_but_preserves_valid_published_map_cache(
     )
     assert completed.returncode != 0
     assert not trace.exists()
-    asset_directories = list((tmp_path / "map-assets-v1").iterdir())
+    asset_directories = list((tmp_path / "map-assets-v2").iterdir())
     assert len(asset_directories) == 1
     load_map_asset(asset_directories[0] / "manifest.json")
     assert not any(".tmp." in path.name for path in asset_directories)

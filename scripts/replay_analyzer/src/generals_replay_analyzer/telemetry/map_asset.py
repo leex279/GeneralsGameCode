@@ -84,8 +84,8 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
     return result
 
 
-def _schema() -> dict[str, object]:
-    filename = "map-asset-v1.schema.json"
+def _schema(version: int) -> dict[str, object]:
+    filename = f"map-asset-v{version}.schema.json"
     source = Path(__file__).resolve().parents[3] / "contracts" / filename
     if source.is_file():
         return cast(dict[str, object], json.loads(source.read_text(encoding="utf-8")))
@@ -93,7 +93,7 @@ def _schema() -> dict[str, object]:
     return cast(dict[str, object], json.loads(packaged.read_text(encoding="utf-8")))
 
 
-_SCHEMA_VALIDATOR = Draft202012Validator(_schema())
+_SCHEMA_VALIDATORS = {version: Draft202012Validator(_schema(version)) for version in (1, 2)}
 
 
 def _canonical_json(value: object) -> bytes:
@@ -208,7 +208,9 @@ def _validate_contained_asset_path(
         else manifest_path.parent.parent.parent
     )
     trace_identity = _require_plain_directory(trace_directory, "trusted trace directory")
-    cache_directory = trace_directory / "map-assets-v1"
+    cache_directory = manifest_path.parent.parent
+    if cache_directory.name not in {"map-assets-v1", "map-assets-v2"}:
+        raise MapAssetValidationError("map manifest is not below a supported versioned map asset cache")
     cache_identity = _require_plain_directory(cache_directory, "map asset cache directory")
     asset_identity = _require_plain_directory(manifest_path.parent, "map asset directory")
     try:
@@ -342,6 +344,7 @@ class EntitySamplePolicy(StrictModel):
     exempt_position_policies: list[str]
     policy: Literal["pathfinder_xy_closed_except_explicit_engine_category"]
     policy_source: Literal[
+        "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
         "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
     ]
 
@@ -351,14 +354,18 @@ class EntitySamplePolicy(StrictModel):
             raise ValueError("bounded layer statuses must equal the closed manifest policy")
         if self.bounded_position_policies != ["pathfinder_xy_closed"]:
             raise ValueError("bounded position policies must equal the closed source-grounded policy")
-        if self.exempt_position_policies != [
+        v1_exemptions = [
             "exempt_kindof_aircraft",
             "exempt_kindof_bridge",
             "exempt_kindof_projectile",
             "exempt_kindof_parachutable",
             "exempt_locomotor_air_surface",
-            "exempt_map_loaded_unclassified_immobile",
-        ]:
+        ]
+        v2_exemptions = [*v1_exemptions, "exempt_map_loaded_unclassified_immobile"]
+        expected = v1_exemptions if self.policy_source == (
+            "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
+        ) else v2_exemptions
+        if self.exempt_position_policies != expected:
             raise ValueError("exempt position policies must equal the closed source-grounded policy")
         return self
 
@@ -478,7 +485,7 @@ class WaypointFeature(StrictModel):
     bounds_policy: BoundsPolicy
     labels: Annotated[list[str], Field(max_length=3)]
     link_names: Annotated[list[Annotated[str, Field(min_length=1, max_length=1024)]], Field(max_length=8)]
-    link_waypoint_ids: Annotated[list[Annotated[int, Field(ge=0)]], Field(max_length=8)]
+    link_waypoint_ids: Annotated[list[Annotated[int, Field(ge=0)]], Field(max_length=8)] | None = None
     name: Annotated[str, Field(min_length=1, max_length=1024)]
     position: Position3
     waypoint_id: Annotated[int, Field(ge=0)]
@@ -561,7 +568,7 @@ class Features(StrictModel):
 
 class Producer(StrictModel):
     name: Literal["zero-hour-replay-map-export"]
-    version: Literal[1]
+    version: Literal[1, 2]
     zlib_version: Annotated[str, Field(min_length=1, max_length=128)]
 
 
@@ -575,11 +582,13 @@ class MapAssetManifest(StrictModel):
     map_identity: Annotated[str, Field(min_length=1, max_length=4096)]
     members: dict[str, MemberMetadata]
     producer: Producer
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     type: Literal["map_asset"]
 
     @model_validator(mode="after")
     def _exact_members_and_grid_lengths(self) -> MapAssetManifest:
+        if self.producer.version != self.schema_version:
+            raise ValueError("map asset producer version must equal schema version")
         if set(self.members) != MEMBER_NAMES:
             raise ValueError("map asset manifest must declare exactly the five canonical members")
         count = self.grids.pathing.width * self.grids.pathing.height
@@ -640,6 +649,7 @@ class _EntityPositionPayload(Protocol):
 class MapAsset(StrictModel):
     """Fully validated immutable map values; constructed only after every member succeeds."""
 
+    schema_version: Literal[1, 2]
     content_sha256: str
     engine_data_identity: str
     map_identity: str
@@ -731,7 +741,7 @@ def _reference_value(reference: object, name: str) -> object:
 def _validate_reference(manifest_path: Path, manifest_bytes: bytes, manifest: MapAssetManifest, reference: object) -> None:
     expected_fields = {
         "type": "map_asset",
-        "schema_version": 1,
+        "schema_version": manifest.schema_version,
         "content_sha256": manifest.content_sha256,
         "engine_data_identity": manifest.engine_data_identity,
         "map_identity": manifest.map_identity,
@@ -741,12 +751,16 @@ def _validate_reference(manifest_path: Path, manifest_bytes: bytes, manifest: Ma
         if _reference_value(reference, field) != expected:
             raise MapAssetValidationError(f"map asset reference {field} differs from exact asset identity")
     path_value = _reference_value(reference, "path")
-    expected_path = f"map-assets-v1/{manifest.content_sha256}/manifest.json"
+    expected_path = f"map-assets-v{manifest.schema_version}/{manifest.content_sha256}/manifest.json"
     if not isinstance(path_value, str) or path_value != expected_path:
         raise MapAssetValidationError("map asset reference path is not the safe content-addressed path")
     if PurePosixPath(path_value).parts != tuple(expected_path.split("/")):
         raise MapAssetValidationError("map asset reference path is not the safe content-addressed path")
-    if tuple(manifest_path.parts[-3:]) != ("map-assets-v1", manifest.content_sha256, "manifest.json"):
+    if tuple(manifest_path.parts[-3:]) != (
+        f"map-assets-v{manifest.schema_version}",
+        manifest.content_sha256,
+        "manifest.json",
+    ):
         raise MapAssetValidationError("map manifest path differs from its content-addressed reference")
 
 
@@ -806,10 +820,25 @@ def _validate_feature_integrity(manifest: MapAssetManifest) -> None:
     if len(slots) != len(set(slots)):
         raise MapAssetValidationError("map feature start slots must be unique")
     waypoint_ids = [waypoint.waypoint_id for waypoint in features.waypoints]
+    waypoint_names = [waypoint.name for waypoint in features.waypoints]
     if len(waypoint_ids) != len(set(waypoint_ids)):
         raise MapAssetValidationError("map feature waypoint IDs must be unique")
+    if manifest.schema_version == 1:
+        if len(waypoint_names) != len(set(waypoint_names)):
+            raise MapAssetValidationError("v1 map feature waypoint names must be unique")
+        known_names = set(waypoint_names)
+        for waypoint in features.waypoints:
+            if waypoint.link_waypoint_ids is not None:
+                raise MapAssetValidationError("v1 map feature waypoint cannot contain link waypoint IDs")
+            if len(waypoint.link_names) != len(set(waypoint.link_names)):
+                raise MapAssetValidationError("v1 map feature waypoint links must be unique")
+            if any(link not in known_names for link in waypoint.link_names):
+                raise MapAssetValidationError("v1 map feature waypoint link targets an unknown unique name")
+        return _validate_non_waypoint_feature_integrity(manifest)
     known_waypoints = {waypoint.waypoint_id: waypoint for waypoint in features.waypoints}
     for waypoint in features.waypoints:
+        if waypoint.link_waypoint_ids is None:
+            raise MapAssetValidationError("v2 map feature waypoint requires link waypoint IDs")
         if len(waypoint.link_names) != len(waypoint.link_waypoint_ids):
             raise MapAssetValidationError("map feature waypoint link names and IDs must have equal length")
         if waypoint.link_waypoint_ids != sorted(set(waypoint.link_waypoint_ids)):
@@ -822,6 +851,11 @@ def _validate_feature_integrity(manifest: MapAssetManifest) -> None:
                 raise MapAssetValidationError("map feature waypoint link targets an unknown ID")
             if link_name != target.name:
                 raise MapAssetValidationError("map feature waypoint link name disagrees with its target ID")
+    _validate_non_waypoint_feature_integrity(manifest)
+
+
+def _validate_non_waypoint_feature_integrity(manifest: MapAssetManifest) -> None:
+    features = manifest.features
     bridge_indices = [bridge.bridge_index for bridge in features.bridges]
     if bridge_indices != sorted(bridge_indices) or len(bridge_indices) != len(set(bridge_indices)):
         raise MapAssetValidationError("map feature bridge indices must be uniquely ordered")
@@ -913,7 +947,10 @@ def load_map_asset(
     except (json.JSONDecodeError, ValueError) as error:
         raise MapAssetValidationError(f"map manifest contains invalid JSON: {error}") from error
     _require_canonical_json(manifest_bytes, parsed)
-    schema_errors = sorted(_SCHEMA_VALIDATOR.iter_errors(parsed), key=lambda issue: list(issue.absolute_path))
+    version = parsed.get("schema_version") if isinstance(parsed, dict) else None
+    if type(version) is not int or version not in _SCHEMA_VALIDATORS:
+        raise MapAssetValidationError(f"map manifest has unsupported schema_version: {version!r}")
+    schema_errors = sorted(_SCHEMA_VALIDATORS[version].iter_errors(parsed), key=lambda issue: list(issue.absolute_path))
     if schema_errors:
         schema_issue = schema_errors[0]
         location = ".".join(str(part) for part in schema_issue.absolute_path) or "root"
@@ -923,7 +960,7 @@ def load_map_asset(
     except ValidationError as error:
         raise MapAssetValidationError(f"map manifest typed validation failed: {error.errors()[0]['msg']}") from error
 
-    if asset_dir.name != manifest.content_sha256 or asset_dir.parent.name != "map-assets-v1":
+    if asset_dir.name != manifest.content_sha256 or asset_dir.parent.name != f"map-assets-v{manifest.schema_version}":
         raise MapAssetValidationError("map content hash directory does not match manifest")
     field = f'"content_sha256":"{manifest.content_sha256}"'.encode()
     if manifest_bytes.count(field) != 1:
@@ -965,6 +1002,7 @@ def load_map_asset(
 
     # Construct only after all schema, identity, filesystem, decompression, grid, and feature checks succeed.
     return MapAsset(
+        schema_version=manifest.schema_version,
         content_sha256=manifest.content_sha256,
         engine_data_identity=manifest.engine_data_identity,
         map_identity=manifest.map_identity,

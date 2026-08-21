@@ -348,7 +348,8 @@ namespace
 
 	Bool publishAsset(const std::string &contentHash, const std::vector<ExpectedFile> &files)
 	{
-		const std::string root = joinPath(parentPath(ReplayTelemetry::getTracePath()), "map-assets-v1");
+		// TheSuperHackers @feature Leex 21/08/2026 Publish waypoint-ID graph semantics under a new immutable map-asset v2 namespace. (#TBD)
+		const std::string root = joinPath(parentPath(ReplayTelemetry::getTracePath()), "map-assets-v2");
 		Bool ownsRoot = FALSE;
 		DWORD attributes = GetFileAttributesA(root.c_str());
 		if (attributes == INVALID_FILE_ATTRIBUTES)
@@ -821,8 +822,8 @@ namespace
 			+ ",\"static_objects\":" + staticObjects + ",\"waypoints\":" + waypoints + "},"
 			"\"grids\":{\"pathing\":" + grid + ",\"terrain\":" + grid + "},\"map_identity\":"
 			+ jsonString(ReplayTelemetry::getMapIdentity()) + ",\"members\":" + memberObject
-			+ ",\"producer\":{\"name\":\"zero-hour-replay-map-export\",\"version\":1,\"zlib_version\":"
-			+ jsonUtf8(zlibVersion()) + "},\"schema_version\":1,\"type\":\"map_asset\"}\n";
+			+ ",\"producer\":{\"name\":\"zero-hour-replay-map-export\",\"version\":2,\"zlib_version\":"
+			+ jsonUtf8(zlibVersion()) + "},\"schema_version\":2,\"type\":\"map_asset\"}\n";
 		if (s_failed) return FALSE;
 		contentHash = ReplayTelemetry::sha256Hex(manifest.data(), manifest.size()).str();
 		const std::string hashField = "\"content_sha256\":\"" + placeholderHash + "\"";
@@ -870,7 +871,7 @@ Bool ReplayMapExport::prepare()
 	std::vector<ExpectedFile> files;
 	if (!buildAsset(contentHash, manifest, files) || !publishAsset(contentHash, files)) return FALSE;
 	const std::string manifestSha256 = ReplayTelemetry::sha256Hex(manifest.data(), manifest.size()).str();
-	const std::string reference = "{\"type\":\"map_asset\",\"schema_version\":1,\"path\":\"map-assets-v1/"
+	const std::string reference = "{\"type\":\"map_asset\",\"schema_version\":2,\"path\":\"map-assets-v2/"
 		+ contentHash + "/manifest.json\",\"sha256\":\"" + manifestSha256 + "\",\"content_sha256\":\""
 		+ contentHash + "\",\"engine_data_identity\":" + jsonString(ReplayTelemetry::getEngineDataIdentity())
 		+ ",\"map_identity\":" + jsonString(ReplayTelemetry::getMapIdentity()) + "}";

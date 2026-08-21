@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -29,10 +30,13 @@ from generals_replay_analyzer.engine.runner import (
     default_process_launcher,
     export_telemetry,
 )
+from generals_replay_analyzer.telemetry.map_asset import load_map_asset
 from generals_replay_analyzer.telemetry.model import (
     CompleteRecord,
+    EntitySampleRecord,
     ManifestRecord,
     MatchOutcomeRecord,
+    ObjectCreatedRecord,
     PlayersInitializedRecord,
 )
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
@@ -127,9 +131,42 @@ _PINNED_MAP_MANIFEST = (
 
 @dataclass(frozen=True)
 class MapEvidence:
+    schema_version: int
     content_sha256: str
     manifest_sha256: str
     file_sha256: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class BridgeBindingEvidence:
+    bridge_index: int
+    object_id: int
+    template_name: str
+    initialization_snapshot_status: str
+    orientation: float
+    orientation_from_map_endpoints: float
+
+
+@dataclass(frozen=True)
+class WaypointEdgeEvidence:
+    source_waypoint_id: int
+    source_name: str
+    target_waypoint_id: int
+    target_name: str
+
+
+@dataclass(frozen=True)
+class OobExemptionEvidence:
+    object_id: int
+    template_name: str
+    position: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class RuntimeMapFacts:
+    bridge_bindings: tuple[BridgeBindingEvidence, ...]
+    duplicate_label_edges: tuple[WaypointEdgeEvidence, ...]
+    oob_exemptions: tuple[OobExemptionEvidence, ...]
 
 
 @dataclass(frozen=True)
@@ -142,6 +179,7 @@ class RunEvidence:
     map_evidence: MapEvidence | None
     match_outcome: dict[str, Any] | None
     player_names: tuple[str, ...]
+    runtime_map_facts: RuntimeMapFacts | None
 
 
 def _json_string(value: str) -> bytes:
@@ -223,6 +261,7 @@ def _map_evidence(paths: tuple[Path, ...]) -> MapEvidence:
     manifest_path = by_name["manifest.json"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     return MapEvidence(
+        schema_version=manifest["schema_version"],
         content_sha256=manifest["content_sha256"],
         manifest_sha256=_sha256_file(manifest_path),
         file_sha256=tuple((name, _sha256_file(by_name[name])) for name in sorted(by_name)),
@@ -286,6 +325,91 @@ def _run_disabled(
         map_evidence=None,
         match_outcome=None,
         player_names=(),
+        runtime_map_facts=None,
+    )
+
+
+def _runtime_map_facts(
+    trace_path: Path,
+    records: tuple[Any, ...],
+    manifest: ManifestRecord,
+) -> RuntimeMapFacts:
+    reference = manifest.payload.map_asset
+    assert reference is not None
+    asset = load_map_asset(
+        trace_path.parent / Path(*reference.path.split("/")),
+        expected_reference=reference,
+        expected_engine_data_identity=manifest.payload.engine_build,
+        expected_map_identity=manifest.payload.map_identity,
+        trusted_trace_directory=trace_path.parent,
+    )
+    creations = {
+        record.payload.object_id: record.payload
+        for record in records
+        if isinstance(record, ObjectCreatedRecord)
+    }
+    bridge_bindings: list[BridgeBindingEvidence] = []
+    for bridge in asset.bridges:
+        if bridge.object_id is None or bridge.template_name is None:
+            continue
+        creation = creations[bridge.object_id]
+        assert creation.creation_source == "map_loaded"
+        assert creation.template_name == bridge.template_name
+        assert creation.initialization_snapshot_status is not None
+        bridge_bindings.append(
+            BridgeBindingEvidence(
+                bridge_index=bridge.bridge_index,
+                object_id=bridge.object_id,
+                template_name=bridge.template_name,
+                initialization_snapshot_status=creation.initialization_snapshot_status,
+                orientation=creation.orientation,
+                orientation_from_map_endpoints=math.atan2(
+                    bridge.to.y - bridge.from_.y,
+                    bridge.to.x - bridge.from_.x,
+                ),
+            )
+        )
+
+    name_counts: dict[str, int] = {}
+    waypoints_by_id = {waypoint.waypoint_id: waypoint for waypoint in asset.waypoints}
+    for waypoint in asset.waypoints:
+        name_counts[waypoint.name] = name_counts.get(waypoint.name, 0) + 1
+    duplicate_label_edges: list[WaypointEdgeEvidence] = []
+    for waypoint in asset.waypoints:
+        for target_id in waypoint.link_waypoint_ids or ():
+            target = waypoints_by_id[target_id]
+            if name_counts[target.name] > 1:
+                duplicate_label_edges.append(
+                    WaypointEdgeEvidence(
+                        source_waypoint_id=waypoint.waypoint_id,
+                        source_name=waypoint.name,
+                        target_waypoint_id=target_id,
+                        target_name=target.name,
+                    )
+                )
+
+    oob_exemptions = {
+        OobExemptionEvidence(
+            object_id=record.payload.object_id,
+            template_name=record.payload.template_name or "",
+            position=(record.payload.position.x, record.payload.position.y, record.payload.position.z),
+        )
+        for record in records
+        if isinstance(record, EntitySampleRecord)
+        and record.payload.position_bounds_policy == "exempt_map_loaded_unclassified_immobile"
+        and (
+            record.payload.position.x < asset.bounds.minimum.x
+            or record.payload.position.x > asset.bounds.maximum.x
+            or record.payload.position.y < asset.bounds.minimum.y
+            or record.payload.position.y > asset.bounds.maximum.y
+        )
+    }
+    return RuntimeMapFacts(
+        bridge_bindings=tuple(sorted(bridge_bindings, key=lambda item: item.bridge_index)),
+        duplicate_label_edges=tuple(
+            sorted(duplicate_label_edges, key=lambda item: (item.source_waypoint_id, item.target_waypoint_id))
+        ),
+        oob_exemptions=tuple(sorted(oob_exemptions, key=lambda item: item.object_id)),
     )
 
 
@@ -348,6 +472,7 @@ def _run_enabled(
         map_evidence=_map_evidence(result.map_assets),
         match_outcome=match.payload.model_dump(mode="json"),
         player_names=player_names,
+        runtime_map_facts=_runtime_map_facts(result.trace_path, records, records[0]),
     )
 
 
@@ -506,6 +631,7 @@ def _summary(replay: Path, mode: str, evidence: RunEvidence) -> dict[str, object
             strict=True,
         )),
         "normalized_trace_sha256": evidence.normalized_trace_sha256,
+        "map_schema_version": evidence.map_evidence.schema_version if evidence.map_evidence else None,
         "map_content_sha256": evidence.map_evidence.content_sha256 if evidence.map_evidence else None,
         "manifest_sha256": evidence.map_evidence.manifest_sha256 if evidence.map_evidence else None,
         "map_file_sha256": dict(evidence.map_evidence.file_sha256) if evidence.map_evidence else None,
@@ -739,15 +865,29 @@ def test_pinned_gate_binds_an_isolated_user_data_root_to_both_launch_modes() -> 
 
 
 def test_loaded_user_map_identity_excludes_the_selected_absolute_profile_root(repository_root: Path) -> None:
-    """Catch isolated-root bytes contaminating authoritative map content and trace hashes."""
+    """Catch textual prefix rewriting accepting traversal/sibling escapes or locale-dependent identities."""
     source = (
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
     ).read_text(encoding="utf-8")
+    canonicalizer = source.split("void normalizePathSeparators", maxsplit=1)[1].split(
+        "class Sha256", maxsplit=1
+    )[0]
 
     assert "canonicalReplayMapIdentity" in source
     assert '"userdata/maps/"' in source
     assert "TheGlobalData->getPath_UserData()" in source
-    assert "s_mapIdentity = canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap())" in source
+    assert canonicalizer.count("GetFullPathNameA") == 1
+    assert canonicalizer.count("canonicalAbsolutePath(") >= 4
+    assert "isPathComponentWithin" in canonicalizer
+    assert "isTextualUserMapsCandidate" in canonicalizer
+    assert 'path.compare(cursor, 2, ".\\\\")' in canonicalizer
+    assert 'path.compare(cursor, separator - cursor, "maps")' in canonicalizer
+    assert "textualUserMapsCandidate" in canonicalizer
+    assert "candidateEscapesUserMaps" in canonicalizer
+    assert "std::tolower" not in canonicalizer
+    assert "asciiLowerPath" in canonicalizer
+    assert "canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap(), s_mapIdentity)" in source
+    assert 'setWriterError("map_identity_path_escape"' in source
 
 
 def test_verification_document_hash_tables_are_exact_and_cross_bound(repository_root: Path) -> None:
@@ -870,6 +1010,14 @@ def test_terrain_road_bridge_has_map_loaded_lifecycle_identity(
 
             assert evidence.outcome.playback_started is True
             assert evidence.map_evidence is not None
+            assert evidence.runtime_map_facts is not None
+            assert len(evidence.runtime_map_facts.bridge_bindings) == 2
+            assert all(
+                binding.template_name == "GenericBridge"
+                and binding.initialization_snapshot_status == "present"
+                and binding.orientation == pytest.approx(binding.orientation_from_map_endpoints, abs=1e-6)
+                for binding in evidence.runtime_map_facts.bridge_bindings
+            )
     finally:
         assert _sha256_file(replay) == replay_sha256
         assert _sha256_file(zero_hour_runtime_executable) == executable_sha256
@@ -901,6 +1049,29 @@ def test_map_loaded_unclassified_immobile_outside_pathfinder_bounds_is_source_ex
 
             assert evidence.outcome.playback_started is True
             assert evidence.map_evidence is not None
+            assert evidence.runtime_map_facts is not None
+            assert tuple(
+                (sample.object_id, sample.template_name)
+                for sample in evidence.runtime_map_facts.oob_exemptions
+            ) == (
+                (262, "TreePalm1"),
+                (347, "TreePalm2"),
+                (364, "TreePalm1"),
+                (365, "TreePalm1"),
+                (366, "TreePalm1"),
+                (490, "RocksG14"),
+                (492, "RocksG14"),
+                (502, "RocksG08"),
+                (542, "TreePalm04"),
+                (565, "TreePalm1"),
+                (569, "TreePalm04"),
+                (585, "TreePalm04"),
+                (589, "TreePalm04"),
+                (592, "TreePalm2short"),
+                (593, "TreePalm2short"),
+                (708, "TreePalm04"),
+            )
+            assert evidence.runtime_map_facts.duplicate_label_edges == ()
     finally:
         assert _sha256_file(replay) == replay_sha256
         assert _sha256_file(zero_hour_runtime_executable) == executable_sha256
@@ -919,6 +1090,7 @@ def test_all_retail_replays_match_with_telemetry_disabled_and_enabled(
     executable_sha256 = _sha256_file(zero_hour_runtime_executable)
     user_data_before = _user_data_inventory()
     summaries: list[dict[str, object]] = []
+    duplicate_label_edges: dict[str, tuple[WaypointEdgeEvidence, ...]] = {}
     try:
         with _short_root(tmp_path, "corpus") as root:
             for index, replay in enumerate(replays):
@@ -943,8 +1115,42 @@ def test_all_retail_replays_match_with_telemetry_disabled_and_enabled(
                 assert enabled.stdout == disabled.stdout, replay.name
                 assert enabled.stderr == disabled.stderr, replay.name
                 assert enabled.map_evidence is not None
+                assert enabled.runtime_map_facts is not None
+                if enabled.runtime_map_facts.duplicate_label_edges:
+                    duplicate_label_edges[replay.name] = enabled.runtime_map_facts.duplicate_label_edges
                 summaries.extend((_summary(replay, "disabled", disabled), _summary(replay, "enabled", enabled)))
 
+            assert {
+                replay_name: tuple(
+                    (
+                        edge.source_waypoint_id,
+                        edge.source_name,
+                        edge.target_waypoint_id,
+                        edge.target_name,
+                    )
+                    for edge in edges
+                )
+                for replay_name, edges in duplicate_label_edges.items()
+            } == {
+                "00-41-30_2v2_Nic_BOMD2MAS_HardAI_HardAI.rep": (
+                    (32, "Waypoint 128", 31, "Waypoint 128"),
+                ),
+                "05-01-50_2v2_amoor123_beshr_HardAI_HardAI.rep": (
+                    (32, "Waypoint 128", 31, "Waypoint 128"),
+                ),
+                "15-07-24_2v2v2_Emkill_haker_HardAI_HardAI_HardAI_HardAI.rep": (
+                    (11, "Waypoint 50", 10, "Waypoint 51"),
+                    (12, "Waypoint 51", 11, "Waypoint 50"),
+                    (14, "Waypoint 47", 13, "Waypoint 48"),
+                    (15, "Waypoint 50", 14, "Waypoint 47"),
+                    (17, "Waypoint 44", 16, "Waypoint 45"),
+                    (18, "Waypoint 49", 17, "Waypoint 44"),
+                    (22, "Waypoint 47", 21, "Waypoint 48"),
+                    (23, "Waypoint 46", 22, "Waypoint 47"),
+                    (25, "Waypoint 44", 24, "Waypoint 45"),
+                    (26, "Waypoint 43", 25, "Waypoint 44"),
+                ),
+            }
             print(json.dumps(summaries))
     finally:
         assert {replay: _sha256_file(replay) for replay in replays} == replay_hashes
