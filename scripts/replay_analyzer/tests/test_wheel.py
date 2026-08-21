@@ -14,12 +14,70 @@ from map_asset_support import write_test_map_asset
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "zero_hour_1_04" / "leex279_vs_fox27.rep"
 PROJECT_ROOT = Path(__file__).parents[1]
 
+MIGRATION_RESOURCES = {
+    "generals_replay_analyzer/db/migrations/env.py",
+    "generals_replay_analyzer/db/migrations/script.py.mako",
+    "generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py",
+}
+
 
 def _run(
     arguments: list[str], working_directory: Path, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run one isolated wheel-install command while retaining useful failure output."""
     return subprocess.run(arguments, check=True, cwd=working_directory, text=True, capture_output=True, env=environment)
+
+
+def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Path) -> None:
+    """Reject a wheel whose Alembic baseline depends on checkout files or in-memory SQLite."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    distribution_directory = tmp_path / "dist"
+    _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+    wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        assert MIGRATION_RESOURCES <= set(archive.namelist())
+
+    environment_directory = tmp_path / "migration-wheel-environment"
+    _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
+    environment_python = environment_directory / "Scripts" / "python.exe"
+    _run([str(environment_python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], tmp_path)
+    database_path = tmp_path / "wheel-library.sqlite3"
+    migration_script = textwrap.dedent(
+        """
+        import os
+        import sqlite3
+        from pathlib import Path
+
+        import generals_replay_analyzer
+        from generals_replay_analyzer.db import downgrade_database, upgrade_database
+
+        database = Path(os.environ["TEST_DATABASE_PATH"])
+        assert "migration-wheel-environment" in str(generals_replay_analyzer.__file__)
+        upgrade_database(database)
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0001_replay_analyzer_v2",)
+            first = connection.execute(
+                "SELECT type, name, COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+        downgrade_database(database)
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'alembic_version'"
+            ).fetchall() == []
+        upgrade_database(database)
+        with sqlite3.connect(database) as connection:
+            second = connection.execute(
+                "SELECT type, name, COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+        assert second == first
+        """
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATABASE_PATH"] = str(database_path)
+    environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
+    result = _run([str(environment_python), "-c", migration_script], tmp_path, environment)
+    assert result.returncode == 0
 
 
 def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_path: Path) -> None:
@@ -47,7 +105,11 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     _run([str(environment_python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], tmp_path)
 
     lookup = _run(
-        [str(environment_python), "-c", "from generals_replay_analyzer.contracts import message_name_for; print(message_name_for(1001))"],
+        [
+            str(environment_python),
+            "-c",
+            "from generals_replay_analyzer.contracts import message_name_for; print(message_name_for(1001))",
+        ],
         tmp_path,
     )
     assert lookup.stdout.strip() == "MSG_CREATE_SELECTED_GROUP"

@@ -5,10 +5,12 @@ description = "Replay analysis tools for Command & Conquer: Generals Zero Hour."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "alembic>=1.16,<2",
     "jsonschema>=4.25,<5",
     "platformdirs>=4.4,<5",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.10,<3",
+    "sqlalchemy>=2.0,<2.1",
 ]
 
 [project.scripts]
@@ -20,6 +22,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/generals_replay_analyzer"]
+exclude = ["src/generals_replay_analyzer/db/migrations/**"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "contracts/zero_hour_1_04_message_types.json" = "generals_replay_analyzer/data/zero_hour_1_04_message_types.json"
@@ -29,6 +32,7 @@ packages = ["src/generals_replay_analyzer"]
 "contracts/map-asset-v1.schema.json" = "generals_replay_analyzer/data/map-asset-v1.schema.json"
 "contracts/map-asset-v2.schema.json" = "generals_replay_analyzer/data/map-asset-v2.schema.json"
 "contracts/zero-hour-combat-types-v1.json" = "generals_replay_analyzer/data/zero-hour-combat-types-v1.json"
+"src/generals_replay_analyzer/db/migrations" = "generals_replay_analyzer/db/migrations"
 
 [dependency-groups]
 dev = [
