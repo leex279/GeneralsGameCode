@@ -1,0 +1,120 @@
+"""Immutable application settings and product-owned runtime paths."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Literal
+
+from platformdirs import PlatformDirs
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_data_root() -> Path:
+    """Return the platform product directory without creating it."""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "GeneralsReplayAnalyzer"
+    return Path(PlatformDirs("GeneralsReplayAnalyzer", appauthor=False, roaming=False).user_data_path)
+
+
+def _absolute_path(value: Path) -> Path:
+    """Normalize a configured path without requiring or creating it."""
+    return value.expanduser().resolve(strict=False)
+
+
+def _containing_git_checkout(path: Path) -> Path | None:
+    """Find a linked or ordinary Git checkout containing a prospective output path."""
+    for candidate in (path, *path.parents):
+        marker = candidate / ".git"
+        if marker.is_file() or marker.is_dir():
+            return candidate
+    return None
+
+
+# TheSuperHackers @feature Leex 21/08/2026 Centralize analyzer paths without creating runtime data during configuration. (#TBD)
+class AnalyzerSettings(BaseSettings):
+    """Frozen application configuration shared by import, analysis, and presentation stages."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="GENERALS_REPLAY_ANALYZER_",
+        env_ignore_empty=True,
+        extra="forbid",
+        frozen=True,
+    )
+
+    data_root: Path
+    database_path: Path
+    managed_replay_directory: Path
+    map_asset_directory: Path
+    cache_directory: Path
+    log_directory: Path
+    engine_executable: Path | None = None
+    ollama_url: str = Field(default="http://127.0.0.1:11434", min_length=1)
+    ollama_model: str = Field(default="qwen3.6:27b", min_length=1)
+    watched_folders: tuple[Path, ...] = ()
+    import_mode: Literal["copy", "reference"] = "copy"
+    minimum_longitudinal_sample_size: int = Field(default=5, ge=1)
+    allow_repository_data_root: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_owned_paths(cls, value: Any) -> Any:
+        """Fill product path defaults from one root before required fields are validated."""
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        root_value = values.get("data_root", _default_data_root())
+        root = Path(root_value)
+        values.setdefault("data_root", root)
+        values.setdefault("database_path", root / "replay-analyzer.sqlite3")
+        values.setdefault("managed_replay_directory", root / "replays")
+        values.setdefault("map_asset_directory", root / "map-assets-v1")
+        values.setdefault("cache_directory", root / "cache")
+        values.setdefault("log_directory", root / "logs")
+        return values
+
+    @model_validator(mode="after")
+    def _normalize_and_protect_paths(self) -> AnalyzerSettings:
+        """Freeze canonical paths and reject every repository-owned output location."""
+        output_fields = (
+            "data_root",
+            "database_path",
+            "managed_replay_directory",
+            "map_asset_directory",
+            "cache_directory",
+            "log_directory",
+        )
+        for field_name in output_fields:
+            normalized = _absolute_path(getattr(self, field_name))
+            object.__setattr__(self, field_name, normalized)
+            if not self.allow_repository_data_root:
+                checkout = _containing_git_checkout(normalized)
+                if checkout is not None:
+                    raise ValueError(f"{field_name} points inside a Git checkout: {checkout}")
+
+        if self.engine_executable is not None:
+            object.__setattr__(self, "engine_executable", _absolute_path(self.engine_executable))
+        object.__setattr__(self, "watched_folders", tuple(_absolute_path(path) for path in self.watched_folders))
+        return self
+
+    @property
+    def run_directory(self) -> Path:
+        """Return the fixed Task 9 transaction parent below the configured product root."""
+        return self.data_root / "runs"
+
+    def ensure_directories(self) -> None:
+        """Create only analyzer-owned output directories, never caller input locations."""
+        directories = (
+            self.data_root,
+            self.database_path.parent,
+            self.managed_replay_directory,
+            self.run_directory,
+            self.map_asset_directory,
+            self.cache_directory,
+            self.log_directory,
+        )
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
