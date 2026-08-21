@@ -11,7 +11,6 @@ enum ReplayOutcomeStartupFailureReason
 	REPLAY_OUTCOME_INPUT_UNAVAILABLE,
 	REPLAY_OUTCOME_INVALID_REPLAY_HEADER,
 	REPLAY_OUTCOME_TRUNCATED_INPUT,
-	REPLAY_OUTCOME_STARTUP_FAILED,
 };
 
 // TheSuperHackers @feature Leex 20/08/2026 Export a passive telemetry-independent replay termination summary. (#TBD)

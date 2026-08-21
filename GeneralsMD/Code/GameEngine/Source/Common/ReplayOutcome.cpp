@@ -38,9 +38,8 @@ namespace
 			case REPLAY_OUTCOME_INPUT_UNAVAILABLE: return "input_unavailable";
 			case REPLAY_OUTCOME_INVALID_REPLAY_HEADER: return "invalid_replay_header";
 			case REPLAY_OUTCOME_TRUNCATED_INPUT: return "truncated_input";
-			case REPLAY_OUTCOME_STARTUP_FAILED: return "startup_failed";
 		}
-		return "startup_failed";
+		return "invalid_replay_header";
 	}
 
 	void diagnostic(const char *message)

@@ -121,6 +121,47 @@ def _write_zero_command_replay(source: Path, destination: Path) -> None:
     destination.write_bytes(source.read_bytes()[: parsed.command_stream_offset])
 
 
+def _header_string_spans(source: bytes) -> dict[str, tuple[int, int]]:
+    """Locate the five Recorder NUL strings without trusting malformed replacement bytes."""
+    offset = 6 + 12 + 10
+    spans: dict[str, tuple[int, int]] = {}
+
+    def take_utf16(name: str) -> None:
+        nonlocal offset
+        start = offset
+        while source[offset : offset + 2] != b"\0\0":
+            offset += 2
+        offset += 2
+        spans[name] = (start, offset)
+
+    def take_ascii(name: str) -> None:
+        nonlocal offset
+        start = offset
+        offset = source.index(b"\0", offset) + 1
+        spans[name] = (start, offset)
+
+    take_utf16("replay_name")
+    offset += 16
+    take_utf16("version_string")
+    take_utf16("version_time_string")
+    offset += 12
+    take_ascii("game_options")
+    take_ascii("local_player_index")
+    return spans
+
+
+def _replace_header_field(source: bytes, span: tuple[int, int], replacement: bytes) -> bytes:
+    return source[: span[0]] + replacement + source[span[1] :]
+
+
+def _max_valid_game_options(source: bytes, span: tuple[int, int]) -> bytes:
+    options = source[span[0] : span[1] - 1]
+    extra = b"A" * (1023 - len(options))
+    padded = options.replace(b"Hleex279,", b"Hleex279" + extra + b",", 1)
+    assert len(padded) == 1023
+    return padded + b"\0"
+
+
 def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     tmp_path: Path,
     repository_root: Path,
@@ -402,6 +443,32 @@ def test_outcome_attempt_brackets_all_replay_input_and_ready_seams(repository_ro
     assert "REPLAY_OUTCOME_INPUT_UNAVAILABLE" in recorder
     assert "REPLAY_OUTCOME_INVALID_REPLAY_HEADER" in recorder
     assert "REPLAY_OUTCOME_TRUNCATED_INPUT" in recorder
+
+
+def test_every_header_string_and_false_return_has_explicit_startup_status(repository_root: Path) -> None:
+    header = (
+        repository_root / "GeneralsMD/Code/GameEngine/Include/Common/Recorder.h"
+    ).read_text(encoding="utf-8")
+    recorder = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    outcome_header = (
+        repository_root / "GeneralsMD/Code/GameEngine/Include/Common/ReplayOutcome.h"
+    ).read_text(encoding="utf-8")
+    read_header = recorder.split("Bool RecorderClass::readReplayHeader", maxsplit=1)[1].split(
+        "Bool RecorderClass::simulateReplay", maxsplit=1
+    )[0]
+    playback = recorder.split("Bool RecorderClass::playbackFile", maxsplit=1)[1].split(
+        "UnicodeString RecorderClass::readUnicodeString", maxsplit=1
+    )[0]
+
+    assert "enum ReplayStringReadStatus" in header
+    assert read_header.count("readUnicodeString(stringStatus)") == 3
+    assert read_header.count("readAsciiString(stringStatus)") == 2
+    assert "return FALSE;" not in read_header
+    assert playback.count("return FALSE;") == 2
+    assert "ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);" in playback
+    assert "REPLAY_OUTCOME_STARTUP_FAILED" not in outcome_header
 
 
 def test_telemetry_requires_one_headless_replay_before_playback(
@@ -744,6 +811,149 @@ def test_replay_outcome_settles_every_preplayback_failure_attempt(
             "crc_mismatch_frame": None,
         }
         assert not tuple(tmp_path.glob(f"{label}-outcome.json.tmp.*"))
+
+
+@pytest.mark.parametrize(
+    "local_index",
+    ["-1", "8", "7", "0junk"],
+    ids=["negative-one", "past-max-slots", "closed-slot", "invalid-syntax"],
+)
+def test_malformed_local_replay_slot_fails_cleanly_with_one_outcome(
+    local_index: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    source = pinned_replay.read_bytes()
+    span = _header_string_spans(source)["local_player_index"]
+    replay = tmp_path / f"local-{local_index.replace('-', 'minus')}.rep"
+    replay.write_bytes(_replace_header_field(source, span, local_index.encode("ascii") + b"\0"))
+    outcome = (tmp_path / f"local-{local_index.replace('-', 'minus')}.json").resolve()
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode not in {0, 3221225477}
+    assert "Cannot open replay" in completed.stdout
+    assert completed.stderr == ""
+    assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "playback_started": False,
+        "final_frame": 0,
+        "command_count": 0,
+        "terminal_reason": "invalid_replay_header",
+        "crc_mismatch": False,
+        "crc_mismatch_frame": None,
+    }
+    assert not tuple(tmp_path.glob(f"{outcome.name}.tmp.*"))
+    assert replay.read_bytes() == _replace_header_field(source, span, local_index.encode("ascii") + b"\0")
+
+
+@pytest.mark.parametrize("field", ["replay_name", "game_options"], ids=["utf16", "ascii"])
+def test_replay_header_accepts_the_maximum_valid_nul_string_payload(
+    field: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    source = pinned_replay.read_bytes()
+    span = _header_string_spans(source)[field]
+    replacement = (
+        ("U" * 1023).encode("utf-16-le") + b"\0\0"
+        if field == "replay_name"
+        else _max_valid_game_options(source, span)
+    )
+    replay = tmp_path / f"max-valid-{field}.rep"
+    replay.write_bytes(_replace_header_field(source, span, replacement))
+    outcome = (tmp_path / f"max-valid-{field}.json").resolve()
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    payload = json.loads(outcome.read_text(encoding="utf-8"))
+    assert completed.returncode != 3221225477
+    assert payload["playback_started"] is True
+    assert payload["final_frame"] > 0
+    assert payload["command_count"] > 0
+    assert replay.read_bytes() == _replace_header_field(source, span, replacement)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "preserve_suffix", "terminal_reason"),
+    [
+        (
+            "replay_name",
+            ("U" * 1024).encode("utf-16-le") + b"\0\0",
+            True,
+            "invalid_replay_header",
+        ),
+        ("game_options", b"A" * 1024 + b"\0", True, "invalid_replay_header"),
+        (
+            "replay_name",
+            ("U" * 1024).encode("utf-16-le"),
+            False,
+            "invalid_replay_header",
+        ),
+        ("game_options", b"A" * 1024, False, "invalid_replay_header"),
+        ("replay_name", b"", False, "truncated_input"),
+        ("game_options", b"", False, "truncated_input"),
+        ("replay_name", "few".encode("utf-16-le"), False, "truncated_input"),
+        ("game_options", b"few", False, "truncated_input"),
+    ],
+    ids=[
+        "utf16-max-plus-one",
+        "ascii-max-plus-one",
+        "utf16-overlong-unterminated",
+        "ascii-overlong-unterminated",
+        "utf16-immediate-eof",
+        "ascii-immediate-eof",
+        "utf16-short-eof",
+        "ascii-short-eof",
+    ],
+)
+def test_malformed_header_strings_fail_bounded_with_source_grounded_reason(
+    field: str,
+    replacement: bytes,
+    preserve_suffix: bool,
+    terminal_reason: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    source = pinned_replay.read_bytes()
+    span = _header_string_spans(source)[field]
+    replay = tmp_path / f"malformed-{field}-{terminal_reason}-{len(replacement)}.rep"
+    if preserve_suffix:
+        malformed = _replace_header_field(source, span, replacement)
+    else:
+        malformed = source[: span[0]] + replacement
+    replay.write_bytes(malformed)
+    outcome = (tmp_path / f"malformed-{field}-{terminal_reason}-{len(replacement)}.json").resolve()
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode not in {0, 3221225477}
+    assert "Cannot open replay" in completed.stdout
+    assert completed.stderr == ""
+    assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "playback_started": False,
+        "final_frame": 0,
+        "command_count": 0,
+        "terminal_reason": terminal_reason,
+        "crc_mismatch": False,
+        "crc_mismatch_frame": None,
+    }
+    assert not tuple(tmp_path.glob(f"{outcome.name}.tmp.*"))
+    assert replay.read_bytes() == malformed
 
 
 def test_preplayback_outcome_writer_failure_is_passive_and_cleans_owned_temp(

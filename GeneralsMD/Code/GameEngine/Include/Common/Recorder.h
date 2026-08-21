@@ -162,6 +162,20 @@ public:
 	void setArchiveEnabled(Bool enable) { m_archiveReplays = enable; } ///< Enable or disable replay archiving.
 	void stopRecording();															///< Stop recording and close m_file.
 protected:
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve bounded replay-header string and failure classifications without exposing partial data. (#TBD)
+	enum ReplayStringReadStatus
+	{
+		REPLAY_STRING_READ_COMPLETE,
+		REPLAY_STRING_READ_TRUNCATED,
+		REPLAY_STRING_READ_INVALID,
+	};
+	enum ReplayHeaderFailureReason
+	{
+		REPLAY_HEADER_INPUT_UNAVAILABLE,
+		REPLAY_HEADER_INVALID,
+		REPLAY_HEADER_TRUNCATED,
+	};
+
 	void startRecording(GameDifficulty diff, Int originalGameMode, Int rankPoints, Int maxFPS);					///< Start recording to m_file.
 	void writeToFile(GameMessage *msg);								///< Write this GameMessage to m_file.
 	void archiveReplay(AsciiString fileName);					///< Move the specified replay file to the archive directory.
@@ -169,8 +183,9 @@ protected:
 	void logGameStart(AsciiString options);
 	void logGameEnd();
 
-	AsciiString readAsciiString();										///< Read the next string from m_file using ascii characters.
-	UnicodeString readUnicodeString();								///< Read the next string from m_file using unicode characters.
+	Bool failReplayHeader(const ReplayHeader &header, ReplayHeaderFailureReason reason, Bool gameInfoActive);
+	AsciiString readAsciiString(ReplayStringReadStatus &status);	///< Read a bounded NUL-terminated ascii string from m_file.
+	UnicodeString readUnicodeString(ReplayStringReadStatus &status); ///< Read a bounded NUL-terminated unicode string from m_file.
 	void readNextFrame();															///< Read the next frame number to execute a command on.
 	void appendNextCommand();													///< Read the next GameMessage and append it to TheCommandList.
 	void writeArgument(GameMessageArgumentDataType type, const GameMessageArgumentType arg);

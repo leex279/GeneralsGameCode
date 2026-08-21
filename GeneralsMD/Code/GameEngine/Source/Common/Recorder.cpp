@@ -922,6 +922,38 @@ void RecorderClass::writeArgument(GameMessageArgumentDataType type, const GameMe
  * Read in a replay header, for (1) populating a replay listbox or (2) starting playback.  In
  * case (2), set FILE *m_file.
  */
+Bool RecorderClass::failReplayHeader(
+	const ReplayHeader &header, ReplayHeaderFailureReason reason, Bool gameInfoActive)
+{
+	// TheSuperHackers @feature Leex 20/08/2026 Close every malformed replay-header attempt through one outcome-safe cleanup seam. (#TBD)
+	if (gameInfoActive)
+	{
+		m_gameInfo.endGame();
+		m_gameInfo.reset();
+	}
+	if (m_file != nullptr)
+	{
+		m_file->close();
+		m_file = nullptr;
+	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (header.forPlayback)
+	{
+		ReplayOutcomeStartupFailureReason outcomeReason = REPLAY_OUTCOME_INVALID_REPLAY_HEADER;
+		if (reason == REPLAY_HEADER_INPUT_UNAVAILABLE)
+		{
+			outcomeReason = REPLAY_OUTCOME_INPUT_UNAVAILABLE;
+		}
+		else if (reason == REPLAY_HEADER_TRUNCATED)
+		{
+			outcomeReason = REPLAY_OUTCOME_TRUNCATED_INPUT;
+		}
+		ReplayOutcome::finishStartupFailure(outcomeReason);
+	}
+#endif
+	return FALSE;
+}
+
 Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 {
 	AsciiString filepath;
@@ -949,14 +981,7 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	if (m_file == nullptr)
 	{
 		DEBUG_LOG(("Can't open %s (%s)", filepath.str(), header.filename.str()));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-		if (header.forPlayback)
-		{
-			// TheSuperHackers @feature Leex 20/08/2026 Settle a configured outcome when the replay input cannot be opened. (#TBD)
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INPUT_UNAVAILABLE);
-		}
-#endif
-		return FALSE;
+		return failReplayHeader(header, REPLAY_HEADER_INPUT_UNAVAILABLE, FALSE);
 	}
 
 	// Read the GENREP header.
@@ -964,17 +989,9 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	const Int genrepBytesRead = m_file->read( &genrep, sizeof(s_genrep) - 1 );
 	if ( strncmp(genrep, s_genrep, sizeof(s_genrep) - 1 ) != 0 ) {
 		DEBUG_LOG(("RecorderClass::readReplayHeader - replay file did not have GENREP at the start."));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-		if (header.forPlayback)
-		{
-			// TheSuperHackers @feature Leex 20/08/2026 Distinguish a proven short magic read from a full invalid replay signature. (#TBD)
-			ReplayOutcome::finishStartupFailure(genrepBytesRead == sizeof(s_genrep) - 1
-				? REPLAY_OUTCOME_INVALID_REPLAY_HEADER : REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-#endif
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		// TheSuperHackers @feature Leex 20/08/2026 Distinguish a proven short magic read from a full invalid replay signature. (#TBD)
+		return failReplayHeader(header, genrepBytesRead == sizeof(s_genrep) - 1
+			? REPLAY_HEADER_INVALID : REPLAY_HEADER_TRUNCATED, FALSE);
 	}
 
 	// read in some stats
@@ -996,138 +1013,98 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 		fixedHeaderComplete = m_file->read(&(header.playerDiscons[i]), sizeof(Bool)) == sizeof(Bool)
 			&& fixedHeaderComplete;
 	}
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	if (!fixedHeaderComplete)
 	{
-		if (header.forPlayback)
-		{
-			// TheSuperHackers @feature Leex 20/08/2026 Report header truncation only after exact fixed-field read counts prove it. (#TBD)
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		// TheSuperHackers @feature Leex 20/08/2026 Reject exact fixed-field short reads before any later header field is consumed. (#TBD)
+		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
 	}
-#endif
 
 	// Read the Replay Name.  We don't actually do anything with it.  Oh well.
-	header.replayName = readUnicodeString();
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	if (m_file->eof())
+	ReplayStringReadStatus stringStatus = REPLAY_STRING_READ_COMPLETE;
+	header.replayName = readUnicodeString(stringStatus);
+	if (stringStatus != REPLAY_STRING_READ_COMPLETE)
 	{
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
+			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, FALSE);
 	}
-#endif
 
 	// Read the date and time.  We don't really do anything with this either. Oh well.
 	const Int timeValueBytesRead = m_file->read(&header.timeVal, sizeof(header.timeVal));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	if (timeValueBytesRead != sizeof(header.timeVal))
 	{
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
 	}
-#endif
 
 	// Read in the Version info
-	header.versionString = readUnicodeString();
-	header.versionTimeString = readUnicodeString();
+	header.versionString = readUnicodeString(stringStatus);
+	if (stringStatus != REPLAY_STRING_READ_COMPLETE)
+	{
+		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
+			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, FALSE);
+	}
+	header.versionTimeString = readUnicodeString(stringStatus);
+	if (stringStatus != REPLAY_STRING_READ_COMPLETE)
+	{
+		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
+			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, FALSE);
+	}
 	const Int versionNumberBytesRead = m_file->read(&header.versionNumber, sizeof(header.versionNumber));
 	const Int exeCRCBytesRead = m_file->read(&header.exeCRC, sizeof(header.exeCRC));
 	const Int iniCRCBytesRead = m_file->read(&header.iniCRC, sizeof(header.iniCRC));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	if (m_file->eof() || versionNumberBytesRead != sizeof(header.versionNumber)
+	if (versionNumberBytesRead != sizeof(header.versionNumber)
 		|| exeCRCBytesRead != sizeof(header.exeCRC) || iniCRCBytesRead != sizeof(header.iniCRC))
 	{
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
 	}
-#endif
 
 	// Read in the GameInfo
-	header.gameOptions = readAsciiString();
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	if (m_file->eof())
+	header.gameOptions = readAsciiString(stringStatus);
+	if (stringStatus != REPLAY_STRING_READ_COMPLETE)
 	{
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
+			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, FALSE);
 	}
-#endif
 	m_gameInfo.reset();
 	m_gameInfo.enterGame();
 	DEBUG_LOG(("RecorderClass::readReplayHeader - GameInfo = %s", header.gameOptions.str()));
 	if (!ParseAsciiStringToGameInfo(&m_gameInfo, header.gameOptions))
 	{
 		DEBUG_LOG(("RecorderClass::readReplayHeader - replay file did not have a valid GameInfo string."));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INVALID_REPLAY_HEADER);
-		}
-#endif
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, REPLAY_HEADER_INVALID, TRUE);
 	}
 	m_gameInfo.startGame(0);
 
-	AsciiString playerIndex = readAsciiString();
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	if (m_file->eof())
+	AsciiString playerIndex = readAsciiString(stringStatus);
+	if (stringStatus != REPLAY_STRING_READ_COMPLETE)
 	{
-		m_gameInfo.endGame();
-		m_gameInfo.reset();
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
-		}
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
+			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, TRUE);
 	}
-#endif
-	header.localPlayerIndex = atoi(playerIndex.str());
-	if (header.localPlayerIndex < -1 || header.localPlayerIndex >= MAX_SLOTS)
+	const Char *playerIndexText = playerIndex.str();
+	Bool validPlayerIndex = playerIndexText[0] != '\0';
+	Int parsedPlayerIndex = 0;
+	for (const Char *digit = playerIndexText; validPlayerIndex && *digit != '\0'; ++digit)
+	{
+		if (*digit < '0' || *digit > '9')
+		{
+			validPlayerIndex = FALSE;
+			break;
+		}
+		parsedPlayerIndex = parsedPlayerIndex * 10 + (*digit - '0');
+		if (parsedPlayerIndex >= MAX_SLOTS)
+		{
+			validPlayerIndex = FALSE;
+		}
+	}
+	GameSlot *localSlot = validPlayerIndex ? m_gameInfo.getSlot(parsedPlayerIndex) : nullptr;
+	// TheSuperHackers @feature Leex 20/08/2026 Require the serialized local replay slot to name a real human, including human observers. (#TBD)
+	if (!validPlayerIndex || localSlot == nullptr || !localSlot->isHuman())
 	{
 		DEBUG_LOG(("RecorderClass::readReplayHeader - invalid local slot number."));
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-		if (header.forPlayback)
-		{
-			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INVALID_REPLAY_HEADER);
-		}
-#endif
-		m_gameInfo.endGame();
-		m_gameInfo.reset();
-		m_file->close();
-		m_file = nullptr;
-		return FALSE;
+		return failReplayHeader(header, REPLAY_HEADER_INVALID, TRUE);
 	}
-	if (header.localPlayerIndex >= 0)
-	{
-		Int localIP = m_gameInfo.getSlot(header.localPlayerIndex)->getIP();
-		m_gameInfo.setLocalIP(localIP);
-	}
+	header.localPlayerIndex = parsedPlayerIndex;
+	m_gameInfo.setLocalIP(localSlot->getIP());
 
 	if (!header.forPlayback)
 	{
@@ -1501,26 +1478,33 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 /**
  * Read a unicode string from the current file position. The string is assumed to be 0-terminated.
  */
-UnicodeString RecorderClass::readUnicodeString() {
+UnicodeString RecorderClass::readUnicodeString(ReplayStringReadStatus &status) {
 	WideChar str[1024] = L"";
 	Int index = 0;
+	status = REPLAY_STRING_READ_COMPLETE;
 
-	Int c = m_file->readWideChar();
-	if (c == EOF) {
-		str[index] = 0;
-	}
-	str[index] = c;
-
-	while (index < 1024 && str[index] != 0) {
-		++index;
-		Int c = m_file->readWideChar();
-		if (c == EOF) {
-			str[index] = 0;
+	// TheSuperHackers @feature Leex 20/08/2026 Bound replay UTF-16 payloads to 1023 units and distinguish EOF from a proven overlong field. (#TBD)
+	while (index < ARRAY_SIZE(str) - 1) {
+		const Int c = m_file->readWideChar();
+		if (c == WEOF) {
+			status = REPLAY_STRING_READ_TRUNCATED;
 			break;
 		}
-		str[index] = c;
+		if (c == 0) {
+			break;
+		}
+		str[index++] = static_cast<WideChar>(c);
 	}
-	str[1023] = L'\0';
+	if (index == ARRAY_SIZE(str) - 1) {
+		const Int terminator = m_file->readWideChar();
+		if (terminator == WEOF) {
+			status = REPLAY_STRING_READ_TRUNCATED;
+		}
+		else if (terminator != 0) {
+			status = REPLAY_STRING_READ_INVALID;
+		}
+	}
+	str[index] = L'\0';
 
 	UnicodeString retval(str);
 	return retval;
@@ -1529,26 +1513,33 @@ UnicodeString RecorderClass::readUnicodeString() {
 /**
  * Read an ascii string from the current file position. The string is assumed to be 0-terminated.
  */
-AsciiString RecorderClass::readAsciiString() {
+AsciiString RecorderClass::readAsciiString(ReplayStringReadStatus &status) {
 	char str[1024] = "";
 	Int index = 0;
+	status = REPLAY_STRING_READ_COMPLETE;
 
-	Int c =	m_file->readChar();
-	if (c == EOF) {
-		str[index] = 0;
-	}
-	str[index] = c;
-
-	while (index < 1024 && str[index] != 0) {
-		++index;
-		Int c = m_file->readChar();
+	// TheSuperHackers @feature Leex 20/08/2026 Bound replay ASCII payloads to 1023 bytes and distinguish EOF from a proven overlong field. (#TBD)
+	while (index < ARRAY_SIZE(str) - 1) {
+		const Int c = m_file->readChar();
 		if (c == EOF) {
-			str[index] = 0;
+			status = REPLAY_STRING_READ_TRUNCATED;
 			break;
 		}
-		str[index] = c;
+		if (c == 0) {
+			break;
+		}
+		str[index++] = static_cast<Char>(c);
 	}
-	str[1023] = '\0';
+	if (index == ARRAY_SIZE(str) - 1) {
+		const Int terminator = m_file->readChar();
+		if (terminator == EOF) {
+			status = REPLAY_STRING_READ_TRUNCATED;
+		}
+		else if (terminator != 0) {
+			status = REPLAY_STRING_READ_INVALID;
+		}
+	}
+	str[index] = '\0';
 
 	AsciiString retval(str);
 	return retval;

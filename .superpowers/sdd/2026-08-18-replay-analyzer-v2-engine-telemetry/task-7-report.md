@@ -269,6 +269,53 @@ The pinned natural replay remains SHA-256
 `EA085767BFA11D2CFC167D9007173CE2EB29B5F557702FFD042E2E9A1A8F6BB8`; no strategy, player, or winner conclusion is
 drawn from the disposable CRC-stripped mechanics derivative.
 
+## Malformed replay startup hardening
+
+The final malformed-input re-review found two memory-safety and startup-settlement gaps in the legacy replay-header
+reader. A serialized local index of `-1` passed the header check and was dereferenced later, and the fixed 1024-unit
+string buffers could write one element past their bounds for an overlong unterminated field. The string readers also
+wrote the EOF sentinel into their buffers and exposed no status that could distinguish a short input from a complete
+but invalid overlong field.
+
+The header reader now closes all failures through one cleanup seam. Once `GameInfo` has been entered, that seam ends
+and resets it; it always closes the replay source, and a configured analyzer playback attempt atomically settles once
+as `input_unavailable`, `truncated_input`, or `invalid_replay_header`. Exact fixed-width read counts and every string
+status are checked before the header is accepted. The unused generic `startup_failed` outcome reason was removed, and the source
+audit proves that `readReplayHeader` has no independent false-return path outside the central seam. The two remaining
+`playbackFile` false returns are the already-settled header failure and the explicitly settled short setup/first-frame
+failure.
+
+Both C++98-compatible NUL readers now accept at most 1023 payload units followed by the terminator. EOF before the
+terminator reports `truncated_input`; a 1024th nonzero unit proves an overlong field and reports
+`invalid_replay_header`. No EOF value is stored and every buffer write is bounded. This safe behavior applies to all
+replay-header callers, while outcome publication remains modern-analyzer playback only. Runtime tests prove UTF-16
+and ASCII fields at 1023 units plus NUL still decode and play normally, 1024 units plus NUL and 1024 unterminated
+units reject as invalid, and immediate or partial EOF rejects as truncated.
+
+The local index parser now accepts only the exact decimal spelling written by `Recorder`, requires the domain
+`0..MAX_SLOTS-1`, resolves the slot before use, and requires `GameSlot::isHuman()`. This accepts human observer slots
+because observers remain `SLOT_PLAYER`, while rejecting negative, out-of-range, syntactically tailed, AI, open,
+closed, or null local slots. Source evidence confirms replay recording is disabled for single-player games, skirmish
+records local slot zero, and network replay recording derives an actual local human slot.
+
+Strict TDD and final verification evidence for this pass:
+
+- focused RED: **10 failed, 5 passed**, including an access violation for local `-1`, accepted closed/syntax-tailed
+  slots, missing string statuses, and unclassified overlong/EOF inputs;
+- focused post-build GREEN: **15 passed**, including local-slot, UTF-16/ASCII boundary, overlong, unterminated, EOF,
+  and static return-path cases;
+- complete startup, writer-failure, and collision file: **56 passed, 1 symlink-privilege skip**;
+- natural CRC and interval-15/30 mechanics rerun: **2 passed**; interval 15 emitted **46,086** samples, interval 30
+  emitted **28,324**, and maximum eligible-moving gap remained exactly **15** frames;
+- full engine suite: **94 passed, 1 symlink-privilege skip**;
+- full non-engine suite: **491 passed, 95 engine tests deselected**;
+- Ruff: **passed**; strict mypy: **passed, 18 source files**; `git diff --check`: **passed**; and
+- modern VS 2022 x86 `z_generals`: **built and linked `generalszh.exe`** after the final C++ changes.
+
+Every malformed-input test preserves the source replay bytes, requires no writer-owned temporary residue, and checks
+the exact passive zero-fact outcome. Natural and interval-density outcomes, command counts, frame/CRC behavior,
+determinism, and the pinned replay SHA-256 remain unchanged.
+
 ## Toolchain limitations
 
 VC6 and MinGW remain unavailable on this host, so no compile pass is claimed for either toolchain. Compatibility
