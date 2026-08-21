@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import Select, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -138,37 +139,40 @@ class JobCoordinator:
                 return _snapshot(session, existing)
 
     def ensure_job(self, session: Session, spec: JobSpec) -> Job:
-        existing = session.scalar(select(Job).where(Job.idempotency_key == spec.idempotency_key))
-        if existing is not None:
-            return existing
         if not spec.stage or not spec.component_version or not spec.idempotency_key:
             raise ValueError("job stage, version, and idempotency key must be nonempty")
         if spec.priority < 0 or spec.max_attempts < 1:
             raise ValueError("job priority and maximum attempts are invalid")
-        row = Job(
-            public_id=str(uuid4()),
-            replay_id=spec.replay_id,
-            stage=spec.stage,
-            component_version=spec.component_version,
-            idempotency_key=spec.idempotency_key,
-            status="pending",
-            priority=spec.priority,
-            attempt_count=0,
-            max_attempts=spec.max_attempts,
-            available_at=self.now(),
-            lease_owner=None,
-            lease_expires_at=None,
-            started_at=None,
-            completed_at=None,
-            input_json=dict(spec.input_json),
-            output_json=None,
-            error_code=None,
-            error_message=None,
-            error_details_json=None,
-            retryable=spec.retryable,
+        # TheSuperHackers @bugfix Leex 22/08/2026 Coalesce graph-local job races without aborting the caller transaction. (#TBD)
+        session.execute(
+            sqlite_insert(Job)
+            .values(
+                public_id=str(uuid4()),
+                replay_id=spec.replay_id,
+                stage=spec.stage,
+                component_version=spec.component_version,
+                idempotency_key=spec.idempotency_key,
+                status="pending",
+                priority=spec.priority,
+                attempt_count=0,
+                max_attempts=spec.max_attempts,
+                available_at=self.now(),
+                lease_owner=None,
+                lease_expires_at=None,
+                started_at=None,
+                completed_at=None,
+                input_json=dict(spec.input_json),
+                output_json=None,
+                error_code=None,
+                error_message=None,
+                error_details_json=None,
+                retryable=spec.retryable,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
         )
-        session.add(row)
-        session.flush()
+        row = session.scalar(select(Job).where(Job.idempotency_key == spec.idempotency_key))
+        if row is None:
+            raise RuntimeError("job idempotency insert did not yield a durable row")
         return row
 
     def add_dependency(self, job_public_id: str, depends_on_public_id: str) -> None:
@@ -261,8 +265,8 @@ class JobCoordinator:
         )
 
     def _retry_at(self, now: datetime, attempt_count: int) -> datetime:
-        multiplier = 2 ** max(0, attempt_count - 1)
-        delay = min(self._retry_base_delay * multiplier, self._retry_max_delay)
+        multiplier: int = 2 ** max(0, attempt_count - 1)
+        delay: timedelta = min(self._retry_base_delay * multiplier, self._retry_max_delay)
         return now + delay
 
     def _reclaim_expired(self, session: Session, now: datetime) -> None:
@@ -356,8 +360,13 @@ class JobCoordinator:
             row = session.scalar(select(Job).where(Job.public_id == job_public_id))
             if row is None:
                 raise JobStateError("unknown_job", "unknown job public ID")
+            # TheSuperHackers @bugfix Leex 22/08/2026 Preserve another worker's live lease during explicit retry. (#TBD)
+            if row.status == "running":
+                raise JobStateError("running_job", "running jobs cannot be retried")
             if row.status == "succeeded":
                 raise JobStateError("successful_job", "successful jobs cannot be retried")
+            if row.status not in {"pending", "failed"}:
+                raise JobStateError("invalid_job_state", "only pending or failed jobs can be retried")
             if not row.retryable:
                 raise JobStateError("nonretryable_job", "nonretryable jobs cannot be retried")
             if row.attempt_count >= row.max_attempts:

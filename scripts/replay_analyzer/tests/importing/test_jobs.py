@@ -6,7 +6,7 @@ import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.db.models import Job, JobDependency
@@ -102,6 +102,28 @@ def test_claim_is_exclusive_and_increments_attempt_exactly_once(
         assert row is not None and row.attempt_count == 1 and row.lease_owner == "worker-a"
 
 
+def test_retry_rejects_running_job_without_clearing_another_workers_lease(
+    session_factory: sessionmaker[Session], clock: MutableClock
+) -> None:
+    first_service = _coordinator(session_factory, clock)
+    second_service = _coordinator(session_factory, clock)
+    created = first_service.create_job(_spec("parse"))
+    claimed = first_service.claim("worker-a", frozenset({"parse"}))
+    assert claimed is not None and claimed.public_id == created.public_id
+
+    with pytest.raises(JobStateError) as failure:
+        second_service.retry(created.public_id)
+    assert failure.value.code == "running_job"
+    assert second_service.claim("worker-b", frozenset({"parse"})) is None
+    with session_factory() as session:
+        row = session.scalar(select(Job).where(Job.public_id == created.public_id))
+        assert row is not None
+        assert row.status == "running"
+        assert row.lease_owner == "worker-a"
+        assert row.lease_expires_at is not None
+        assert row.attempt_count == 1
+
+
 def test_expired_leases_retry_with_bounded_delay_or_fail_without_live_lease(
     session_factory: sessionmaker[Session], clock: MutableClock
 ) -> None:
@@ -186,6 +208,44 @@ def test_unregistered_future_stage_is_never_claimed(
     future = jobs.create_job(_spec("derive_features"))
     assert jobs.claim("task-3-worker", frozenset({"discover", "hash", "parse"})) is None
     assert jobs.snapshot(future.public_id).status == "pending"
+
+
+def test_graph_local_idempotency_conflict_reloads_competing_job_and_keeps_transaction_usable(
+    session_factory: sessionmaker[Session], database_engine: Engine, clock: MutableClock
+) -> None:
+    first = _coordinator(session_factory, clock)
+    competitor = _coordinator(session_factory, clock)
+    contested = _spec("contested")
+    injected_public_id: str | None = None
+    injected = False
+
+    def inject_competing_commit(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        nonlocal injected, injected_public_id
+        if injected or not statement.lstrip().upper().startswith("INSERT INTO JOBS"):
+            return
+        injected = True
+        injected_public_id = competitor.create_job(contested).public_id
+
+    event.listen(database_engine, "before_cursor_execute", inject_competing_commit)
+    try:
+        with session_factory.begin() as session:
+            coalesced = first.ensure_job(session, contested)
+            followup = first.ensure_job(session, _spec("followup"))
+            assert coalesced.public_id == injected_public_id
+            assert followup.stage == "followup"
+    finally:
+        event.remove(database_engine, "before_cursor_execute", inject_competing_commit)
+
+    assert injected is True
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Job)) == 2
 
 
 def test_job_boundary_rejects_invalid_clock_specs_workers_and_transitions(

@@ -302,6 +302,15 @@ class _FakeAcquirer:
         return self.artifact
 
 
+class _MutatingAcquirer:
+    def __init__(self, artifact: TelemetryArtifact) -> None:
+        self.artifact = artifact
+
+    def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
+        replay.write_bytes(replay.read_bytes() + b"telemetry-mutation")
+        return self.artifact
+
+
 def _artifact(tmp_path: Path, *, status: str = "success") -> TelemetryArtifact:
     trace = tmp_path / "trace.ndjson"
     stdout = tmp_path / "stdout.log"
@@ -388,6 +397,122 @@ def test_source_provenance_never_creates_identity_or_missing_telemetry_issue(
         assert dependencies == {parse_job.id}
 
 
+def test_reference_parser_revalidates_bytes_after_consumption(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    def mutating_parser(path: Path) -> SimpleNamespace:
+        path.write_bytes(path.read_bytes() + b"parser-mutation")
+        return _successful_parser(path)
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=mutating_parser,
+    )
+    service.submit(ImportRequest(replay_file, reference_only=True))
+    for _ in range(4):
+        result = service.run_available("reference-parser")
+    assert result[0].stage == "parse"
+    assert result[0].status == "failed"
+    assert result[0].error_code == "source_changed"
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ParserRun)) == 0
+
+
+def test_reference_telemetry_revalidates_bytes_before_copying_artifacts(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_MutatingAcquirer(_artifact(tmp_path)),
+    )
+    service.submit(ImportRequest(replay_file, reference_only=True, request_telemetry=True))
+    for _ in range(5):
+        result = service.run_available("reference-telemetry")
+    assert result[0].stage == "telemetry"
+    assert result[0].status == "failed"
+    assert result[0].error_code == "source_changed"
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ManagedAsset)) == 0
+        assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
+
+
+def test_failed_reference_branch_cannot_block_later_successful_copy_branch(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    original_bytes = b"same-replay-content"
+    reference = tmp_path / "stale-reference.rep"
+    copied = tmp_path / "fresh-copy.rep"
+    reference.write_bytes(original_bytes)
+    copied.write_bytes(original_bytes)
+    parser_calls = 0
+
+    def first_parser_fails_after_mutation(path: Path) -> SimpleNamespace:
+        nonlocal parser_calls
+        parser_calls += 1
+        if parser_calls == 1:
+            path.write_bytes(path.read_bytes() + b"stale")
+            raise ValueError("reference parser observed unstable bytes")
+        return _successful_parser(path)
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=first_parser_fails_after_mutation,
+    )
+    service.submit(ImportRequest(reference, reference_only=True))
+    for _ in range(4):
+        reference_result = service.run_available("reference")
+    assert reference_result[0].error_code == "source_changed"
+    assert service.run_available("dependency-projector") == ()
+
+    service.submit(ImportRequest(copied))
+    _drain(service, worker="copy")
+    with session_factory() as session:
+        parse_jobs = list(session.scalars(select(Job).where(Job.stage == "parse").order_by(Job.id)))
+        assert [(job.input_json["import_mode"], job.status) for job in parse_jobs] == [
+            ("reference", "failed"),
+            ("copy", "succeeded"),
+        ]
+        import_jobs = list(
+            session.scalars(select(Job).where(Job.stage == "import_observations").order_by(Job.id))
+        )
+        assert len(import_jobs) == 2
+        assert [job.status for job in import_jobs] == ["failed", "pending"]
+        copy_dependencies = set(
+            session.scalars(
+                select(JobDependency.depends_on_job_id).where(JobDependency.job_id == import_jobs[1].id)
+            )
+        )
+        assert copy_dependencies == {parse_jobs[1].id}
+
+
 def test_artifact_port_rejects_duplicate_or_unsafe_paths_without_observations(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
@@ -414,6 +539,98 @@ def test_artifact_port_rejects_duplicate_or_unsafe_paths_without_observations(
         assert job is not None and job.status == "failed"
         assert job.error_code == "invalid_telemetry_artifact"
         assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
+
+
+def test_artifact_port_rejects_supplied_symlink_before_path_canonicalization(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    artifact = _artifact(tmp_path)
+    assert artifact.stdout_path is not None
+    linked_stdout = tmp_path / "linked-stdout.log"
+    try:
+        linked_stdout.symlink_to(artifact.stdout_path)
+    except OSError as error:
+        pytest.skip(f"symlink/reparse creation is unavailable: {error}")
+    assert linked_stdout.is_symlink()
+    malformed = replace(artifact, stdout_path=linked_stdout)
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(malformed),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    _drain(service)
+    with session_factory() as session:
+        job = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        assert job is not None and job.status == "failed"
+        assert job.error_code == "invalid_telemetry_artifact"
+        assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
+
+
+def test_artifact_port_inspects_supplied_alias_before_resolving_target(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path)
+    assert artifact.stdout_path is not None
+    target = artifact.stdout_path
+    supplied_alias = tmp_path / "synthetic-reparse.log"
+    original_resolve = Path.resolve
+    original_lstat = Path.lstat
+    original_is_symlink = Path.is_symlink
+    resolved_alias = False
+
+    def resolve_alias(path: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolved_alias
+        if path == supplied_alias:
+            resolved_alias = True
+            return target
+        return original_resolve(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def lstat_alias(path: Path) -> object:
+        if path == supplied_alias:
+            return SimpleNamespace(st_mode=target.lstat().st_mode, st_file_attributes=0x400)
+        return original_lstat(path)
+
+    def identify_alias(path: Path) -> bool:
+        if path == supplied_alias:
+            return False
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "resolve", resolve_alias)
+    monkeypatch.setattr(Path, "lstat", lstat_alias)
+    monkeypatch.setattr(Path, "is_symlink", identify_alias)
+    malformed = replace(artifact, stdout_path=supplied_alias)
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(malformed),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    _drain(service)
+    with session_factory() as session:
+        job = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        assert job is not None and job.status == "failed"
+        assert job.error_code == "invalid_telemetry_artifact"
+    assert resolved_alias is False
 
 
 @pytest.mark.parametrize(

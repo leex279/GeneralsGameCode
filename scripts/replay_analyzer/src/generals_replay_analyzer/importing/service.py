@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -110,6 +110,15 @@ class ImportResultDTO:
     lifecycle_state: str
     source_public_ids: tuple[str, ...]
     jobs: tuple[JobDTO, ...]
+
+
+@dataclass(frozen=True)
+class _ReplayInput:
+    path: Path
+    revalidate_reference: bool
+
+
+_ResultT = TypeVar("_ResultT")
 
 
 # TheSuperHackers @feature Leex 21/08/2026 Import replay bytes transactionally without coupling analytics to engine internals. (#TBD)
@@ -444,6 +453,7 @@ class ImportService:
         self._jobs.ensure_dependency(session, parse.id, manage.id)
 
         telemetry: Job | None = None
+        telemetry_identity: Mapping[str, Any] | None = None
         use_telemetry = request_telemetry and self._telemetry_acquirer is not None
         if use_telemetry:
             telemetry_identity = {
@@ -463,10 +473,12 @@ class ImportService:
             )
             self._jobs.ensure_dependency(session, telemetry.id, parse.id)
 
+        # TheSuperHackers @bugfix Leex 22/08/2026 Isolate downstream copy, reference, parser, and telemetry branches. (#TBD)
         branch_identity = {
             "import_observations_version": IMPORT_OBSERVATIONS_VERSION,
-            "parser_version": self._parser_version,
-            "telemetry_acquirer_version": self._telemetry_acquirer_version if use_telemetry else None,
+            "import_mode": mode,
+            "parse": parse_identity,
+            "telemetry": telemetry_identity,
         }
         import_job = self._future_job(
             session,
@@ -561,9 +573,11 @@ class ImportService:
     def _parse(self, claimed: ClaimedJob) -> Mapping[str, Any]:
         sha256 = cast(str, claimed.input_json["replay_sha256"])
         mode = cast(str, claimed.input_json["import_mode"])
-        replay_path = self._immutable_replay_path(sha256, mode)
+        replay_input = self._replay_input(sha256, mode)
         try:
-            parsed = self._parser(replay_path)
+            parsed = _consume_replay(replay_input, sha256, self._parser)
+        except StageFailure:
+            raise
         except OSError as error:
             raise StageFailure(
                 "parser_failed",
@@ -578,7 +592,7 @@ class ImportService:
                 retryable=False,
                 details={"exception_type": type(error).__name__},
             ) from error
-        warning_codes = sorted({cast(str, warning.code) for warning in parsed.warnings})
+        warning_codes = sorted({warning.code for warning in parsed.warnings})
         return {
             "parser_version": self._parser_version,
             "content_sha256": sha256,
@@ -594,9 +608,11 @@ class ImportService:
         assert acquirer is not None
         sha256 = cast(str, claimed.input_json["replay_sha256"])
         mode = cast(str, claimed.input_json["import_mode"])
-        replay_path = self._immutable_replay_path(sha256, mode)
+        replay_input = self._replay_input(sha256, mode)
         try:
-            artifact = acquirer.acquire(replay_path, sha256)
+            artifact = _consume_replay(replay_input, sha256, lambda path: acquirer.acquire(path, sha256))
+        except StageFailure:
+            raise
         except OSError as error:
             raise StageFailure("telemetry_acquisition_failed", str(error), retryable=True) from error
         try:
@@ -673,7 +689,7 @@ class ImportService:
             ]
             return _first_regular_path(source.original_locator for source in sources)
 
-    def _immutable_replay_path(self, sha256: str, mode: str) -> Path:
+    def _replay_input(self, sha256: str, mode: str) -> _ReplayInput:
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
             if replay is None:
@@ -683,13 +699,13 @@ class ImportService:
                 if asset is None:
                     raise StageFailure("managed_asset_missing", "managed replay metadata disappeared", retryable=False)
                 try:
-                    return self._replay_store.verify(sha256).path
+                    return _ReplayInput(self._replay_store.verify(sha256).path, revalidate_reference=False)
                 except ContentStorageError as error:
                     raise StageFailure("managed_asset_invalid", str(error), retryable=False) from error
         source_path = self._source_path_for_replay(sha256, mode)
         if source_path is None:
             raise StageFailure("source_missing", "reference source is no longer an ordinary file", retryable=False)
-        return source_path
+        return _ReplayInput(source_path, revalidate_reference=True)
 
 
 def _absolute_without_following(path: Path) -> Path:
@@ -779,6 +795,43 @@ def _hash_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+# TheSuperHackers @bugfix Leex 22/08/2026 Reject reference bytes that change while a parser or acquirer consumes them. (#TBD)
+def _consume_replay(
+    replay_input: _ReplayInput,
+    expected_sha256: str,
+    consumer: Callable[[Path], _ResultT],
+) -> _ResultT:
+    if replay_input.revalidate_reference:
+        _validate_reference_digest(replay_input.path, expected_sha256)
+    try:
+        return consumer(replay_input.path)
+    finally:
+        if replay_input.revalidate_reference:
+            _validate_reference_digest(replay_input.path, expected_sha256)
+
+
+def _validate_reference_digest(path: Path, expected_sha256: str) -> None:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink() or _is_reparse(info):
+            raise OSError("reference is no longer an ordinary file")
+        actual_sha256, _size = _hash_file(path)
+    except OSError as error:
+        raise StageFailure(
+            "source_changed",
+            "reference source changed while it was being consumed",
+            retryable=False,
+            details={"reason": type(error).__name__},
+        ) from error
+    if actual_sha256 != expected_sha256:
+        raise StageFailure(
+            "source_changed",
+            "reference source changed while it was being consumed",
+            retryable=False,
+            details={"expected_sha256": expected_sha256, "actual_sha256": actual_sha256},
+        )
+
+
 def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[tuple[str, Path]]:
     try:
         parsed_uuid = UUID(artifact.run_id)
@@ -810,16 +863,17 @@ def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[tuple[str, Pa
     for kind, possible_path in values:
         if possible_path is None:
             continue
+        # TheSuperHackers @bugfix Leex 22/08/2026 Reject supplied aliases before resolving artifact uniqueness. (#TBD)
+        try:
+            info = possible_path.lstat()
+        except OSError as error:
+            raise ValueError(f"telemetry artifact is unavailable: {possible_path.name}") from error
+        if not stat.S_ISREG(info.st_mode) or possible_path.is_symlink() or _is_reparse(info):
+            raise ValueError("telemetry artifacts must be ordinary non-symlink files")
         path = possible_path.resolve(strict=False)
         if path in seen:
             raise ValueError("telemetry artifact paths must be unique")
         seen.add(path)
-        try:
-            info = path.lstat()
-        except OSError as error:
-            raise ValueError(f"telemetry artifact is unavailable: {path.name}") from error
-        if not stat.S_ISREG(info.st_mode) or path.is_symlink() or _is_reparse(info):
-            raise ValueError("telemetry artifacts must be ordinary non-symlink files")
         retained.append((kind, path))
     if artifact.runner_status == "success" and artifact.trace_path is None:
         raise ValueError("successful telemetry acquisition requires a trace")
