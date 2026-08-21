@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from types import MappingProxyType
+from typing import Any, Protocol, TypeAlias, TypeVar, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -17,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import AnalyzerSettings
-from ..db.models import Job, ManagedAsset, Replay, Source
+from ..db.models import Job, JobDependency, ManagedAsset, Replay, Source
 from ..parser import ParsedReplay
 from ..provenance import SourceProvenance, extract_source_provenance
 from ..storage import ContentAddressedStore, ContentStorageError, StoredContent
@@ -41,10 +43,33 @@ from .stages import (
     PARSE_VERSION,
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
+    STAGES,
     TELEMETRY,
     TELEMETRY_VERSION,
+    canonical_json,
     content_key,
 )
+
+FrozenJSONValue: TypeAlias = (
+    str | int | float | bool | None | tuple["FrozenJSONValue", ...] | Mapping[str, "FrozenJSONValue"]
+)
+
+_STAGE_VERSIONS = MappingProxyType(
+    {
+        DISCOVER: DISCOVER_VERSION,
+        HASH: HASH_VERSION,
+        MANAGE_COPY: MANAGE_COPY_VERSION,
+        PARSE: PARSE_VERSION,
+        TELEMETRY: TELEMETRY_VERSION,
+        IMPORT_OBSERVATIONS: IMPORT_OBSERVATIONS_VERSION,
+        DERIVE_FEATURES: DERIVE_FEATURES_VERSION,
+        ASSESS_STRATEGIES: ASSESS_STRATEGIES_VERSION,
+        ANALYZE_LLM: ANALYZE_LLM_VERSION,
+        RENDER_REPORT: RENDER_REPORT_VERSION,
+    }
+)
+_STAGE_ORDER = {stage: index for index, stage in enumerate(_STAGE_VERSIONS)}
+_BUILT_IN_STAGES = frozenset({DISCOVER, HASH, MANAGE_COPY, PARSE, TELEMETRY})
 
 
 @dataclass(frozen=True)
@@ -112,6 +137,43 @@ class ImportResultDTO:
     jobs: tuple[JobDTO, ...]
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Expose immutable dependency evidence to injected future-stage handlers. (#TBD)
+@dataclass(frozen=True)
+class StageDependencyOutput:
+    """Immutable public snapshot of one selected direct dependency."""
+
+    job_public_id: str
+    stage: str
+    component_version: str
+    output: Mapping[str, FrozenJSONValue]
+
+
+@dataclass(frozen=True)
+class StageExecutionContext:
+    """Immutable public input for a registered future-stage handler."""
+
+    job_public_id: str
+    replay_public_id: str
+    replay_sha256: str
+    stage: str
+    component_version: str
+    input: Mapping[str, FrozenJSONValue]
+    dependencies: tuple[StageDependencyOutput, ...]
+
+
+class StageHandler(Protocol):
+    def __call__(self, context: StageExecutionContext) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class StageHandlerRegistration:
+    """Construction-time binding of one closed future stage to its handler."""
+
+    stage: str
+    component_version: str
+    handler: StageHandler
+
+
 @dataclass(frozen=True)
 class _ReplayInput:
     path: Path
@@ -137,6 +199,7 @@ class ImportService:
         clock: Callable[[], datetime],
         parser_version: str,
         telemetry_acquirer_version: str,
+        stage_handlers: Iterable[StageHandlerRegistration] = (),
     ) -> None:
         if not parser_version or not telemetry_acquirer_version:
             raise ValueError("component versions must be nonempty")
@@ -149,14 +212,30 @@ class ImportService:
         self._parser_version = parser_version
         self._telemetry_acquirer_version = telemetry_acquirer_version
         self._jobs = JobCoordinator(session_factory, clock=clock)
-        self._handlers: dict[str, Callable[[ClaimedJob], Mapping[str, Any]]] = {
+        handlers: dict[str, Callable[[ClaimedJob], Mapping[str, Any]]] = {
             DISCOVER: self._discover,
             HASH: self._hash,
             MANAGE_COPY: self._manage_copy,
             PARSE: self._parse,
         }
         if telemetry_acquirer is not None:
-            self._handlers[TELEMETRY] = self._telemetry
+            handlers[TELEMETRY] = self._telemetry
+        seen: set[str] = set()
+        for registration in tuple(stage_handlers):
+            if registration.stage in seen:
+                raise ValueError(f"duplicate_stage: {registration.stage}")
+            seen.add(registration.stage)
+            if registration.stage not in STAGES:
+                raise ValueError(f"unknown_stage: {registration.stage}")
+            if registration.stage in _BUILT_IN_STAGES:
+                raise ValueError(f"built_in_stage: {registration.stage}")
+            expected_version = _STAGE_VERSIONS[registration.stage]
+            if registration.component_version != expected_version:
+                raise ValueError(
+                    f"version_mismatch: {registration.stage} requires component version {expected_version}"
+                )
+            handlers[registration.stage] = self._adapt_stage_handler(registration.handler)
+        self._handlers: Mapping[str, Callable[[ClaimedJob], Mapping[str, Any]]] = MappingProxyType(handlers)
 
     def submit(self, request: ImportRequest) -> ImportSubmissionDTO:
         path = _absolute_without_following(request.path)
@@ -189,7 +268,7 @@ class ImportService:
                 break
             handler = self._handlers[claimed.stage]
             try:
-                output = handler(claimed)
+                output = _canonical_output(handler(claimed))
             except StageFailure as failure:
                 snapshot = self._jobs.fail(claimed.public_id, worker_id, failure)
             except Exception as error:  # noqa: BLE001 - the durable worker boundary must retain unexpected failures.
@@ -207,6 +286,55 @@ class ImportService:
                 snapshot = self._jobs.succeed(claimed.public_id, worker_id, output)
             completed.append(self._dto(snapshot))
         return tuple(completed)
+
+    def _adapt_stage_handler(
+        self, handler: StageHandler
+    ) -> Callable[[ClaimedJob], Mapping[str, Any]]:
+        def execute(claimed: ClaimedJob) -> Mapping[str, Any]:
+            return handler(self._stage_execution_context(claimed))
+
+        return execute
+
+    def _stage_execution_context(self, claimed: ClaimedJob) -> StageExecutionContext:
+        replay_public_id = claimed.replay_public_id
+        replay_sha256 = claimed.input_json.get("replay_sha256")
+        if replay_public_id is None or not isinstance(replay_sha256, str):
+            raise StageFailure(
+                "invalid_stage_context",
+                "registered stage requires public replay identity and content SHA-256",
+                retryable=False,
+            )
+        with self._session_factory() as session:
+            dependencies = list(
+                session.scalars(
+                    select(Job)
+                    .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
+                    .where(JobDependency.job_id == claimed.internal_id)
+                )
+            )
+            if any(dependency.status != "succeeded" for dependency in dependencies):
+                raise StageFailure(
+                    "dependency_unavailable",
+                    "registered stage dependency output is not succeeded",
+                    retryable=True,
+                )
+            dependencies.sort(
+                key=lambda dependency: (
+                    _STAGE_ORDER.get(dependency.stage, len(_STAGE_ORDER)),
+                    dependency.component_version,
+                    dependency.public_id,
+                )
+            )
+            snapshots = tuple(_dependency_output(dependency) for dependency in dependencies)
+        return StageExecutionContext(
+            job_public_id=claimed.public_id,
+            replay_public_id=replay_public_id,
+            replay_sha256=replay_sha256,
+            stage=claimed.stage,
+            component_version=claimed.component_version,
+            input=_freeze_mapping(claimed.input_json),
+            dependencies=snapshots,
+        )
 
     def retry(self, job_public_id: str) -> JobDTO:
         return self._dto(self._jobs.retry(job_public_id))
@@ -793,6 +921,51 @@ def _hash_file(path: Path) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
+
+
+def _freeze_json(value: Any) -> FrozenJSONValue:
+    if isinstance(value, Mapping):
+        return _freeze_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"stage context contains non-JSON value: {type(value).__name__}")
+
+
+def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, FrozenJSONValue]:
+    if any(not isinstance(key, str) for key in value):
+        raise TypeError("stage context mapping keys must be strings")
+    frozen: dict[str, FrozenJSONValue] = {}
+    for key in sorted(value):
+        frozen[key] = _freeze_json(value[key])
+    return MappingProxyType(frozen)
+
+
+def _dependency_output(row: Job) -> StageDependencyOutput:
+    output = row.output_json
+    if not isinstance(output, Mapping):
+        raise StageFailure(
+            "dependency_output_invalid",
+            "succeeded dependency has no mapping output",
+            retryable=False,
+            details={"dependency_public_id": row.public_id, "dependency_stage": row.stage},
+        )
+    return StageDependencyOutput(
+        job_public_id=row.public_id,
+        stage=row.stage,
+        component_version=row.component_version,
+        output=_freeze_mapping(output),
+    )
+
+
+def _canonical_output(output: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(output, Mapping):
+        raise TypeError("stage handler output must be a mapping")
+    canonical = json.loads(canonical_json(dict(output)))
+    if not isinstance(canonical, dict):
+        raise TypeError("stage handler output must canonicalize to an object")
+    return cast(dict[str, Any], canonical)
 
 
 # TheSuperHackers @bugfix Leex 22/08/2026 Reject reference bytes that change while a parser or acquirer consumes them. (#TBD)

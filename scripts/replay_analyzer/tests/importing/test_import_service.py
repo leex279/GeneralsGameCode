@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import replace
+from collections.abc import Iterable
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -36,6 +38,9 @@ from generals_replay_analyzer.importing import (
     AcquisitionDiagnostic,
     ImportRequest,
     ImportService,
+    StageExecutionContext,
+    StageFailure,
+    StageHandlerRegistration,
     TelemetryArtifact,
 )
 from generals_replay_analyzer.storage import ContentAddressedStore
@@ -59,6 +64,7 @@ def _service(
     *,
     parser: object | None = None,
     acquirer: object | None = None,
+    stage_handlers: Iterable[StageHandlerRegistration] = (),
 ) -> ImportService:
     if parser is None:
         parser = _successful_parser
@@ -72,6 +78,7 @@ def _service(
         clock=clock,
         parser_version="test-parser-1",
         telemetry_acquirer_version="test-acquirer-1",
+        stage_handlers=stage_handlers,
     )
 
 
@@ -147,6 +154,233 @@ def test_single_file_creates_provenance_lowercase_replay_and_expected_dag(
     assert result.sha256 == expected_sha
     assert result.source_public_ids == (source.public_id,)
     assert all("\\" not in job.public_id and "/" not in job.public_id for job in result.jobs)
+
+
+def test_registered_import_observations_runs_after_frozen_dependency_context(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    contexts: list[StageExecutionContext] = []
+    returned_output: dict[str, Any] = {
+        "summary": {"families": ["parser", "telemetry"]},
+        "status": "imported",
+    }
+
+    def import_observations(context: StageExecutionContext) -> dict[str, Any]:
+        contexts.append(context)
+        assert tuple(dependency.stage for dependency in context.dependencies) == ("parse", "telemetry")
+        assert context.input["replay_public_id"] == context.replay_public_id
+        assert context.input["replay_sha256"] == context.replay_sha256
+        assert context.dependencies[0].output["content_sha256"] == context.replay_sha256
+        artifacts = context.dependencies[1].output["artifacts"]
+        assert isinstance(artifacts, tuple) and artifacts
+        with pytest.raises(FrozenInstanceError):
+            context.stage = "mutated"  # type: ignore[misc]
+        with pytest.raises(TypeError):
+            context.input["replay_sha256"] = "f" * 64  # type: ignore[index]
+        with pytest.raises(TypeError):
+            context.dependencies[0].output["content_sha256"] = "f" * 64  # type: ignore[index]
+        with pytest.raises(AttributeError):
+            cast(Any, artifacts).append("mutated")
+        with pytest.raises(AttributeError):
+            cast(Any, context.dependencies).append("mutated")
+        return returned_output
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(_artifact(tmp_path)),
+        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert tuple(job.stage for job in completed) == (
+        "discover",
+        "hash",
+        "manage_copy",
+        "parse",
+        "telemetry",
+        "import_observations",
+    )
+    assert len(contexts) == 1
+    context = contexts[0]
+    assert context.job_public_id == completed[-1].public_id
+    assert context.stage == "import_observations"
+    assert context.component_version == "1"
+    assert context.replay_public_id == completed[-1].replay_public_id
+    assert context.replay_sha256 == hashlib.sha256(replay_file.read_bytes()).hexdigest()
+
+    cast(dict[str, Any], returned_output["summary"])["families"].append("caller-mutation")
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None and imported.status == "succeeded"
+        assert imported.output_json == {
+            "status": "imported",
+            "summary": {"families": ["parser", "telemetry"]},
+        }
+
+
+def test_registered_stage_never_receives_failed_dependency_output(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    received: list[StageExecutionContext] = []
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        received.append(context)
+        return {"status": "unexpected"}
+
+    def failing_parser(_path: Path) -> SimpleNamespace:
+        raise ValueError("fixture parser failure")
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=failing_parser,
+        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+    )
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert tuple(job.stage for job in completed) == ("discover", "hash", "manage_copy", "parse")
+    assert received == []
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None and imported.status == "failed"
+        assert imported.error_code == "dependency_failed"
+        assert imported.output_json is None
+
+
+def test_registered_stage_uses_existing_typed_failure_and_retry_semantics(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        raise StageFailure(
+            "observation_validation_failed",
+            "fixture observation validation failed",
+            retryable=False,
+            details={"dependency_count": len(context.dependencies)},
+        )
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+    )
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert completed[-1].stage == "import_observations"
+    assert completed[-1].status == "failed"
+    assert completed[-1].error_code == "observation_validation_failed"
+    assert completed[-1].retryable is False
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None
+        assert imported.error_details_json == {"dependency_count": 1}
+
+
+def test_registered_stage_omits_absent_optional_dependency_and_copies_configuration(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    received: list[StageExecutionContext] = []
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        received.append(context)
+        return {"status": "imported"}
+
+    registrations = [StageHandlerRegistration("import_observations", "1", import_observations)]
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        stage_handlers=registrations,
+    )
+    registrations.clear()
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert completed[-1].stage == "import_observations"
+    assert len(received) == 1
+    assert tuple(dependency.stage for dependency in received[0].dependencies) == ("parse",)
+
+
+def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    clock: MutableClock,
+) -> None:
+    def handler(_context: StageExecutionContext) -> dict[str, str]:
+        return {"status": "unused"}
+
+    cases = (
+        ((StageHandlerRegistration("parse", "1", handler),), "built_in_stage"),
+        ((StageHandlerRegistration("private_task_4_stage", "1", handler),), "unknown_stage"),
+        ((StageHandlerRegistration("import_observations", "999", handler),), "version_mismatch"),
+        (
+            (
+                StageHandlerRegistration("import_observations", "1", handler),
+                StageHandlerRegistration("import_observations", "1", handler),
+            ),
+            "duplicate_stage",
+        ),
+    )
+    for registrations, error_code in cases:
+        with pytest.raises(ValueError, match=error_code):
+            _service(
+                session_factory,
+                settings,
+                replay_store,
+                artifact_store,
+                clock,
+                stage_handlers=registrations,
+            )
+
+
+def test_default_service_keeps_future_observation_stage_pending(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-3-worker", limit=10)
+    assert tuple(job.stage for job in completed) == ("discover", "hash", "manage_copy", "parse")
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None and imported.status == "pending"
 
 
 def test_folder_snapshot_filters_sorts_and_respects_recursion(
