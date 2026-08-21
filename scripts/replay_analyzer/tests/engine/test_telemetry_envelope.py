@@ -428,6 +428,135 @@ def test_analyzer_paths_share_one_final_component_and_identity_policy(repository
     assert "_stricmp(leftIdentity.str(), rightIdentity.str()) == 0" in source
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing-argument",
+        "duplicate",
+        "relative",
+        "missing-directory",
+        "ordinary-file",
+        "long",
+        "dot-alias",
+        "wildcard-replay",
+    ],
+)
+def test_replay_user_data_root_rejects_unsafe_or_ambiguous_inputs_before_playback(
+    case: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch the analyzer accepting an ambiguous or unsafe user-map discovery root."""
+    isolated_root = (tmp_path / "isolated-user-data").resolve()
+    isolated_root.mkdir()
+    ordinary_file = (tmp_path / "ordinary-file").resolve()
+    ordinary_file.write_bytes(b"not a directory")
+    alias_child = isolated_root / "alias-child"
+    alias_child.mkdir()
+    option = ["-replay-user-data-root"]
+    values = {
+        "missing-argument": [],
+        "duplicate": [str(isolated_root), "-replay-user-data-root", str(isolated_root)],
+        "relative": ["relative-user-data"],
+        "missing-directory": [str((tmp_path / "missing-user-data").resolve())],
+        "ordinary-file": [str(ordinary_file)],
+        "long": [f"{tmp_path.anchor}{'a' * 270}"],
+        "dot-alias": [f"{alias_child}\\.."],
+        "wildcard-replay": [str(isolated_root)],
+    }
+    base_command = _base_command(zero_hour_runtime_executable, pinned_replay)
+    if case == "wildcard-replay":
+        base_command[-1] = str(pinned_replay.parent / "*.rep")
+    completed = _run_engine(
+        [*base_command, *option, *values[case]],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert "Simulating Replay" not in completed.stdout
+    assert "Replay user data:" in completed.stderr
+
+
+def test_replay_user_data_root_is_modern_guarded_and_applied_before_map_discovery(repository_root: Path) -> None:
+    """Catch the option escaping analyzer builds or being applied after MapCache consumes the default root."""
+    command_line = (repository_root / "Core/GameEngine/Source/Common/CommandLine.cpp").read_text(encoding="utf-8")
+    global_data = (
+        repository_root / "GeneralsMD/Code/GameEngine/Include/Common/GlobalData.h"
+    ).read_text(encoding="utf-8")
+    global_data_cpp = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp"
+    ).read_text(encoding="utf-8")
+    win_main = (repository_root / "GeneralsMD/Code/Main/WinMain.cpp").read_text(encoding="utf-8")
+    game_engine = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp"
+    ).read_text(encoding="utf-8")
+    modern_guard = "#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)"
+
+    assert modern_guard in command_line
+    assert modern_guard in global_data
+    assert '"-replay-user-data-root"' in command_line
+    startup = command_line.split("void CommandLine::parseCommandLineForStartup()", maxsplit=1)[1]
+    assert startup.index("parseCommandLine(paramsForStartup") < startup.index("validateReplayUserDataRootOptions();")
+    assert "setReplayAnalyzerUserDataRoot" in global_data
+    assert "ensureReplayAnalyzerUserDataDirectory" in global_data
+    constructor = global_data_cpp.split("GlobalData::GlobalData()", maxsplit=1)[1].split(
+        "GlobalData::~GlobalData()", maxsplit=1
+    )[0]
+    assert "BuildUserDataPathFromRegistry(FALSE)" in constructor
+    assert constructor.index("#else") < constructor.index("CreateDirectory(m_userDataDir.str(), nullptr);")
+    assert "SHGetSpecialFolderPath(nullptr, temp, CSIDL_PERSONAL, createDocuments)" in global_data_cpp
+    validator = command_line.split("void validateReplayUserDataRootOptions()", maxsplit=1)[1].split(
+        "Int parseReplayParseDump", maxsplit=1
+    )[0]
+    assert "strchr(TheGlobalData->m_simulateReplays[0].str(), '*')" in validator
+    assert validator.index("setReplayAnalyzerUserDataRoot") < validator.rindex(
+        "ensureReplayAnalyzerUserDataDirectory"
+    )
+    assert win_main.index("CommandLine::parseCommandLineForStartup();") < win_main.index(
+        "MiniDumper::initMiniDumper"
+    )
+    assert game_engine.index("CommandLine::parseCommandLineForEngineInit();") < game_engine.index(
+        "TheMapCache->updateCache();"
+    )
+
+
+def test_terrain_road_bridge_creation_is_scoped_as_map_loaded(repository_root: Path) -> None:
+    """Catch terrain-road GenericBridge roots missing the authoritative map-load lifecycle source."""
+    terrain_logic = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/GameLogic/Map/TerrainLogic.cpp"
+    ).read_text(encoding="utf-8")
+    bridge_constructor = terrain_logic.split(
+        "Bridge::Bridge(BridgeInfo &theInfo, Dict *props, AsciiString bridgeTemplateName)",
+        maxsplit=1,
+    )[1].split("Bridge::Bridge(Object *bridgeObj)", maxsplit=1)[0]
+
+    assert '#include "Common/ReplayEntityLifecycle.h"' in terrain_logic
+    assert "#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)" in bridge_constructor
+    assert bridge_constructor.index(
+        "ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);"
+    ) < bridge_constructor.index("TheThingFactory->newObject(genericBridgeTemplate, nullptr)")
+    assert bridge_constructor.index("TheThingFactory->newObject(genericBridgeTemplate, nullptr)") < (
+        bridge_constructor.index("creationScope.observeReturned(bridge);")
+    )
+    pre_position = bridge_constructor.split("bridge->setPosition(&center);", maxsplit=1)[0]
+    assert "bridge->setOrientation(" not in pre_position
+    assert bridge_constructor.index("bridge->setOrientation( v.toAngle() );") < bridge_constructor.index(
+        "ReplayEntityLifecycle::observeMapLoadedOrientation(bridge);"
+    )
+
+    map_export = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayMapExport.cpp"
+    ).read_text(encoding="utf-8")
+    bridge_export = map_export.split("std::string buildBridges(", maxsplit=1)[1].split(
+        "void addCategory(", maxsplit=1
+    )[0]
+    assert "TheGameLogic->findObjectByID(info.bridgeObjectID)" in bridge_export
+    assert "bridgeObject->getTemplate()->getName()" in bridge_export
+
+
 def test_outcome_attempt_brackets_all_replay_input_and_ready_seams(repository_root: Path) -> None:
     recorder = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp").read_text(encoding="utf-8")
     playback = recorder.split("Bool RecorderClass::playbackFile(AsciiString filename)", maxsplit=1)[1].split(

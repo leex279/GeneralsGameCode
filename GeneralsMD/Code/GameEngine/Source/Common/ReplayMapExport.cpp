@@ -447,15 +447,13 @@ namespace
 	{
 		std::vector<Waypoint *> waypoints;
 		std::set<Int> waypointIds;
-		std::set<std::string> waypointNames;
 		for (Waypoint *waypoint = TheTerrainLogic->getFirstWaypoint(); waypoint != nullptr; waypoint = waypoint->getNext())
 		{
 			const Int waypointId = static_cast<Int>(waypoint->getID());
 			const std::string waypointName = narrowUtf8(waypoint->getName());
-			if (!waypointIds.insert(waypointId).second || waypointName.empty()
-				|| !waypointNames.insert(waypointName).second)
+			if (!waypointIds.insert(waypointId).second || waypointName.empty())
 			{
-				fail("map_waypoint_identity", "initialized waypoint IDs and names must be nonempty and unique");
+				fail("map_waypoint_identity", "initialized waypoint IDs must be unique and names must be nonempty");
 				return "[]";
 			}
 			waypoints.push_back(waypoint);
@@ -472,17 +470,26 @@ namespace
 			if (waypoint->getPathLabel1().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel1()));
 			if (waypoint->getPathLabel2().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel2()));
 			if (waypoint->getPathLabel3().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel3()));
-			std::vector<std::string> links;
+			std::vector<std::pair<Int, std::string>> links;
 			for (Int link = 0; link < waypoint->getNumLinks(); ++link)
 			{
 				Waypoint *linked = waypoint->getLink(link);
-				if (linked != nullptr) links.push_back(narrowUtf8(linked->getName()));
+				if (linked != nullptr) links.push_back(std::make_pair(static_cast<Int>(linked->getID()), narrowUtf8(linked->getName())));
 			}
 			std::sort(links.begin(), links.end());
+			std::vector<Int> linkWaypointIds;
+			std::vector<std::string> linkNames;
+			for (const std::pair<Int, std::string> &link : links)
+			{
+				linkWaypointIds.push_back(link.first);
+				linkNames.push_back(link.second);
+			}
+			// TheSuperHackers @feature Leex 21/08/2026 Bind waypoint graph edges by the unique engine ID while preserving duplicate raw display names. (#TBD)
 			result += "{\"bidirectional\":" + std::string(waypoint->getBiDirectional() ? "true" : "false")
 				+ ",\"bounds_policy\":" + jsonUtf8(insideXY(position, minimumX, minimumY, maximumX, maximumY)
 					? "pathfinder_xy_closed" : "not_asserted_by_source")
-				+ ",\"labels\":" + stringArray(labels) + ",\"link_names\":" + stringArray(links)
+				+ ",\"labels\":" + stringArray(labels) + ",\"link_names\":" + stringArray(linkNames)
+				+ ",\"link_waypoint_ids\":" + intArray(linkWaypointIds)
 				+ ",\"name\":" + jsonString(waypoint->getName()) + ",\"position\":" + positionJson(position)
 				+ ",\"waypoint_id\":" + std::to_string(static_cast<Int>(waypoint->getID())) + "}";
 		}
@@ -581,7 +588,19 @@ namespace
 			}
 			cornersJson.push_back(']');
 			if (index != 0) result.push_back(',');
-			const AsciiString templateName = bridge->getBridgeTemplateName();
+			AsciiString templateName = bridge->getBridgeTemplateName();
+			if (info.bridgeObjectID != INVALID_ID)
+			{
+				// TheSuperHackers @feature Leex 21/08/2026 Bind a bridge object ID to its authoritative ThingTemplate rather than its terrain-road visual template. (#TBD)
+				const Object *bridgeObject = TheGameLogic->findObjectByID(info.bridgeObjectID);
+				if (bridgeObject == nullptr || bridgeObject->getTemplate() == nullptr
+					|| bridgeObject->getTemplate()->getName().isEmpty())
+				{
+					fail("map_bridge_identity", "initialized bridge object ID has no stable object template");
+					return "[]";
+				}
+				templateName = bridgeObject->getTemplate()->getName();
+			}
 			result += "{\"bounds_policy\":\"pathfinder_xy_closed\",\"bridge_index\":"
 				+ std::to_string(info.bridgeIndex) + ",\"bridge_width\":" + jsonReal(info.bridgeWidth)
 				+ ",\"category_source\":\"TerrainLogic::getFirstBridge\",\"corners\":" + cornersJson
@@ -599,6 +618,24 @@ namespace
 		categories.emplace_back(name, source);
 	}
 
+	void buildStaticCategories(const Object *object, std::vector<std::pair<std::string, std::string>> &categories)
+	{
+		static const NameKeyType warehouseKey = NAMEKEY("SupplyWarehouseDockUpdate");
+		static const NameKeyType autoDepositKey = NAMEKEY("AutoDepositUpdate");
+		if (object->isKindOf(KINDOF_BRIDGE)) addCategory(categories, "bridge", "ThingTemplate::isKindOf(KINDOF_BRIDGE)");
+		if (object->isKindOf(KINDOF_CAPTURABLE)) addCategory(categories, "capturable", "ThingTemplate::isKindOf(KINDOF_CAPTURABLE)");
+		if (object->isKindOf(KINDOF_CASH_GENERATOR)) addCategory(categories, "cash_generator", "ThingTemplate::isKindOf(KINDOF_CASH_GENERATOR)");
+		if (object->findUpdateModule(autoDepositKey) != nullptr
+			&& (object->isKindOf(KINDOF_CAPTURABLE) || object->isKindOf(KINDOF_TECH_BUILDING)))
+		{
+			addCategory(categories, "oil_income", "Object::findUpdateModule(AutoDepositUpdate)+capturable_or_tech_KindOf");
+		}
+		if (object->isKindOf(KINDOF_OBSTACLE)) addCategory(categories, "static_blocker", "ThingTemplate::isKindOf(KINDOF_OBSTACLE)");
+		if (object->isKindOf(KINDOF_SUPPLY_SOURCE)) addCategory(categories, "supply_source", "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)");
+		if (object->findUpdateModule(warehouseKey) != nullptr) addCategory(categories, "supply_warehouse", "Object::findUpdateModule(SupplyWarehouseDockUpdate)");
+		if (object->isKindOf(KINDOF_TECH_BUILDING)) addCategory(categories, "tech_building", "ThingTemplate::isKindOf(KINDOF_TECH_BUILDING)");
+	}
+
 	std::string buildStaticObjects(Real minimumX, Real minimumY, Real maximumX, Real maximumY)
 	{
 		std::vector<const Object *> objects;
@@ -612,25 +649,12 @@ namespace
 		std::sort(objects.begin(), objects.end(), [](const Object *left, const Object *right) {
 			return left->getID() < right->getID();
 		});
-		static const NameKeyType warehouseKey = NAMEKEY("SupplyWarehouseDockUpdate");
-		static const NameKeyType autoDepositKey = NAMEKEY("AutoDepositUpdate");
 		std::string result("[");
 		Bool firstObject = TRUE;
 		for (const Object *object : objects)
 		{
 			std::vector<std::pair<std::string, std::string>> categories;
-			if (object->isKindOf(KINDOF_BRIDGE)) addCategory(categories, "bridge", "ThingTemplate::isKindOf(KINDOF_BRIDGE)");
-			if (object->isKindOf(KINDOF_CAPTURABLE)) addCategory(categories, "capturable", "ThingTemplate::isKindOf(KINDOF_CAPTURABLE)");
-			if (object->isKindOf(KINDOF_CASH_GENERATOR)) addCategory(categories, "cash_generator", "ThingTemplate::isKindOf(KINDOF_CASH_GENERATOR)");
-			if (object->findUpdateModule(autoDepositKey) != nullptr
-				&& (object->isKindOf(KINDOF_CAPTURABLE) || object->isKindOf(KINDOF_TECH_BUILDING)))
-			{
-				addCategory(categories, "oil_income", "Object::findUpdateModule(AutoDepositUpdate)+capturable_or_tech_KindOf");
-			}
-			if (object->isKindOf(KINDOF_OBSTACLE)) addCategory(categories, "static_blocker", "ThingTemplate::isKindOf(KINDOF_OBSTACLE)");
-			if (object->isKindOf(KINDOF_SUPPLY_SOURCE)) addCategory(categories, "supply_source", "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)");
-			if (object->findUpdateModule(warehouseKey) != nullptr) addCategory(categories, "supply_warehouse", "Object::findUpdateModule(SupplyWarehouseDockUpdate)");
-			if (object->isKindOf(KINDOF_TECH_BUILDING)) addCategory(categories, "tech_building", "ThingTemplate::isKindOf(KINDOF_TECH_BUILDING)");
+			buildStaticCategories(object, categories);
 			if (categories.empty()) continue;
 			const Coord3D &position = *object->getPosition();
 			if (!insideXY(position, minimumX, minimumY, maximumX, maximumY))
@@ -787,9 +811,10 @@ namespace
 			"\"entity_sample_policy\":{\"bounded_layer_statuses\":[\"stable\",\"dynamic_bridge_layer\",\"unknown_engine_value\"],"
 			"\"bounded_position_policies\":[\"pathfinder_xy_closed\"],"
 			"\"exempt_position_policies\":[\"exempt_kindof_aircraft\",\"exempt_kindof_bridge\","
-			"\"exempt_kindof_projectile\",\"exempt_kindof_parachutable\",\"exempt_locomotor_air_surface\"],"
+			"\"exempt_kindof_projectile\",\"exempt_kindof_parachutable\",\"exempt_locomotor_air_surface\","
+			"\"exempt_map_loaded_unclassified_immobile\"],"
 			"\"policy\":\"pathfinder_xy_closed_except_explicit_engine_category\","
-			"\"policy_source\":\"ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface\"},"
+			"\"policy_source\":\"ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface\"},"
 			"\"float_encoding\":\"IEEE-754-binary32\",\"units\":\"engine_world_unit\"},"
 			"\"engine_data_identity\":" + jsonString(ReplayTelemetry::getEngineDataIdentity())
 			+ ",\"features\":{\"bridges\":" + bridges + ",\"start_positions\":" + starts
@@ -819,6 +844,14 @@ namespace
 		});
 		return TRUE;
 	}
+}
+
+Bool ReplayMapExport::isClassifiedStaticObject(const Object *object)
+{
+	if (object == nullptr) return FALSE;
+	std::vector<std::pair<std::string, std::string>> categories;
+	buildStaticCategories(object, categories);
+	return !categories.empty();
 }
 
 void ReplayMapExport::reset()

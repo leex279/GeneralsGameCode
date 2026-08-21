@@ -539,6 +539,19 @@ void ReplayEntityLifecycle::observeTransform(const Object *object, Bool position
 	}
 }
 
+void ReplayEntityLifecycle::observeMapLoadedOrientation(const Object *object)
+{
+	CreationMap::iterator it = findCreation(object);
+	if (it == s_creations.end() || it->second.finalized || !it->second.hasPosition
+		|| it->second.source != REPLAY_ENTITY_CREATION_MAP_LOADED)
+	{
+		ReplayTelemetry::fail("map_loaded_orientation_unavailable",
+			"map-loaded first-pose orientation was observed without a buffered placed map root");
+		return;
+	}
+	it->second.orientation = object->getOrientation();
+}
+
 void ReplayEntityLifecycle::ensureObjectCreated(const Object *object)
 {
 	CreationMap::iterator it = findCreation(object);

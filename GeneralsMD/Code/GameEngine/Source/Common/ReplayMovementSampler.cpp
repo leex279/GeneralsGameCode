@@ -19,6 +19,7 @@
 #include "Common/Player.h"
 #include "Common/Recorder.h"
 #include "Common/ReplayEntityLifecycle.h"
+#include "Common/ReplayMapExport.h"
 #include "Common/ReplayTelemetry.h"
 #include "Common/ThingTemplate.h"
 #include "GameLogic/AIPathfind.h"
@@ -542,6 +543,12 @@ namespace
 		if (object->isKindOf(KINDOF_BRIDGE)) return "exempt_kindof_bridge";
 		if (object->isKindOf(KINDOF_PROJECTILE)) return "exempt_kindof_projectile";
 		if (object->isKindOf(KINDOF_PARACHUTABLE)) return "exempt_kindof_parachutable";
+		if (ReplayEntityLifecycle::getCreationSource(object) == REPLAY_ENTITY_CREATION_MAP_LOADED
+			&& object->isKindOf(KINDOF_IMMOBILE) && !ReplayMapExport::isClassifiedStaticObject(object))
+		{
+			// TheSuperHackers @feature Leex 21/08/2026 Mark map-loaded immobile samples for independent classified-static exclusion before any bounds exemption. (#TBD)
+			return "exempt_map_loaded_unclassified_immobile";
+		}
 		const AIUpdateInterface *ai = object->getAI();
 		const Locomotor *locomotor = ai != nullptr ? ai->getCurLocomotor() : nullptr;
 		if (locomotor != nullptr && (locomotor->getLegalSurfaces() & LOCOMOTORSURFACE_AIR) != 0)

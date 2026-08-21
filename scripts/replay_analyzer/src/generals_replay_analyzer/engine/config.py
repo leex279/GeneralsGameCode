@@ -103,6 +103,18 @@ def require_regular_input(path: Path, label: str) -> Path:
     return resolved
 
 
+def require_plain_directory_input(path: Path, label: str) -> Path:
+    """Require one existing ordinary directory without any reparse or symlink component."""
+    try:
+        resolved = require_absolute_resolved_path(path, label, must_exist=True)
+        info = resolved.lstat()
+    except (EngineRunConfigurationError, OSError) as error:
+        raise EngineRunConfigurationError(f"{label} must be an existing ordinary non-reparse directory") from error
+    if resolved.is_symlink() or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise EngineRunConfigurationError(f"{label} must be an existing ordinary non-reparse directory")
+    return resolved
+
+
 # TheSuperHackers @feature Leex 21/08/2026 Define one strict isolated replay-engine invocation contract. (#TBD)
 @dataclass(frozen=True)
 class EngineRunConfig:
@@ -112,6 +124,7 @@ class EngineRunConfig:
     timeout_seconds: int = 900
     movement_sample_frames: int = 15
     data_root: Path = field(default_factory=default_data_root)
+    replay_user_data_root: Path | None = None
 
     def __post_init__(self) -> None:
         executable = require_regular_input(self.executable, "engine executable")
@@ -128,5 +141,11 @@ class EngineRunConfig:
                 f"{MIN_MOVEMENT_SAMPLE_FRAMES} through {MAX_MOVEMENT_SAMPLE_FRAMES}"
             )
         data_root = require_absolute_resolved_path(self.data_root, "data root", must_exist=False)
+        replay_user_data_root = (
+            None
+            if self.replay_user_data_root is None
+            else require_plain_directory_input(self.replay_user_data_root, "replay user-data root")
+        )
         object.__setattr__(self, "executable", executable)
         object.__setattr__(self, "data_root", data_root)
+        object.__setattr__(self, "replay_user_data_root", replay_user_data_root)

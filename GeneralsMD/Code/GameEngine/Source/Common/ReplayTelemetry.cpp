@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,29 @@
 
 namespace
 {
+	std::string canonicalPath(const char *value)
+	{
+		std::string result(value != nullptr ? value : "");
+		for (char &character : result)
+		{
+			if (character == '\\') character = '/';
+			character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+		}
+		return result;
+	}
+
+	// TheSuperHackers @feature Leex 21/08/2026 Keep user-map telemetry identity stable across validated isolated profile roots. (#TBD)
+	AsciiString canonicalReplayMapIdentity(const AsciiString &loadedMap)
+	{
+		if (TheGlobalData == nullptr) return loadedMap;
+		std::string userRoot = canonicalPath(TheGlobalData->getPath_UserData().str());
+		while (!userRoot.empty() && userRoot.back() == '/') userRoot.pop_back();
+		const std::string userMaps = userRoot + "/maps/";
+		const std::string mapPath = canonicalPath(loadedMap.str());
+		if (userRoot.empty() || mapPath.compare(0, userMaps.size(), userMaps) != 0) return loadedMap;
+		return AsciiString((std::string("userdata/maps/") + mapPath.substr(userMaps.size())).c_str());
+	}
+
 	class Sha256
 	{
 	public:
@@ -528,7 +552,7 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 	ReplayCombat::observeReplayHeader(header);
 	if (TheRecorder != nullptr && TheRecorder->getGameInfo() != nullptr)
 	{
-		s_mapIdentity = TheRecorder->getGameInfo()->getMap();
+		s_mapIdentity = canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap());
 		s_initialSeed = TheRecorder->getGameInfo()->getSeed();
 	}
 	// TheSuperHackers @feature Leex 18/08/2026 Keep the trace unpublished until map overrides and replay players are authoritative. (#TBD)

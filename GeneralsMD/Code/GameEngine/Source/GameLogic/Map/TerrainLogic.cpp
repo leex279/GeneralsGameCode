@@ -34,6 +34,9 @@
 #include "Common/GameState.h"
 #include "Common/MapObject.h"
 #include "Common/Radar.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "Common/ReplayEntityLifecycle.h"
+#endif
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
 #include "Common/WellKnownKeys.h"
@@ -245,7 +248,17 @@ m_bridgeInfo(theInfo)
 		DEBUG_LOG(("*** GenericBridge template not found."));
 		return;
 	}
-	Object *bridge = TheThingFactory->newObject(genericBridgeTemplate, nullptr);
+	Object *bridge;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	{
+		// TheSuperHackers @feature Leex 21/08/2026 Classify the terrain-road bridge root created while loading authoritative map data. (#TBD)
+		ReplayEntityCreationScope creationScope(REPLAY_ENTITY_CREATION_MAP_LOADED);
+		bridge = TheThingFactory->newObject(genericBridgeTemplate, nullptr);
+		creationScope.observeReturned(bridge);
+	}
+#else
+	bridge = TheThingFactory->newObject(genericBridgeTemplate, nullptr);
+#endif
 	Coord3D center;
 	center.x = (m_bridgeInfo.fromLeft.x + m_bridgeInfo.toRight.x)/2.0f;
 	center.y = (m_bridgeInfo.fromLeft.y + m_bridgeInfo.toRight.y)/2.0f;
@@ -262,6 +275,10 @@ m_bridgeInfo(theInfo)
 	v.x = m_bridgeInfo.toLeft.x - m_bridgeInfo.fromLeft.x;
 	v.y = m_bridgeInfo.toLeft.y - m_bridgeInfo.fromLeft.y;
 	bridge->setOrientation( v.toAngle() );
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Observe the existing authoritative orientation setter without adding a gameplay mutation. (#TBD)
+	ReplayEntityLifecycle::observeMapLoadedOrientation(bridge);
+#endif
 
 	v.x = m_bridgeInfo.toLeft.x - m_bridgeInfo.toRight.x;
 	v.y = m_bridgeInfo.toLeft.y - m_bridgeInfo.toRight.y;

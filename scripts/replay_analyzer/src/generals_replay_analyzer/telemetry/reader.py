@@ -1898,6 +1898,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                     validated.payload,
                     sample_kind_of_flags,
                     catalog_air_locomotors,
+                    lifecycle.creation_source if lifecycle is not None else None,
                 )
             except MapAssetValidationError as error:
                 raise _error(
@@ -1905,7 +1906,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                     line_number,
                     validated.sequence,
                     f"map bounds: {error}; policy {validated.payload.position_bounds_policy}; "
-                    f"template KindOf flags {sorted(sample_kind_of_flags)}",
+                    f"template KindOf flags {sorted(sample_kind_of_flags)}; "
+                    f"lifecycle source {lifecycle.creation_source if lifecycle is not None else None}",
                 ) from error
 
         if expected_schema_version == 2:

@@ -1048,8 +1048,13 @@ GlobalData::GlobalData()
 
 	// Set user data directory based on registry settings instead of INI parameters.
 	// This allows us to localize the leaf name.
-	m_userDataDir = BuildUserDataPathFromRegistry();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Defer analyzer directory creation until startup parsing selects the isolated or default root. (#TBD)
+	m_userDataDir = BuildUserDataPathFromRegistry(FALSE);
+#else
+	m_userDataDir = BuildUserDataPathFromRegistry(TRUE);
 	CreateDirectory(m_userDataDir.str(), nullptr);
+#endif
 
 	//-allAdvice feature
 	//m_allAdvice = FALSE;
@@ -1336,7 +1341,7 @@ UnsignedInt GlobalData::generateExeCRC()
 	return exeCRC.get();
 }
 
-AsciiString GlobalData::BuildUserDataPathFromRegistry()
+AsciiString GlobalData::BuildUserDataPathFromRegistry(Bool createDocuments)
 {
 #if defined(_MSC_VER) && (_MSC_VER < 1300)
 	// VC6 lacks FOLDERID_Documents and KF_FLAG_DEFAULT
@@ -1368,7 +1373,7 @@ AsciiString GlobalData::BuildUserDataPathFromRegistry()
 	}
 	else {
 		char temp[_MAX_PATH + 1];
-		if (SHGetSpecialFolderPath(nullptr, temp, CSIDL_PERSONAL, true)) {
+		if (SHGetSpecialFolderPath(nullptr, temp, CSIDL_PERSONAL, createDocuments)) {
 			myDocumentsDirectory = temp;
 		}
 	}
@@ -1393,3 +1398,14 @@ AsciiString GlobalData::BuildUserDataPathFromRegistry()
 
 	return myDocumentsDirectory;
 }
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+void GlobalData::ensureReplayAnalyzerUserDataDirectory()
+{
+	if (m_userDataDir.isEmpty())
+	{
+		m_userDataDir = BuildUserDataPathFromRegistry(TRUE);
+	}
+	CreateDirectory(m_userDataDir.str(), nullptr);
+}
+#endif

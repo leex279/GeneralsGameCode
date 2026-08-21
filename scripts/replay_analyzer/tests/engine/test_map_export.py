@@ -130,9 +130,10 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
                     "exempt_kindof_aircraft", "exempt_kindof_bridge",
                     "exempt_kindof_projectile", "exempt_kindof_parachutable",
                     "exempt_locomotor_air_surface",
+                    "exempt_map_loaded_unclassified_immobile",
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
-                "policy_source": "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
+                "policy_source": "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
             },
             "float_encoding": "IEEE-754-binary32",
             "units": "engine_world_unit",
@@ -423,8 +424,8 @@ def test_loader_rejects_oob_features_and_never_clamps(tmp_path: Path) -> None:
     "mutation",
     [
         "duplicate_start_slot",
-        "duplicate_waypoint_name",
         "dangling_waypoint_link",
+        "mismatched_waypoint_link_name",
         "duplicate_bridge_index",
         "duplicate_static_object_id",
         "forged_category_source",
@@ -441,6 +442,7 @@ def test_loader_rejects_rehashed_feature_identity_and_provenance_tampering(
         "bounds_policy": "pathfinder_xy_closed",
         "labels": [],
         "link_names": [],
+        "link_waypoint_ids": [],
         "name": "Waypoint_A",
         "position": {"x": 10.0, "y": 10.0, "z": 1.0},
         "waypoint_id": 8,
@@ -476,10 +478,16 @@ def test_loader_rejects_rehashed_feature_identity_and_provenance_tampering(
     }
     if mutation == "duplicate_start_slot":
         manifest["features"]["start_positions"].append({**start, "name": "Player_2_Start", "waypoint_id": 2})
-    elif mutation == "duplicate_waypoint_name":
-        manifest["features"]["waypoints"] = [waypoint, {**waypoint, "waypoint_id": 9}]
     elif mutation == "dangling_waypoint_link":
-        manifest["features"]["waypoints"] = [{**waypoint, "link_names": ["Missing"]}]
+        manifest["features"]["waypoints"] = [
+            {**waypoint, "link_names": ["Missing"], "link_waypoint_ids": [999]}
+        ]
+    elif mutation == "mismatched_waypoint_link_name":
+        linked = {**waypoint, "name": "Duplicate", "waypoint_id": 9}
+        manifest["features"]["waypoints"] = [
+            {**waypoint, "name": "Duplicate", "link_names": ["Forged"], "link_waypoint_ids": [9]},
+            linked,
+        ]
     elif mutation == "duplicate_bridge_index":
         manifest["features"]["bridges"] = [bridge, {**bridge, "layer_id": 3}]
     elif mutation == "duplicate_static_object_id":
@@ -497,6 +505,36 @@ def test_loader_rejects_rehashed_feature_identity_and_provenance_tampering(
     )
     with pytest.raises(MapAssetValidationError, match=diagnostic):
         load_map_asset(manifest_path, expected_reference=reference)
+
+
+def test_loader_preserves_duplicate_waypoint_names_and_binds_links_by_unique_id(tmp_path: Path) -> None:
+    """Retail maps may repeat display names; only IDs are authoritative for waypoint links."""
+    asset_dir, reference = _write_asset(tmp_path)
+    manifest = json.loads((asset_dir / "manifest.json").read_text(encoding="utf-8"))
+    first = {
+        "bidirectional": False,
+        "bounds_policy": "pathfinder_xy_closed",
+        "labels": [],
+        "link_names": ["Waypoint 128"],
+        "link_waypoint_ids": [31],
+        "name": "Waypoint 128",
+        "position": {"x": 10.0, "y": 10.0, "z": 1.0},
+        "waypoint_id": 8,
+    }
+    second = {
+        **first,
+        "link_names": [],
+        "link_waypoint_ids": [],
+        "position": {"x": 11.0, "y": 10.0, "z": 1.0},
+        "waypoint_id": 31,
+    }
+    manifest["features"]["waypoints"] = [first, second]
+    manifest_path = _rebind_manifest(asset_dir, reference, manifest)
+
+    asset = load_map_asset(manifest_path, expected_reference=reference)
+
+    assert [waypoint.name for waypoint in asset.waypoints] == ["Waypoint 128", "Waypoint 128"]
+    assert asset.waypoints[0].link_waypoint_ids == [31]
 
 
 def test_entity_bounds_accept_edges_reject_oob_and_require_source_grounded_exemption(tmp_path: Path) -> None:
@@ -762,6 +800,8 @@ def test_map_export_sources_remain_modern_zero_hour_read_only(repository_root: P
     assert "exempt_module_wander_ai" not in sampler
     assert "current_locomotor_template_name" in sampler
     assert "positionBoundsPolicy(object)" in sampler
+    assert "!ReplayMapExport::isClassifiedStaticObject(object)" in sampler
+    assert "ReplayMapExport::isClassifiedStaticObject" in source
     assert "getTemplate()->getName()" not in sampler.split("const char *positionBoundsPolicy", 1)[1].split(
         "Bool emitSample", 1
     )[0]

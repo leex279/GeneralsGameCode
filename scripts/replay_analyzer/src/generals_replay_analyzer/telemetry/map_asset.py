@@ -342,7 +342,7 @@ class EntitySamplePolicy(StrictModel):
     exempt_position_policies: list[str]
     policy: Literal["pathfinder_xy_closed_except_explicit_engine_category"]
     policy_source: Literal[
-        "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
+        "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
     ]
 
     @model_validator(mode="after")
@@ -357,6 +357,7 @@ class EntitySamplePolicy(StrictModel):
             "exempt_kindof_projectile",
             "exempt_kindof_parachutable",
             "exempt_locomotor_air_surface",
+            "exempt_map_loaded_unclassified_immobile",
         ]:
             raise ValueError("exempt position policies must equal the closed source-grounded policy")
         return self
@@ -477,6 +478,7 @@ class WaypointFeature(StrictModel):
     bounds_policy: BoundsPolicy
     labels: Annotated[list[str], Field(max_length=3)]
     link_names: Annotated[list[Annotated[str, Field(min_length=1, max_length=1024)]], Field(max_length=8)]
+    link_waypoint_ids: Annotated[list[Annotated[int, Field(ge=0)]], Field(max_length=8)]
     name: Annotated[str, Field(min_length=1, max_length=1024)]
     position: Position3
     waypoint_id: Annotated[int, Field(ge=0)]
@@ -669,6 +671,7 @@ class MapAsset(StrictModel):
         payload: _EntityPositionPayload,
         kind_of_flags: frozenset[str],
         catalog_air_locomotors: frozenset[str],
+        creation_source: str | None = None,
     ) -> None:
         """Apply the manifest's explicit layer policy to a telemetry sample and path goal."""
         policy = payload.position_bounds_policy
@@ -691,6 +694,19 @@ class MapAsset(StrictModel):
             if not isinstance(locomotor_name, str) or locomotor_name not in catalog_air_locomotors:
                 raise MapAssetValidationError(
                     "entity sample AIR exemption lacks a catalog-bound AIR locomotor for its template/set"
+                )
+            return
+        if policy == "exempt_map_loaded_unclassified_immobile":
+            object_id = getattr(payload, "object_id", None)
+            classified_static_ids = {entry.object_id for entry in self.static_objects}
+            if (
+                creation_source != "map_loaded"
+                or "IMMOBILE" not in kind_of_flags
+                or type(object_id) is not int
+                or object_id in classified_static_ids
+            ):
+                raise MapAssetValidationError(
+                    "entity sample map-loaded unclassified immobile exemption lacks lifecycle/catalog/map evidence"
                 )
             return
         if policy != "pathfinder_xy_closed":
@@ -789,16 +805,23 @@ def _validate_feature_integrity(manifest: MapAssetManifest) -> None:
     slots = [slot for start in features.start_positions for slot in start.slot_indices]
     if len(slots) != len(set(slots)):
         raise MapAssetValidationError("map feature start slots must be unique")
-    waypoint_names = [waypoint.name for waypoint in features.waypoints]
     waypoint_ids = [waypoint.waypoint_id for waypoint in features.waypoints]
-    if len(waypoint_names) != len(set(waypoint_names)) or len(waypoint_ids) != len(set(waypoint_ids)):
-        raise MapAssetValidationError("map feature waypoint names and IDs must be unique")
-    known_names = set(waypoint_names)
+    if len(waypoint_ids) != len(set(waypoint_ids)):
+        raise MapAssetValidationError("map feature waypoint IDs must be unique")
+    known_waypoints = {waypoint.waypoint_id: waypoint for waypoint in features.waypoints}
     for waypoint in features.waypoints:
-        if len(waypoint.link_names) != len(set(waypoint.link_names)):
-            raise MapAssetValidationError("map feature waypoint links must be unique")
-        if any(link not in known_names for link in waypoint.link_names):
-            raise MapAssetValidationError("map feature waypoint link targets an unknown unique name")
+        if len(waypoint.link_names) != len(waypoint.link_waypoint_ids):
+            raise MapAssetValidationError("map feature waypoint link names and IDs must have equal length")
+        if waypoint.link_waypoint_ids != sorted(set(waypoint.link_waypoint_ids)):
+            raise MapAssetValidationError("map feature waypoint link IDs must be uniquely ordered")
+        if waypoint.waypoint_id in waypoint.link_waypoint_ids:
+            raise MapAssetValidationError("map feature waypoint cannot link to itself")
+        for link_name, link_id in zip(waypoint.link_names, waypoint.link_waypoint_ids, strict=True):
+            target = known_waypoints.get(link_id)
+            if target is None:
+                raise MapAssetValidationError("map feature waypoint link targets an unknown ID")
+            if link_name != target.name:
+                raise MapAssetValidationError("map feature waypoint link name disagrees with its target ID")
     bridge_indices = [bridge.bridge_index for bridge in features.bridges]
     if bridge_indices != sorted(bridge_indices) or len(bridge_indices) != len(set(bridge_indices)):
         raise MapAssetValidationError("map feature bridge indices must be uniquely ordered")

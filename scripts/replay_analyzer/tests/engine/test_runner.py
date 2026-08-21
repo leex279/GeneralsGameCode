@@ -213,6 +213,41 @@ def test_success_uses_explicit_argv_runtime_cwd_and_validated_public_paths(tmp_p
     assert (result.run_dir / "result.json").is_file()
 
 
+def test_isolated_replay_user_data_root_is_validated_and_bound_to_request(tmp_path: Path) -> None:
+    """Catch the runner omitting or ambiguously recording the engine's isolated user-map root."""
+    executable, replay, data_root = _inputs(tmp_path)
+    isolated_user_data = (tmp_path / "isolated-user-data").resolve()
+    isolated_user_data.mkdir()
+    launcher = FakeLauncher(_publish_valid_evidence)
+
+    result = export_telemetry(
+        replay,
+        _config(executable, data_root, replay_user_data_root=isolated_user_data),
+        launcher=launcher,
+        run_id_factory=lambda: "133e4567-e89b-42d3-a456-426614174000",
+    )
+
+    assert result.status is EngineRunStatus.SUCCESS
+    request = launcher.requests[0]
+    option_index = request.argv.index("-replay-user-data-root")
+    assert request.argv[option_index + 1] == str(isolated_user_data)
+    request_document = json.loads((result.run_dir / "request.json").read_text(encoding="utf-8"))
+    assert request_document["config"]["replay_user_data_root"] == str(isolated_user_data)
+
+
+def test_isolated_replay_user_data_root_must_be_an_existing_plain_directory(tmp_path: Path) -> None:
+    """Catch launch configuration accepting a missing path or an ordinary file as the user-data root."""
+    executable, _replay, data_root = _inputs(tmp_path)
+    missing = (tmp_path / "missing-user-data").resolve()
+    ordinary_file = (tmp_path / "not-a-directory").resolve()
+    ordinary_file.write_bytes(b"not a directory")
+
+    with pytest.raises(EngineRunConfigurationError, match="existing ordinary non-reparse directory"):
+        _config(executable, data_root, replay_user_data_root=missing)
+    with pytest.raises(EngineRunConfigurationError, match="existing ordinary non-reparse directory"):
+        _config(executable, data_root, replay_user_data_root=ordinary_file)
+
+
 def test_crc_mismatch_is_validated_partial_evidence_not_success(tmp_path: Path) -> None:
     """Catch an expected CRC stop being mislabeled as complete-match strategy evidence."""
     executable, replay, data_root = _inputs(tmp_path)

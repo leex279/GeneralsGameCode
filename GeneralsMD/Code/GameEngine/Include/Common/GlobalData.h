@@ -574,6 +574,20 @@ public:
 	// the trailing '\' is included!
   const AsciiString &getPath_UserData() const { return m_userDataDir; }
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Isolate analyzer replay map discovery from the player's registry-derived data directory. (#TBD)
+	void setReplayAnalyzerUserDataRoot(const AsciiString &path)
+	{
+		m_userDataDir = path;
+		if (!m_userDataDir.endsWith("\\"))
+		{
+			m_userDataDir.concat('\\');
+		}
+	}
+	// TheSuperHackers @feature Leex 21/08/2026 Create only the startup-selected analyzer user-data directory after command-line validation. (#TBD)
+	void ensureReplayAnalyzerUserDataDirectory();
+#endif
+
 private:
 
 	static UnsignedInt generateExeCRC();
@@ -583,7 +597,7 @@ private:
 	// this is private, since we read the info from Windows and cache it for
 	// future use. No one is allowed to change it, ever. (srj)
 	AsciiString m_userDataDir;
-	AsciiString BuildUserDataPathFromRegistry();
+	AsciiString BuildUserDataPathFromRegistry(Bool createDocuments);
 
 	static GlobalData *m_theOriginal;		///< the original global data instance (no overrides)
 	GlobalData *m_next;									///< next instance (for overrides)

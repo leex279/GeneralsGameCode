@@ -35,6 +35,8 @@ public:
 	static void observeRegistered(const Object *object);
 	static void observePositionSet(const Object *object);
 	static void observeTransform(const Object *object, Bool positionChanged);
+	// TheSuperHackers @feature Leex 21/08/2026 Correct a buffered map root's first-pose orientation from its authoritative post-placement setter without mutating simulation. (#TBD)
+	static void observeMapLoadedOrientation(const Object *object);
 	static void observeTeamChanged(const Object *object, const Team *previousTeam, const Team *newTeam);
 	static void observeStatusChanged(const Object *object, Bool previousUnderConstruction,
 		Bool newUnderConstruction, Bool previousSold, Bool newSold);

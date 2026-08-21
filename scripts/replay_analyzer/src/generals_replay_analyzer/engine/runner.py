@@ -189,11 +189,16 @@ def _ansi_path_bytes(path: Path) -> bytes:
     return bytes(buffer[:written])
 
 
-def _preflight_ansi_paths(run_dir: Path, executable: Path, replay: Path) -> None:
+def _preflight_ansi_paths(
+    run_dir: Path,
+    executable: Path,
+    replay: Path,
+    replay_user_data_root: Path | None,
+) -> None:
     """Fail before launch when any actual engine-bound ANSI path cannot fit exactly."""
     hash_name = "f" * 64
     transaction_suffix = ".tmp.4294967295.100"
-    candidates = (
+    candidates = [
         ("engine executable", executable),
         ("engine working directory", executable.parent),
         ("replay input", replay),
@@ -207,7 +212,14 @@ def _preflight_ansi_paths(run_dir: Path, executable: Path, replay: Path) -> None
             run_dir / "map-assets-v1" / f"{hash_name}{transaction_suffix}" / "pathing-amphibious.u8.zlib",
         ),
         ("outcome transaction", run_dir / "replay-outcome.json.tmp.4294967295.100"),
-    )
+    ]
+    if replay_user_data_root is not None:
+        candidates.extend(
+            (
+                ("replay user-data root", replay_user_data_root),
+                ("replay user map cache", replay_user_data_root / "Maps" / "MapCache.ini"),
+            )
+        )
     for label, candidate in candidates:
         byte_length = len(_ansi_path_bytes(candidate))
         if byte_length >= ANSI_MAX_PATH:
@@ -501,7 +513,7 @@ def export_telemetry(
     replay = require_regular_input(replay, "replay input")
     run_id = _canonical_run_id(run_id_factory())
     run_dir = config.data_root / "runs" / run_id
-    _preflight_ansi_paths(run_dir, config.executable, replay)
+    _preflight_ansi_paths(run_dir, config.executable, replay, config.replay_user_data_root)
     _ensure_plain_directory(config.data_root)
     runs_root = config.data_root / "runs"
     _ensure_plain_directory(runs_root)
@@ -515,12 +527,16 @@ def export_telemetry(
     outcome_path = run_dir / "replay-outcome.json"
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
-    argv = (
+    argv_parts = [
         str(config.executable),
         "-headless",
         "-noaudio",
         "-replay",
         str(replay),
+    ]
+    if config.replay_user_data_root is not None:
+        argv_parts.extend(("-replay-user-data-root", str(config.replay_user_data_root)))
+    argv_parts.extend((
         "-telemetry",
         str(trace_path),
         "-telemetry-run-id",
@@ -529,7 +545,8 @@ def export_telemetry(
         str(config.movement_sample_frames),
         "-replay-outcome",
         str(outcome_path),
-    )
+    ))
+    argv = tuple(argv_parts)
     replay_sha256 = _sha256_file(replay)
     replay_size = replay.stat().st_size
     executable_sha256 = _sha256_file(config.executable)
@@ -551,6 +568,9 @@ def export_telemetry(
             "timeout_seconds": config.timeout_seconds,
             "movement_sample_frames": config.movement_sample_frames,
             "data_root": str(config.data_root),
+            "replay_user_data_root": (
+                str(config.replay_user_data_root) if config.replay_user_data_root is not None else None
+            ),
         },
         "argv": list(argv),
         "cwd": str(config.executable.parent),

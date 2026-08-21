@@ -144,6 +144,9 @@ def _write_catalog(directory: Path) -> dict[str, object]:
                     ("MapBridge", ["BRIDGE"], []),
                     ("SupplyPile", ["SUPPLY_SOURCE"], []),
                     ("OilDerrick", ["CAPTURABLE", "TECH_BUILDING"], ["AutoDepositUpdate"]),
+                    ("TreePalm1", ["IGNORED_IN_GUI", "IMMOBILE", "SHRUBBERY"], []),
+                    ("RocksG14", ["IMMOBILE"], []),
+                    ("StaticRock", ["IMMOBILE", "OBSTACLE"], []),
                 ]
             )
         ],
@@ -950,6 +953,111 @@ def test_v2_entity_bounds_policy_requires_independent_catalog_and_lifecycle_evid
         match="KindOf|locomotor template/set|outside pathfinder bounds",
     ):
         tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
+
+
+@pytest.mark.parametrize(
+    ("template_name", "flags"),
+    [
+        ("TreePalm1", ["IGNORED_IN_GUI", "IMMOBILE", "SHRUBBERY"]),
+        ("RocksG14", ["IMMOBILE"]),
+    ],
+)
+def test_v2_accepts_oob_map_loaded_unclassified_immobile_decoration(
+    tmp_path: Path,
+    template_name: str,
+    flags: list[str],
+) -> None:
+    creation = _map_loaded_creation(
+        404,
+        template_name,
+        flags,
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 404,
+            "template_name": template_name,
+            "owner_player_index": None,
+            "position": {"x": 0.0, "y": -1_000_001.0, "z": 0.0},
+            "position_bounds_policy": "exempt_map_loaded_unclassified_immobile",
+            "speed_status": "unavailable_no_physics",
+            "speed": None,
+            "current_state": "unknown",
+            "current_state_source": "ai_interface_unavailable",
+            "ai_state_id": None,
+            "ai_state_name": None,
+            "ai_state_name_status": "unavailable_no_ai",
+            "locomotor_set_id": None,
+            "locomotor_set_name": None,
+            "locomotor_set_name_status": "unavailable_no_ai",
+            "path_goal_status": "unavailable_no_ai",
+            "is_mobile": False,
+        }
+    )
+
+    records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
+
+    assert records[-1].event_type == "complete"
+
+
+@pytest.mark.parametrize("tamper", ["not_map_loaded", "missing_immobile", "catalog_mismatch"])
+def test_v2_rejects_forged_map_loaded_unclassified_immobile_exemption(tmp_path: Path, tamper: str) -> None:
+    creation = _map_loaded_creation(
+        404,
+        "TreePalm1",
+        ["IGNORED_IN_GUI", "IMMOBILE", "SHRUBBERY"],
+    )
+    if tamper == "not_map_loaded":
+        creation["creation_source"] = "unknown"
+        creation["initialization_snapshot_status"] = "not_applicable"
+    elif tamper == "missing_immobile":
+        creation["kind_of_flags"] = ["IGNORED_IN_GUI", "SHRUBBERY"]
+    else:
+        creation["kind_of_flags"] = ["IGNORED_IN_GUI", "IMMOBILE", "SHRUBBERY", "VEHICLE"]
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 404,
+            "template_name": "TreePalm1",
+            "owner_player_index": None,
+            "position": {"x": 0.0, "y": -1_000_001.0, "z": 0.0},
+            "position_bounds_policy": "exempt_map_loaded_unclassified_immobile",
+        }
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="unclassified|immobile|KindOf|lifecycle|catalog"):
+        tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
+
+
+def test_v2_rejects_unclassified_immobile_exemption_for_classified_static_id(tmp_path: Path) -> None:
+    creation = _map_loaded_creation(405, "StaticRock", ["IMMOBILE", "OBSTACLE"])
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 405,
+            "template_name": "StaticRock",
+            "owner_player_index": None,
+            "position": {"x": 0.0, "y": -1_000_001.0, "z": 0.0},
+            "position_bounds_policy": "exempt_map_loaded_unclassified_immobile",
+        }
+    )
+    static = _static_feature(
+        405,
+        "StaticRock",
+        "static_blocker",
+        "ThingTemplate::isKindOf(KINDOF_OBSTACLE)",
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="unclassified immobile"):
+        tuple(
+            iter_validated_trace(
+                _trace(
+                    tmp_path,
+                    [("object_created", creation), ("entity_sample", sample)],
+                    static_objects=[static],
+                )
+            )
+        )
 
 
 def test_v2_rejects_lifecycle_payload_identity_that_differs_from_tracked_owner_and_team(tmp_path: Path) -> None:

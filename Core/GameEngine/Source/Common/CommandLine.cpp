@@ -473,6 +473,11 @@ namespace
 	Bool s_hasTelemetryMovementFrames = FALSE;
 	AsciiString s_replayOutcomePath;
 	Bool s_hasReplayOutcomePath = FALSE;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Store one validated process-local user-data root before map discovery begins. (#TBD)
+	AsciiString s_replayUserDataRoot;
+	Bool s_hasReplayUserDataRoot = FALSE;
+#endif
 
 	void telemetryCommandLineError(const char *message)
 	{
@@ -487,6 +492,15 @@ namespace
 		fflush(stderr);
 		exit(1);
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	void replayUserDataCommandLineError(const char *message)
+	{
+		fprintf(stderr, "Replay user data: %s\n", message);
+		fflush(stderr);
+		exit(1);
+	}
+#endif
 
 	Bool isAbsoluteAnalyzerPath(const Char *path)
 	{
@@ -614,6 +628,153 @@ namespace
 		return TRUE;
 	}
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	Bool hasSafeWin32PathComponents(const Char *path)
+	{
+		if (_strnicmp(path, "\\\\?\\", 4) == 0 || _strnicmp(path, "\\\\.\\", 4) == 0)
+		{
+			return FALSE;
+		}
+		const Char *cursor = path;
+		if (cursor[0] != '\0' && cursor[1] == ':' && (cursor[2] == '\\' || cursor[2] == '/'))
+		{
+			cursor += 3;
+		}
+		else if (cursor[0] == '\\' && cursor[1] == '\\')
+		{
+			cursor += 2;
+		}
+		else if (cursor[0] == '/')
+		{
+			++cursor;
+		}
+		else
+		{
+			return FALSE;
+		}
+		if (*cursor == '\0')
+		{
+			return FALSE;
+		}
+		while (*cursor != '\0')
+		{
+			const Char *separator = cursor;
+			while (*separator != '\0' && *separator != '\\' && *separator != '/')
+			{
+				++separator;
+			}
+			if (separator == cursor)
+			{
+				return FALSE;
+			}
+			const std::string component(cursor, static_cast<size_t>(separator - cursor));
+			if (component == "." || component == ".." || !hasSafeWin32FinalComponent(component.c_str()))
+			{
+				return FALSE;
+			}
+			if (*separator == '\0')
+			{
+				break;
+			}
+			cursor = separator + 1;
+			if (*cursor == '\0')
+			{
+				return FALSE;
+			}
+		}
+		return TRUE;
+	}
+
+	Bool hasExactAnalyzerAnsiRoundTrip(const Char *path)
+	{
+		WCHAR widePath[_MAX_PATH];
+		Char roundTrip[_MAX_PATH];
+		const UINT codePage = GetACP();
+		const DWORD decodeFlags = codePage == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+		const Int wideLength = MultiByteToWideChar(codePage, decodeFlags, path, -1, widePath, ARRAY_SIZE(widePath));
+		if (wideLength <= 0)
+		{
+			return FALSE;
+		}
+		BOOL usedDefault = FALSE;
+		const DWORD encodeFlags = codePage == CP_UTF8 ? WC_ERR_INVALID_CHARS : WC_NO_BEST_FIT_CHARS;
+		BOOL *usedDefaultPointer = codePage == CP_UTF8 ? nullptr : &usedDefault;
+		const Int byteLength = WideCharToMultiByte(codePage, encodeFlags, widePath, wideLength,
+			roundTrip, ARRAY_SIZE(roundTrip), nullptr, usedDefaultPointer);
+		return byteLength > 0 && !usedDefault && strcmp(path, roundTrip) == 0;
+	}
+
+	void normalizeAnalyzerSeparators(std::string &path)
+	{
+		for (char &character : path)
+		{
+			if (character == '/')
+			{
+				character = '\\';
+			}
+		}
+		while (path.size() > 3 && path.back() == '\\')
+		{
+			path.pop_back();
+		}
+	}
+
+	Bool canonicalExistingAnalyzerDirectory(const Char *path, AsciiString &result, Bool requireDirectIdentity)
+	{
+		std::string requested(path);
+		normalizeAnalyzerSeparators(requested);
+		Char absolutePath[_MAX_PATH];
+		const DWORD absoluteLength = GetFullPathNameA(requested.c_str(), ARRAY_SIZE(absolutePath), absolutePath, nullptr);
+		if (absoluteLength == 0 || absoluteLength >= ARRAY_SIZE(absolutePath))
+		{
+			return FALSE;
+		}
+		std::string absolute(absolutePath);
+		normalizeAnalyzerSeparators(absolute);
+		if (requireDirectIdentity && _stricmp(requested.c_str(), absolute.c_str()) != 0)
+		{
+			return FALSE;
+		}
+		const DWORD attributes = GetFileAttributesA(absolute.c_str());
+		if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)
+			|| (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+		{
+			return FALSE;
+		}
+		HANDLE directory = CreateFileA(absolute.c_str(), FILE_READ_ATTRIBUTES,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+			FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+		if (directory == INVALID_HANDLE_VALUE)
+		{
+			return FALSE;
+		}
+		Char resolvedPath[_MAX_PATH];
+		const DWORD resolvedLength = GetFinalPathNameByHandleA(directory, resolvedPath,
+			ARRAY_SIZE(resolvedPath), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+		CloseHandle(directory);
+		if (resolvedLength == 0 || resolvedLength >= ARRAY_SIZE(resolvedPath))
+		{
+			return FALSE;
+		}
+		std::string resolved(resolvedPath, resolvedLength);
+		if (resolved.compare(0, 8, "\\\\?\\UNC\\") == 0)
+		{
+			resolved = "\\\\" + resolved.substr(8);
+		}
+		else if (resolved.compare(0, 4, "\\\\?\\") == 0)
+		{
+			resolved.erase(0, 4);
+		}
+		normalizeAnalyzerSeparators(resolved);
+		if (requireDirectIdentity && _stricmp(absolute.c_str(), resolved.c_str()) != 0)
+		{
+			return FALSE;
+		}
+		result = resolved.c_str();
+		return TRUE;
+	}
+#endif
+
 	// TheSuperHackers @feature Leex 20/08/2026 Compare analyzer paths through one canonical parent and case-insensitive identity policy. (#TBD)
 	Bool analyzerPathIdentitiesMatch(const Char *leftPath, const Char *rightPath)
 	{
@@ -711,6 +872,57 @@ namespace
 		// TheSuperHackers @feature Leex 20/08/2026 Configure an opt-in passive terminal summary without enabling telemetry. (#TBD)
 		ReplayOutcome::configure(s_replayOutcomePath);
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	void validateReplayUserDataRootOptions()
+	{
+		if (!s_hasReplayUserDataRoot)
+		{
+			TheWritableGlobalData->ensureReplayAnalyzerUserDataDirectory();
+			return;
+		}
+		if (!TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+		{
+			replayUserDataCommandLineError("-replay-user-data-root requires exactly one headless replay");
+		}
+		if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+		{
+			replayUserDataCommandLineError("-replay-user-data-root requires sequential replay playback");
+		}
+		if (strchr(TheGlobalData->m_simulateReplays[0].str(), '*') != nullptr
+			|| strchr(TheGlobalData->m_simulateReplays[0].str(), '?') != nullptr)
+		{
+			replayUserDataCommandLineError("-replay-user-data-root requires one explicit replay without wildcards");
+		}
+		const size_t mapCacheSuffixLength = strlen("\\Maps\\MapCache.ini");
+		if (strlen(s_replayUserDataRoot.str()) + mapCacheSuffixLength >= _MAX_PATH)
+		{
+			replayUserDataCommandLineError("-replay-user-data-root cannot fit below ANSI MAX_PATH");
+		}
+		if (!hasExactAnalyzerAnsiRoundTrip(s_replayUserDataRoot.str()))
+		{
+			replayUserDataCommandLineError("-replay-user-data-root must be exactly ANSI encodable");
+		}
+		if (!hasSafeWin32PathComponents(s_replayUserDataRoot.str()))
+		{
+			replayUserDataCommandLineError("-replay-user-data-root contains an unsafe Win32 path component");
+		}
+		AsciiString canonicalRoot;
+		if (!canonicalExistingAnalyzerDirectory(s_replayUserDataRoot.str(), canonicalRoot, TRUE))
+		{
+			replayUserDataCommandLineError("-replay-user-data-root must name an existing direct non-reparse directory");
+		}
+		AsciiString defaultRootIdentity;
+		if (canonicalExistingAnalyzerDirectory(TheGlobalData->getPath_UserData().str(), defaultRootIdentity, FALSE)
+			&& _stricmp(canonicalRoot.str(), defaultRootIdentity.str()) == 0)
+		{
+			replayUserDataCommandLineError("-replay-user-data-root must not alias the registry-derived user-data directory");
+		}
+		// TheSuperHackers @feature Leex 21/08/2026 Apply the validated isolated root before any startup consumer or MapCache can observe user data. (#TBD)
+		TheWritableGlobalData->setReplayAnalyzerUserDataRoot(canonicalRoot);
+		TheWritableGlobalData->ensureReplayAnalyzerUserDataDirectory();
+	}
+#endif
 }
 
 // TheSuperHackers @feature Leex 18/08/2026 Configure a process-local replay parser sink without affecting replay input or simulation state.
@@ -810,6 +1022,28 @@ Int parseReplayOutcome(char *args[], int num)
 	s_hasReplayOutcomePath = TRUE;
 	return 2;
 }
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+// TheSuperHackers @feature Leex 21/08/2026 Accept one explicit isolated replay user-data directory only in modern analyzer builds. (#TBD)
+Int parseReplayUserDataRoot(char *args[], int num)
+{
+	if (num <= 1)
+	{
+		replayUserDataCommandLineError("-replay-user-data-root requires an absolute directory");
+	}
+	if (s_hasReplayUserDataRoot)
+	{
+		replayUserDataCommandLineError("-replay-user-data-root may only be specified once");
+	}
+	if (!isAbsoluteAnalyzerPath(args[1]))
+	{
+		replayUserDataCommandLineError("-replay-user-data-root directory must be absolute");
+	}
+	s_replayUserDataRoot = args[1];
+	s_hasReplayUserDataRoot = TRUE;
+	return 2;
+}
+#endif
 #endif
 
 Int parseJobs(char *args[], int num)
@@ -1509,6 +1743,10 @@ static CommandLineParam paramsForStartup[] =
 	{ "-telemetry-movement-frames", parseReplayTelemetryMovementFrames },
 	// TheSuperHackers @feature Leex 20/08/2026 Expose telemetry-independent replay completion evidence for parity tests. (#TBD)
 	{ "-replay-outcome", parseReplayOutcome },
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Route analyzer replay user-map discovery into one validated isolated directory. (#TBD)
+	{ "-replay-user-data-root", parseReplayUserDataRoot },
+#endif
 #endif
 
 	// TheSuperHackers @feature helmutbuhler 23/05/2025
@@ -1820,6 +2058,9 @@ void CommandLine::parseCommandLineForStartup()
 
 	parseCommandLine(paramsForStartup, ARRAY_SIZE(paramsForStartup));
 #if defined(RTS_REPLAY_ANALYZER)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	validateReplayUserDataRootOptions();
+#endif
 	validateReplayTelemetryOptions();
 	validateReplayOutcomeOptions();
 #endif
