@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from map_asset_support import write_test_map_asset
 
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
@@ -57,6 +58,9 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "map_assets": [],
     }
     if version == 2:
+        manifest_payload = prior_records[0]["payload"]
+        assert isinstance(manifest_payload, dict)
+        payload["map_assets"] = [manifest_payload["map_asset"]]
         payload.update(
             {
                 "crc_mismatch_frame": None,
@@ -162,7 +166,7 @@ def _write_catalog_with_numeric_token(directory: Path, token: str) -> dict[str, 
     }
 
 
-def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
+def _v2_manifest(reference: dict[str, object], map_reference: dict[str, object]) -> dict[str, object]:
     return {
         "engine_build": ENGINE_IDENTITY,
         "replay_version": "1.04",
@@ -174,6 +178,7 @@ def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
             "order_coverage": canonical_order_coverage(),
         },
         "game_data_catalog": reference,
+        "map_asset": map_reference,
     }
 
 
@@ -250,7 +255,8 @@ def _write_v2_trace(
     name: str = "trace.ndjson",
 ) -> Path:
     payloads = [_v2_players(reference)] if player_payloads is None else player_payloads
-    records = [_record(2, 0, "manifest", _v2_manifest(reference))]
+    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
+    records = [_record(2, 0, "manifest", _v2_manifest(reference, map_reference))]
     records.extend(_record(2, index, "players_initialized", payload) for index, payload in enumerate(payloads, start=1))
     records.append(_outcome(len(records)))
     records.append(_completion(2, records))
@@ -260,8 +266,9 @@ def _write_v2_trace(
 def _write_v2_trace_with_player_numeric_token(directory: Path, token: str, name: str) -> Path:
     """Write a digest-valid v2 trace with one literal exponent token in the resolved start position."""
     reference = _write_catalog(directory)
+    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
     records = [
-        _record(2, 0, "manifest", _v2_manifest(reference)),
+        _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
     manifest_line = json.dumps(records[0], separators=(",", ":")).encode("utf-8") + b"\n"
@@ -424,8 +431,9 @@ def test_reader_preserves_historical_v1_player_snapshot_without_manifest_catalog
 def test_reader_accepts_v2_only_with_a_catalog_and_one_complete_slot_snapshot(tmp_path: Path) -> None:
     """Catch a version selector that cannot consume the new mandatory v2 evidence contract."""
     reference = _write_catalog(tmp_path)
+    map_reference = write_test_map_asset(tmp_path, ENGINE_IDENTITY, "maps/test.map")
     records = [
-        _record(2, 0, "manifest", _v2_manifest(reference)),
+        _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
     records.append(_outcome(len(records)))

@@ -7,6 +7,7 @@
 #include "Common/GlobalData.h"
 #include "Common/ReplayCombat.h"
 #include "Common/ReplayGameDataExport.h"
+#include "Common/ReplayMapExport.h"
 #include "Common/ReplayMovementSampler.h"
 #include "Common/ReplayOutcome.h"
 #include "Common/ReplayEconomy.h"
@@ -400,6 +401,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	s_replayLocalSlotIndex = -1;
 	s_initialized = FALSE;
 	ReplayGameDataExport::reset();
+	// TheSuperHackers @feature Leex 21/08/2026 Reset the trace-local authoritative map reference before replay initialization. (#TBD)
+	ReplayMapExport::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local combat and terminal observations before a new replay. (#TBD)
 	ReplayCombat::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local economy and queue identities before a new replay. (#TBD)
@@ -428,6 +431,11 @@ const AsciiString &ReplayTelemetry::getTracePath()
 const AsciiString &ReplayTelemetry::getEngineDataIdentity()
 {
 	return s_engineDataIdentity;
+}
+
+const AsciiString &ReplayTelemetry::getMapIdentity()
+{
+	return s_mapIdentity;
 }
 
 Int ReplayTelemetry::getReplayLocalSlotIndex()
@@ -529,7 +537,8 @@ void ReplayTelemetry::initialize()
 		return;
 	}
 	// TheSuperHackers @feature Leex 18/08/2026 Publish v2 provenance only from the post-map authoritative initialization seam. (#TBD)
-	if (!ReplayGameDataExport::prepareCatalog() || s_outputFailed)
+	// TheSuperHackers @feature Leex 21/08/2026 Validate and atomically publish the initialized map before manifest record zero. (#TBD)
+	if (!ReplayMapExport::prepare() || !ReplayGameDataExport::prepareCatalog() || s_outputFailed)
 	{
 		discardPendingOutput("could not close telemetry output after authoritative initialization failure");
 		return;
@@ -545,7 +554,8 @@ void ReplayTelemetry::initialize()
 		+ ",\"order_coverage\":" + ReplayMovementSampler::orderCoverageJson().str() + "}"
 		+ ",\"game_data_catalog\":{\"type\":\"game_data_catalog\",\"path\":" + jsonString(s_catalogPath)
 		+ ",\"sha256\":" + jsonString(s_catalogSha256)
-		+ ",\"engine_data_identity\":" + jsonString(s_catalogEngineDataIdentity) + "}}";
+		+ ",\"engine_data_identity\":" + jsonString(s_catalogEngineDataIdentity) + "}"
+		+ ",\"map_asset\":" + ReplayMapExport::referenceJson().str() + "}";
 	writeLine(envelope(s_sequence++, 0, "manifest", payload), TRUE);
 	s_eventCounts["manifest"] = 1;
 	flushOutput();
@@ -647,7 +657,8 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationR
 		+ ",\"clean_shutdown\":" + (cleanShutdown ? "true" : "false")
 		+ ",\"writer_error\":" + writerError
 		+ ",\"trace_sha256\":\"" + s_traceDigest.hexDigest()
-		+ "\",\"map_assets\":[],\"final_cash_balances\":" + finalCashBalances.str() + "}";
+		+ "\",\"map_assets\":[" + ReplayMapExport::referenceJson().str()
+		+ "],\"final_cash_balances\":" + finalCashBalances.str() + "}";
 	writeLine(envelope(s_sequence++, finalFrame, "complete", payload), FALSE);
 	// TheSuperHackers @feature Leex 18/08/2026 Exercise late transaction failure without feeding the result into replay execution. (#TBD)
 	const char *injectedFailure = getenv("GENERALS_REPLAY_TELEMETRY_TEST_FAIL_AFTER_COMPLETE_WRITE");

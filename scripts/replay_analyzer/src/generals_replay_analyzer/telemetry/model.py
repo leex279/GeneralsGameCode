@@ -558,6 +558,15 @@ class EntitySamplePayload(OpenPayload):
     layer_id: int | None = None
     layer_name: Annotated[str, Field(min_length=1)] | None = None
     layer_name_status: Literal["stable", "dynamic_bridge_layer", "unknown_engine_value"] | None = None
+    position_bounds_policy: Literal[
+        "pathfinder_xy_closed",
+        "exempt_kindof_aircraft",
+        "exempt_kindof_bridge",
+        "exempt_kindof_projectile",
+        "exempt_locomotor_air_surface",
+        "exempt_module_wander_ai",
+        "exempt_physics_without_ai_pathing",
+    ] | None = None
     speed_status: Literal["measured_physics_velocity", "unavailable_no_physics"] | None = None
     speed: NonNegativeFloat | None
     current_state: Annotated[str, Field(min_length=1)]
@@ -584,7 +593,8 @@ class EntitySamplePayload(OpenPayload):
     ] | None = None
 
     @field_validator(
-        "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status", "speed_status",
+        "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status",
+        "position_bounds_policy", "speed_status",
         "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status", "locomotor_set_id",
         "locomotor_set_name", "locomotor_set_name_status", "current_order_id", "current_order_message_type",
         "current_order_message_name", "path_goal_status", "path_goal", "is_mobile", "is_structure",
@@ -610,20 +620,52 @@ class ManifestPayload(BaseModel):
     initial_seed: int
     exporter_settings: dict[str, object]
     game_data_catalog: "GameDataCatalogReference | None" = None
+    map_asset: "MapAssetReference | None" = None
 
     @model_validator(mode="after")
     def _require_catalog_engine_identity(self) -> "ManifestPayload":
         if self.game_data_catalog is not None and self.game_data_catalog.engine_data_identity != self.engine_build:
             raise ValueError("game_data_catalog engine_data_identity must equal engine_build")
+        if self.map_asset is not None:
+            if self.map_asset.engine_data_identity != self.engine_build:
+                raise ValueError("map_asset engine_data_identity must equal engine_build")
+            if self.map_asset.map_identity != self.map_identity:
+                raise ValueError("map_asset map_identity must equal manifest map_identity")
         return self
 
 
 class MapAssetReference(BaseModel):
-    """Content-addressed asset reference retained by terminal and catalog observations."""
+    """A legacy generic asset reference or the closed content-addressed v2 map reference."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    type: Literal["map_asset"] | None = None
+    schema_version: Literal[1] | None = None
+    content_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    engine_data_identity: str | None = Field(default=None, min_length=1)
+    map_identity: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _bind_strict_content_address(self) -> "MapAssetReference":
+        strict = (
+            self.type,
+            self.schema_version,
+            self.content_sha256,
+            self.engine_data_identity,
+            self.map_identity,
+        )
+        if any(value is not None for value in strict):
+            if any(value is None for value in strict):
+                raise ValueError("map asset reference identity fields must be jointly present")
+            if self.path != f"map-assets-v1/{self.content_sha256}/manifest.json":
+                raise ValueError("map asset path must embed its content_sha256 identity")
+        return self
+
+    def require_strict_v2(self) -> None:
+        """Reject a historical two-field reference where telemetry v2 requires a map identity."""
+        if self.type != "map_asset":
+            raise ValueError("v2 requires a strict map_asset reference")
 
 
 class GameDataCatalogReference(BaseModel):
@@ -706,6 +748,9 @@ class ManifestRecord(TelemetryEnvelope):
     @model_validator(mode="after")
     def _require_bounded_v2_exporter_settings(self) -> "ManifestRecord":
         if self.schema_version == 2:
+            if self.payload.map_asset is None:
+                raise ValueError("v2 manifest requires a strict map_asset reference")
+            self.payload.map_asset.require_strict_v2()
             interval = self.payload.exporter_settings.get("movement_sample_frames")
             if type(interval) is not int or not 1 <= interval <= 3600:
                 raise ValueError("v2 movement_sample_frames must be an integer from 1 through 3600")
@@ -1295,6 +1340,7 @@ class EntitySampleRecord(TelemetryEnvelope):
             self.payload,
             {
                 "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status",
+                "position_bounds_policy",
                 "speed_status", "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status",
                 "locomotor_set_id", "locomotor_set_name", "locomotor_set_name_status", "current_order_id",
                 "current_order_message_type", "current_order_message_name",
@@ -1308,6 +1354,7 @@ class EntitySampleRecord(TelemetryEnvelope):
             raise ValueError("v2 entity sample requires a supported direct classification")
         if (
             self.payload.layer_name_status is None
+            or self.payload.position_bounds_policy is None
             or self.payload.speed_status is None
             or self.payload.current_state_source is None
             or self.payload.ai_state_name_status is None
@@ -1388,6 +1435,9 @@ class CompleteRecord(TelemetryEnvelope):
         if self.payload.final_frame != self.frame:
             raise ValueError("complete payload final_frame must equal envelope frame")
         if self.schema_version == 2:
+            if len(self.payload.map_assets) != 1:
+                raise ValueError("v2 complete requires exactly one authoritative map asset")
+            self.payload.map_assets[0].require_strict_v2()
             _require_v2_closed_payload(self.payload)
             _require_v2_payload_fields(
                 self.payload,

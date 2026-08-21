@@ -24,6 +24,7 @@
 #include "GameLogic/AIPathfind.h"
 #include "GameLogic/AIStateMachine.h"
 #include "GameLogic/GameLogic.h"
+#include "GameLogic/Locomotor.h"
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/ContainModule.h"
 #include "GameLogic/Module/PhysicsUpdate.h"
@@ -534,6 +535,23 @@ namespace
 		}
 	}
 
+	// TheSuperHackers @feature Leex 21/08/2026 Bind coordinate exemptions to live KindOf, locomotor, module, or physics evidence. (#TBD)
+	const char *positionBoundsPolicy(const Object *object)
+	{
+		if (object->isKindOf(KINDOF_AIRCRAFT)) return "exempt_kindof_aircraft";
+		if (object->isKindOf(KINDOF_BRIDGE)) return "exempt_kindof_bridge";
+		if (object->isKindOf(KINDOF_PROJECTILE)) return "exempt_kindof_projectile";
+		const AIUpdateInterface *ai = object->getAI();
+		const Locomotor *locomotor = ai != nullptr ? ai->getCurLocomotor() : nullptr;
+		if (locomotor != nullptr && (locomotor->getLegalSurfaces() & LOCOMOTORSURFACE_AIR) != 0)
+			return "exempt_locomotor_air_surface";
+		static const NameKeyType wanderAiKey = TheNameKeyGenerator->nameToKey("WanderAIUpdate");
+		if ((object->getAI() != nullptr && object->getAI()->getModuleNameKey() == wanderAiKey)
+			|| object->findUpdateModule(wanderAiKey) != nullptr) return "exempt_module_wander_ai";
+		if (object->getAI() == nullptr && object->getPhysics() != nullptr) return "exempt_physics_without_ai_pathing";
+		return "pathfinder_xy_closed";
+	}
+
 	Bool emitSample(UnsignedInt frame, const Object *object, const EngineSampleSnapshot &sample, const char *reason)
 	{
 		std::string position;
@@ -559,6 +577,7 @@ namespace
 			+ ",\"layer_id\":" + std::to_string(sample.layerId)
 			+ ",\"layer_name\":" + (stableLayerName != nullptr ? jsonString(stableLayerName) : "null")
 			+ ",\"layer_name_status\":" + jsonString(layerStatus)
+			+ ",\"position_bounds_policy\":" + jsonString(positionBoundsPolicy(object))
 			+ ",\"speed_status\":" + jsonString(sample.hasSpeed ? "measured_physics_velocity" : "unavailable_no_physics")
 			+ ",\"speed\":" + (sample.hasSpeed ? speed : "null")
 			+ ",\"current_state\":" + jsonString(sample.state.classification.c_str())

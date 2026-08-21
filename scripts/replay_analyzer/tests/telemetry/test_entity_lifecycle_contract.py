@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from map_asset_support import write_test_map_asset
 
 from generals_replay_analyzer.telemetry.model import ObjectCreatedRecord
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
@@ -55,6 +56,9 @@ def _completion(version: int, prior_records: list[dict[str, object]]) -> dict[st
         "map_assets": [],
     }
     if version == 2:
+        manifest_payload = prior_records[0]["payload"]
+        assert isinstance(manifest_payload, dict)
+        payload["map_assets"] = [manifest_payload["map_asset"]]
         payload.update(
             {
                 "crc_mismatch_frame": None,
@@ -144,7 +148,7 @@ def _write_catalog(directory: Path) -> dict[str, object]:
     return {"type": "game_data_catalog", "path": name, "sha256": digest, "engine_data_identity": ENGINE_IDENTITY}
 
 
-def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
+def _v2_manifest(reference: dict[str, object], map_reference: dict[str, object]) -> dict[str, object]:
     return {
         "engine_build": ENGINE_IDENTITY,
         "replay_version": "1.04",
@@ -156,6 +160,7 @@ def _v2_manifest(reference: dict[str, object]) -> dict[str, object]:
             "order_coverage": canonical_order_coverage(),
         },
         "game_data_catalog": reference,
+        "map_asset": map_reference,
     }
 
 
@@ -271,6 +276,7 @@ def _task7_sample_payload() -> dict[str, object]:
         "is_structure": False,
         "is_disabled": False,
         "is_engine_moving": False,
+        "position_bounds_policy": "pathfinder_xy_closed",
         "sample_reason": "lifecycle_forced",
     }
 
@@ -330,8 +336,9 @@ def _lifecycle_payloads() -> list[tuple[str, dict[str, object]]]:
 
 def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: str = "lifecycle.ndjson") -> Path:
     reference = _write_catalog(tmp_path)
+    map_reference = write_test_map_asset(tmp_path, ENGINE_IDENTITY, "maps/test.map")
     records = [
-        _record(2, 0, "manifest", _v2_manifest(reference)),
+        _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
         _record(2, 1, "players_initialized", _v2_players(reference)),
     ]
     records.extend(_record(2, sequence, event, payload) for sequence, (event, payload) in enumerate(events, 2))

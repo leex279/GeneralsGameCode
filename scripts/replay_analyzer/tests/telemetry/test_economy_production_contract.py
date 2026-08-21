@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from map_asset_support import write_test_map_asset
 from pydantic import ValidationError
 
 from generals_replay_analyzer.telemetry.model import (
@@ -180,6 +181,7 @@ def _upgrade(state: str) -> dict[str, object]:
 
 def _base_records(directory: Path) -> list[dict[str, object]]:
     reference = _write_catalog(directory)
+    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
     return [
         _record(
             0,
@@ -195,6 +197,7 @@ def _base_records(directory: Path) -> list[dict[str, object]]:
                     "order_coverage": canonical_order_coverage(),
                 },
                 "game_data_catalog": reference,
+                "map_asset": map_reference,
             },
         ),
         _record(1, "players_initialized", _players(reference)),
@@ -257,6 +260,7 @@ def _inject_lifecycle_samples(records: list[dict[str, object]]) -> None:
                     "is_structure": False,
                     "is_disabled": False,
                     "is_engine_moving": False,
+                    "position_bounds_policy": "pathfinder_xy_closed",
                     "sample_reason": "lifecycle_forced",
                 },
             )
@@ -319,7 +323,7 @@ def _finish(path: Path, records: list[dict[str, object]], balances: list[dict[st
                 "clean_shutdown": True,
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
-                "map_assets": [],
+                "map_assets": [records[0]["payload"]["map_asset"]],
                 "final_cash_balances": balances,
             },
             frame=20,

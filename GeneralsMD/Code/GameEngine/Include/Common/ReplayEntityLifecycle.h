@@ -42,6 +42,8 @@ public:
 	static void initialize();
 	static void flushPendingCreations();
 	static void ensureObjectCreated(const Object *object);
+	// TheSuperHackers @feature Leex 21/08/2026 Expose the immutable creation-callsite classification for static map export. (#TBD)
+	static ReplayEntityCreationSource getCreationSource(const Object *object);
 
 private:
 	friend class ReplayEntityCreationScope;

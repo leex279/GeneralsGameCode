@@ -228,7 +228,7 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert complete.payload.replay_truncated is False
     assert complete.payload.clean_shutdown == (completed.returncode == 0)
     assert complete.payload.writer_error is None
-    assert complete.payload.map_assets == []
+    assert complete.payload.map_assets == [manifest.payload.map_asset]
 
 
 @pytest.mark.parametrize(

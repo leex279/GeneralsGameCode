@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from map_asset_support import write_test_map_asset
 
 from generals_replay_analyzer.telemetry.model import (
     EntitySampleRecord,
@@ -201,6 +202,7 @@ def _sample(reason: str) -> dict[str, object]:
         "is_structure": False,
         "is_disabled": False,
         "is_engine_moving": True,
+        "position_bounds_policy": "pathfinder_xy_closed",
         "sample_reason": reason,
     }
 
@@ -235,6 +237,7 @@ def _lifecycle_sample(object_id: int, template_name: str, *, mobile: bool, struc
 
 def _valid_records(tmp_path: Path, movement_sample_frames: int = 15) -> list[dict[str, object]]:
     reference = _write_catalog(tmp_path)
+    map_reference = write_test_map_asset(tmp_path, ENGINE_IDENTITY, "maps/test.map")
     return [
         _record(
             0,
@@ -251,6 +254,7 @@ def _valid_records(tmp_path: Path, movement_sample_frames: int = 15) -> list[dic
                     "order_coverage": _coverage(),
                 },
                 "game_data_catalog": reference,
+                "map_asset": map_reference,
             },
         ),
         _record(1, 0, "players_initialized", _players(reference)),
@@ -310,7 +314,7 @@ def _write_complete(path: Path, records: list[dict[str, object]]) -> Path:
             "clean_shutdown": True,
             "writer_error": None,
             "trace_sha256": hashlib.sha256(prior).hexdigest(),
-            "map_assets": [],
+            "map_assets": [records[0]["payload"]["map_asset"]],
             "final_cash_balances": [
                 {"player_index": 0, "has_money": True, "balance": 0},
                 {"player_index": 1, "has_money": False, "balance": None},

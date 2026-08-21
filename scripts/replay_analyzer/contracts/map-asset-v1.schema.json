@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://generals-replay-analyzer.local/contracts/map-asset-v1.schema.json",
+  "title": "Authoritative Zero Hour Map Asset V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "content_sha256",
+    "coordinate_system",
+    "engine_data_identity",
+    "features",
+    "grids",
+    "map_identity",
+    "members",
+    "producer",
+    "schema_version",
+    "type"
+  ],
+  "properties": {
+    "classification": { "$ref": "#/$defs/classification" },
+    "content_sha256": { "$ref": "#/$defs/sha256" },
+    "coordinate_system": { "$ref": "#/$defs/coordinateSystem" },
+    "engine_data_identity": { "$ref": "#/$defs/nonEmptyString" },
+    "features": { "$ref": "#/$defs/features" },
+    "grids": { "$ref": "#/$defs/grids" },
+    "map_identity": { "$ref": "#/$defs/nonEmptyString" },
+    "members": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "height.f32.zlib",
+        "pathing-amphibious.u8.zlib",
+        "pathing-ground.u8.zlib",
+        "terrain.u8.zlib",
+        "zones.i32.zlib"
+      ],
+      "properties": {
+        "height.f32.zlib": { "$ref": "#/$defs/member" },
+        "pathing-amphibious.u8.zlib": { "$ref": "#/$defs/member" },
+        "pathing-ground.u8.zlib": { "$ref": "#/$defs/member" },
+        "terrain.u8.zlib": { "$ref": "#/$defs/member" },
+        "zones.i32.zlib": { "$ref": "#/$defs/member" }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "zlib_version"],
+      "properties": {
+        "name": { "const": "zero-hour-replay-map-export" },
+        "version": { "const": 1 },
+        "zlib_version": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "schema_version": { "const": 1 },
+    "type": { "const": "map_asset" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "safeName": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "finiteNumber": { "type": "number", "minimum": -3.40282347e38, "maximum": 3.40282347e38 },
+    "position2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": { "x": { "$ref": "#/$defs/finiteNumber" }, "y": { "$ref": "#/$defs/finiteNumber" } }
+    },
+    "position3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "$ref": "#/$defs/finiteNumber" },
+        "y": { "$ref": "#/$defs/finiteNumber" },
+        "z": { "$ref": "#/$defs/finiteNumber" }
+      }
+    },
+    "worldBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum", "maximum_inclusive", "minimum", "minimum_inclusive"],
+      "properties": {
+        "maximum": { "$ref": "#/$defs/position3" },
+        "maximum_inclusive": { "const": true },
+        "minimum": { "$ref": "#/$defs/position3" },
+        "minimum_inclusive": { "const": true }
+      }
+    },
+    "coordinateSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["axes", "bounds", "entity_sample_policy", "float_encoding", "units"],
+      "properties": {
+        "axes": { "const": ["engine_world_x", "engine_world_y", "engine_world_z"] },
+        "bounds": { "$ref": "#/$defs/worldBounds" },
+        "entity_sample_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bounded_layer_statuses", "bounded_position_policies", "exempt_position_policies", "policy", "policy_source"],
+          "properties": {
+            "bounded_layer_statuses": { "const": ["stable", "dynamic_bridge_layer"] },
+            "bounded_position_policies": { "const": ["pathfinder_xy_closed"] },
+            "exempt_position_policies": { "const": ["exempt_kindof_aircraft", "exempt_kindof_bridge", "exempt_kindof_projectile", "exempt_locomotor_air_surface", "exempt_module_wander_ai", "exempt_physics_without_ai_pathing"] },
+            "policy": { "const": "pathfinder_xy_closed_except_explicit_engine_category" },
+            "policy_source": { "const": "ReplayMovementSampler KindOf, current locomotor AIR surface, WanderAIUpdate, or physics without AI pathing" }
+          }
+        },
+        "float_encoding": { "const": "IEEE-754-binary32" },
+        "units": { "const": "engine_world_unit" }
+      }
+    },
+    "gridBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum_exclusive", "minimum_inclusive"],
+      "properties": {
+        "maximum_exclusive": { "$ref": "#/$defs/position2" },
+        "minimum_inclusive": { "$ref": "#/$defs/position2" }
+      }
+    },
+    "grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bounds", "cell_size", "dimension_source", "height", "index_origin", "sample_point", "width"],
+      "properties": {
+        "bounds": { "$ref": "#/$defs/gridBounds" },
+        "cell_size": { "$ref": "#/$defs/position2" },
+        "dimension_source": { "$ref": "#/$defs/nonEmptyString" },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "index_origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } }
+        },
+        "sample_point": { "const": "cell_center" },
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    },
+    "grids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pathing", "terrain"],
+      "properties": { "pathing": { "$ref": "#/$defs/grid" }, "terrain": { "$ref": "#/$defs/grid" } }
+    },
+    "cellType": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "enum": ["CELL_CLEAR", "CELL_WATER", "CELL_CLIFF", "CELL_RUBBLE", "CELL_OBSTACLE", "CELL_BRIDGE_IMPASSABLE", "CELL_IMPASSABLE"] },
+        "value": { "type": "integer", "minimum": 0, "maximum": 6 }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["amphibious_passable_cell_types", "cell_types", "ground_passable_cell_types", "pathing_derivation_source", "raw_cell_type_source", "raw_zone_source"],
+      "properties": {
+        "amphibious_passable_cell_types": { "const": [0, 1] },
+        "cell_types": { "type": "array", "minItems": 7, "maxItems": 7, "items": { "$ref": "#/$defs/cellType" } },
+        "ground_passable_cell_types": { "const": [0] },
+        "pathing_derivation_source": { "const": "Pathfinder::validLocomotorSurfacesForCellType" },
+        "raw_cell_type_source": { "const": "PathfindCell::getType" },
+        "raw_zone_source": { "const": "PathfindCell::getZone" }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compression", "compression_level", "compressed_sha256", "compressed_size", "dtype", "element_count", "endianness", "grid", "uncompressed_sha256", "uncompressed_size"],
+      "properties": {
+        "compression": { "const": "zlib" },
+        "compression_level": { "const": 9 },
+        "compressed_sha256": { "$ref": "#/$defs/sha256" },
+        "compressed_size": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "dtype": { "enum": ["float32", "uint8", "int32"] },
+        "element_count": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "endianness": { "const": "little" },
+        "grid": { "const": "pathing" },
+        "uncompressed_sha256": { "$ref": "#/$defs/sha256" },
+        "uncompressed_size": { "type": "integer", "minimum": 1, "maximum": 67108864 }
+      }
+    },
+    "boundedFeature": {
+      "type": "object",
+      "required": ["bounds_policy", "position"],
+      "properties": {
+        "bounds_policy": { "enum": ["pathfinder_xy_closed", "not_asserted_by_source"] },
+        "position": { "$ref": "#/$defs/position3" }
+      }
+    },
+    "startPosition": {
+      "allOf": [
+        { "$ref": "#/$defs/boundedFeature" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bounds_policy", "category_source", "name", "position", "slot_indices", "waypoint_id"],
+          "properties": {
+            "bounds_policy": { "const": "pathfinder_xy_closed" },
+            "category_source": { "const": "GameSlot::getStartPos + TerrainLogic::getWaypointByName" },
+            "name": { "$ref": "#/$defs/safeName" },
+            "position": { "$ref": "#/$defs/position3" },
+            "slot_indices": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 7 } },
+            "waypoint_id": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "waypoint": {
+      "allOf": [
+        { "$ref": "#/$defs/boundedFeature" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bidirectional", "bounds_policy", "labels", "link_ids", "name", "position", "waypoint_id"],
+          "properties": {
+            "bidirectional": { "type": "boolean" },
+            "bounds_policy": { "enum": ["pathfinder_xy_closed", "not_asserted_by_source"] },
+            "labels": { "type": "array", "maxItems": 3, "items": { "type": "string", "maxLength": 1024 } },
+            "link_ids": { "type": "array", "maxItems": 8, "items": { "type": "integer", "minimum": 0 } },
+            "name": { "$ref": "#/$defs/safeName" },
+            "position": { "$ref": "#/$defs/position3" },
+            "waypoint_id": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bounds_policy", "bridge_width", "category_source", "corners", "from", "layer_id", "object_id", "template_name", "to"],
+      "properties": {
+        "bounds_policy": { "const": "pathfinder_xy_closed" },
+        "bridge_width": { "$ref": "#/$defs/finiteNumber" },
+        "category_source": { "const": "TerrainLogic::getFirstBridge" },
+        "corners": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/position3" } },
+        "from": { "$ref": "#/$defs/position3" },
+        "layer_id": { "type": "integer", "minimum": 0 },
+        "object_id": { "type": ["integer", "null"], "minimum": 1 },
+        "template_name": { "$ref": "#/$defs/safeName" },
+        "to": { "$ref": "#/$defs/position3" }
+      }
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source"],
+      "properties": {
+        "name": { "enum": ["static_blocker", "supply_source", "supply_warehouse", "capturable", "tech_building", "cash_generator", "oil_income", "bridge"] },
+        "source": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "staticObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bounds_policy", "categories", "creation_source", "object_id", "orientation", "position", "snapshot_scope", "template_name"],
+      "properties": {
+        "bounds_policy": { "const": "pathfinder_xy_closed" },
+        "categories": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/category" } },
+        "creation_source": { "const": "map_loaded" },
+        "object_id": { "type": "integer", "minimum": 1 },
+        "orientation": { "$ref": "#/$defs/finiteNumber" },
+        "position": { "$ref": "#/$defs/position3" },
+        "snapshot_scope": { "const": "post_map_initialization" },
+        "template_name": { "$ref": "#/$defs/safeName" }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bridges", "start_positions", "static_objects", "waypoints"],
+      "properties": {
+        "bridges": { "type": "array", "items": { "$ref": "#/$defs/bridge" } },
+        "start_positions": { "type": "array", "items": { "$ref": "#/$defs/startPosition" } },
+        "static_objects": { "type": "array", "items": { "$ref": "#/$defs/staticObject" } },
+        "waypoints": { "type": "array", "items": { "$ref": "#/$defs/waypoint" } }
+      }
+    }
+  }
+}

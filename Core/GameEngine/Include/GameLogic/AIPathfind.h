@@ -719,6 +719,28 @@ public:
 
 	const ICoord2D *getExtent() const {return &m_extent.hi;}
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 21/08/2026 Expose the initialized pathfinder snapshot read-only to the authoritative replay map exporter. (#TBD)
+	Bool replayAnalyzerGetExtent(IRegion2D *extent) const
+	{
+		if (!m_isMapReady || m_map == nullptr || extent == nullptr)
+		{
+			return FALSE;
+		}
+		*extent = m_extent;
+		return TRUE;
+	}
+	const PathfindCell *replayAnalyzerGetGroundCell(Int x, Int y) const
+	{
+		if (!m_isMapReady || m_map == nullptr || x < m_extent.lo.x || x > m_extent.hi.x
+			|| y < m_extent.lo.y || y > m_extent.hi.y)
+		{
+			return nullptr;
+		}
+		return &m_map[x][y];
+	}
+#endif
+
 	void setIgnoreObstacleID( ObjectID objID );					///< if non-zero, the pathfinder will ignore the given obstacle
 
 	Bool validMovementPosition( Bool isCrusher, LocomotorSurfaceTypeMask acceptableSurfaces, PathfindCell *toCell, PathfindCell *fromCell = nullptr );		///< Return true if given position is a valid movement location

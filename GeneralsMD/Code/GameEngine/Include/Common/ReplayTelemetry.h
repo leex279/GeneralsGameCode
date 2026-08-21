@@ -25,6 +25,8 @@ public:
 	static Bool isInitialized();
 	static const AsciiString &getTracePath();
 	static const AsciiString &getEngineDataIdentity();
+	// TheSuperHackers @feature Leex 21/08/2026 Expose the configured replay map identity to the bound map exporter. (#TBD)
+	static const AsciiString &getMapIdentity();
 	static Int getReplayLocalSlotIndex();
 	static Int getMovementSampleFrames();
 	static AsciiString sha256Hex(const char *data, size_t length);

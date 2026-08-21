@@ -24,6 +24,7 @@ packages = ["src/generals_replay_analyzer"]
 "contracts/telemetry-v1.schema.json" = "generals_replay_analyzer/data/telemetry-v1.schema.json"
 "contracts/telemetry-v2.schema.json" = "generals_replay_analyzer/data/telemetry-v2.schema.json"
 "contracts/game-data-catalog-v1.schema.json" = "generals_replay_analyzer/data/game-data-catalog-v1.schema.json"
+"contracts/map-asset-v1.schema.json" = "generals_replay_analyzer/data/map-asset-v1.schema.json"
 "contracts/zero-hour-combat-types-v1.json" = "generals_replay_analyzer/data/zero-hour-combat-types-v1.json"
 
 [dependency-groups]
@@ -46,6 +47,7 @@ mypy_path = ["$MYPY_CONFIG_FILE_DIR/src"]
 files = ["src"]
 
 [tool.pytest.ini_options]
+pythonpath = ["tests"]
 markers = [
     "engine: launches the modern Zero Hour executable for authoritative parser parity",
 ]

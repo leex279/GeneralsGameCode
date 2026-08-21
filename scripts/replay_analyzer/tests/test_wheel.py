@@ -9,6 +9,8 @@ import textwrap
 import zipfile
 from pathlib import Path
 
+from map_asset_support import write_test_map_asset
+
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "zero_hour_1_04" / "leex279_vs_fox27.rep"
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -30,9 +32,11 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     with zipfile.ZipFile(wheel) as archive:
         packaged_v1_schema = archive.read("generals_replay_analyzer/data/telemetry-v1.schema.json")
         packaged_v2_schema = archive.read("generals_replay_analyzer/data/telemetry-v2.schema.json")
+        packaged_map_schema = archive.read("generals_replay_analyzer/data/map-asset-v1.schema.json")
         packaged_combat_types = archive.read("generals_replay_analyzer/data/zero-hour-combat-types-v1.json")
     assert packaged_v1_schema == (PROJECT_ROOT / "contracts" / "telemetry-v1.schema.json").read_bytes()
     assert packaged_v2_schema == (PROJECT_ROOT / "contracts" / "telemetry-v2.schema.json").read_bytes()
+    assert packaged_map_schema == (PROJECT_ROOT / "contracts" / "map-asset-v1.schema.json").read_bytes()
     assert packaged_combat_types == (PROJECT_ROOT / "contracts" / "zero-hour-combat-types-v1.json").read_bytes()
 
     environment_directory = tmp_path / "wheel-environment"
@@ -54,17 +58,23 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
 
     wheel_environment = os.environ.copy()
     wheel_environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
+    telemetry_directory = tmp_path / "wheel-telemetry"
+    telemetry_directory.mkdir()
+    map_reference = write_test_map_asset(telemetry_directory, "test", "test.map")
+    wheel_environment["TEST_TELEMETRY_DIRECTORY"] = str(telemetry_directory)
+    wheel_environment["TEST_MAP_REFERENCE"] = json.dumps(map_reference, separators=(",", ":"))
     telemetry_script = textwrap.dedent(
         """
         import hashlib
         import json
-        import tempfile
+        import os
         from pathlib import Path
 
         from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
         from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
-        directory = Path(tempfile.mkdtemp(prefix="wheel-telemetry-"))
+        directory = Path(os.environ["TEST_TELEMETRY_DIRECTORY"])
+        map_reference = json.loads(os.environ["TEST_MAP_REFERENCE"])
         catalog = {
             "schema_version": 1,
             "type": "game_data_catalog",
@@ -105,6 +115,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                     "order_coverage": canonical_order_coverage(),
                 },
                 "game_data_catalog": reference,
+                "map_asset": map_reference,
             },
         }
         slots = [
@@ -184,7 +195,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                 "clean_shutdown": True,
                 "writer_error": None,
                 "trace_sha256": hashlib.sha256(prior).hexdigest(),
-                "map_assets": [],
+                "map_assets": [map_reference],
                 "final_cash_balances": [{"player_index": 0, "has_money": False, "balance": None}],
             },
         }

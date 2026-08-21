@@ -422,6 +422,16 @@ void ReplayEntityLifecycle::reset()
 	s_directCreationDepth = 0;
 }
 
+ReplayEntityCreationSource ReplayEntityLifecycle::getCreationSource(const Object *object)
+{
+	if (object == nullptr)
+	{
+		return REPLAY_ENTITY_CREATION_UNKNOWN;
+	}
+	const CreationMap::const_iterator entry = s_creations.find(object->getID());
+	return entry != s_creations.end() ? entry->second.source : REPLAY_ENTITY_CREATION_UNKNOWN;
+}
+
 void ReplayEntityLifecycle::observeRegistered(const Object *object)
 {
 	if (!ReplayTelemetry::isEnabled() || object == nullptr || object->getID() == INVALID_ID)

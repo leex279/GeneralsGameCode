@@ -15,13 +15,16 @@ from jsonschema import Draft202012Validator, FormatChecker  # type: ignore[impor
 from pydantic import TypeAdapter, ValidationError
 
 from generals_replay_analyzer.contracts import message_name_for
+from generals_replay_analyzer.telemetry.map_asset import MapAsset, MapAssetValidationError, load_map_asset
 from generals_replay_analyzer.telemetry.model import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     CompleteRecord,
+    EntitySampleRecord,
     FinalCashBalance,
     GameDataCatalogReference,
     ManifestRecord,
+    MapAssetReference,
     MatchOutcomeRecord,
     PlayersInitializedRecord,
     TelemetryRecord,
@@ -85,6 +88,7 @@ class _CatalogIdentities:
     """Stable semantic names available to task-specific observations."""
 
     thing_templates: frozenset[str]
+    thing_template_kind_of_flags: Mapping[str, frozenset[str]]
     upgrades: frozenset[str]
     sciences: frozenset[str]
 
@@ -379,6 +383,13 @@ def _validate_catalog_asset(
     sciences = cast(list[dict[str, object]], catalog["sciences"])
     return _CatalogIdentities(
         thing_templates=frozenset(cast(str, entry["name"]) for entry in thing_templates),
+        thing_template_kind_of_flags={
+            cast(str, entry["name"]): frozenset(
+                cast(str, flag["name"])
+                for flag in cast(list[dict[str, object]], entry["kind_of_flags"])
+            )
+            for entry in thing_templates
+        },
         upgrades=frozenset(cast(str, entry["name"]) for entry in upgrades),
         sciences=frozenset(cast(str, entry["name"]) for entry in sciences),
     )
@@ -1515,6 +1526,9 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     expected_schema_version: int | None = None
     expected_run_id: object | None = None
     expected_catalog: GameDataCatalogReference | None = None
+    expected_map_reference: MapAssetReference | None = None
+    authoritative_map: MapAsset | None = None
+    catalog_identities: _CatalogIdentities | None = None
     expected_engine_build: str | None = None
     players_initialized_count = 0
     actual_event_counts: dict[str, int] = {}
@@ -1622,6 +1636,20 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         if isinstance(validated, ManifestRecord):
             expected_catalog = validated.payload.game_data_catalog
             expected_engine_build = validated.payload.engine_build
+            if expected_schema_version == 2:
+                assert expected_catalog is not None
+                catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
+                expected_map_reference = validated.payload.map_asset
+                assert expected_map_reference is not None
+                try:
+                    authoritative_map = load_map_asset(
+                        path.parent / Path(*expected_map_reference.path.split("/")),
+                        expected_reference=expected_map_reference,
+                        expected_engine_data_identity=validated.payload.engine_build,
+                        expected_map_identity=validated.payload.map_identity,
+                    )
+                except MapAssetValidationError as error:
+                    raise _error(path, line_number, validated.sequence, f"map_asset: {error}") from error
             interval = validated.payload.exporter_settings["movement_sample_frames"]
             assert type(interval) is int
             movement_sample_frames = interval
@@ -1641,6 +1669,26 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 }
         elif isinstance(validated, MatchOutcomeRecord):
             outcome_records.append(validated)
+
+        if expected_schema_version == 2 and isinstance(validated, EntitySampleRecord):
+            assert authoritative_map is not None
+            assert catalog_identities is not None
+            sample_kind_of_flags = catalog_identities.thing_template_kind_of_flags.get(
+                validated.payload.template_name or "", frozenset()
+            )
+            try:
+                authoritative_map.require_entity_position(
+                    validated.payload,
+                    sample_kind_of_flags,
+                )
+            except MapAssetValidationError as error:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    f"map bounds: {error}; policy {validated.payload.position_bounds_policy}; "
+                    f"template KindOf flags {sorted(sample_kind_of_flags)}",
+                ) from error
 
         if expected_schema_version == 2:
             if engine_player_indices is None:
@@ -1711,6 +1759,13 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         prior_sequence = validated.sequence
         actual_event_counts[validated.event_type] = actual_event_counts.get(validated.event_type, 0) + 1
         if isinstance(validated, CompleteRecord):
+            if expected_schema_version == 2 and validated.payload.map_assets != [expected_map_reference]:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    "complete map_assets must exactly repeat the manifest map_asset reference",
+                )
             if validated.payload.trace_sha256 != digest.hexdigest():
                 raise _error(path, line_number, validated.sequence, "complete trace_sha256 does not match prior trace bytes")
             if validated.payload.event_counts != actual_event_counts:
@@ -1736,8 +1791,8 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             raise TelemetryTraceValidationError(
                 f"trace '{path}': v2 requires exactly one players_initialized event; found {players_initialized_count}"
             )
-        if expected_catalog is None or expected_engine_build is None:
-            raise TelemetryTraceValidationError(f"trace '{path}': v2 manifest catalog identity is unavailable")
+        if expected_catalog is None or expected_engine_build is None or authoritative_map is None:
+            raise TelemetryTraceValidationError(f"trace '{path}': v2 manifest asset identity is unavailable")
         missing_construction = sorted(
             object_id
             for object_id, state in entity_lifecycles.items()
@@ -1759,7 +1814,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             engine_player_indices,
             frozenset(observed_disconnected_slots),
         )
-        catalog_identities = _validate_catalog_asset(path, expected_catalog, expected_engine_build)
+        assert catalog_identities is not None
         _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
         if pending_forced_samples:
             object_id = min(pending_forced_samples)

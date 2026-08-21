@@ -1153,6 +1153,7 @@ if(NOT IS_VS6_BUILD)
     list(APPEND GAMEENGINE_SRC
 		Include/Common/ReplayCombat.h
         Include/Common/ReplayGameDataExport.h
+        Include/Common/ReplayMapExport.h
         Include/Common/ReplayEconomy.h
         Include/Common/ReplayEntityLifecycle.h
         Include/Common/ReplayMovementSampler.h
@@ -1161,6 +1162,7 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayTelemetry.h
 		Source/Common/ReplayCombat.cpp
         Source/Common/ReplayGameDataExport.cpp
+        Source/Common/ReplayMapExport.cpp
         Source/Common/ReplayEconomy.cpp
         Source/Common/ReplayEntityLifecycle.cpp
         Source/Common/ReplayMovementSampler.cpp
@@ -1189,6 +1191,7 @@ target_include_directories(z_gameengine PRIVATE
 
 target_link_libraries(z_gameengine PRIVATE
     corei_gameengine_private
+    core_compression
     zi_always
 )
 
