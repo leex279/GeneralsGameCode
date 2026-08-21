@@ -53,6 +53,25 @@ namespace
 		return TRUE;
 	}
 
+	Bool finalExistingPath(const char *value, Bool directory, std::string &result)
+	{
+		const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
+		HANDLE handle = CreateFileA(value, FILE_READ_ATTRIBUTES,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, flags, nullptr);
+		if (handle == INVALID_HANDLE_VALUE) return FALSE;
+		char resolved[_MAX_PATH];
+		const DWORD length = GetFinalPathNameByHandleA(handle, resolved, ARRAY_SIZE(resolved),
+			FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+		CloseHandle(handle);
+		if (length == 0 || length >= ARRAY_SIZE(resolved)) return FALSE;
+		result.assign(resolved, length);
+		if (result.compare(0, 8, "\\\\?\\UNC\\") == 0) result = "\\\\" + result.substr(8);
+		else if (result.compare(0, 4, "\\\\?\\") == 0) result.erase(0, 4);
+		normalizePathSeparators(result);
+		asciiLowerPath(result);
+		return TRUE;
+	}
+
 	Bool isPathComponentWithin(const std::string &path, const std::string &parent)
 	{
 		return path.size() > parent.size() && path.compare(0, parent.size(), parent) == 0
@@ -89,9 +108,19 @@ namespace
 		const Bool textualUserMapsCandidate = isTextualUserMapsCandidate(textualMap, userRoot);
 		const Bool candidateEscapesUserMaps = textualUserMapsCandidate && !isPathComponentWithin(mapPath, userMaps);
 		if (candidateEscapesUserMaps) return FALSE;
-		if (!isPathComponentWithin(mapPath, userMaps)) return TRUE;
+		if (!textualUserMapsCandidate && !isPathComponentWithin(mapPath, userMaps)) return TRUE;
 
-		std::string relative = mapPath.substr(userMaps.size() + 1);
+		// TheSuperHackers @feature Leex 21/08/2026 Resolve opened map and Maps identities so a reparse target cannot escape textual containment. (#TBD)
+		std::string finalUserMaps;
+		std::string finalMapPath;
+		if (!finalExistingPath(userMaps.c_str(), TRUE, finalUserMaps)
+			|| !finalExistingPath(mapPath.c_str(), FALSE, finalMapPath)
+			|| !isPathComponentWithin(finalMapPath, finalUserMaps))
+		{
+			return FALSE;
+		}
+
+		std::string relative = finalMapPath.substr(finalUserMaps.size() + 1);
 		for (char &character : relative)
 		{
 			if (character == '\\') character = '/';

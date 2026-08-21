@@ -33,6 +33,17 @@ MEMBER_NAMES = frozenset(
     }
 )
 ASSET_NAMES = MEMBER_NAMES | {"manifest.json"}
+POSITION_POLICIES = frozenset(
+    {
+        "pathfinder_xy_closed",
+        "exempt_kindof_aircraft",
+        "exempt_kindof_bridge",
+        "exempt_kindof_projectile",
+        "exempt_kindof_parachutable",
+        "exempt_locomotor_air_surface",
+        "exempt_map_loaded_unclassified_immobile",
+    }
+)
 CELL_TYPES = (
     (0, "CELL_CLEAR"),
     (1, "CELL_WATER"),
@@ -653,6 +664,7 @@ class MapAsset(StrictModel):
     content_sha256: str
     engine_data_identity: str
     map_identity: str
+    declared_position_policies: frozenset[str]
     pathing: GridSpec
     terrain: GridSpec
     bounds: WorldBounds
@@ -685,8 +697,13 @@ class MapAsset(StrictModel):
     ) -> None:
         """Apply the manifest's explicit layer policy to a telemetry sample and path goal."""
         policy = payload.position_bounds_policy
-        if not isinstance(policy, str):
+        if not isinstance(policy, str) or policy not in POSITION_POLICIES:
             raise MapAssetValidationError("entity sample has unknown position bounds policy")
+        if policy not in self.declared_position_policies:
+            raise MapAssetValidationError(
+                f"entity sample position policy {policy} is not declared by map asset schema version "
+                f"{self.schema_version}"
+            )
         expected_kind_of = {
             "exempt_kindof_aircraft": "AIRCRAFT",
             "exempt_kindof_bridge": "BRIDGE",
@@ -1006,6 +1023,10 @@ def load_map_asset(
         content_sha256=manifest.content_sha256,
         engine_data_identity=manifest.engine_data_identity,
         map_identity=manifest.map_identity,
+        declared_position_policies=frozenset(
+            [*manifest.coordinate_system.entity_sample_policy.bounded_position_policies,
+             *manifest.coordinate_system.entity_sample_policy.exempt_position_policies]
+        ),
         pathing=manifest.grids.pathing,
         terrain=manifest.grids.terrain,
         bounds=manifest.coordinate_system.bounds,

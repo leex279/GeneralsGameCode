@@ -773,6 +773,41 @@ namespace
 		result = resolved.c_str();
 		return TRUE;
 	}
+
+	Bool analyzerTreeContainsNoReparsePoints(const std::string &directory, Bool allowMissing)
+	{
+		const DWORD attributes = GetFileAttributesA(directory.c_str());
+		if (attributes == INVALID_FILE_ATTRIBUTES)
+		{
+			const DWORD error = GetLastError();
+			return allowMissing && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+		}
+		if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return FALSE;
+		WIN32_FIND_DATAA entry;
+		HANDLE search = FindFirstFileA((directory + "\\*").c_str(), &entry);
+		if (search == INVALID_HANDLE_VALUE) return FALSE;
+		Bool valid = TRUE;
+		do
+		{
+			if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+			if (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+			{
+				valid = FALSE;
+				break;
+			}
+			if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+				&& !analyzerTreeContainsNoReparsePoints(directory + "\\" + entry.cFileName, FALSE))
+			{
+				valid = FALSE;
+				break;
+			}
+		}
+		while (FindNextFileA(search, &entry));
+		if (valid && GetLastError() != ERROR_NO_MORE_FILES) valid = FALSE;
+		FindClose(search);
+		return valid;
+	}
+
 #endif
 
 	// TheSuperHackers @feature Leex 20/08/2026 Compare analyzer paths through one canonical parent and case-insensitive identity policy. (#TBD)
@@ -911,6 +946,11 @@ namespace
 		if (!canonicalExistingAnalyzerDirectory(s_replayUserDataRoot.str(), canonicalRoot, TRUE))
 		{
 			replayUserDataCommandLineError("-replay-user-data-root must name an existing direct non-reparse directory");
+		}
+		// TheSuperHackers @feature Leex 21/08/2026 Reject a Maps reparse subtree before MapCache can traverse outside the isolated analyzer root. (#TBD)
+		if (!analyzerTreeContainsNoReparsePoints(std::string(canonicalRoot.str()) + "\\Maps", TRUE))
+		{
+			replayUserDataCommandLineError("-replay-user-data-root Maps subtree must contain no reparse points");
 		}
 		AsciiString defaultRootIdentity;
 		const Char *defaultRoot = TheGlobalData->getPath_UserData().str();

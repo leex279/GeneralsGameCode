@@ -523,6 +523,44 @@ def test_replay_user_data_root_is_modern_guarded_and_applied_before_map_discover
     )
 
 
+def test_replay_user_data_root_rejects_a_maps_subtree_junction_before_playback(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    """Catch MapCache reaching a junction target outside the validated isolated root."""
+    isolated_root = (tmp_path / "isolated-user-data").resolve()
+    maps = isolated_root / "Maps"
+    outside = (tmp_path / "outside").resolve()
+    maps.mkdir(parents=True)
+    outside.mkdir()
+    junction = maps / "escaped-map"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"host cannot create a directory junction: {created.stderr}")
+
+    completed = _run_engine(
+        [
+            *_base_command(zero_hour_runtime_executable, pinned_replay),
+            "-replay-user-data-root",
+            str(isolated_root),
+        ],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert "Simulating Replay" not in completed.stdout
+    assert "Maps subtree must contain no reparse points" in completed.stderr
+
+
 def test_default_user_data_identity_resolves_junction_targets_and_fails_closed(
     tmp_path: Path,
     repository_root: Path,

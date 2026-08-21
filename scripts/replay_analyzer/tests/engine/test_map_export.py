@@ -603,6 +603,31 @@ def test_entity_bounds_rejects_unprovable_or_unknown_exemptions(tmp_path: Path, 
         asset.require_entity_position(payload, frozenset(), frozenset())
 
 
+def test_v1_asset_rejects_the_v2_only_map_loaded_immobile_exemption(tmp_path: Path) -> None:
+    asset_dir, reference = _write_asset(tmp_path, schema_version=1)
+    asset = load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+    payload = SimpleNamespace(
+        object_id=1,
+        template_name="TreePalm1",
+        layer_name="LAYER_GROUND",
+        layer_name_status="stable",
+        position=SimpleNamespace(x=-1.0, y=0.0),
+        path_goal=None,
+        position_bounds_policy="exempt_map_loaded_unclassified_immobile",
+        current_locomotor_template_name=None,
+        locomotor_set_id=None,
+        locomotor_set_name=None,
+    )
+
+    with pytest.raises(MapAssetValidationError, match="not declared by map asset schema version 1"):
+        asset.require_entity_position(
+            payload,
+            frozenset({"IMMOBILE"}),
+            frozenset(),
+            creation_source="map_loaded",
+        )
+
+
 def test_loader_rejects_hardlinked_or_symlinked_members(tmp_path: Path) -> None:
     asset_dir, reference = _write_asset(tmp_path)
     member = asset_dir / "terrain.u8.zlib"
