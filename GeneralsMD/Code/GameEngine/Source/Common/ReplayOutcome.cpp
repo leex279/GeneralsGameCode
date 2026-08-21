@@ -16,6 +16,8 @@ namespace
 	UnsignedInt s_tempCounter = 0;
 	Bool s_crcMismatchObserved = FALSE;
 	Bool s_finished = FALSE;
+	Bool s_attemptActive = FALSE;
+	Bool s_playbackStarted = FALSE;
 
 	const char *terminationReason(ReplayTelemetryTerminationReason reason)
 	{
@@ -27,6 +29,18 @@ namespace
 			case REPLAY_TELEMETRY_TERMINATION_INTERRUPTED: return "interrupted";
 		}
 		return "interrupted";
+	}
+
+	const char *startupFailureReason(ReplayOutcomeStartupFailureReason reason)
+	{
+		switch (reason)
+		{
+			case REPLAY_OUTCOME_INPUT_UNAVAILABLE: return "input_unavailable";
+			case REPLAY_OUTCOME_INVALID_REPLAY_HEADER: return "invalid_replay_header";
+			case REPLAY_OUTCOME_TRUNCATED_INPUT: return "truncated_input";
+			case REPLAY_OUTCOME_STARTUP_FAILED: return "startup_failed";
+		}
+		return "startup_failed";
 	}
 
 	void diagnostic(const char *message)
@@ -72,6 +86,19 @@ namespace
 			remove(tempPath.str());
 		}
 	}
+
+	// TheSuperHackers @feature Leex 20/08/2026 Serialize playback readiness with every terminal outcome transaction. (#TBD)
+	void publishFinishedOutcome(UnsignedInt finalFrame, const char *reason, Bool crcMismatch)
+	{
+		const std::string payload = "{\"playback_started\":" + std::string(s_playbackStarted ? "true" : "false")
+			+ ",\"final_frame\":" + std::to_string(finalFrame)
+			+ ",\"command_count\":" + std::to_string(s_commandCount)
+			+ ",\"terminal_reason\":\"" + reason + "\""
+			+ ",\"crc_mismatch\":" + (crcMismatch ? "true" : "false")
+			+ ",\"crc_mismatch_frame\":"
+			+ (crcMismatch && s_crcMismatchObserved ? std::to_string(s_crcMismatchFrame) : "null") + "}\n";
+		publish(payload);
+	}
 }
 
 void ReplayOutcome::configure(const AsciiString &outputPath)
@@ -81,6 +108,8 @@ void ReplayOutcome::configure(const AsciiString &outputPath)
 	s_crcMismatchFrame = 0;
 	s_crcMismatchObserved = FALSE;
 	s_finished = FALSE;
+	s_attemptActive = FALSE;
+	s_playbackStarted = FALSE;
 }
 
 Bool ReplayOutcome::isEnabled()
@@ -88,9 +117,44 @@ Bool ReplayOutcome::isEnabled()
 	return s_outputPath.isNotEmpty();
 }
 
+void ReplayOutcome::beginAttempt()
+{
+	if (!isEnabled())
+	{
+		return;
+	}
+	// TheSuperHackers @feature Leex 20/08/2026 Start one outcome transaction before opening or decoding the configured replay. (#TBD)
+	s_commandCount = 0;
+	s_crcMismatchFrame = 0;
+	s_crcMismatchObserved = FALSE;
+	s_finished = FALSE;
+	s_attemptActive = TRUE;
+	s_playbackStarted = FALSE;
+}
+
+void ReplayOutcome::observePlaybackStarted()
+{
+	if (s_attemptActive && !s_finished)
+	{
+		// TheSuperHackers @feature Leex 20/08/2026 Mark playback ready only after setup and the first command frame have decoded. (#TBD)
+		s_playbackStarted = TRUE;
+	}
+}
+
+void ReplayOutcome::finishStartupFailure(ReplayOutcomeStartupFailureReason reason)
+{
+	if (!s_attemptActive || s_finished)
+	{
+		return;
+	}
+	// TheSuperHackers @feature Leex 20/08/2026 Atomically settle failures that occur before the normal telemetry completion seam exists. (#TBD)
+	s_finished = TRUE;
+	publishFinishedOutcome(0, startupFailureReason(reason), FALSE);
+}
+
 void ReplayOutcome::observeExecutedCommand()
 {
-	if (isEnabled() && !s_finished)
+	if (s_attemptActive && !s_finished)
 	{
 		++s_commandCount;
 	}
@@ -98,7 +162,7 @@ void ReplayOutcome::observeExecutedCommand()
 
 void ReplayOutcome::observeCRCMismatch(UnsignedInt frame)
 {
-	if (isEnabled() && !s_crcMismatchObserved)
+	if (s_attemptActive && !s_crcMismatchObserved)
 	{
 		s_crcMismatchObserved = TRUE;
 		s_crcMismatchFrame = frame;
@@ -107,19 +171,13 @@ void ReplayOutcome::observeCRCMismatch(UnsignedInt frame)
 
 void ReplayOutcome::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationReason reason)
 {
-	if (!isEnabled() || s_finished)
+	if (!s_attemptActive || s_finished)
 	{
 		return;
 	}
 	s_finished = TRUE;
 	const Bool crcMismatch = reason == REPLAY_TELEMETRY_TERMINATION_CRC_MISMATCH;
-	const std::string payload = "{\"final_frame\":" + std::to_string(finalFrame)
-		+ ",\"command_count\":" + std::to_string(s_commandCount)
-		+ ",\"terminal_reason\":\"" + terminationReason(reason) + "\""
-		+ ",\"crc_mismatch\":" + (crcMismatch ? "true" : "false")
-		+ ",\"crc_mismatch_frame\":"
-		+ (crcMismatch && s_crcMismatchObserved ? std::to_string(s_crcMismatchFrame) : "null") + "}\n";
-	publish(payload);
+	publishFinishedOutcome(finalFrame, terminationReason(reason), crcMismatch);
 }
 
 #endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)

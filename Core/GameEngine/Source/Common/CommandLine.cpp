@@ -566,6 +566,64 @@ namespace
 		return TRUE;
 	}
 
+	// TheSuperHackers @feature Leex 20/08/2026 Fail closed on final components Win32 can normalize or reinterpret. (#TBD)
+	Bool hasSafeWin32FinalComponent(const Char *path)
+	{
+		const Char *finalComponent = path;
+		for (const Char *cursor = path; *cursor != '\0'; ++cursor)
+		{
+			if (*cursor == '\\' || *cursor == '/')
+			{
+				finalComponent = cursor + 1;
+			}
+		}
+		const size_t length = strlen(finalComponent);
+		if (length == 0 || finalComponent[length - 1] == '.' || finalComponent[length - 1] == ' ')
+		{
+			return FALSE;
+		}
+		for (size_t index = 0; index < length; ++index)
+		{
+			const UnsignedByte character = static_cast<UnsignedByte>(finalComponent[index]);
+			if (character < 32 || strchr("<>:\"|?*", character) != nullptr)
+			{
+				return FALSE;
+			}
+		}
+
+		std::string deviceBase(finalComponent);
+		const size_t extension = deviceBase.find('.');
+		if (extension != std::string::npos)
+		{
+			deviceBase.erase(extension);
+		}
+		static const Char *const reservedDevices[] = { "CON", "PRN", "AUX", "NUL", "CLOCK$" };
+		for (size_t index = 0; index < ARRAY_SIZE(reservedDevices); ++index)
+		{
+			if (_stricmp(deviceBase.c_str(), reservedDevices[index]) == 0)
+			{
+				return FALSE;
+			}
+		}
+		if (deviceBase.length() == 4
+			&& (deviceBase[3] >= '1' && deviceBase[3] <= '9')
+			&& (_strnicmp(deviceBase.c_str(), "COM", 3) == 0 || _strnicmp(deviceBase.c_str(), "LPT", 3) == 0))
+		{
+			return FALSE;
+		}
+		return TRUE;
+	}
+
+	// TheSuperHackers @feature Leex 20/08/2026 Compare analyzer paths through one canonical parent and case-insensitive identity policy. (#TBD)
+	Bool analyzerPathIdentitiesMatch(const Char *leftPath, const Char *rightPath)
+	{
+		AsciiString leftIdentity;
+		AsciiString rightIdentity;
+		return canonicalAnalyzerDestination(leftPath, leftIdentity)
+			&& canonicalAnalyzerDestination(rightPath, rightIdentity)
+			&& _stricmp(leftIdentity.str(), rightIdentity.str()) == 0;
+	}
+
 	void validateReplayTelemetryOptions()
 	{
 		if (!s_hasTelemetryPath)
@@ -592,10 +650,20 @@ namespace
 		{
 			telemetryCommandLineError("-telemetry requires sequential replay playback");
 		}
+		// TheSuperHackers @feature Leex 20/08/2026 Reject Win32 final-component aliases before comparing replay and telemetry identities. (#TBD)
+		if (!hasSafeWin32FinalComponent(s_telemetryTracePath.str())
+			|| !hasSafeWin32FinalComponent(TheGlobalData->m_simulateReplays[0].str()))
+		{
+			telemetryCommandLineError("unsafe Win32 final component in replay or telemetry path");
+		}
 		// TheSuperHackers @feature Leex 18/08/2026 Reserve telemetry for a new path so replay inputs and prior evidence cannot be overwritten. (#TBD)
 		if (GetFileAttributesA(s_telemetryTracePath.str()) != INVALID_FILE_ATTRIBUTES)
 		{
 			telemetryCommandLineError("-telemetry output path must not already exist");
+		}
+		if (analyzerPathIdentitiesMatch(s_telemetryTracePath.str(), TheGlobalData->m_simulateReplays[0].str()))
+		{
+			telemetryCommandLineError("-telemetry output must not alias the replay input");
 		}
 		ReplayTelemetry::configure(s_telemetryTracePath, s_telemetryRunId, s_telemetryMovementFrames);
 	}
@@ -614,9 +682,19 @@ namespace
 		{
 			replayOutcomeCommandLineError("-replay-outcome requires sequential replay playback");
 		}
+		// TheSuperHackers @feature Leex 20/08/2026 Apply the same fail-closed Win32 final-component policy to replay and outcome identities. (#TBD)
+		if (!hasSafeWin32FinalComponent(s_replayOutcomePath.str())
+			|| !hasSafeWin32FinalComponent(TheGlobalData->m_simulateReplays[0].str()))
+		{
+			replayOutcomeCommandLineError("unsafe Win32 final component in replay or outcome path");
+		}
 		if (GetFileAttributesA(s_replayOutcomePath.str()) != INVALID_FILE_ATTRIBUTES)
 		{
 			replayOutcomeCommandLineError("-replay-outcome path must not already exist");
+		}
+		if (analyzerPathIdentitiesMatch(s_replayOutcomePath.str(), TheGlobalData->m_simulateReplays[0].str()))
+		{
+			replayOutcomeCommandLineError("-replay-outcome must not alias the replay input");
 		}
 		AsciiString canonicalOutcomePath;
 		AsciiString canonicalTelemetryPath;
@@ -1670,7 +1748,12 @@ static void parseCommandLine(const CommandLineParam* params, int numParams)
 	char *token = nextParam(&cmdLine[0], "\" ");
 	while (token != nullptr)
 	{
+#if defined(RTS_REPLAY_ANALYZER)
+		// TheSuperHackers @feature Leex 20/08/2026 Preserve quoted path-edge characters until analyzer identity validation. (#TBD)
+		argv.push_back(token);
+	#else
 		argv.push_back(strtrim(token));
+#endif
 		token = nextParam(nullptr, "\" ");
 	}
 	int argc = argv.size();

@@ -333,6 +333,93 @@ def test_v2_reader_accepts_source_grounded_order_state_and_bounded_samples(tmp_p
     assert records[9].frame - records[8].frame == 15
 
 
+def test_v2_reader_accepts_non_task7_fact_between_order_and_ordered_sampler_block(tmp_path: Path) -> None:
+    records = _valid_records(tmp_path)
+    records.insert(
+        7,
+        _record(
+            7,
+            5,
+            "cash_changed",
+            {
+                "player_index": 0,
+                "before": 0,
+                "delta": 0,
+                "after": 0,
+                "track_income": False,
+                "reason": "unknown",
+            },
+        ),
+    )
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+
+    trace = _write_complete(tmp_path / "mixed-producer-order.ndjson", records)
+
+    assert tuple(iter_validated_trace(trace))[-1].event_type == "complete"
+
+
+def _move_order_after_sampler(records: list[dict[str, object]]) -> None:
+    order = records.pop(6)
+    state_payload = records[6]["payload"]
+    sample_payload = records[7]["payload"]
+    assert isinstance(state_payload, dict) and isinstance(sample_payload, dict)
+    state_payload["current_order_id"] = None
+    sample_payload["current_order_id"] = None
+    sample_payload["current_order_message_type"] = None
+    sample_payload["current_order_message_name"] = None
+    records.insert(8, order)
+
+
+def _move_state_after_sample(records: list[dict[str, object]]) -> None:
+    state = records.pop(7)
+    sample_payload = records[7]["payload"]
+    assert isinstance(sample_payload, dict)
+    sample_payload.update(
+        {
+            "current_state": "idle",
+            "current_state_source": "ai_idle_state",
+            "ai_state_id": 0,
+            "ai_state_name": "AI_IDLE",
+            "is_engine_moving": False,
+            "sample_reason": "order_forced",
+        }
+    )
+    records.insert(8, state)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "diagnostic"),
+    [
+        (_move_order_after_sampler, "order.*sampler"),
+        (_move_state_after_sample, "sample.*state"),
+        (lambda records: records.insert(4, records.pop(5)), "numeric object_id"),
+        (lambda records: records.insert(8, copy.deepcopy(records[7])), "duplicate entity_state_changed"),
+        (lambda records: records.insert(9, copy.deepcopy(records[8])), "duplicate entity_sample"),
+    ],
+    ids=[
+        "order-after-state-and-sample",
+        "sample-before-state",
+        "descending-sampler-object-ids",
+        "duplicate-state",
+        "duplicate-sample",
+    ],
+)
+def test_v2_reader_rejects_producer_impossible_same_frame_task7_ordering(
+    tmp_path: Path,
+    mutation: Callable[[list[dict[str, object]]], object],
+    diagnostic: str,
+) -> None:
+    records = copy.deepcopy(_valid_records(tmp_path))
+    mutation(records)
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+    trace = _write_complete(tmp_path / "impossible-producer-order.ndjson", records)
+
+    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
+        tuple(iter_validated_trace(trace))
+
+
 @pytest.mark.parametrize(
     ("mutation", "diagnostic"),
     [
@@ -506,6 +593,70 @@ def test_v2_reader_excludes_owner_identity_from_engine_snapshot_change_detection
     )
 
     assert tuple(iter_validated_trace(trace))[-1].event_type == "complete"
+
+
+def test_v2_reader_requires_state_owner_to_match_current_lifecycle_owner(tmp_path: Path) -> None:
+    records = _valid_records(tmp_path)
+    records[7]["payload"]["owner_player_index"] = 1
+    trace = _write_complete(tmp_path / "wrong-state-owner.ndjson", records)
+
+    with pytest.raises(TelemetryTraceValidationError, match="state owner identity"):
+        tuple(iter_validated_trace(trace))
+
+
+@pytest.mark.parametrize("new_owner", [1, None], ids=["player-transfer", "neutral-transfer"])
+def test_v2_reader_binds_state_and_sample_owner_after_owner_change(
+    tmp_path: Path, new_owner: int | None
+) -> None:
+    records = _valid_records(tmp_path)
+    records.insert(
+        7,
+        _record(
+            7,
+            5,
+            "owner_changed",
+            {
+                "object_id": 101,
+                "previous_owner_player_index": 0,
+                "new_owner_player_index": new_owner,
+                "previous_team_id": 0,
+                "new_team_id": 1 if new_owner is not None else None,
+            },
+        ),
+    )
+    records[8]["payload"]["owner_player_index"] = new_owner
+    records[9]["payload"]["owner_player_index"] = new_owner
+    records[10]["payload"]["owner_player_index"] = new_owner
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+    trace = _write_complete(tmp_path / f"owner-transfer-{new_owner}.ndjson", records)
+
+    assert tuple(iter_validated_trace(trace))[-1].event_type == "complete"
+
+
+def test_v2_reader_rejects_stale_state_owner_after_owner_change(tmp_path: Path) -> None:
+    records = _valid_records(tmp_path)
+    records.insert(
+        7,
+        _record(
+            7,
+            5,
+            "owner_changed",
+            {
+                "object_id": 101,
+                "previous_owner_player_index": 0,
+                "new_owner_player_index": 1,
+                "previous_team_id": 0,
+                "new_team_id": 1,
+            },
+        ),
+    )
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+    trace = _write_complete(tmp_path / "stale-state-owner-after-transfer.ndjson", records)
+
+    with pytest.raises(TelemetryTraceValidationError, match="state owner identity"):
+        tuple(iter_validated_trace(trace))
 
 
 def test_v2_reader_rejects_changed_reason_caused_only_by_owner_identity(tmp_path: Path) -> None:

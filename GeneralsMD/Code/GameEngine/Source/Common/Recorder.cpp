@@ -949,14 +949,29 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	if (m_file == nullptr)
 	{
 		DEBUG_LOG(("Can't open %s (%s)", filepath.str(), header.filename.str()));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		if (header.forPlayback)
+		{
+			// TheSuperHackers @feature Leex 20/08/2026 Settle a configured outcome when the replay input cannot be opened. (#TBD)
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INPUT_UNAVAILABLE);
+		}
+#endif
 		return FALSE;
 	}
 
 	// Read the GENREP header.
 	char genrep[sizeof(s_genrep) - 1] = {0};
-	m_file->read( &genrep, sizeof(s_genrep) - 1 );
+	const Int genrepBytesRead = m_file->read( &genrep, sizeof(s_genrep) - 1 );
 	if ( strncmp(genrep, s_genrep, sizeof(s_genrep) - 1 ) != 0 ) {
 		DEBUG_LOG(("RecorderClass::readReplayHeader - replay file did not have GENREP at the start."));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		if (header.forPlayback)
+		{
+			// TheSuperHackers @feature Leex 20/08/2026 Distinguish a proven short magic read from a full invalid replay signature. (#TBD)
+			ReplayOutcome::finishStartupFailure(genrepBytesRead == sizeof(s_genrep) - 1
+				? REPLAY_OUTCOME_INVALID_REPLAY_HEADER : REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+#endif
 		m_file->close();
 		m_file = nullptr;
 		return FALSE;
@@ -964,41 +979,113 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 
 	// read in some stats
 	replay_time_t tmp;
-	m_file->read(&tmp, sizeof(tmp));
+	const Int startTimeBytesRead = m_file->read(&tmp, sizeof(tmp));
 	header.startTime = tmp;
-	m_file->read(&tmp, sizeof(tmp));
+	const Int endTimeBytesRead = m_file->read(&tmp, sizeof(tmp));
 	header.endTime = tmp;
 
-	m_file->read(&header.frameCount, sizeof(header.frameCount));
+	const Int frameCountBytesRead = m_file->read(&header.frameCount, sizeof(header.frameCount));
 
-	m_file->read(&header.desyncGame, sizeof(header.desyncGame));
-	m_file->read(&header.quitEarly, sizeof(header.quitEarly));
+	const Int desyncBytesRead = m_file->read(&header.desyncGame, sizeof(header.desyncGame));
+	const Int quitEarlyBytesRead = m_file->read(&header.quitEarly, sizeof(header.quitEarly));
+	Bool fixedHeaderComplete = startTimeBytesRead == sizeof(tmp) && endTimeBytesRead == sizeof(tmp)
+		&& frameCountBytesRead == sizeof(header.frameCount) && desyncBytesRead == sizeof(header.desyncGame)
+		&& quitEarlyBytesRead == sizeof(header.quitEarly);
 	for (Int i=0; i<MAX_SLOTS; ++i)
 	{
-		m_file->read(&(header.playerDiscons[i]), sizeof(Bool));
+		fixedHeaderComplete = m_file->read(&(header.playerDiscons[i]), sizeof(Bool)) == sizeof(Bool)
+			&& fixedHeaderComplete;
 	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (!fixedHeaderComplete)
+	{
+		if (header.forPlayback)
+		{
+			// TheSuperHackers @feature Leex 20/08/2026 Report header truncation only after exact fixed-field read counts prove it. (#TBD)
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 
 	// Read the Replay Name.  We don't actually do anything with it.  Oh well.
 	header.replayName = readUnicodeString();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_file->eof())
+	{
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 
 	// Read the date and time.  We don't really do anything with this either. Oh well.
-	m_file->read(&header.timeVal, sizeof(header.timeVal));
+	const Int timeValueBytesRead = m_file->read(&header.timeVal, sizeof(header.timeVal));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (timeValueBytesRead != sizeof(header.timeVal))
+	{
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 
 	// Read in the Version info
 	header.versionString = readUnicodeString();
 	header.versionTimeString = readUnicodeString();
-	m_file->read(&header.versionNumber, sizeof(header.versionNumber));
-	m_file->read(&header.exeCRC, sizeof(header.exeCRC));
-	m_file->read(&header.iniCRC, sizeof(header.iniCRC));
+	const Int versionNumberBytesRead = m_file->read(&header.versionNumber, sizeof(header.versionNumber));
+	const Int exeCRCBytesRead = m_file->read(&header.exeCRC, sizeof(header.exeCRC));
+	const Int iniCRCBytesRead = m_file->read(&header.iniCRC, sizeof(header.iniCRC));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_file->eof() || versionNumberBytesRead != sizeof(header.versionNumber)
+		|| exeCRCBytesRead != sizeof(header.exeCRC) || iniCRCBytesRead != sizeof(header.iniCRC))
+	{
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 
 	// Read in the GameInfo
 	header.gameOptions = readAsciiString();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_file->eof())
+	{
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 	m_gameInfo.reset();
 	m_gameInfo.enterGame();
 	DEBUG_LOG(("RecorderClass::readReplayHeader - GameInfo = %s", header.gameOptions.str()));
 	if (!ParseAsciiStringToGameInfo(&m_gameInfo, header.gameOptions))
 	{
 		DEBUG_LOG(("RecorderClass::readReplayHeader - replay file did not have a valid GameInfo string."));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INVALID_REPLAY_HEADER);
+		}
+#endif
 		m_file->close();
 		m_file = nullptr;
 		return FALSE;
@@ -1006,10 +1093,30 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	m_gameInfo.startGame(0);
 
 	AsciiString playerIndex = readAsciiString();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_file->eof())
+	{
+		m_gameInfo.endGame();
+		m_gameInfo.reset();
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+		}
+		m_file->close();
+		m_file = nullptr;
+		return FALSE;
+	}
+#endif
 	header.localPlayerIndex = atoi(playerIndex.str());
 	if (header.localPlayerIndex < -1 || header.localPlayerIndex >= MAX_SLOTS)
 	{
 		DEBUG_LOG(("RecorderClass::readReplayHeader - invalid local slot number."));
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		if (header.forPlayback)
+		{
+			ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_INVALID_REPLAY_HEADER);
+		}
+#endif
 		m_gameInfo.endGame();
 		m_gameInfo.reset();
 		m_file->close();
@@ -1217,6 +1324,10 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 			TheGameLogic->clearGameData();
 		}
 	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Open the independent outcome attempt after prior game cleanup but before replay input access. (#TBD)
+	ReplayOutcome::beginAttempt();
+#endif
 
 	ReplayHeader header;
 	header.forPlayback = TRUE;
@@ -1324,6 +1435,10 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 		// TheSuperHackers @feature Leex 19/08/2026 Never emit a partially read setup block as an authoritative record.
 		m_replayParseDumpComplete = FALSE;
 		ReplayParseDump::markIncomplete();
+#if !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Preserve exact setup short reads as pre-playback truncation evidence. (#TBD)
+		ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+#endif
 	}
 #endif
 
@@ -1339,6 +1454,10 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	if(m_file == nullptr)
 	{
 #if defined(RTS_REPLAY_ANALYZER)
+#if !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Settle an exact short first-frame read before the recorder enters playback mode. (#TBD)
+		ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
+#endif
 		// TheSuperHackers @feature Leex 18/08/2026 Settle telemetry immediately when playback fails before entering GameLogic update. (#TBD)
 		ReplayTelemetry::finish(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0,
 			REPLAY_TELEMETRY_TERMINATION_INTERRUPTED);
@@ -1372,6 +1491,10 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 
 	m_currentReplayFilename = filename;
 	m_playbackFrameCount = header.frameCount;
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 20/08/2026 Mark outcome playback ready only after setup, first-frame decoding, and recorder activation. (#TBD)
+	ReplayOutcome::observePlaybackStarted();
+#endif
 	return TRUE;
 }
 

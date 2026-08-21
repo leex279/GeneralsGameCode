@@ -238,7 +238,17 @@ def test_invalid_telemetry_settings_fail_before_replay_playback(
 
 
 @pytest.mark.parametrize(
-    "case", ["missing", "relative", "duplicate", "existing", "telemetry_alias", "spelling_alias"]
+    "case",
+    [
+        "missing",
+        "relative",
+        "duplicate",
+        "existing",
+        "telemetry_alias",
+        "spelling_alias",
+        "trailing_dot_alias",
+        "trailing_space",
+    ],
 )
 def test_invalid_replay_outcome_settings_fail_before_playback(
     case: str,
@@ -278,6 +288,18 @@ def test_invalid_replay_outcome_settings_fail_before_playback(
             "-replay-outcome",
             alternate_spelling,
         ]
+    elif case == "trailing_dot_alias":
+        trace_path = (tmp_path / "Evidence.NDJSON").resolve()
+        arguments = [
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+            "-replay-outcome",
+            f"{trace_path.parent}\\{trace_path.name.lower()}.",
+        ]
+    elif case == "trailing_space":
+        arguments.append(f"{outcome_path} ")
 
     completed = _run_engine(
         [*_base_command(zero_hour_runtime_executable, pinned_replay), *arguments],
@@ -294,6 +316,92 @@ def test_invalid_replay_outcome_settings_fail_before_playback(
         assert not outcome_path.exists()
     assert not second_path.exists()
     assert not trace_path.exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    ["evidence.ndjson.", "evidence.ndjson ", "evidence.ndjson:stream", "CON.ndjson"],
+    ids=["trailing-dot", "trailing-space", "alternate-data-stream", "reserved-device"],
+)
+def test_telemetry_rejects_unsafe_win32_final_components_before_playback(
+    unsafe_name: str,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    trace_path = tmp_path / unsafe_name
+    completed = _run_engine(
+        [
+            *_base_command(zero_hour_runtime_executable, pinned_replay),
+            "-telemetry",
+            str(trace_path),
+            "-telemetry-run-id",
+            RUN_ID,
+        ],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert "Simulating Replay" not in completed.stdout
+    assert "unsafe Win32 final component" in completed.stderr
+    assert not trace_path.exists()
+
+
+def test_case_insensitive_replay_spelling_and_canonical_outputs_still_work(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    replay = tmp_path / "MixedCase.REP"
+    shutil.copyfile(pinned_replay, replay)
+    lowercase_replay = replay.with_name(replay.name.lower())
+    outcome = (tmp_path / "canonical-outcome.json").resolve()
+    completed = _run_engine(
+        [
+            *_base_command(zero_hour_runtime_executable, lowercase_replay),
+            "-replay-outcome",
+            str(outcome),
+        ],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode != 0
+    assert json.loads(outcome.read_text(encoding="utf-8"))["playback_started"] is True
+    assert replay.read_bytes() == pinned_replay.read_bytes()
+
+
+def test_analyzer_paths_share_one_final_component_and_identity_policy(repository_root: Path) -> None:
+    source = (repository_root / "Core/GameEngine/Source/Common/CommandLine.cpp").read_text(encoding="utf-8")
+
+    assert 'strchr("<>:\\\"|?*", character)' in source
+    assert '"CON", "PRN", "AUX", "NUL", "CLOCK$"' in source
+    assert '"COM"' in source and '"LPT"' in source
+    assert source.count("hasSafeWin32FinalComponent(TheGlobalData->m_simulateReplays[0].str())") == 2
+    assert "hasSafeWin32FinalComponent(s_telemetryTracePath.str())" in source
+    assert "hasSafeWin32FinalComponent(s_replayOutcomePath.str())" in source
+    assert "GetFinalPathNameByHandleA" in source
+    assert "_stricmp(leftIdentity.str(), rightIdentity.str()) == 0" in source
+
+
+def test_outcome_attempt_brackets_all_replay_input_and_ready_seams(repository_root: Path) -> None:
+    recorder = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp").read_text(encoding="utf-8")
+    playback = recorder.split("Bool RecorderClass::playbackFile(AsciiString filename)", maxsplit=1)[1].split(
+        "UnicodeString RecorderClass::readUnicodeString", maxsplit=1
+    )[0]
+
+    assert playback.index("clearGameData();") < playback.index("ReplayOutcome::beginAttempt();")
+    assert playback.index("ReplayOutcome::beginAttempt();") < playback.index("readReplayHeader( header )")
+    assert playback.index("m_mode = RECORDERMODETYPE_PLAYBACK;") < playback.index(
+        "ReplayOutcome::observePlaybackStarted();"
+    )
+    assert "genrepBytesRead == sizeof(s_genrep) - 1" in recorder
+    assert "REPLAY_OUTCOME_INPUT_UNAVAILABLE" in recorder
+    assert "REPLAY_OUTCOME_INVALID_REPLAY_HEADER" in recorder
+    assert "REPLAY_OUTCOME_TRUNCATED_INPUT" in recorder
 
 
 def test_telemetry_requires_one_headless_replay_before_playback(
@@ -589,6 +697,111 @@ def test_replay_failure_before_initialized_phase_discards_pending_telemetry(
     assert not trace_path.exists()
     assert not tuple(tmp_path.glob("zero-command.ndjson.tmp.*"))
     assert not tuple(tmp_path.glob("game-data-catalog-v1-*.json"))
+
+
+def test_replay_outcome_settles_every_preplayback_failure_attempt(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    missing = tmp_path / "missing.rep"
+    invalid_magic = tmp_path / "invalid-magic.rep"
+    invalid_magic.write_bytes(b"NOTREP" + (b"\0" * 64))
+    truncated_header = tmp_path / "truncated-header.rep"
+    truncated_header.write_bytes(b"GENREP")
+    later_startup_abort = tmp_path / "later-startup-abort.rep"
+    _write_zero_command_replay(pinned_replay, later_startup_abort)
+    cases = (
+        ("missing", missing, "input_unavailable"),
+        ("invalid-magic", invalid_magic, "invalid_replay_header"),
+        ("truncated-header", truncated_header, "truncated_input"),
+        ("later-startup-abort", later_startup_abort, "truncated_input"),
+    )
+
+    for label, replay, terminal_reason in cases:
+        baseline = _run_engine(
+            _base_command(zero_hour_runtime_executable, replay),
+            zero_hour_runtime_executable.parent,
+            repository_root,
+        )
+        outcome = (tmp_path / f"{label}-outcome.json").resolve()
+        completed = _run_engine(
+            [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+            zero_hour_runtime_executable.parent,
+            repository_root,
+        )
+
+        assert completed.returncode == baseline.returncode != 0
+        assert completed.stdout == baseline.stdout
+        assert completed.stderr == baseline.stderr
+        assert json.loads(outcome.read_text(encoding="utf-8")) == {
+            "playback_started": False,
+            "final_frame": 0,
+            "command_count": 0,
+            "terminal_reason": terminal_reason,
+            "crc_mismatch": False,
+            "crc_mismatch_frame": None,
+        }
+        assert not tuple(tmp_path.glob(f"{label}-outcome.json.tmp.*"))
+
+
+def test_preplayback_outcome_writer_failure_is_passive_and_cleans_owned_temp(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+) -> None:
+    replay = tmp_path / "missing.rep"
+    baseline = _run_engine(
+        _base_command(zero_hour_runtime_executable, replay),
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+    outcome = (tmp_path / "missing-parent" / "outcome.json").resolve()
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode == baseline.returncode
+    assert completed.stdout == baseline.stdout
+    assert baseline.stderr in completed.stderr
+    assert "ReplayOutcome:" in completed.stderr
+    assert not outcome.exists()
+    assert not tuple(tmp_path.rglob("outcome.json.tmp.*"))
+
+
+def test_outcome_publish_collision_preserves_caller_destination_and_replay(
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+    pinned_replay: Path,
+) -> None:
+    replay = tmp_path / "collision-mechanics.rep"
+    _write_crc_free_replay(pinned_replay, replay)
+    replay_hash = replay.read_bytes()
+    outcome = (tmp_path / "late-collision.json").resolve()
+    caller_bytes = b"caller-owned-after-validation\n"
+    process = subprocess.Popen(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        cwd=zero_hour_runtime_executable.parent,
+        env=_runtime_environment(repository_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    first_line = process.stdout.readline()
+    assert first_line.startswith("Simulating Replay")
+    outcome.write_bytes(caller_bytes)
+    stdout_tail, stderr = process.communicate(timeout=120)
+
+    assert process.returncode == 0, first_line + stdout_tail + stderr
+    assert outcome.read_bytes() == caller_bytes
+    assert "could not exclusively publish replay outcome" in stderr
+    assert not tuple(tmp_path.glob("late-collision.json.tmp.*"))
+    assert replay.read_bytes() == replay_hash
 
 
 def test_telemetry_writer_avoids_msvc_only_bounded_formatting() -> None:

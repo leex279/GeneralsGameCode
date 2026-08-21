@@ -214,6 +214,61 @@ creation during publish, temporary candidate exhaustion, and pre-initialization 
 alias case is **1 skipped** because this Windows host lacks symlink privilege. The full real/static engine suite is
 **67 passed, 1 skipped**. The focused post-review natural/mechanics rerun is **2 passed** with the exact counts above.
 
+## Final review hardening
+
+The reviewed Task 7 commit was followed by a scoped corrective pass for four evidence-integrity findings.
+
+Windows destination identity now fails closed before playback for final components that Win32 can normalize or
+reinterpret: trailing dot/space, alternate-data-stream colon, control characters, wildcard/forbidden characters, and
+the documented DOS device basenames (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1`-`COM9`, and `LPT1`-`LPT9`). Replay,
+telemetry, and outcome paths use the same final-component policy. Output identity comparison still resolves the
+existing parent through `GetFinalPathNameByHandleA`, appends the validated final component, and compares
+case-insensitively. Quoted argument edges are preserved only in the analyzer build until validation; normal builds
+retain the existing trimming behavior. Exact canonical paths and case-insensitive replay spelling remain accepted.
+Trailing-dot/space, mixed-case/dot aliases, ADS, and reserved devices reject before `Simulating Replay`; existing and
+late-created destinations remain caller-owned. The outcome late-collision test also proves the replay and writer-owned
+temporary cleanup remain unchanged. This policy does not claim to prove privileged final-component symlink aliases;
+the symlink test remains skipped on this host because symlink creation privilege is unavailable.
+
+`ReplayOutcome` now opens an attempt after prior-game cleanup but before replay input access. Every tested configured
+startup attempt publishes exactly one no-replace JSON outcome:
+
+- missing input: `playback_started=false`, frame/count zero, `input_unavailable`, and no CRC facts;
+- full but wrong `GENREP` signature: the same zero facts with `invalid_replay_header`;
+- exact short header reads: the same zero facts with `truncated_input`; and
+- a valid decoded header/setup with a short first-frame read: the same zero facts with `truncated_input`.
+
+The last case is not marked started: `playback_started` becomes true only after setup, the first command-frame read,
+recorder mode, current filename, and advertised frame count are ready. Natural and clean mechanics outcomes now carry
+`playback_started=true`. Startup outcome writer failure is diagnostic-only, preserves the replay return/stdout, and
+removes any writer-owned temporary file. Configure/begin reset counters without publishing a false successful outcome.
+
+The atomic v2 reader now binds `entity_state_changed.owner_player_index` and every sample owner to Task 4's current
+lifecycle owner at that record. Tests cover wrong in-domain owners, valid and stale facts after transfer, nullable
+neutral ownership, and post-destroy rejection. A per-frame producer-order validator also requires all supported
+`order_issued` records before the end-update state/sample block; numeric object-ID ordering; at most one state and one
+sample per object/frame; and state before sample for a common object. Non-Task-7 authoritative facts may precede or
+interleave before the sampler block, and terminal outcome/completion may follow it.
+
+Strict TDD evidence for this corrective pass:
+
+- focused reader RED: **5 failed, 36 passed**; final focused reader GREEN: **42 passed**;
+- focused real alias/startup RED: **8 failed, 7 passed**; final focused alias/startup GREEN: **15 passed**;
+- focused owner/order/static/late-collision selection: **15 passed**;
+- natural CRC plus interval-15/30 mechanics gates: **2 passed in 88.72s**;
+- natural outcome: playback started, frame **108**, **16** executed commands, CRC mismatch frame **105**;
+- CRC-free outcome: playback started, clean frame **56,004**, **2,874** executed commands, no CRC mismatch;
+- interval-15 samples: **46,086**; interval-30 samples: **28,324**; all existing determinism, normalized
+  non-sample byte identity, and maximum eligible-moving gap assertions pass;
+- full non-engine suite: **491 passed, 80 engine tests deselected**;
+- full engine suite: **79 passed, 1 symlink-privilege skip, 491 non-engine tests deselected**;
+- Ruff: **passed**; strict mypy: **passed, 18 source files**; `git diff --check`: **passed**; and
+- modern VS 2022 x86 `z_generals`: **built and linked** after the final C++ refinement.
+
+The pinned natural replay remains SHA-256
+`EA085767BFA11D2CFC167D9007173CE2EB29B5F557702FFD042E2E9A1A8F6BB8`; no strategy, player, or winner conclusion is
+drawn from the disposable CRC-stripped mechanics derivative.
+
 ## Toolchain limitations
 
 VC6 and MinGW remain unavailable on this host, so no compile pass is claimed for either toolchain. Compatibility

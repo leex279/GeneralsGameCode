@@ -5,6 +5,7 @@ import json
 import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import Enum
 from importlib import resources
 from pathlib import Path
@@ -144,6 +145,17 @@ class _PendingForcedSample:
 
     frame: int
     reason: str
+
+
+@dataclass
+class _Task7FrameOrdering:
+    """Producer-order state for one frame's post-dispatch sampler block."""
+
+    frame: int | None = None
+    sampler_started: bool = False
+    last_sampler_object_id: int | None = None
+    state_object_ids: set[int] = dataclass_field(default_factory=set)
+    sample_object_ids: set[int] = dataclass_field(default_factory=set)
 
 
 _SAMPLE_SNAPSHOT_FIELDS = (
@@ -1188,6 +1200,62 @@ def _validated_order_coverage(path: Path, manifest: ManifestRecord) -> dict[int,
     return result
 
 
+def _validate_v2_task7_frame_order(
+    path: Path,
+    line_number: int,
+    record: TelemetryRecord,
+    ordering: _Task7FrameOrdering,
+) -> None:
+    """Reject record orders that the post-dispatch/end-update producer cannot emit."""
+    if record.event_type not in {"order_issued", "entity_state_changed", "entity_sample"}:
+        return
+    if ordering.frame != record.frame:
+        ordering.frame = record.frame
+        ordering.sampler_started = False
+        ordering.last_sampler_object_id = None
+        ordering.state_object_ids.clear()
+        ordering.sample_object_ids.clear()
+
+    if record.event_type == "order_issued":
+        if ordering.sampler_started:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "order_issued cannot follow the same-frame end-of-update sampler block",
+            )
+        return
+
+    ordering.sampler_started = True
+    payload = cast(dict[str, object], record.payload.model_dump())
+    object_id = cast(int, payload["object_id"])
+    if ordering.last_sampler_object_id is not None and object_id < ordering.last_sampler_object_id:
+        raise _error(
+            path,
+            line_number,
+            record.sequence,
+            "same-frame sampler records must use ascending numeric object_id order",
+        )
+    ordering.last_sampler_object_id = object_id
+
+    if record.event_type == "entity_state_changed":
+        if object_id in ordering.state_object_ids:
+            raise _error(path, line_number, record.sequence, "duplicate entity_state_changed for object/frame")
+        if object_id in ordering.sample_object_ids:
+            raise _error(
+                path,
+                line_number,
+                record.sequence,
+                "entity_sample cannot precede entity_state_changed for the same object/frame",
+            )
+        ordering.state_object_ids.add(object_id)
+        return
+
+    if object_id in ordering.sample_object_ids:
+        raise _error(path, line_number, record.sequence, "duplicate entity_sample for object/frame")
+    ordering.sample_object_ids.add(object_id)
+
+
 def _validate_v2_order_movement(
     path: Path,
     line_number: int,
@@ -1294,6 +1362,8 @@ def _validate_v2_order_movement(
 
     if event_type == "entity_state_changed":
         object_id = cast(int, payload["object_id"])
+        if payload["owner_player_index"] != entities[object_id].owner_player_index:
+            raise _error(path, line_number, record.sequence, "state owner identity changed without owner_changed")
         current_order_id = cast(int | None, payload["current_order_id"])
         if current_order_id != current_order_by_object.get(object_id):
             raise _error(path, line_number, record.sequence, "state current_order_id contradicts post-dispatch order history")
@@ -1473,6 +1543,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     pending_forced_samples: dict[int, _PendingForcedSample] = {}
     pending_lifecycle_samples: dict[int, int] = {}
     last_entity_samples: dict[int, _LastEntitySample] = {}
+    task7_frame_ordering = _Task7FrameOrdering()
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
         try:
@@ -1619,6 +1690,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 terminal_players,
                 observed_disconnected_slots,
             )
+            _validate_v2_task7_frame_order(path, line_number, validated, task7_frame_ordering)
             _validate_v2_order_movement(
                 path,
                 line_number,
