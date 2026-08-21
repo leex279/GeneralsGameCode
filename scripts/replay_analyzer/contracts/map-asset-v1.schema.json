@@ -100,11 +100,11 @@
           "additionalProperties": false,
           "required": ["bounded_layer_statuses", "bounded_position_policies", "exempt_position_policies", "policy", "policy_source"],
           "properties": {
-            "bounded_layer_statuses": { "const": ["stable", "dynamic_bridge_layer"] },
+            "bounded_layer_statuses": { "const": ["stable", "dynamic_bridge_layer", "unknown_engine_value"] },
             "bounded_position_policies": { "const": ["pathfinder_xy_closed"] },
-            "exempt_position_policies": { "const": ["exempt_kindof_aircraft", "exempt_kindof_bridge", "exempt_kindof_projectile", "exempt_locomotor_air_surface", "exempt_module_wander_ai", "exempt_physics_without_ai_pathing"] },
+            "exempt_position_policies": { "const": ["exempt_kindof_aircraft", "exempt_kindof_bridge", "exempt_kindof_projectile", "exempt_kindof_parachutable", "exempt_locomotor_air_surface"] },
             "policy": { "const": "pathfinder_xy_closed_except_explicit_engine_category" },
-            "policy_source": { "const": "ReplayMovementSampler KindOf, current locomotor AIR surface, WanderAIUpdate, or physics without AI pathing" }
+            "policy_source": { "const": "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface" }
           }
         },
         "float_encoding": { "const": "IEEE-754-binary32" },
@@ -123,7 +123,7 @@
     "grid": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bounds", "cell_size", "dimension_source", "height", "index_origin", "sample_point", "width"],
+      "required": ["bounds", "cell_size", "dimension_source", "height", "index_origin", "sample_point", "storage_order", "width"],
       "properties": {
         "bounds": { "$ref": "#/$defs/gridBounds" },
         "cell_size": { "$ref": "#/$defs/position2" },
@@ -136,6 +136,7 @@
           "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } }
         },
         "sample_point": { "const": "cell_center" },
+        "storage_order": { "const": "row_major_y_then_x_x_fastest" },
         "width": { "type": "integer", "minimum": 1, "maximum": 16384 }
       }
     },
@@ -216,12 +217,12 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["bidirectional", "bounds_policy", "labels", "link_ids", "name", "position", "waypoint_id"],
+          "required": ["bidirectional", "bounds_policy", "labels", "link_names", "name", "position", "waypoint_id"],
           "properties": {
             "bidirectional": { "type": "boolean" },
             "bounds_policy": { "enum": ["pathfinder_xy_closed", "not_asserted_by_source"] },
             "labels": { "type": "array", "maxItems": 3, "items": { "type": "string", "maxLength": 1024 } },
-            "link_ids": { "type": "array", "maxItems": 8, "items": { "type": "integer", "minimum": 0 } },
+            "link_names": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/safeName" } },
             "name": { "$ref": "#/$defs/safeName" },
             "position": { "$ref": "#/$defs/position3" },
             "waypoint_id": { "type": "integer", "minimum": 0 }
@@ -232,16 +233,17 @@
     "bridge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bounds_policy", "bridge_width", "category_source", "corners", "from", "layer_id", "object_id", "template_name", "to"],
+      "required": ["bounds_policy", "bridge_index", "bridge_width", "category_source", "corners", "from", "layer_id", "object_id", "template_name", "to"],
       "properties": {
         "bounds_policy": { "const": "pathfinder_xy_closed" },
+        "bridge_index": { "type": "integer", "minimum": 0 },
         "bridge_width": { "$ref": "#/$defs/finiteNumber" },
         "category_source": { "const": "TerrainLogic::getFirstBridge" },
         "corners": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/position3" } },
         "from": { "$ref": "#/$defs/position3" },
         "layer_id": { "type": "integer", "minimum": 0 },
         "object_id": { "type": ["integer", "null"], "minimum": 1 },
-        "template_name": { "$ref": "#/$defs/safeName" },
+        "template_name": { "anyOf": [{ "$ref": "#/$defs/safeName" }, { "type": "null" }] },
         "to": { "$ref": "#/$defs/position3" }
       }
     },
@@ -251,7 +253,7 @@
       "required": ["name", "source"],
       "properties": {
         "name": { "enum": ["static_blocker", "supply_source", "supply_warehouse", "capturable", "tech_building", "cash_generator", "oil_income", "bridge"] },
-        "source": { "$ref": "#/$defs/nonEmptyString" }
+        "source": { "enum": ["ThingTemplate::isKindOf(KINDOF_OBSTACLE)", "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)", "Object::findUpdateModule(SupplyWarehouseDockUpdate)", "ThingTemplate::isKindOf(KINDOF_CAPTURABLE)", "ThingTemplate::isKindOf(KINDOF_TECH_BUILDING)", "ThingTemplate::isKindOf(KINDOF_CASH_GENERATOR)", "Object::findUpdateModule(AutoDepositUpdate)+capturable_or_tech_KindOf", "ThingTemplate::isKindOf(KINDOF_BRIDGE)"] }
       }
     },
     "staticObject": {

@@ -7,7 +7,15 @@ import zlib
 from pathlib import Path
 
 
-def write_test_map_asset(directory: Path, engine_identity: str, map_identity: str) -> dict[str, object]:
+def write_test_map_asset(
+    directory: Path,
+    engine_identity: str,
+    map_identity: str,
+    *,
+    bridges: list[dict[str, object]] | None = None,
+    start_positions: list[dict[str, object]] | None = None,
+    static_objects: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     """Write deterministic 2x2 authoritative-format bytes and return their strict reference."""
     raw_members = {
         "height.f32.zlib": ("float32", struct.pack("<4f", 0.0, 0.0, 0.0, 0.0)),
@@ -43,6 +51,7 @@ def write_test_map_asset(directory: Path, engine_identity: str, map_identity: st
         "height": 2,
         "index_origin": {"x": -1, "y": -1},
         "sample_point": "cell_center",
+        "storage_order": "row_major_y_then_x_x_fastest",
         "width": 2,
     }
     manifest: dict[str, object] = {
@@ -72,25 +81,35 @@ def write_test_map_asset(directory: Path, engine_identity: str, map_identity: st
                 "minimum_inclusive": True,
             },
             "entity_sample_policy": {
-                "bounded_layer_statuses": ["stable", "dynamic_bridge_layer"],
+                "bounded_layer_statuses": ["stable", "dynamic_bridge_layer", "unknown_engine_value"],
                 "bounded_position_policies": ["pathfinder_xy_closed"],
                 "exempt_position_policies": [
                     "exempt_kindof_aircraft", "exempt_kindof_bridge",
-                    "exempt_kindof_projectile", "exempt_locomotor_air_surface",
-                    "exempt_module_wander_ai",
-                    "exempt_physics_without_ai_pathing",
+                    "exempt_kindof_projectile", "exempt_kindof_parachutable",
+                    "exempt_locomotor_air_surface",
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
-                "policy_source": (
-                    "ReplayMovementSampler KindOf, current locomotor AIR surface, "
-                    "WanderAIUpdate, or physics without AI pathing"
-                ),
+                "policy_source": "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
             },
             "float_encoding": "IEEE-754-binary32",
             "units": "engine_world_unit",
         },
         "engine_data_identity": engine_identity,
-        "features": {"bridges": [], "start_positions": [], "static_objects": [], "waypoints": []},
+        "features": {
+            "bridges": [] if bridges is None else bridges,
+            "start_positions": [
+                {
+                    "bounds_policy": "pathfinder_xy_closed",
+                    "category_source": "GameSlot::getStartPos + TerrainLogic::getWaypointByName",
+                    "name": "Player_1_Start",
+                    "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+                    "slot_indices": [0],
+                    "waypoint_id": 1,
+                }
+            ] if start_positions is None else start_positions,
+            "static_objects": [] if static_objects is None else static_objects,
+            "waypoints": [],
+        },
         "grids": {"pathing": grid, "terrain": grid},
         "map_identity": map_identity,
         "members": members,

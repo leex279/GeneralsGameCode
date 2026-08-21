@@ -48,6 +48,7 @@ def _write_catalog(directory: Path) -> dict[str, object]:
                 "name": name,
                 "faction": None,
                 "kind_of_flags": [],
+                "behavior_modules": [],
                 "build_cost": 0,
                 "configured_build_time_seconds": 0.0,
                 "prerequisites": [],
@@ -118,6 +119,7 @@ def _creation(object_id: int, template_name: str) -> dict[str, object]:
         "kind_of_flags": ["VEHICLE"] if object_id == 101 else ["STRUCTURE"],
         "initial_status": [],
         "creation_source": "starting_object",
+        "initialization_snapshot_status": "not_applicable",
         "creation_context": {
             "registration_frame": 0,
             "producer_object_id": None,
@@ -193,6 +195,7 @@ def _sample(reason: str) -> dict[str, object]:
         "locomotor_set_id": 0,
         "locomotor_set_name": "LOCOMOTORSET_NORMAL",
         "locomotor_set_name_status": "stable",
+        "current_locomotor_template_name": None,
         "current_order_id": 1,
         "current_order_message_type": 1059,
         "current_order_message_name": "MSG_DO_ATTACK_OBJECT",
@@ -222,6 +225,7 @@ def _lifecycle_sample(object_id: int, template_name: str, *, mobile: bool, struc
             "locomotor_set_id": 0 if mobile else None,
             "locomotor_set_name": "LOCOMOTORSET_NORMAL" if mobile else None,
             "locomotor_set_name_status": "stable" if mobile else "unavailable_no_ai",
+            "current_locomotor_template_name": None,
             "current_order_id": None,
             "current_order_message_type": None,
             "current_order_message_name": None,
@@ -687,6 +691,7 @@ def test_v2_reader_rejects_interval_sample_for_interval_ineligible_entity(tmp_pa
             "locomotor_set_id": 0,
             "locomotor_set_name": "LOCOMOTORSET_NORMAL",
             "locomotor_set_name_status": "stable",
+            "current_locomotor_template_name": None,
             "path_goal_status": "unavailable_no_path",
             "is_engine_moving": True,
         }
@@ -745,6 +750,7 @@ def test_v2_reader_uses_producer_interval_eligibility_for_moving_structure(tmp_p
             "locomotor_set_id": 0,
             "locomotor_set_name": "LOCOMOTORSET_NORMAL",
             "locomotor_set_name_status": "stable",
+            "current_locomotor_template_name": None,
             "path_goal_status": "unavailable_no_path",
             "is_engine_moving": True,
         }

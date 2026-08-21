@@ -359,6 +359,8 @@ namespace
 			}
 		}
 		s_initialized = FALSE;
+		// TheSuperHackers @feature Leex 21/08/2026 Clear failed initialization references without deleting immutable map cache bytes. (#TBD)
+		ReplayMapExport::reset();
 		discardTemporaryOutput();
 	}
 
@@ -472,6 +474,8 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 		return;
 	}
 	ReplayCombat::reset();
+	// TheSuperHackers @feature Leex 21/08/2026 Begin every replay with an empty trace-local authoritative map reference. (#TBD)
+	ReplayMapExport::reset();
 
 	s_sequence = 0;
 	s_commandCount = 0;
@@ -692,6 +696,8 @@ void ReplayTelemetry::discard()
 	{
 		discardPendingOutput("could not close discarded telemetry output");
 	}
+	// TheSuperHackers @feature Leex 21/08/2026 Discard trace-local map readiness while preserving published content-addressed cache bytes. (#TBD)
+	ReplayMapExport::reset();
 }
 
 void ReplayTelemetry::fail(const char *code, const char *message)

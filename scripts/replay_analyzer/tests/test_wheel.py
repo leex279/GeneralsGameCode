@@ -60,7 +60,12 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     wheel_environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
     telemetry_directory = tmp_path / "wheel-telemetry"
     telemetry_directory.mkdir()
-    map_reference = write_test_map_asset(telemetry_directory, "test", "test.map")
+    map_reference = write_test_map_asset(
+        telemetry_directory,
+        "test",
+        "test.map",
+        start_positions=[],
+    )
     wheel_environment["TEST_TELEMETRY_DIRECTORY"] = str(telemetry_directory)
     wheel_environment["TEST_MAP_REFERENCE"] = json.dumps(map_reference, separators=(",", ":"))
     telemetry_script = textwrap.dedent(

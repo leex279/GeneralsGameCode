@@ -47,6 +47,7 @@ def _catalog() -> dict[str, object]:
                 "name": "AmericaTankCrusader",
                 "faction": "America",
                 "kind_of_flags": [],
+                "behavior_modules": [],
                 "build_cost": 900,
                 "configured_build_time_seconds": 10.0,
                 "prerequisites": [],
@@ -137,6 +138,7 @@ def _object_created(object_id: int, template_name: str) -> dict[str, object]:
         "kind_of_flags": [],
         "initial_status": [],
         "creation_source": "starting_object",
+        "initialization_snapshot_status": "not_applicable",
         "creation_context": {
             "registration_frame": 0,
             "producer_object_id": None,
@@ -181,7 +183,21 @@ def _upgrade(state: str) -> dict[str, object]:
 
 def _base_records(directory: Path) -> list[dict[str, object]]:
     reference = _write_catalog(directory)
-    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
+    map_reference = write_test_map_asset(
+        directory,
+        ENGINE_IDENTITY,
+        "maps/test.map",
+        start_positions=[
+            {
+                "bounds_policy": "pathfinder_xy_closed",
+                "category_source": "GameSlot::getStartPos + TerrainLogic::getWaypointByName",
+                "name": "Player_1_Start",
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "slot_indices": [0],
+                "waypoint_id": 1,
+            }
+        ],
+    )
     return [
         _record(
             0,
@@ -251,6 +267,7 @@ def _inject_lifecycle_samples(records: list[dict[str, object]]) -> None:
                     "locomotor_set_id": None,
                     "locomotor_set_name": None,
                     "locomotor_set_name_status": "unavailable_no_ai",
+                    "current_locomotor_template_name": None,
                     "current_order_id": None,
                     "current_order_message_type": None,
                     "current_order_message_name": None,

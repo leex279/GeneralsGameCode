@@ -33,6 +33,7 @@ def test_catalog_schema_preserves_weapon_set_conditions_slots_and_choice_metadat
                 "name": "TestTank",
                 "faction": "FactionTest",
                 "kind_of_flags": [],
+                "behavior_modules": [],
                 "build_cost": 100,
                 "configured_build_time_seconds": 1.0,
                 "prerequisites": [],

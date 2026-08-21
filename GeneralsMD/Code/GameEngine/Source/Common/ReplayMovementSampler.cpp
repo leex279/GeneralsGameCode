@@ -535,21 +535,25 @@ namespace
 		}
 	}
 
-	// TheSuperHackers @feature Leex 21/08/2026 Bind coordinate exemptions to live KindOf, locomotor, module, or physics evidence. (#TBD)
+	// TheSuperHackers @feature Leex 21/08/2026 Bind coordinate exemptions only to independently catalog-verifiable engine evidence. (#TBD)
 	const char *positionBoundsPolicy(const Object *object)
 	{
 		if (object->isKindOf(KINDOF_AIRCRAFT)) return "exempt_kindof_aircraft";
 		if (object->isKindOf(KINDOF_BRIDGE)) return "exempt_kindof_bridge";
 		if (object->isKindOf(KINDOF_PROJECTILE)) return "exempt_kindof_projectile";
+		if (object->isKindOf(KINDOF_PARACHUTABLE)) return "exempt_kindof_parachutable";
 		const AIUpdateInterface *ai = object->getAI();
 		const Locomotor *locomotor = ai != nullptr ? ai->getCurLocomotor() : nullptr;
 		if (locomotor != nullptr && (locomotor->getLegalSurfaces() & LOCOMOTORSURFACE_AIR) != 0)
 			return "exempt_locomotor_air_surface";
-		static const NameKeyType wanderAiKey = TheNameKeyGenerator->nameToKey("WanderAIUpdate");
-		if ((object->getAI() != nullptr && object->getAI()->getModuleNameKey() == wanderAiKey)
-			|| object->findUpdateModule(wanderAiKey) != nullptr) return "exempt_module_wander_ai";
-		if (object->getAI() == nullptr && object->getPhysics() != nullptr) return "exempt_physics_without_ai_pathing";
 		return "pathfinder_xy_closed";
+	}
+
+	std::string currentLocomotorTemplateName(const Object *object)
+	{
+		const AIUpdateInterface *ai = object->getAI();
+		const Locomotor *locomotor = ai != nullptr ? ai->getCurLocomotor() : nullptr;
+		return locomotor != nullptr ? jsonString(locomotor->getTemplateName().str()) : "null";
 	}
 
 	Bool emitSample(UnsignedInt frame, const Object *object, const EngineSampleSnapshot &sample, const char *reason)
@@ -588,6 +592,7 @@ namespace
 			+ ",\"locomotor_set_id\":" + nullableLocomotorSet(sample.state)
 			+ ",\"locomotor_set_name\":" + nullableLocomotorSetName(sample.state)
 			+ ",\"locomotor_set_name_status\":" + jsonString(locomotorSetNameStatus(sample.state))
+			+ ",\"current_locomotor_template_name\":" + currentLocomotorTemplateName(object)
 			+ ",\"current_order_id\":" + orderId
 			+ ",\"current_order_message_type\":" + orderType
 			+ ",\"current_order_message_name\":" + orderName

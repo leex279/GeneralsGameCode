@@ -83,12 +83,13 @@
     "thingTemplate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "name", "faction", "kind_of_flags", "build_cost", "configured_build_time_seconds", "prerequisites", "locomotor_sets", "production_capable", "weapon_sets", "derived_weapon_names", "category_tags"],
+      "required": ["ordinal", "name", "faction", "kind_of_flags", "behavior_modules", "build_cost", "configured_build_time_seconds", "prerequisites", "locomotor_sets", "production_capable", "weapon_sets", "derived_weapon_names", "category_tags"],
       "properties": {
         "ordinal": {"type": "integer", "minimum": 0},
         "name": {"type": "string", "minLength": 1},
         "faction": {"type": ["string", "null"], "minLength": 1},
         "kind_of_flags": {"type": "array", "items": {"$ref": "#/$defs/kindOfFlag"}},
+        "behavior_modules": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "build_cost": {"type": "integer", "minimum": 0},
         "configured_build_time_seconds": {"type": "number", "minimum": 0},
         "prerequisites": {"type": "array", "items": {"$ref": "#/$defs/prerequisite"}},

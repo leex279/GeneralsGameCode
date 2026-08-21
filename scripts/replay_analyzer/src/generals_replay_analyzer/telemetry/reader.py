@@ -9,7 +9,7 @@ from dataclasses import field as dataclass_field
 from enum import Enum
 from importlib import resources
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from jsonschema import Draft202012Validator, FormatChecker  # type: ignore[import-untyped]
 from pydantic import TypeAdapter, ValidationError
@@ -78,6 +78,12 @@ class _EntityLifecycleState:
     owner_player_index: int | None
     team_id: int | None
     construction_state: str
+    position_status: str
+    position: tuple[float, float, float] | None
+    orientation: float
+    kind_of_flags: frozenset[str]
+    creation_source: str
+    initialization_snapshot_status: str
     sold: bool = False
     destroyed: bool = False
     current_veterancy_level_id: int | None = None
@@ -89,8 +95,23 @@ class _CatalogIdentities:
 
     thing_templates: frozenset[str]
     thing_template_kind_of_flags: Mapping[str, frozenset[str]]
+    thing_template_behavior_modules: Mapping[str, frozenset[str]]
+    thing_template_locomotors_by_sample_set: Mapping[tuple[str, int, str], frozenset[str]]
+    thing_template_air_locomotors_by_sample_set: Mapping[tuple[str, int, str], frozenset[str]]
     upgrades: frozenset[str]
     sciences: frozenset[str]
+
+
+_LOCOMOTOR_SAMPLE_TO_CATALOG_SETS = (
+    (0, "LOCOMOTORSET_NORMAL", "SET_NORMAL"),
+    (1, "LOCOMOTORSET_NORMAL_UPGRADED", "SET_NORMAL_UPGRADED"),
+    (2, "LOCOMOTORSET_FREEFALL", "SET_FREEFALL"),
+    (3, "LOCOMOTORSET_WANDER", "SET_WANDER"),
+    (4, "LOCOMOTORSET_PANIC", "SET_PANIC"),
+    (5, "LOCOMOTORSET_TAXIING", "SET_TAXIING"),
+    (6, "LOCOMOTORSET_SUPERSONIC", "SET_SUPERSONIC"),
+    (7, "LOCOMOTORSET_SLUGGISH", "SET_SLUGGISH"),
+)
 
 
 @dataclass
@@ -379,6 +400,28 @@ def _validate_catalog_asset(
             f"trace '{path}': catalog engine_data_identity differs from manifest engine_build"
         )
     thing_templates = cast(list[dict[str, object]], catalog["thing_templates"])
+    locomotors = cast(list[dict[str, object]], catalog["locomotors"])
+    air_locomotors = frozenset(
+        cast(str, entry["name"])
+        for entry in locomotors
+        if "AIR" in cast(list[str], entry["surface_capabilities"])
+    )
+    sample_set_by_catalog_name = {
+        catalog_name: (set_id, sample_name)
+        for set_id, sample_name, catalog_name in _LOCOMOTOR_SAMPLE_TO_CATALOG_SETS
+    }
+    template_locomotors: dict[tuple[str, int, str], frozenset[str]] = {}
+    template_air_locomotors: dict[tuple[str, int, str], frozenset[str]] = {}
+    for entry in thing_templates:
+        template_name = cast(str, entry["name"])
+        for locomotor_set in cast(list[dict[str, object]], entry["locomotor_sets"]):
+            sample_set = sample_set_by_catalog_name.get(cast(str, locomotor_set["set"]))
+            if sample_set is None:
+                continue
+            names = frozenset(cast(list[str], locomotor_set["names"]))
+            key = (template_name, sample_set[0], sample_set[1])
+            template_locomotors[key] = names
+            template_air_locomotors[key] = names & air_locomotors
     upgrades = cast(list[dict[str, object]], catalog["upgrades"])
     sciences = cast(list[dict[str, object]], catalog["sciences"])
     return _CatalogIdentities(
@@ -390,6 +433,12 @@ def _validate_catalog_asset(
             )
             for entry in thing_templates
         },
+        thing_template_behavior_modules={
+            cast(str, entry["name"]): frozenset(cast(list[str], entry["behavior_modules"]))
+            for entry in thing_templates
+        },
+        thing_template_locomotors_by_sample_set=template_locomotors,
+        thing_template_air_locomotors_by_sample_set=template_air_locomotors,
         upgrades=frozenset(cast(str, entry["name"]) for entry in upgrades),
         sciences=frozenset(cast(str, entry["name"]) for entry in sciences),
     )
@@ -504,11 +553,25 @@ def _validate_v2_entity_lifecycle(
         if object_id in entities:
             raise _error(path, line_number, record.sequence, f"duplicate object_created for object_id {object_id}")
         initial_status = cast(list[str], payload["initial_status"])
+        raw_position = payload["position"]
+        position = None
+        if isinstance(raw_position, Mapping):
+            position = (
+                cast(float, raw_position["x"]),
+                cast(float, raw_position["y"]),
+                cast(float, raw_position["z"]),
+            )
         entities[object_id] = _EntityLifecycleState(
             template_name=cast(str, payload["template_name"]),
             owner_player_index=cast(int | None, payload["owner_player_index"]),
             team_id=cast(int | None, payload["team_id"]),
             construction_state="not_present" if "UNDER_CONSTRUCTION" in initial_status else "complete",
+            position_status=cast(str, payload["position_status"]),
+            position=position,
+            orientation=cast(float, payload["orientation"]),
+            kind_of_flags=frozenset(cast(list[str], payload["kind_of_flags"])),
+            creation_source=cast(str, payload["creation_source"]),
+            initialization_snapshot_status=cast(str, payload["initialization_snapshot_status"]),
         )
         return
 
@@ -1166,6 +1229,121 @@ def _validate_v2_catalog_identities(
             raise _error(path, line_number, record.sequence, "science_name is absent from game data catalog")
 
 
+def _source_classified_categories(
+    kind_of_flags: frozenset[str], behavior_modules: frozenset[str]
+) -> tuple[tuple[str, str], ...]:
+    categories: list[tuple[str, str]] = []
+    if "BRIDGE" in kind_of_flags:
+        categories.append(("bridge", "ThingTemplate::isKindOf(KINDOF_BRIDGE)"))
+    if "CAPTURABLE" in kind_of_flags:
+        categories.append(("capturable", "ThingTemplate::isKindOf(KINDOF_CAPTURABLE)"))
+    if "CASH_GENERATOR" in kind_of_flags:
+        categories.append(("cash_generator", "ThingTemplate::isKindOf(KINDOF_CASH_GENERATOR)"))
+    if "AutoDepositUpdate" in behavior_modules and ({"CAPTURABLE", "TECH_BUILDING"} & kind_of_flags):
+        categories.append(
+            ("oil_income", "Object::findUpdateModule(AutoDepositUpdate)+capturable_or_tech_KindOf")
+        )
+    if "OBSTACLE" in kind_of_flags:
+        categories.append(("static_blocker", "ThingTemplate::isKindOf(KINDOF_OBSTACLE)"))
+    if "SUPPLY_SOURCE" in kind_of_flags:
+        categories.append(("supply_source", "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)"))
+    if "SupplyWarehouseDockUpdate" in behavior_modules:
+        categories.append(("supply_warehouse", "Object::findUpdateModule(SupplyWarehouseDockUpdate)"))
+    if "TECH_BUILDING" in kind_of_flags:
+        categories.append(("tech_building", "ThingTemplate::isKindOf(KINDOF_TECH_BUILDING)"))
+    return tuple(categories)
+
+
+class _PositionLike(Protocol):
+    x: float
+    y: float
+    z: float
+
+
+def _position_tuple(position: _PositionLike) -> tuple[float, float, float]:
+    return (
+        position.x,
+        position.y,
+        position.z,
+    )
+
+
+def _validate_v2_map_features(
+    path: Path,
+    authoritative_map: MapAsset,
+    players_start_positions: Mapping[int, tuple[float, float, float]],
+    entities: Mapping[int, _EntityLifecycleState],
+    identities: _CatalogIdentities,
+) -> None:
+    asset_starts = {
+        slot: _position_tuple(start.position)
+        for start in authoritative_map.start_positions
+        for slot in start.slot_indices
+    }
+    if asset_starts != players_start_positions:
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': map start positions do not exactly match players_initialized start slots"
+        )
+
+    expected_static: dict[int, tuple[str, tuple[float, float, float], float, tuple[tuple[str, str], ...]]] = {}
+    for object_id, entity in entities.items():
+        if entity.creation_source != "map_loaded" or entity.initialization_snapshot_status != "present":
+            continue
+        catalog_flags = identities.thing_template_kind_of_flags.get(entity.template_name)
+        if catalog_flags is None:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': map_loaded template {entity.template_name} is absent from game data catalog"
+            )
+        if entity.kind_of_flags != catalog_flags:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': map_loaded object {object_id} KindOf flags differ from game data catalog"
+            )
+        modules = identities.thing_template_behavior_modules[entity.template_name]
+        categories = _source_classified_categories(catalog_flags, modules)
+        if not categories:
+            continue
+        if entity.position_status != "placed" or entity.position is None:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': source-classified map_loaded object {object_id} lacks a first placed position"
+            )
+        expected_static[object_id] = (entity.template_name, entity.position, entity.orientation, categories)
+
+    actual_static = {entry.object_id: entry for entry in authoritative_map.static_objects}
+    if set(actual_static) != set(expected_static):
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': map feature static object set invents or omits source-classified map_loaded evidence"
+        )
+    for object_id, expected in expected_static.items():
+        actual = actual_static[object_id]
+        actual_categories = tuple((category.name, category.source) for category in actual.categories)
+        if (
+            actual.template_name != expected[0]
+            or _position_tuple(actual.position) != expected[1]
+            or actual.orientation != expected[2]
+            or actual_categories != expected[3]
+        ):
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': map feature static object {object_id} contradicts lifecycle/catalog identity"
+            )
+
+    for bridge in authoritative_map.bridges:
+        if bridge.object_id is None:
+            continue
+        bridge_entity = entities.get(bridge.object_id)
+        static = actual_static.get(bridge.object_id)
+        if (
+            bridge_entity is None
+            or bridge_entity.creation_source != "map_loaded"
+            or bridge_entity.initialization_snapshot_status != "present"
+            or (bridge.template_name is not None and bridge.template_name != bridge_entity.template_name)
+            or static is None
+            or static.template_name != bridge_entity.template_name
+        ):
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': bridge {bridge.bridge_index} object identity lacks matching map_loaded lifecycle evidence"
+            )
+
+
 def _validated_order_coverage(path: Path, manifest: ManifestRecord) -> dict[int, tuple[str, str, int | None]]:
     """Validate the closed dispatch capability against the packaged numeric/name command catalog."""
     if manifest.schema_version != 2:
@@ -1546,6 +1724,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
     pending_supply_cash_pair: _PendingSupplyCashPair | None = None
     complete_record: CompleteRecord | None = None
     slot_player_indices: dict[int, int] = {}
+    players_start_positions: dict[int, tuple[float, float, float]] = {}
     terminal_players: dict[int, str] = {}
     observed_disconnected_slots: set[int] = set()
     outcome_records: list[MatchOutcomeRecord] = []
@@ -1647,6 +1826,7 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                         expected_reference=expected_map_reference,
                         expected_engine_data_identity=validated.payload.engine_build,
                         expected_map_identity=validated.payload.map_identity,
+                        trusted_trace_directory=path.parent,
                     )
                 except MapAssetValidationError as error:
                     raise _error(path, line_number, validated.sequence, f"map_asset: {error}") from error
@@ -1667,6 +1847,11 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                     for slot in validated.payload.slots
                     if slot.player_index is not None
                 }
+                players_start_positions = {
+                    slot.slot_index: _position_tuple(slot.start_position)
+                    for slot in validated.payload.slots
+                    if slot.start_position_status == "resolved" and slot.start_position is not None
+                }
         elif isinstance(validated, MatchOutcomeRecord):
             outcome_records.append(validated)
 
@@ -1676,10 +1861,43 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
             sample_kind_of_flags = catalog_identities.thing_template_kind_of_flags.get(
                 validated.payload.template_name or "", frozenset()
             )
+            lifecycle = entity_lifecycles.get(validated.payload.object_id)
+            if lifecycle is not None:
+                sample_kind_of_flags &= lifecycle.kind_of_flags
+            catalog_locomotors: frozenset[str] = frozenset()
+            catalog_air_locomotors: frozenset[str] = frozenset()
+            if (
+                validated.payload.locomotor_set_id is not None
+                and validated.payload.locomotor_set_name is not None
+            ):
+                sample_set_key = (
+                    validated.payload.template_name or "",
+                    validated.payload.locomotor_set_id,
+                    validated.payload.locomotor_set_name,
+                )
+                catalog_locomotors = catalog_identities.thing_template_locomotors_by_sample_set.get(
+                    sample_set_key, frozenset()
+                )
+                catalog_air_locomotors = (
+                    catalog_identities.thing_template_air_locomotors_by_sample_set.get(
+                        sample_set_key, frozenset()
+                    )
+                )
+            if (
+                validated.payload.current_locomotor_template_name is not None
+                and validated.payload.current_locomotor_template_name not in catalog_locomotors
+            ):
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    "current locomotor template/set identity differs from game-data catalog",
+                )
             try:
                 authoritative_map.require_entity_position(
                     validated.payload,
                     sample_kind_of_flags,
+                    catalog_air_locomotors,
                 )
             except MapAssetValidationError as error:
                 raise _error(
@@ -1816,6 +2034,13 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
         )
         assert catalog_identities is not None
         _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
+        _validate_v2_map_features(
+            path,
+            authoritative_map,
+            players_start_positions,
+            entity_lifecycles,
+            catalog_identities,
+        )
         if pending_forced_samples:
             object_id = min(pending_forced_samples)
             raise TelemetryTraceValidationError(

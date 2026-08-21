@@ -141,6 +141,7 @@ def _write_catalog_with_numeric_token(directory: Path, token: str) -> dict[str, 
             "name": "NumericBoundaryTemplate",
             "faction": None,
             "kind_of_flags": [],
+            "behavior_modules": [],
             "build_cost": 0,
             "configured_build_time_seconds": 1.0,
             "prerequisites": [],
@@ -636,16 +637,14 @@ def test_reader_rejects_exponent_overflow_in_hash_valid_catalog_numbers(tmp_path
 
 
 @pytest.mark.parametrize("token", ["1e308", "-1e308", "1e-999"])
-def test_reader_accepts_finite_trace_exponent_boundaries(tmp_path: Path, token: str) -> None:
-    """Keep valid finite large, negative, and underflowing exponent numbers readable."""
+def test_reader_rejects_finite_numeric_tokens_that_change_bound_map_start_evidence(
+    tmp_path: Path, token: str
+) -> None:
+    """Finite JSON syntax cannot bypass exact initialized start-position cross-binding."""
     trace = _write_v2_trace_with_player_numeric_token(tmp_path, token, f"finite-{token.replace('-', 'm')}.ndjson")
 
-    assert [record.event_type for record in iter_validated_trace(trace)] == [
-        "manifest",
-        "players_initialized",
-        "match_outcome",
-        "complete",
-    ]
+    with pytest.raises(TelemetryTraceValidationError, match="map start positions"):
+        tuple(iter_validated_trace(trace))
 
 
 @pytest.mark.parametrize("token", ["1e308", "1e-999"])

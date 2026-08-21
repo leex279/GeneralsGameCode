@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import stat
 import struct
 import subprocess
 import zlib
@@ -15,7 +17,9 @@ from uuid import UUID
 
 import pytest
 
+import generals_replay_analyzer.telemetry.map_asset as map_asset_module
 from generals_replay_analyzer.telemetry.map_asset import (
+    MAX_MANIFEST_BYTES,
     MapAssetValidationError,
     load_map_asset,
 )
@@ -33,6 +37,27 @@ MEMBER_NAMES = (
     "terrain.u8.zlib",
     "zones.i32.zlib",
 )
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def _rebind_manifest(asset_dir: Path, reference: dict[str, str], manifest: dict[str, Any]) -> Path:
+    manifest["content_sha256"] = "0" * 64
+    content_hash = hashlib.sha256(_canonical_bytes(manifest)).hexdigest()
+    manifest["content_sha256"] = content_hash
+    manifest_bytes = _canonical_bytes(manifest)
+    rebound = asset_dir.parent / content_hash
+    asset_dir.rename(rebound)
+    manifest_path = rebound / "manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+    reference.update(
+        content_sha256=content_hash,
+        path=f"map-assets-v1/{content_hash}/manifest.json",
+        sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    return manifest_path
 
 
 def _compressed_member(raw: bytes, *, dtype: str, width: int = 2, height: int = 2) -> tuple[bytes, dict[str, Any]]:
@@ -99,19 +124,15 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
                 "minimum_inclusive": True,
             },
             "entity_sample_policy": {
-                "bounded_layer_statuses": ["stable", "dynamic_bridge_layer"],
+                "bounded_layer_statuses": ["stable", "dynamic_bridge_layer", "unknown_engine_value"],
                 "bounded_position_policies": ["pathfinder_xy_closed"],
                 "exempt_position_policies": [
                     "exempt_kindof_aircraft", "exempt_kindof_bridge",
-                    "exempt_kindof_projectile", "exempt_locomotor_air_surface",
-                    "exempt_module_wander_ai",
-                    "exempt_physics_without_ai_pathing",
+                    "exempt_kindof_projectile", "exempt_kindof_parachutable",
+                    "exempt_locomotor_air_surface",
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
-                "policy_source": (
-                    "ReplayMovementSampler KindOf, current locomotor AIR surface, "
-                    "WanderAIUpdate, or physics without AI pathing"
-                ),
+                "policy_source": "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
             },
             "float_encoding": "IEEE-754-binary32",
             "units": "engine_world_unit",
@@ -143,6 +164,7 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
                 "height": 2,
                 "index_origin": {"x": 0, "y": 0},
                 "sample_point": "cell_center",
+                "storage_order": "row_major_y_then_x_x_fastest",
                 "width": 2,
             },
             "terrain": {
@@ -151,10 +173,11 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
                     "minimum_inclusive": {"x": 0.0, "y": 0.0},
                 },
                 "cell_size": {"x": 10.0, "y": 10.0},
-                "dimension_source": "initialized TerrainLogic sampled on authoritative path cells",
+                "dimension_source": "Pathfinder::replayAnalyzerGetExtent",
                 "height": 2,
                 "index_origin": {"x": 0, "y": 0},
                 "sample_point": "cell_center",
+                "storage_order": "row_major_y_then_x_x_fastest",
                 "width": 2,
             },
         },
@@ -164,10 +187,10 @@ def _write_asset(root: Path) -> tuple[Path, dict[str, str]]:
         "schema_version": 1,
         "type": "map_asset",
     }
-    placeholder = (json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    placeholder = _canonical_bytes(manifest)
     content_hash = hashlib.sha256(placeholder).hexdigest()
     manifest["content_sha256"] = content_hash
-    manifest_bytes = (json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    manifest_bytes = _canonical_bytes(manifest)
     asset_dir = root / "map-assets-v1" / content_hash
     asset_dir.mkdir(parents=True)
     for name, data in compressed.items():
@@ -292,6 +315,87 @@ def test_loader_rejects_tampered_or_partial_assets(tmp_path: Path, mutation: str
         load_map_asset(manifest_path, expected_reference=reference)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("small_declared_zip_bomb", "overlong|uncompressed size"),
+        ("concatenated_streams", "trailing"),
+        ("truncated_stream", "truncated|invalid zlib"),
+    ],
+)
+def test_loader_streams_with_a_declared_output_budget_and_one_complete_zlib_stream(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    manifest_path = asset_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    member = asset_dir / "height.f32.zlib"
+    if mutation == "small_declared_zip_bomb":
+        compressed = zlib.compress(b"\0" * (2 * 1024 * 1024), level=9)
+    elif mutation == "concatenated_streams":
+        compressed = member.read_bytes() + zlib.compress(b"second-stream", level=9)
+    else:
+        compressed = member.read_bytes()[:-1]
+    member.write_bytes(compressed)
+    metadata = manifest["members"][member.name]
+    metadata["compressed_size"] = len(compressed)
+    metadata["compressed_sha256"] = hashlib.sha256(compressed).hexdigest()
+    manifest_path = _rebind_manifest(asset_dir, reference, manifest)
+
+    with pytest.raises(MapAssetValidationError, match=message):
+        load_map_asset(manifest_path, expected_reference=reference)
+
+
+def test_loader_preflights_manifest_and_member_sizes_without_path_read_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+
+    def forbidden_read_bytes(_path: Path) -> bytes:
+        raise AssertionError("unbounded Path.read_bytes must not be used for hostile assets")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    asset = load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+    assert asset.pathing.width == 2
+
+
+def test_loader_rejects_oversized_sparse_manifest_and_member_before_read(tmp_path: Path) -> None:
+    asset_dir, reference = _write_asset(tmp_path / "manifest-case")
+    manifest_path = asset_dir / "manifest.json"
+    with manifest_path.open("r+b") as output:
+        output.truncate(MAX_MANIFEST_BYTES + 1)
+    with pytest.raises(MapAssetValidationError, match="manifest.*size"):
+        load_map_asset(manifest_path, expected_reference=reference)
+
+    asset_dir, reference = _write_asset(tmp_path / "member-case")
+    member = asset_dir / "terrain.u8.zlib"
+    with member.open("r+b") as output:
+        output.truncate(64 * 1024 * 1024 + 1)
+    with pytest.raises(MapAssetValidationError, match="size.*closed bound|compressed size"):
+        load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["storage_order", "origin", "world_bounds", "different_terrain_grid"],
+)
+def test_loader_rejects_rehashed_grid_descriptor_tampering(tmp_path: Path, mutation: str) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    manifest = json.loads((asset_dir / "manifest.json").read_text(encoding="utf-8"))
+    if mutation == "storage_order":
+        manifest["grids"]["pathing"]["storage_order"] = "x_major"
+    elif mutation == "origin":
+        manifest["grids"]["pathing"]["index_origin"]["x"] = 1
+    elif mutation == "world_bounds":
+        manifest["coordinate_system"]["bounds"]["maximum"]["x"] = 19.0
+    else:
+        manifest["grids"]["terrain"]["dimension_source"] = "different grid"
+    manifest_path = _rebind_manifest(asset_dir, reference, manifest)
+
+    with pytest.raises(MapAssetValidationError, match="schema|grid|origin|world.*bounds|descriptor"):
+        load_map_asset(manifest_path, expected_reference=reference)
+
+
 def test_loader_rejects_oob_features_and_never_clamps(tmp_path: Path) -> None:
     asset_dir, reference = _write_asset(tmp_path)
     manifest_path = asset_dir / "manifest.json"
@@ -315,6 +419,86 @@ def test_loader_rejects_oob_features_and_never_clamps(tmp_path: Path) -> None:
         load_map_asset(manifest_path, expected_reference=reference)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_start_slot",
+        "duplicate_waypoint_name",
+        "dangling_waypoint_link",
+        "duplicate_bridge_index",
+        "duplicate_static_object_id",
+        "forged_category_source",
+    ],
+)
+def test_loader_rejects_rehashed_feature_identity_and_provenance_tampering(
+    tmp_path: Path, mutation: str
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    manifest = json.loads((asset_dir / "manifest.json").read_text(encoding="utf-8"))
+    start = manifest["features"]["start_positions"][0]
+    waypoint = {
+        "bidirectional": False,
+        "bounds_policy": "pathfinder_xy_closed",
+        "labels": [],
+        "link_names": [],
+        "name": "Waypoint_A",
+        "position": {"x": 10.0, "y": 10.0, "z": 1.0},
+        "waypoint_id": 8,
+    }
+    bridge = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "bridge_index": 3,
+        "bridge_width": 4.0,
+        "category_source": "TerrainLogic::getFirstBridge",
+        "corners": [
+            {"x": 1.0, "y": 1.0, "z": 0.0},
+            {"x": 2.0, "y": 1.0, "z": 0.0},
+            {"x": 1.0, "y": 2.0, "z": 0.0},
+            {"x": 2.0, "y": 2.0, "z": 0.0},
+        ],
+        "from": {"x": 1.0, "y": 1.5, "z": 0.0},
+        "layer_id": 2,
+        "object_id": None,
+        "template_name": None,
+        "to": {"x": 2.0, "y": 1.5, "z": 0.0},
+    }
+    static_object = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "categories": [
+            {"name": "supply_source", "source": "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)"}
+        ],
+        "creation_source": "map_loaded",
+        "object_id": 44,
+        "orientation": 0.0,
+        "position": {"x": 5.0, "y": 5.0, "z": 0.0},
+        "snapshot_scope": "post_map_initialization",
+        "template_name": "SupplyPile",
+    }
+    if mutation == "duplicate_start_slot":
+        manifest["features"]["start_positions"].append({**start, "name": "Player_2_Start", "waypoint_id": 2})
+    elif mutation == "duplicate_waypoint_name":
+        manifest["features"]["waypoints"] = [waypoint, {**waypoint, "waypoint_id": 9}]
+    elif mutation == "dangling_waypoint_link":
+        manifest["features"]["waypoints"] = [{**waypoint, "link_names": ["Missing"]}]
+    elif mutation == "duplicate_bridge_index":
+        manifest["features"]["bridges"] = [bridge, {**bridge, "layer_id": 3}]
+    elif mutation == "duplicate_static_object_id":
+        manifest["features"]["static_objects"] = [static_object, static_object]
+    else:
+        forged = json.loads(json.dumps(static_object))
+        forged["categories"][0]["source"] = "template name contains Supply"
+        manifest["features"]["static_objects"] = [forged]
+    manifest_path = _rebind_manifest(asset_dir, reference, manifest)
+
+    diagnostic = (
+        "map feature static object IDs must be uniquely ordered"
+        if mutation == "duplicate_static_object_id"
+        else "feature|unique|duplicate|link|category|source"
+    )
+    with pytest.raises(MapAssetValidationError, match=diagnostic):
+        load_map_asset(manifest_path, expected_reference=reference)
+
+
 def test_entity_bounds_accept_edges_reject_oob_and_require_source_grounded_exemption(tmp_path: Path) -> None:
     asset_dir, reference = _write_asset(tmp_path)
     asset = load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
@@ -326,17 +510,54 @@ def test_entity_bounds_accept_edges_reject_oob_and_require_source_grounded_exemp
         position=SimpleNamespace(x=20.0, y=0.0),
         path_goal=SimpleNamespace(x=0.0, y=20.0),
         position_bounds_policy="pathfinder_xy_closed",
+        current_locomotor_template_name=None,
+        locomotor_set_id=0,
+        locomotor_set_name="LOCOMOTORSET_NORMAL",
     )
-    asset.require_entity_position(payload, frozenset())
+    asset.require_entity_position(payload, frozenset(), frozenset())
 
     payload.position.x = 20.000001
     with pytest.raises(MapAssetValidationError, match="outside pathfinder bounds"):
-        asset.require_entity_position(payload, frozenset())
+        asset.require_entity_position(payload, frozenset(), frozenset())
 
     payload.position_bounds_policy = "exempt_kindof_aircraft"
     with pytest.raises(MapAssetValidationError, match="contradicts game-data KindOf"):
-        asset.require_entity_position(payload, frozenset())
-    asset.require_entity_position(payload, frozenset({"AIRCRAFT"}))
+        asset.require_entity_position(payload, frozenset(), frozenset())
+    asset.require_entity_position(payload, frozenset({"AIRCRAFT"}), frozenset())
+
+    payload.position_bounds_policy = "exempt_locomotor_air_surface"
+    payload.current_locomotor_template_name = "BirdLocomotor"
+    with pytest.raises(MapAssetValidationError, match="catalog-bound AIR locomotor"):
+        asset.require_entity_position(payload, frozenset(), frozenset())
+    asset.require_entity_position(payload, frozenset(), frozenset({"BirdLocomotor"}))
+
+    payload.position_bounds_policy = "pathfinder_xy_closed"
+    payload.layer_name_status = "unknown_engine_value"
+    with pytest.raises(MapAssetValidationError, match="outside pathfinder bounds"):
+        asset.require_entity_position(payload, frozenset(), frozenset())
+
+
+@pytest.mark.parametrize(
+    "forged_policy",
+    ["exempt_module_wander_ai", "exempt_physics_without_ai_pathing", "unknown_policy"],
+)
+def test_entity_bounds_rejects_unprovable_or_unknown_exemptions(tmp_path: Path, forged_policy: str) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    asset = load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+    payload = SimpleNamespace(
+        object_id=1,
+        template_name="GroundUnit",
+        layer_name=None,
+        layer_name_status="unknown_engine_value",
+        position=SimpleNamespace(x=20.000001, y=0.0),
+        path_goal=None,
+        position_bounds_policy=forged_policy,
+        current_locomotor_template_name=None,
+        locomotor_set_id=None,
+        locomotor_set_name=None,
+    )
+    with pytest.raises(MapAssetValidationError, match="unknown position bounds policy"):
+        asset.require_entity_position(payload, frozenset(), frozenset())
 
 
 def test_loader_rejects_hardlinked_or_symlinked_members(tmp_path: Path) -> None:
@@ -356,6 +577,154 @@ def test_loader_rejects_hardlinked_or_symlinked_members(tmp_path: Path) -> None:
         pytest.skip("host does not permit unprivileged symlink creation")
     with pytest.raises(MapAssetValidationError, match="reparse|symlink"):
         load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+
+def test_loader_rejects_member_replaced_between_lstat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    target = asset_dir / "terrain.u8.zlib"
+    replacement = tmp_path / "replacement.zlib"
+    replacement.write_bytes(target.read_bytes())
+    original_open = Path.open
+    raced = False
+
+    def racing_open(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal raced
+        if path == target and not raced:
+            raced = True
+            os.replace(replacement, target)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+
+    with pytest.raises(MapAssetValidationError, match="opened identity differs from preflight"):
+        load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+
+@pytest.mark.parametrize("component", ["cache", "asset"])
+def test_loader_rejects_directory_replaced_between_validation_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, component: str
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    manifest_path = asset_dir / "manifest.json"
+    cache_dir = asset_dir.parent
+    original_open = Path.open
+    raced = False
+
+    def racing_open(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal raced
+        if path == manifest_path and not raced:
+            raced = True
+            if component == "cache":
+                saved = tmp_path / "saved-cache"
+                cache_dir.rename(saved)
+                cache_dir.mkdir()
+                (saved / asset_dir.name).rename(cache_dir / asset_dir.name)
+            else:
+                saved = tmp_path / "saved-asset"
+                asset_dir.rename(saved)
+                asset_dir.mkdir()
+                for member in saved.iterdir():
+                    member.rename(asset_dir / member.name)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+
+    with pytest.raises(MapAssetValidationError, match=f"{component} directory identity changed"):
+        load_map_asset(manifest_path, expected_reference=reference)
+
+
+@pytest.mark.parametrize("opened_kind", ["nonregular", "reparse"])
+def test_loader_rejects_unsafe_final_opened_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opened_kind: str
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    original_fstat = map_asset_module.os.fstat
+    injected = False
+
+    def unsafe_fstat(descriptor: int) -> object:
+        nonlocal injected
+        info = original_fstat(descriptor)
+        if injected:
+            return info
+        injected = True
+        mode = stat.S_IFDIR | stat.S_IMODE(info.st_mode) if opened_kind == "nonregular" else info.st_mode
+        attributes = 0x400 if opened_kind == "reparse" else getattr(info, "st_file_attributes", 0)
+        return SimpleNamespace(
+            st_mode=mode,
+            st_nlink=info.st_nlink,
+            st_size=info.st_size,
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_file_attributes=attributes,
+        )
+
+    monkeypatch.setattr(map_asset_module.os, "fstat", unsafe_fstat)
+
+    with pytest.raises(MapAssetValidationError, match="opened handle is not a safe regular file"):
+        load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+
+def test_loader_fails_closed_when_opened_identity_fields_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset_dir, reference = _write_asset(tmp_path)
+    original_fstat = map_asset_module.os.fstat
+    injected = False
+
+    def incomplete_fstat(descriptor: int) -> object:
+        nonlocal injected
+        info = original_fstat(descriptor)
+        if injected:
+            return info
+        injected = True
+        return SimpleNamespace(
+            st_mode=info.st_mode,
+            st_nlink=info.st_nlink,
+            st_size=info.st_size,
+            st_dev=info.st_dev,
+            st_file_attributes=getattr(info, "st_file_attributes", 0),
+        )
+
+    monkeypatch.setattr(map_asset_module.os, "fstat", incomplete_fstat)
+
+    with pytest.raises(MapAssetValidationError, match="filesystem identity is unavailable"):
+        load_map_asset(asset_dir / "manifest.json", expected_reference=reference)
+
+
+def test_loader_rejects_reparse_parent_escape_from_trusted_trace_directory(tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted"
+    outside = tmp_path / "outside"
+    trusted.mkdir()
+    asset_dir, reference = _write_asset(outside)
+    linked_root = trusted / "map-assets-v1"
+    try:
+        linked_root.symlink_to(asset_dir.parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("host does not permit unprivileged directory symlink creation")
+    escaped_manifest = linked_root / asset_dir.name / "manifest.json"
+
+    with pytest.raises(MapAssetValidationError, match="reparse|symlink|escapes"):
+        load_map_asset(
+            escaped_manifest,
+            expected_reference=reference,
+            trusted_trace_directory=trusted,
+        )
+
+
+def test_loader_rejects_contained_but_noncanonical_cache_path_alias(tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted"
+    asset_dir, reference = _write_asset(trusted)
+    aliased = trusted / "nested" / "map-assets-v1" / asset_dir.name
+    shutil.copytree(asset_dir, aliased)
+
+    with pytest.raises(MapAssetValidationError, match="canonical map asset cache path"):
+        load_map_asset(
+            aliased / "manifest.json",
+            expected_reference=reference,
+            trusted_trace_directory=trusted,
+        )
 
 
 def test_map_schema_is_packaged_verbatim(repository_root: Path) -> None:
@@ -382,15 +751,24 @@ def test_map_export_sources_remain_modern_zero_hour_read_only(repository_root: P
     assert "strstr(" not in source
     assert 'find("Supply' not in source
     assert 'find("Oil' not in source
+    assert "bridge_index" in source
+    assert "info.bridgeIndex" in source
+    assert "row_major_y_then_x_x_fastest" in source
     sampler = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayMovementSampler.cpp").read_text(
         encoding="utf-8"
     )
     assert "LOCOMOTORSURFACE_AIR" in sampler
-    assert "exempt_physics_without_ai_pathing" in sampler
+    assert "exempt_physics_without_ai_pathing" not in sampler
+    assert "exempt_module_wander_ai" not in sampler
+    assert "current_locomotor_template_name" in sampler
     assert "positionBoundsPolicy(object)" in sampler
     assert "getTemplate()->getName()" not in sampler.split("const char *positionBoundsPolicy", 1)[1].split(
         "Bool emitSample", 1
     )[0]
+    telemetry = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert telemetry.count("ReplayMapExport::reset();") >= 4
 
 
 @pytest.mark.engine
@@ -423,16 +801,13 @@ def test_pinned_replay_exports_strict_deterministic_map_asset(
         reference = records[0].payload.map_asset
         assert reference is not None
         assert records[-1].payload.map_assets == [reference]
-        asset = load_map_asset(
+        load_map_asset(
             trace.parent / reference.path,
             expected_reference=reference,
             expected_engine_data_identity=records[0].payload.engine_build,
             expected_map_identity=records[0].payload.map_identity,
         )
-        for record in records:
-            if record.event_type != "entity_sample":
-                continue
-            asset.require_entity_position(record.payload, frozenset())
+        assert any(record.event_type == "entity_sample" for record in records)
         asset_dir = (trace.parent / reference.path).parent
         snapshots.append({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in asset_dir.iterdir()})
         traces.append(trace)

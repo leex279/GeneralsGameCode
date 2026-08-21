@@ -254,6 +254,7 @@ class ObjectCreatedPayload(OpenPayload):
     kind_of_flags: list[str]
     initial_status: list[str] | None = None
     creation_source: str = Field(min_length=1)
+    initialization_snapshot_status: Literal["present", "absent", "not_applicable"] | None = None
     creation_context: "ObjectCreationContext | None" = None
 
     @model_validator(mode="after")
@@ -563,9 +564,8 @@ class EntitySamplePayload(OpenPayload):
         "exempt_kindof_aircraft",
         "exempt_kindof_bridge",
         "exempt_kindof_projectile",
+        "exempt_kindof_parachutable",
         "exempt_locomotor_air_surface",
-        "exempt_module_wander_ai",
-        "exempt_physics_without_ai_pathing",
     ] | None = None
     speed_status: Literal["measured_physics_velocity", "unavailable_no_physics"] | None = None
     speed: NonNegativeFloat | None
@@ -577,6 +577,7 @@ class EntitySamplePayload(OpenPayload):
     locomotor_set_id: int | None = None
     locomotor_set_name: Annotated[str, Field(min_length=1)] | None = None
     locomotor_set_name_status: str | None = None
+    current_locomotor_template_name: Annotated[str, Field(min_length=1)] | None = None
     current_order_id: Annotated[int, Field(ge=1)] | None = None
     current_order_message_type: NonNegativeInt | None = None
     current_order_message_name: Annotated[str, Field(min_length=1)] | None = None
@@ -596,7 +597,8 @@ class EntitySamplePayload(OpenPayload):
         "template_name", "owner_player_index", "layer_id", "layer_name", "layer_name_status",
         "position_bounds_policy", "speed_status",
         "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status", "locomotor_set_id",
-        "locomotor_set_name", "locomotor_set_name_status", "current_order_id", "current_order_message_type",
+        "locomotor_set_name", "locomotor_set_name_status", "current_locomotor_template_name",
+        "current_order_id", "current_order_message_type",
         "current_order_message_name", "path_goal_status", "path_goal", "is_mobile", "is_structure",
         "is_disabled", "is_engine_moving", "sample_reason", mode="wrap",
     )
@@ -787,11 +789,25 @@ class ObjectCreatedRecord(TelemetryEnvelope):
     @model_validator(mode="after")
     def _require_strict_v2_creation(self) -> "ObjectCreatedRecord":
         if self.schema_version == 2:
-            _require_v2_payload_fields(self.payload, {"position_status", "initial_status", "creation_context"})
+            _require_v2_payload_fields(
+                self.payload,
+                {"position_status", "initial_status", "initialization_snapshot_status", "creation_context"},
+            )
             if self.payload.object_id == 0:
                 raise ValueError("v2 object_id must be greater than zero")
             if self.payload.creation_source not in {"map_loaded", "starting_object", "player_production", "unknown"}:
                 raise ValueError("v2 creation_source must be an authoritative source enum")
+            if (
+                self.payload.creation_source == "map_loaded"
+                and self.payload.initialization_snapshot_status not in {"present", "absent"}
+            ) or (
+                self.payload.creation_source != "map_loaded"
+                and self.payload.initialization_snapshot_status != "not_applicable"
+            ):
+                raise ValueError(
+                    "v2 map_loaded creation must declare present/absent initialization snapshot status, "
+                    "and every other source must be not_applicable"
+                )
             for names in (self.payload.kind_of_flags, self.payload.initial_status or []):
                 if any(not name for name in names) or len(names) != len(set(names)):
                     raise ValueError("v2 kind/status names must each be unique and nonempty")
@@ -1343,6 +1359,7 @@ class EntitySampleRecord(TelemetryEnvelope):
                 "position_bounds_policy",
                 "speed_status", "current_state_source", "ai_state_id", "ai_state_name", "ai_state_name_status",
                 "locomotor_set_id", "locomotor_set_name", "locomotor_set_name_status", "current_order_id",
+                "current_locomotor_template_name",
                 "current_order_message_type", "current_order_message_name",
                 "path_goal_status", "path_goal", "is_mobile", "is_structure", "is_disabled", "is_engine_moving",
                 "sample_reason",

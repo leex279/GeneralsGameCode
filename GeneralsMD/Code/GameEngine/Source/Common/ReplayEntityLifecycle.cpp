@@ -72,6 +72,9 @@ namespace
 		UnsignedInt frame;
 		std::string eventType;
 		std::string payload;
+		ObjectID objectId;
+		Bool isObjectCreated;
+		Bool isMapLoaded;
 	};
 
 	typedef std::map<ObjectID, CreationEntry> CreationMap;
@@ -80,6 +83,7 @@ namespace
 	std::vector<PendingEvent> s_pendingEvents;
 	unsigned long long s_nextObservationOrder = 0;
 	UnsignedInt s_directCreationDepth = 0;
+	Bool s_flushingInitializationSnapshot = FALSE;
 
 	UnsignedInt currentFrame()
 	{
@@ -231,7 +235,14 @@ namespace
 
 	void queueEvent(unsigned long long order, UnsignedInt frame, const char *eventType, const std::string &payload)
 	{
-		PendingEvent event = { order, frame, eventType, payload };
+		PendingEvent event = { order, frame, eventType, payload, INVALID_ID, FALSE, FALSE };
+		s_pendingEvents.push_back(event);
+	}
+
+	void queueObjectCreatedEvent(const CreationEntry &entry, const std::string &payload)
+	{
+		PendingEvent event = { entry.creationOrder, entry.registrationFrame, "object_created", payload,
+			entry.objectId, TRUE, entry.source == REPLAY_ENTITY_CREATION_MAP_LOADED };
 		s_pendingEvents.push_back(event);
 	}
 
@@ -284,7 +295,15 @@ namespace
 			[](const PendingEvent &left, const PendingEvent &right) { return left.order < right.order; });
 		for (const PendingEvent &event : s_pendingEvents)
 		{
-			ReplayTelemetry::emit(event.frame, event.eventType.c_str(), AsciiString(event.payload.c_str()));
+			std::string payload = event.payload;
+			if (event.isObjectCreated)
+			{
+				const Bool isPresent = event.isMapLoaded && s_flushingInitializationSnapshot
+					&& TheGameLogic != nullptr && TheGameLogic->findObjectByID(event.objectId) != nullptr;
+				const char *status = !event.isMapLoaded ? "not_applicable" : (isPresent ? "present" : "absent");
+				payload.insert(payload.size() - 1, ",\"initialization_snapshot_status\":" + jsonString(status));
+			}
+			ReplayTelemetry::emit(event.frame, event.eventType.c_str(), AsciiString(payload.c_str()));
 		}
 		s_pendingEvents.clear();
 	}
@@ -328,7 +347,7 @@ namespace
 			+ ",\"producer_object_id\":" + nullableObjectId(entry.initialProducerId)
 			+ ",\"producer_player_index\":"
 			+ nullableInt(entry.hasInitialProducerPlayer, entry.initialProducerPlayer) + "}}";
-		queueEvent(entry.creationOrder, entry.registrationFrame, "object_created", payload);
+		queueObjectCreatedEvent(entry, payload);
 		if (entry.initialConstructionOrder != 0)
 		{
 			queueEvent(entry.initialConstructionOrder, entry.registrationFrame, "construction_started",
@@ -420,6 +439,7 @@ void ReplayEntityLifecycle::reset()
 	s_pendingEvents.clear();
 	s_nextObservationOrder = 0;
 	s_directCreationDepth = 0;
+	s_flushingInitializationSnapshot = FALSE;
 }
 
 ReplayEntityCreationSource ReplayEntityLifecycle::getCreationSource(const Object *object)
@@ -603,8 +623,11 @@ void ReplayEntityLifecycle::observeDestroyed(const Object *object)
 void ReplayEntityLifecycle::initialize()
 {
 	// TheSuperHackers @feature Leex 20/08/2026 Flush copied pre-initialization lifecycle observations only after players_initialized. (#TBD)
+	// TheSuperHackers @feature Leex 21/08/2026 Bind map-loaded lifecycle identities to independent post-map initialization presence evidence. (#TBD)
+	s_flushingInitializationSnapshot = TRUE;
 	finalizeThrough(~0ULL);
 	flushEvents();
+	s_flushingInitializationSnapshot = FALSE;
 }
 
 void ReplayEntityLifecycle::flushPendingCreations()

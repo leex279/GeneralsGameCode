@@ -418,6 +418,14 @@ namespace
 			locomotorSetsJson.push_back(']');
 
 			std::set<std::string> categoryTags(kindNames.begin(), kindNames.end());
+			// TheSuperHackers @feature Leex 21/08/2026 Bind map feature module classifications to immutable template metadata. (#TBD)
+			std::set<std::string> behaviorModules;
+			const ModuleInfo &behaviorInfo = thingTemplate->getBehaviorModuleInfo();
+			for (Int moduleIndex = 0; moduleIndex < behaviorInfo.getCount(); ++moduleIndex)
+			{
+				const AsciiString moduleName = behaviorInfo.getNthName(moduleIndex);
+				if (moduleName.isNotEmpty()) behaviorModules.insert(narrowUtf8(moduleName));
+			}
 			if (thingTemplate->isBuildableItem()) categoryTags.insert("BUILDABLE");
 			if (thingTemplate->isBuildFacility()) categoryTags.insert("PRODUCTION_CAPABLE");
 			if (!templateWeapons.empty()) categoryTags.insert("WEAPON_CAPABLE");
@@ -438,6 +446,7 @@ namespace
 				+ ",\"name\":" + jsonUtf8(entry.first.c_str())
 				+ ",\"faction\":" + (faction.isEmpty() ? "null" : jsonString(faction))
 				+ ",\"kind_of_flags\":" + kindJson
+				+ ",\"behavior_modules\":" + stringArray(behaviorModules)
 				+ ",\"build_cost\":" + std::to_string(thingTemplate->friend_getBuildCost())
 				+ ",\"configured_build_time_seconds\":" + configuredBuildTimeJson
 				+ ",\"prerequisites\":" + prerequisitesJson(thingTemplate)

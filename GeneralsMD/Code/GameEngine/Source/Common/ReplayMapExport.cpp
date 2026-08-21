@@ -446,8 +446,18 @@ namespace
 	std::string buildWaypoints(Real minimumX, Real minimumY, Real maximumX, Real maximumY)
 	{
 		std::vector<Waypoint *> waypoints;
+		std::set<Int> waypointIds;
+		std::set<std::string> waypointNames;
 		for (Waypoint *waypoint = TheTerrainLogic->getFirstWaypoint(); waypoint != nullptr; waypoint = waypoint->getNext())
 		{
+			const Int waypointId = static_cast<Int>(waypoint->getID());
+			const std::string waypointName = narrowUtf8(waypoint->getName());
+			if (!waypointIds.insert(waypointId).second || waypointName.empty()
+				|| !waypointNames.insert(waypointName).second)
+			{
+				fail("map_waypoint_identity", "initialized waypoint IDs and names must be nonempty and unique");
+				return "[]";
+			}
 			waypoints.push_back(waypoint);
 		}
 		std::sort(waypoints.begin(), waypoints.end(), waypointLess);
@@ -462,17 +472,17 @@ namespace
 			if (waypoint->getPathLabel1().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel1()));
 			if (waypoint->getPathLabel2().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel2()));
 			if (waypoint->getPathLabel3().isNotEmpty()) labels.push_back(narrowUtf8(waypoint->getPathLabel3()));
-			std::vector<Int> links;
+			std::vector<std::string> links;
 			for (Int link = 0; link < waypoint->getNumLinks(); ++link)
 			{
 				Waypoint *linked = waypoint->getLink(link);
-				if (linked != nullptr) links.push_back(static_cast<Int>(linked->getID()));
+				if (linked != nullptr) links.push_back(narrowUtf8(linked->getName()));
 			}
 			std::sort(links.begin(), links.end());
 			result += "{\"bidirectional\":" + std::string(waypoint->getBiDirectional() ? "true" : "false")
 				+ ",\"bounds_policy\":" + jsonUtf8(insideXY(position, minimumX, minimumY, maximumX, maximumY)
 					? "pathfinder_xy_closed" : "not_asserted_by_source")
-				+ ",\"labels\":" + stringArray(labels) + ",\"link_ids\":" + intArray(links)
+				+ ",\"labels\":" + stringArray(labels) + ",\"link_names\":" + stringArray(links)
 				+ ",\"name\":" + jsonString(waypoint->getName()) + ",\"position\":" + positionJson(position)
 				+ ",\"waypoint_id\":" + std::to_string(static_cast<Int>(waypoint->getID())) + "}";
 		}
@@ -536,16 +546,21 @@ namespace
 			bridges.push_back(bridge);
 		}
 		std::sort(bridges.begin(), bridges.end(), [](Bridge *left, Bridge *right) {
-			const ObjectID leftId = left->peekBridgeInfo()->bridgeObjectID;
-			const ObjectID rightId = right->peekBridgeInfo()->bridgeObjectID;
-			if (leftId != rightId) return leftId < rightId;
-			return narrowUtf8(left->getBridgeTemplateName()) < narrowUtf8(right->getBridgeTemplateName());
+			return left->peekBridgeInfo()->bridgeIndex < right->peekBridgeInfo()->bridgeIndex;
 		});
+		std::set<Int> bridgeIndices;
+		std::set<ObjectID> bridgeObjectIds;
 		std::string result("[");
 		for (size_t index = 0; index < bridges.size(); ++index)
 		{
 			Bridge *bridge = bridges[index];
 			const BridgeInfo &info = *bridge->peekBridgeInfo();
+			if (info.bridgeIndex < 0 || !bridgeIndices.insert(info.bridgeIndex).second
+				|| (info.bridgeObjectID != INVALID_ID && !bridgeObjectIds.insert(info.bridgeObjectID).second))
+			{
+				fail("map_bridge_identity", "initialized bridge indices and non-null object IDs must be unique");
+				return "[]";
+			}
 			const Coord3D corners[] = { info.fromLeft, info.fromRight, info.toLeft, info.toRight };
 			if (!insideXY(info.from, minimumX, minimumY, maximumX, maximumY)
 				|| !insideXY(info.to, minimumX, minimumY, maximumX, maximumY))
@@ -566,11 +581,13 @@ namespace
 			}
 			cornersJson.push_back(']');
 			if (index != 0) result.push_back(',');
-			result += "{\"bounds_policy\":\"pathfinder_xy_closed\",\"bridge_width\":" + jsonReal(info.bridgeWidth)
+			const AsciiString templateName = bridge->getBridgeTemplateName();
+			result += "{\"bounds_policy\":\"pathfinder_xy_closed\",\"bridge_index\":"
+				+ std::to_string(info.bridgeIndex) + ",\"bridge_width\":" + jsonReal(info.bridgeWidth)
 				+ ",\"category_source\":\"TerrainLogic::getFirstBridge\",\"corners\":" + cornersJson
 				+ ",\"from\":" + positionJson(info.from) + ",\"layer_id\":" + std::to_string(bridge->getLayer())
 				+ ",\"object_id\":" + (info.bridgeObjectID == INVALID_ID ? "null" : std::to_string(info.bridgeObjectID))
-				+ ",\"template_name\":" + jsonString(bridge->getBridgeTemplateName())
+				+ ",\"template_name\":" + (templateName.isEmpty() ? "null" : jsonString(templateName))
 				+ ",\"to\":" + positionJson(info.to) + "}";
 		}
 		result.push_back(']');
@@ -744,7 +761,8 @@ namespace
 			+ position2Json(PATHFIND_CELL_SIZE_F, PATHFIND_CELL_SIZE_F)
 			+ ",\"dimension_source\":\"Pathfinder::replayAnalyzerGetExtent initialized inclusive IRegion2D\""
 			+ ",\"height\":" + std::to_string(height) + ",\"index_origin\":{\"x\":" + std::to_string(extent.lo.x)
-			+ ",\"y\":" + std::to_string(extent.lo.y) + "},\"sample_point\":\"cell_center\",\"width\":"
+			+ ",\"y\":" + std::to_string(extent.lo.y) + "},\"sample_point\":\"cell_center\","
+			+ "\"storage_order\":\"row_major_y_then_x_x_fastest\",\"width\":"
 			+ std::to_string(width) + "}";
 		std::string memberObject("{");
 		for (size_t index = 0; index < members.size(); ++index)
@@ -766,13 +784,12 @@ namespace
 			"\"engine_world_y\",\"engine_world_z\"],\"bounds\":{\"maximum\":"
 			+ positionJson({ maximumX, maximumY, maximumZ }) + ",\"maximum_inclusive\":true,\"minimum\":"
 			+ positionJson({ minimumX, minimumY, minimumZ }) + ",\"minimum_inclusive\":true},"
-			"\"entity_sample_policy\":{\"bounded_layer_statuses\":[\"stable\",\"dynamic_bridge_layer\"],"
+			"\"entity_sample_policy\":{\"bounded_layer_statuses\":[\"stable\",\"dynamic_bridge_layer\",\"unknown_engine_value\"],"
 			"\"bounded_position_policies\":[\"pathfinder_xy_closed\"],"
 			"\"exempt_position_policies\":[\"exempt_kindof_aircraft\",\"exempt_kindof_bridge\","
-			"\"exempt_kindof_projectile\",\"exempt_locomotor_air_surface\",\"exempt_module_wander_ai\","
-			"\"exempt_physics_without_ai_pathing\"],"
+			"\"exempt_kindof_projectile\",\"exempt_kindof_parachutable\",\"exempt_locomotor_air_surface\"],"
 			"\"policy\":\"pathfinder_xy_closed_except_explicit_engine_category\","
-			"\"policy_source\":\"ReplayMovementSampler KindOf, current locomotor AIR surface, WanderAIUpdate, or physics without AI pathing\"},"
+			"\"policy_source\":\"ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface\"},"
 			"\"float_encoding\":\"IEEE-754-binary32\",\"units\":\"engine_world_unit\"},"
 			"\"engine_data_identity\":" + jsonString(ReplayTelemetry::getEngineDataIdentity())
 			+ ",\"features\":{\"bridges\":" + bridges + ",\"start_positions\":" + starts

@@ -117,6 +117,7 @@ def _created(object_id: int, owner: int, template: str) -> dict[str, object]:
         "kind_of_flags": [],
         "initial_status": [],
         "creation_source": "starting_object",
+        "initialization_snapshot_status": "not_applicable",
         "creation_context": {
             "registration_frame": 0,
             "producer_object_id": None,
@@ -178,7 +179,22 @@ def _outcome(
 
 def _base(directory: Path) -> list[dict[str, object]]:
     reference = _write_catalog(directory)
-    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
+    map_reference = write_test_map_asset(
+        directory,
+        ENGINE_IDENTITY,
+        "maps/test.map",
+        start_positions=[
+            {
+                "bounds_policy": "pathfinder_xy_closed",
+                "category_source": "GameSlot::getStartPos + TerrainLogic::getWaypointByName",
+                "name": f"Player_{slot + 1}_Start",
+                "position": {"x": float(slot), "y": 0.0, "z": 0.0},
+                "slot_indices": [slot],
+                "waypoint_id": slot + 1,
+            }
+            for slot in range(2)
+        ],
+    )
     return [
         _record(
             0,
@@ -241,6 +257,7 @@ def _inject_lifecycle_samples(records: list[dict[str, object]]) -> None:
                     "locomotor_set_id": None,
                     "locomotor_set_name": None,
                     "locomotor_set_name_status": "unavailable_no_ai",
+                    "current_locomotor_template_name": None,
                     "current_order_id": None,
                     "current_order_message_type": None,
                     "current_order_message_name": None,

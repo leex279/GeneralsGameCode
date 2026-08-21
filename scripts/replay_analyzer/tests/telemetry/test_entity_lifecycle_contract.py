@@ -122,7 +122,11 @@ def _write_catalog(directory: Path) -> dict[str, object]:
                 "ordinal": ordinal,
                 "name": name,
                 "faction": None,
-                "kind_of_flags": [],
+                "kind_of_flags": [
+                    {"ordinal": flag_ordinal, "name": flag}
+                    for flag_ordinal, flag in enumerate(flags)
+                ],
+                "behavior_modules": modules,
                 "build_cost": 0,
                 "configured_build_time_seconds": 0.0,
                 "prerequisites": [],
@@ -132,8 +136,15 @@ def _write_catalog(directory: Path) -> dict[str, object]:
                 "derived_weapon_names": [],
                 "category_tags": [],
             }
-            for ordinal, name in enumerate(
-                ["AmericaVehicleHumvee", "TargetTemplate", "DifferentTargetTemplate"]
+            for ordinal, (name, flags, modules) in enumerate(
+                [
+                    ("AmericaVehicleHumvee", [], []),
+                    ("TargetTemplate", [], []),
+                    ("DifferentTargetTemplate", [], []),
+                    ("MapBridge", ["BRIDGE"], []),
+                    ("SupplyPile", ["SUPPLY_SOURCE"], []),
+                    ("OilDerrick", ["CAPTURABLE", "TECH_BUILDING"], ["AutoDepositUpdate"]),
+                ]
             )
         ],
         "upgrades": [],
@@ -211,6 +222,7 @@ def _creation(
         "kind_of_flags": ["CAN_ATTACK", "VEHICLE"],
         "initial_status": [] if initial_status is None else initial_status,
         "creation_source": "player_production",
+        "initialization_snapshot_status": "not_applicable",
         "creation_context": {
             "registration_frame": 7,
             "producer_object_id": None,
@@ -267,6 +279,7 @@ def _task7_sample_payload() -> dict[str, object]:
         "locomotor_set_id": 0,
         "locomotor_set_name": "LOCOMOTORSET_NORMAL",
         "locomotor_set_name_status": "stable",
+        "current_locomotor_template_name": None,
         "current_order_id": None,
         "current_order_message_type": None,
         "current_order_message_name": None,
@@ -334,9 +347,22 @@ def _lifecycle_payloads() -> list[tuple[str, dict[str, object]]]:
     ]
 
 
-def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: str = "lifecycle.ndjson") -> Path:
+def _trace(
+    tmp_path: Path,
+    events: list[tuple[str, dict[str, object]]],
+    name: str = "lifecycle.ndjson",
+    *,
+    bridges: list[dict[str, object]] | None = None,
+    static_objects: list[dict[str, object]] | None = None,
+) -> Path:
     reference = _write_catalog(tmp_path)
-    map_reference = write_test_map_asset(tmp_path, ENGINE_IDENTITY, "maps/test.map")
+    map_reference = write_test_map_asset(
+        tmp_path,
+        ENGINE_IDENTITY,
+        "maps/test.map",
+        bridges=bridges,
+        static_objects=static_objects,
+    )
     records = [
         _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
         _record(2, 1, "players_initialized", _v2_players(reference)),
@@ -382,6 +408,7 @@ def _trace(tmp_path: Path, events: list[tuple[str, dict[str, object]]], name: st
                 "locomotor_set_id": 0 if mobile else None,
                 "locomotor_set_name": "LOCOMOTORSET_NORMAL" if mobile else None,
                 "locomotor_set_name_status": "stable" if mobile else "unavailable_no_ai",
+                "current_locomotor_template_name": None,
                 "path_goal_status": "unavailable_no_path" if mobile else "unavailable_no_ai",
                 "is_mobile": mobile,
                 "is_structure": "STRUCTURE" in flags,
@@ -619,6 +646,7 @@ def test_preinitialization_create_place_destroy_snapshots_flush_after_players_in
             "owner_player_index": None,
             "team_id": None,
             "creation_source": "map_loaded",
+            "initialization_snapshot_status": "absent",
             "creation_context": {
                 "registration_frame": 0,
                 "producer_object_id": None,
@@ -645,6 +673,283 @@ def test_preinitialization_create_place_destroy_snapshots_flush_after_players_in
         "object_created",
         "object_destroyed",
     ]
+
+
+def _map_loaded_creation(object_id: int, template_name: str, kind_of_flags: list[str]) -> dict[str, object]:
+    creation = _creation(object_id=object_id, template_name=template_name)
+    creation.update(
+        {
+            "owner_player_index": None,
+            "team_id": None,
+            "kind_of_flags": kind_of_flags,
+            "creation_source": "map_loaded",
+            "initialization_snapshot_status": "present",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    return creation
+
+
+def test_v2_map_snapshot_membership_survives_later_object_destruction(tmp_path: Path) -> None:
+    creation = _map_loaded_creation(401, "SupplyPile", ["SUPPLY_SOURCE"])
+    destroyed = {
+        "object_id": 401,
+        "previous_state": "alive",
+        "new_state": "destroyed",
+        "owner_player_index": None,
+        "team_id": None,
+        "destruction_source": "destroy_object",
+    }
+    static_objects = [
+        _static_feature(
+            401,
+            "SupplyPile",
+            "supply_source",
+            "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)",
+        )
+    ]
+
+    records = tuple(
+        iter_validated_trace(
+            _trace(tmp_path, [("object_created", creation), ("object_destroyed", destroyed)], static_objects=static_objects)
+        )
+    )
+
+    assert records[-1].event_type == "complete"
+
+
+def test_v2_absent_map_snapshot_member_is_not_required_as_a_static_feature(tmp_path: Path) -> None:
+    creation = _map_loaded_creation(401, "SupplyPile", ["SUPPLY_SOURCE"])
+    creation["initialization_snapshot_status"] = "absent"
+
+    records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation)])))
+
+    assert records[-1].event_type == "complete"
+
+
+@pytest.mark.parametrize(
+    ("source", "status"),
+    [
+        ("map_loaded", "not_applicable"),
+        ("starting_object", "present"),
+        ("player_production", "absent"),
+    ],
+)
+def test_v2_rejects_forged_initialization_snapshot_membership(
+    tmp_path: Path, source: str, status: str
+) -> None:
+    creation = _creation()
+    creation.update(
+        {
+            "creation_source": source,
+            "initialization_snapshot_status": status,
+        }
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="initialization_snapshot_status"):
+        tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation)])))
+
+
+def test_v2_rejects_missing_initialization_snapshot_membership(tmp_path: Path) -> None:
+    creation = _creation()
+    del creation["initialization_snapshot_status"]
+
+    with pytest.raises(TelemetryTraceValidationError, match="initialization_snapshot_status"):
+        tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation)])))
+
+
+def _static_feature(object_id: int, template_name: str, name: str, source: str) -> dict[str, object]:
+    return {
+        "bounds_policy": "pathfinder_xy_closed",
+        "categories": [{"name": name, "source": source}],
+        "creation_source": "map_loaded",
+        "object_id": object_id,
+        "orientation": 1.5,
+        "position": {"x": 12.5, "y": -3.0, "z": 0.25},
+        "snapshot_scope": "post_map_initialization",
+        "template_name": template_name,
+    }
+
+
+@pytest.mark.parametrize("tamper", ["omitted_supply", "invented_supply", "forged_oil_module"])
+def test_v2_map_features_exactly_cross_bind_lifecycle_and_catalog(tmp_path: Path, tamper: str) -> None:
+    if tamper == "omitted_supply":
+        events = [("object_created", _map_loaded_creation(401, "SupplyPile", ["SUPPLY_SOURCE"]))]
+        static_objects: list[dict[str, object]] = []
+    elif tamper == "invented_supply":
+        events = []
+        static_objects = [
+            _static_feature(
+                401,
+                "SupplyPile",
+                "supply_source",
+                "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)",
+            )
+        ]
+    else:
+        events = [
+            (
+                "object_created",
+                _map_loaded_creation(402, "OilDerrick", ["CAPTURABLE", "TECH_BUILDING"]),
+            )
+        ]
+        static_objects = [
+            _static_feature(
+                402,
+                "OilDerrick",
+                "oil_income",
+                "Object::findUpdateModule(SupplyWarehouseDockUpdate)",
+            )
+        ]
+
+    with pytest.raises(TelemetryTraceValidationError, match="map feature|static object|category"):
+        tuple(iter_validated_trace(_trace(tmp_path, events, static_objects=static_objects)))
+
+
+def test_v2_catalog_requires_explicit_behavior_modules_before_feature_comparison(tmp_path: Path) -> None:
+    trace = _trace(
+        tmp_path,
+        [("object_created", _map_loaded_creation(402, "OilDerrick", ["CAPTURABLE", "TECH_BUILDING"]))],
+        static_objects=[],
+    )
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    manifest_payload = records[0]["payload"]
+    assert isinstance(manifest_payload, dict)
+    reference = manifest_payload["game_data_catalog"]
+    assert isinstance(reference, dict)
+    catalog_path = tmp_path / str(reference["path"])
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    oil = next(entry for entry in catalog["thing_templates"] if entry["name"] == "OilDerrick")
+    del oil["behavior_modules"]
+    content = json.dumps(catalog, separators=(",", ":")).encode() + b"\n"
+    digest = hashlib.sha256(content).hexdigest()
+    replacement_name = f"game-data-catalog-v1-{digest}.json"
+    (tmp_path / replacement_name).write_bytes(content)
+    reference.update({"path": replacement_name, "sha256": digest})
+    players_reference = records[1]["payload"]["game_data_catalog"]
+    assert isinstance(players_reference, dict)
+    players_reference.update({"path": replacement_name, "sha256": digest})
+    records[-1] = _completion(2, records[:-1])
+    _write_records(trace, records)
+
+    with pytest.raises(TelemetryTraceValidationError, match=r"catalog schema path .*behavior_modules"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_v2_catalog_accepts_explicit_empty_behavior_modules(tmp_path: Path) -> None:
+    records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", _creation())])))
+
+    assert records[-1].event_type == "complete"
+
+
+def test_v2_map_start_slots_exactly_cross_bind_players_initialized(tmp_path: Path) -> None:
+    trace = _trace(tmp_path, [])
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    records[1]["payload"]["slots"][0]["start_position"]["x"] = 99.0
+    records[-1] = _completion(2, records[:-1])
+    _write_records(trace, records)
+
+    with pytest.raises(TelemetryTraceValidationError, match="start position|start slot"):
+        tuple(iter_validated_trace(trace))
+
+
+def test_v2_map_bridge_object_identity_requires_matching_map_loaded_lifecycle(tmp_path: Path) -> None:
+    bridge = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "bridge_index": 0,
+        "bridge_width": 10.0,
+        "category_source": "TerrainLogic::getFirstBridge",
+        "corners": [
+            {"x": 1.0, "y": 1.0, "z": 0.0},
+            {"x": 2.0, "y": 1.0, "z": 0.0},
+            {"x": 1.0, "y": 2.0, "z": 0.0},
+            {"x": 2.0, "y": 2.0, "z": 0.0},
+        ],
+        "from": {"x": 1.0, "y": 1.5, "z": 0.0},
+        "layer_id": 2,
+        "object_id": 303,
+        "template_name": "MapBridge",
+        "to": {"x": 2.0, "y": 1.5, "z": 0.0},
+    }
+
+    with pytest.raises(TelemetryTraceValidationError, match="bridge.*lifecycle|map feature"):
+        tuple(iter_validated_trace(_trace(tmp_path, [], bridges=[bridge])))
+
+
+def test_v2_map_bridge_preserves_nullable_template_with_lifecycle_identity(tmp_path: Path) -> None:
+    bridge = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "bridge_index": 0,
+        "bridge_width": 10.0,
+        "category_source": "TerrainLogic::getFirstBridge",
+        "corners": [
+            {"x": 1.0, "y": 1.0, "z": 0.0},
+            {"x": 2.0, "y": 1.0, "z": 0.0},
+            {"x": 1.0, "y": 2.0, "z": 0.0},
+            {"x": 2.0, "y": 2.0, "z": 0.0},
+        ],
+        "from": {"x": 1.0, "y": 1.5, "z": 0.0},
+        "layer_id": 2,
+        "object_id": 303,
+        "template_name": None,
+        "to": {"x": 2.0, "y": 1.5, "z": 0.0},
+    }
+    static = _static_feature(
+        303,
+        "MapBridge",
+        "bridge",
+        "ThingTemplate::isKindOf(KINDOF_BRIDGE)",
+    )
+    creation = _map_loaded_creation(303, "MapBridge", ["BRIDGE"])
+
+    records = tuple(
+        iter_validated_trace(
+            _trace(tmp_path, [("object_created", creation)], bridges=[bridge], static_objects=[static])
+        )
+    )
+
+    assert records[-1].event_type == "complete"
+
+
+@pytest.mark.parametrize(
+    "tamper", ["forged_kindof", "forged_lifecycle_mask", "forged_air_set", "unknown_layer_oob"]
+)
+def test_v2_entity_bounds_policy_requires_independent_catalog_and_lifecycle_evidence(
+    tmp_path: Path, tamper: str
+) -> None:
+    creation = _creation()
+    sample = _task7_sample_payload()
+    sample["position"] = {"x": 1_000_001.0, "y": 0.0, "z": 0.0}
+    if tamper in {"forged_kindof", "forged_lifecycle_mask"}:
+        sample["position_bounds_policy"] = "exempt_kindof_aircraft"
+        if tamper == "forged_lifecycle_mask":
+            creation["kind_of_flags"] = ["AIRCRAFT", "CAN_ATTACK", "VEHICLE"]
+    elif tamper == "forged_air_set":
+        sample.update(
+            {
+                "position_bounds_policy": "exempt_locomotor_air_surface",
+                "current_locomotor_template_name": "ForgedAirLocomotor",
+            }
+        )
+    else:
+        sample.update(
+            {
+                "layer_id": 999,
+                "layer_name": None,
+                "layer_name_status": "unknown_engine_value",
+                "position_bounds_policy": "pathfinder_xy_closed",
+            }
+        )
+
+    with pytest.raises(
+        TelemetryTraceValidationError,
+        match="KindOf|locomotor template/set|outside pathfinder bounds",
+    ):
+        tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
 
 
 def test_v2_rejects_lifecycle_payload_identity_that_differs_from_tracked_owner_and_team(tmp_path: Path) -> None:
