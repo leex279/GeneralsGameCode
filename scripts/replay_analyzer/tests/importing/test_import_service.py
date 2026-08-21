@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from generals_replay_analyzer.cli import main
 from generals_replay_analyzer.config import AnalyzerSettings
-from generals_replay_analyzer.db import create_database_engine, create_session_factory
+from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.db.models import (
     Job,
     JobDependency,
@@ -43,6 +43,7 @@ from generals_replay_analyzer.importing import (
     StageHandlerRegistration,
     TelemetryArtifact,
 )
+from generals_replay_analyzer.importing import service as importing_service
 from generals_replay_analyzer.storage import ContentAddressedStore
 
 from .conftest import PINNED_REPLAY, MutableClock
@@ -65,6 +66,7 @@ def _service(
     parser: object | None = None,
     acquirer: object | None = None,
     stage_handlers: Iterable[StageHandlerRegistration] = (),
+    acquirer_version: str = "test-acquirer-1",
 ) -> ImportService:
     if parser is None:
         parser = _successful_parser
@@ -77,7 +79,7 @@ def _service(
         telemetry_acquirer=acquirer,
         clock=clock,
         parser_version="test-parser-1",
-        telemetry_acquirer_version="test-acquirer-1",
+        telemetry_acquirer_version=acquirer_version,
         stage_handlers=stage_handlers,
     )
 
@@ -222,6 +224,8 @@ def test_registered_import_observations_runs_after_frozen_dependency_context(
     with session_factory() as session:
         imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
         assert imported is not None and imported.status == "succeeded"
+        assert context.idempotency_key == imported.idempotency_key
+        assert context.input["selected_dependency_digest"] in imported.idempotency_key
         assert imported.output_json == {
             "status": "imported",
             "summary": {"families": ["parser", "telemetry"]},
@@ -330,6 +334,163 @@ def test_registered_stage_omits_absent_optional_dependency_and_copies_configurat
     assert completed[-1].stage == "import_observations"
     assert len(received) == 1
     assert tuple(dependency.stage for dependency in received[0].dependencies) == ("parse",)
+
+
+def test_logical_topology_materializes_distinct_observation_branch_identity(
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    def recording_handler(
+        received: list[StageExecutionContext],
+    ) -> Callable[[StageExecutionContext], dict[str, str]]:
+        def handle(context: StageExecutionContext) -> dict[str, str]:
+            received.append(context)
+            return {"status": "imported"}
+
+        return handle
+
+    keys: list[str] = []
+    manifests: list[list[tuple[str, str, int]]] = []
+    logical_paths: list[list[str]] = []
+    for name, trace_name in (
+        ("first", "trace-a.ndjson"),
+        ("second", "trace-b.ndjson"),
+        ("repeat", "trace-a.ndjson"),
+    ):
+        side_root = tmp_path / name
+        configured = AnalyzerSettings(data_root=side_root / "product-data")
+        configured.ensure_directories()
+        upgrade_database(configured.database_path)
+        engine = create_database_engine(configured.database_path)
+        factory = create_session_factory(engine)
+        replay = side_root / "same.rep"
+        replay.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(PINNED_REPLAY, replay)
+        artifact = _bundle_artifact(side_root / "bundle", trace_name=trace_name)
+        contexts: list[StageExecutionContext] = []
+
+        try:
+            service = _service(
+                factory,
+                configured,
+                ContentAddressedStore(configured.managed_replay_directory),
+                ContentAddressedStore(configured.cache_directory / "artifacts"),
+                clock,
+                acquirer=_FakeAcquirer(artifact),
+                    stage_handlers=(
+                        StageHandlerRegistration("import_observations", "1", recording_handler(contexts)),
+                    ),
+            )
+            service.submit(ImportRequest(replay, request_telemetry=True))
+            completed = service.run_available(f"{name}-worker", limit=10)
+            assert completed[-1].stage == "import_observations" and completed[-1].status == "succeeded"
+            repeated_source = side_root / "same-second-source.rep"
+            shutil.copyfile(PINNED_REPLAY, repeated_source)
+            service.submit(ImportRequest(repeated_source, request_telemetry=True))
+            assert tuple(job.stage for job in service.run_available(f"{name}-repeat", limit=10)) == ("discover",)
+            assert len(contexts) == 1
+            with factory() as session:
+                imports = list(session.scalars(select(Job).where(Job.stage == "import_observations")))
+                assert len(imports) == 1
+                imported = imports[0]
+                telemetry = session.scalar(select(Job).where(Job.stage == "telemetry"))
+                assert imported is not None and telemetry is not None
+                keys.append(imported.idempotency_key)
+                assert contexts[0].idempotency_key == imported.idempotency_key
+                artifact_manifest = cast(dict[str, Any], telemetry.output_json)["artifacts"]
+                manifests.append(
+                    sorted((entry["kind"], entry["sha256"], entry["size_bytes"]) for entry in artifact_manifest)
+                )
+                logical_paths.append([entry["logical_path"] for entry in artifact_manifest])
+        finally:
+            engine.dispose()
+
+    assert manifests[0] == manifests[1] == manifests[2]
+    assert logical_paths[0] != logical_paths[1]
+    assert logical_paths[0] == logical_paths[2]
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
+
+
+def test_converged_materialized_jobs_coalesce_without_losing_downstream_edges(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    bootstrap = _service(session_factory, settings, replay_store, artifact_store, clock)
+    bootstrap.submit(ImportRequest(replay_file))
+    _drain(bootstrap, worker="bootstrap")
+    with session_factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        derive = session.scalar(select(Job).where(Job.stage == "derive_features"))
+        assert original is not None and derive is not None and original.status == "pending"
+        duplicate = Job(
+            public_id=str(uuid4()),
+            replay_id=original.replay_id,
+            stage=original.stage,
+            component_version=original.component_version,
+            idempotency_key=f"import_observations:1:{cast(Replay, session.get(Replay, original.replay_id)).sha256}:{'f' * 64}",
+            status="pending",
+            priority=original.priority,
+            attempt_count=0,
+            max_attempts=original.max_attempts,
+            available_at=clock(),
+            lease_owner=None,
+            lease_expires_at=None,
+            started_at=None,
+            completed_at=None,
+            input_json=dict(cast(dict[str, Any], original.input_json)),
+            output_json=None,
+            error_code=None,
+            error_message=None,
+            error_details_json=None,
+            retryable=True,
+        )
+        session.add(duplicate)
+        session.flush()
+        dependency_ids = list(
+            session.scalars(
+                select(JobDependency.depends_on_job_id).where(JobDependency.job_id == original.id)
+            )
+        )
+        for dependency_id in dependency_ids:
+            session.add(
+                JobDependency(job_id=duplicate.id, depends_on_job_id=dependency_id, created_at=clock())
+            )
+        session.add(JobDependency(job_id=derive.id, depends_on_job_id=duplicate.id, created_at=clock()))
+
+    contexts: list[StageExecutionContext] = []
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        contexts.append(context)
+        return {"status": "imported"}
+
+    resumed = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+    )
+    completed = resumed.run_available("materializer", limit=2)
+    assert tuple(job.stage for job in completed) == ("import_observations",)
+    assert len(contexts) == 1
+    with session_factory() as session:
+        imports = list(session.scalars(select(Job).where(Job.stage == "import_observations")))
+        assert len(imports) == 1 and imports[0].status == "succeeded"
+        derive = session.scalar(select(Job).where(Job.stage == "derive_features"))
+        assert derive is not None
+        derive_dependencies = set(
+            session.scalars(
+                select(JobDependency.depends_on_job_id).where(JobDependency.job_id == derive.id)
+            )
+        )
+        assert imports[0].id in derive_dependencies
+        assert all(job.error_code is None for job in imports)
 
 
 def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
@@ -568,6 +729,240 @@ def _artifact(tmp_path: Path, *, status: str = "success") -> TelemetryArtifact:
     )
 
 
+def _bundle_artifact(
+    root: Path,
+    *,
+    trace_name: str = "trace.ndjson",
+    run_id: str = "123e4567-e89b-12d3-a456-426614174000",
+) -> TelemetryArtifact:
+    root.mkdir(parents=True, exist_ok=True)
+    trace = root / trace_name
+    trace.write_bytes(b'{"schema_version":2,"type":"fixture"}\n')
+    catalog_bytes = b'{"schema_version":1,"type":"game_data_catalog"}\n'
+    catalog_sha256 = hashlib.sha256(catalog_bytes).hexdigest()
+    catalog = root / f"game-data-catalog-v1-{catalog_sha256}.json"
+    catalog.write_bytes(catalog_bytes)
+    map_content_sha256 = "b" * 64
+    map_root = root / "map-assets-v2" / map_content_sha256
+    map_root.mkdir(parents=True)
+    map_members = {
+        "manifest.json": b'{"schema_version":2,"type":"map_asset"}\n',
+        "height.f32.zlib": b"height-map-fixture",
+        "pathing-amphibious.u8.zlib": b"amphibious-pathing-fixture",
+        "pathing-ground.u8.zlib": b"ground-pathing-fixture",
+        "terrain.u8.zlib": b"terrain-fixture",
+        "zones.i32.zlib": b"zones-fixture",
+    }
+    map_paths = tuple(map_root / name for name in reversed(tuple(map_members)))
+    for path in map_paths:
+        path.write_bytes(map_members[path.name])
+    outcome = root / "replay-outcome.json"
+    stdout = root / "stdout.log"
+    stderr = root / "stderr.log"
+    outcome.write_bytes(b'{"terminal_reason":"complete"}\n')
+    stdout.write_bytes(b"fixture stdout")
+    stderr.write_bytes(b"fixture stderr")
+    return TelemetryArtifact(
+        run_id=run_id,
+        runner_status="success",
+        replay_quality="complete",
+        strategy_analysis_scope="full",
+        trace_path=trace,
+        catalog_path=catalog,
+        map_asset_paths=map_paths,
+        outcome_path=outcome,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        exit_code=0,
+        engine_build="fixture-build",
+        engine_executable_sha256="a" * 64,
+        diagnostics=(),
+    )
+
+
+def test_v2_bundle_manifest_retains_safe_loader_relative_topology(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    bundle_root = tmp_path / "private-run-root"
+    artifact = replace(
+        _bundle_artifact(bundle_root),
+        diagnostics=(AcquisitionDiagnostic("fixture", f"retained from {bundle_root / 'trace.ndjson'}"),),
+    )
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(artifact),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    _drain(service)
+
+    with session_factory() as session:
+        telemetry = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        assert telemetry is not None and telemetry.status == "succeeded"
+        manifest = cast(dict[str, Any], telemetry.output_json)["artifacts"]
+        logical_paths = [entry["logical_path"] for entry in manifest]
+        assert logical_paths == [
+            artifact.catalog_path.name,
+            f"map-assets-v2/{'b' * 64}/height.f32.zlib",
+            f"map-assets-v2/{'b' * 64}/manifest.json",
+            f"map-assets-v2/{'b' * 64}/pathing-amphibious.u8.zlib",
+            f"map-assets-v2/{'b' * 64}/pathing-ground.u8.zlib",
+            f"map-assets-v2/{'b' * 64}/terrain.u8.zlib",
+            f"map-assets-v2/{'b' * 64}/zones.i32.zlib",
+            "replay-outcome.json",
+            "stderr.log",
+            "stdout.log",
+            "trace.ndjson",
+        ]
+        assert all({"asset_public_id", "kind", "logical_path", "sha256", "size_bytes"} == set(entry) for entry in manifest)
+        persisted = json.dumps(telemetry.output_json, sort_keys=True)
+        assert str(bundle_root) not in persisted
+        assert "private-run-root" not in persisted
+
+
+@pytest.mark.parametrize(
+    "logical_path",
+    ["", "/absolute", "C:/absolute", "dir\\member", "bad:name", "\x00", ".", "..", "a/../b", "a//b", "a/"],
+)
+def test_logical_artifact_descriptor_rejects_unsafe_text(logical_path: str) -> None:
+    with pytest.raises(ValueError):
+        importing_service._validated_logical_path(logical_path, set())
+
+
+def test_logical_artifact_descriptor_rejects_windows_case_collision() -> None:
+    seen: set[str] = set()
+    assert importing_service._validated_logical_path("Logs/STDOUT.log", seen) == "Logs/STDOUT.log"
+    with pytest.raises(ValueError):
+        importing_service._validated_logical_path("logs/stdout.LOG", seen)
+
+
+@pytest.mark.parametrize("malformation", ["traversal", "outside_root", "case_collision"])
+def test_usable_bundle_rejects_unsafe_topology_before_asset_persistence(
+    malformation: str,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    bundle_root = tmp_path / "private-bundle-root"
+    artifact = _bundle_artifact(bundle_root)
+    if malformation == "traversal":
+        (bundle_root / "nested").mkdir()
+        artifact = replace(artifact, stdout_path=bundle_root / "nested" / ".." / "stdout.log")
+    elif malformation == "outside_root":
+        outside = tmp_path / "outside-stdout.log"
+        outside.write_bytes(b"fixture stdout")
+        artifact = replace(artifact, stdout_path=outside)
+    else:
+        upper = bundle_root / "Case.log"
+        lower = bundle_root / "case.log"
+        upper.write_bytes(b"case collision")
+        if not lower.exists():
+            lower.write_bytes(b"case collision")
+        artifact = replace(artifact, stdout_path=upper, stderr_path=lower)
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(artifact),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    _drain(service)
+
+    with session_factory() as session:
+        telemetry = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        assert telemetry is not None and telemetry.status == "failed"
+        assert telemetry.error_code == "invalid_telemetry_artifact"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(ManagedAsset).where(ManagedAsset.kind.like("telemetry_%"))
+            )
+            == 0
+        )
+        assert str(bundle_root) not in json.dumps(telemetry.error_details_json, sort_keys=True)
+
+
+def test_failed_no_trace_artifacts_use_closed_role_descriptors_without_source_topology(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    private_root = tmp_path / "customer-private-run-name"
+    private_root.mkdir()
+    catalog = private_root / "secret-catalog-name.json"
+    outcome = private_root / "secret-outcome-name.json"
+    stdout = private_root / "secret-stdout-name.log"
+    stderr = private_root / "secret-stderr-name.log"
+    first_map = private_root / "secret-map-one.bin"
+    second_map = private_root / "secret-map-two.bin"
+    for path, content in (
+        (catalog, b"catalog"),
+        (outcome, b"outcome"),
+        (stdout, b"stdout"),
+        (stderr, b"stderr"),
+        (first_map, b"map-one"),
+        (second_map, b"map-two"),
+    ):
+        path.write_bytes(content)
+    artifact = TelemetryArtifact(
+        run_id="123e4567-e89b-12d3-a456-426614174000",
+        runner_status="nonzero_engine_failure",
+        replay_quality="failed",
+        strategy_analysis_scope="none",
+        trace_path=None,
+        catalog_path=catalog,
+        map_asset_paths=(second_map, first_map),
+        outcome_path=outcome,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        exit_code=7,
+        engine_build="fixture-build",
+        engine_executable_sha256="a" * 64,
+        diagnostics=(AcquisitionDiagnostic("fixture", "failure retained"),),
+    )
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(artifact),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    _drain(service)
+
+    with session_factory() as session:
+        telemetry = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        assert telemetry is not None and telemetry.status == "failed"
+        payload = cast(dict[str, Any], telemetry.error_details_json)
+        descriptors = [entry["logical_path"] for entry in payload["artifacts"]]
+        map_descriptors = sorted(
+            f"map-assets/{hashlib.sha256(content).hexdigest()}.asset" for content in (b"map-one", b"map-two")
+        )
+        assert descriptors == ["catalog.json", *map_descriptors, "outcome.json", "stderr.log", "stdout.log"]
+        persisted = json.dumps(payload, sort_keys=True)
+        assert str(private_root) not in persisted
+        assert "customer-private-run-name" not in persisted
+
+
 @pytest.mark.parametrize("runner_status", ["success", "nonzero_engine_failure"])
 def test_telemetry_artifacts_and_failure_diagnostics_are_retained_without_observations(
     runner_status: str,
@@ -772,6 +1167,12 @@ def test_artifact_port_rejects_duplicate_or_unsafe_paths_without_observations(
         job = session.scalar(select(Job).where(Job.stage == "telemetry"))
         assert job is not None and job.status == "failed"
         assert job.error_code == "invalid_telemetry_artifact"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(ManagedAsset).where(ManagedAsset.kind.like("telemetry_%"))
+            )
+            == 0
+        )
         assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
 
 
@@ -807,6 +1208,12 @@ def test_artifact_port_rejects_supplied_symlink_before_path_canonicalization(
         job = session.scalar(select(Job).where(Job.stage == "telemetry"))
         assert job is not None and job.status == "failed"
         assert job.error_code == "invalid_telemetry_artifact"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(ManagedAsset).where(ManagedAsset.kind.like("telemetry_%"))
+            )
+            == 0
+        )
         assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
 
 
@@ -864,6 +1271,12 @@ def test_artifact_port_inspects_supplied_alias_before_resolving_target(
         job = session.scalar(select(Job).where(Job.stage == "telemetry"))
         assert job is not None and job.status == "failed"
         assert job.error_code == "invalid_telemetry_artifact"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(ManagedAsset).where(ManagedAsset.kind.like("telemetry_%"))
+            )
+            == 0
+        )
     assert resolved_alias is False
 
 

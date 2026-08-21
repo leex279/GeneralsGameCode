@@ -58,6 +58,7 @@ class JobSpec:
 class JobSnapshot:
     internal_id: int
     public_id: str
+    idempotency_key: str
     replay_public_id: str | None
     stage: str
     component_version: str
@@ -87,6 +88,7 @@ def _snapshot(session: Session, row: Job) -> JobSnapshot:
     return JobSnapshot(
         internal_id=row.id,
         public_id=row.public_id,
+        idempotency_key=row.idempotency_key,
         replay_public_id=replay_public_id,
         stage=row.stage,
         component_version=row.component_version,

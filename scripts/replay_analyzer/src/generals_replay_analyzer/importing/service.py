@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, TypeAlias, TypeVar, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -48,6 +49,7 @@ from .stages import (
     TELEMETRY_VERSION,
     canonical_json,
     content_key,
+    input_digest,
 )
 
 FrozenJSONValue: TypeAlias = (
@@ -153,6 +155,7 @@ class StageExecutionContext:
     """Immutable public input for a registered future-stage handler."""
 
     job_public_id: str
+    idempotency_key: str
     replay_public_id: str
     replay_sha256: str
     stage: str
@@ -178,6 +181,14 @@ class StageHandlerRegistration:
 class _ReplayInput:
     path: Path
     revalidate_reference: bool
+
+
+# TheSuperHackers @bugfix Leex 22/08/2026 Preserve safe bundle topology without persisting engine run paths. (#TBD)
+@dataclass(frozen=True)
+class _ArtifactDescriptor:
+    kind: str
+    path: Path
+    logical_path: str
 
 
 _ResultT = TypeVar("_ResultT")
@@ -235,6 +246,7 @@ class ImportService:
                     f"version_mismatch: {registration.stage} requires component version {expected_version}"
                 )
             handlers[registration.stage] = self._adapt_stage_handler(registration.handler)
+        self._registered_future_stages = frozenset(seen)
         self._handlers: Mapping[str, Callable[[ClaimedJob], Mapping[str, Any]]] = MappingProxyType(handlers)
 
     def submit(self, request: ImportRequest) -> ImportSubmissionDTO:
@@ -263,6 +275,8 @@ class ImportService:
             raise ValueError("run limit must be positive")
         completed: list[JobDTO] = []
         for _ in range(limit):
+            if IMPORT_OBSERVATIONS in self._registered_future_stages:
+                self._materialize_ready_observation_jobs()
             claimed = self._jobs.claim(worker_id, self._handlers)
             if claimed is None:
                 break
@@ -328,6 +342,7 @@ class ImportService:
             snapshots = tuple(_dependency_output(dependency) for dependency in dependencies)
         return StageExecutionContext(
             job_public_id=claimed.public_id,
+            idempotency_key=claimed.idempotency_key,
             replay_public_id=replay_public_id,
             replay_sha256=replay_sha256,
             stage=claimed.stage,
@@ -614,6 +629,7 @@ class ImportService:
             IMPORT_OBSERVATIONS,
             IMPORT_OBSERVATIONS_VERSION,
             branch_identity,
+            dependency_bound=True,
         )
         derive = self._future_job(
             session,
@@ -658,17 +674,157 @@ class ImportService:
         stage: str,
         version: str,
         identity: Mapping[str, Any],
+        *,
+        dependency_bound: bool = False,
     ) -> Job:
+        provisional_key = content_key(stage, version, replay.sha256, identity)
+        input_json: dict[str, Any] = {
+            "replay_public_id": replay.public_id,
+            "replay_sha256": replay.sha256,
+        }
+        if dependency_bound:
+            input_json.update(
+                {
+                    "branch_recipe": dict(identity),
+                    "dependency_identity_bound": False,
+                    "provisional_idempotency_key": provisional_key,
+                }
+            )
+            for existing in session.scalars(
+                select(Job).where(Job.replay_id == replay.id, Job.stage == stage).order_by(Job.id)
+            ):
+                existing_input = cast(Mapping[str, Any], existing.input_json)
+                if existing_input.get("provisional_idempotency_key") == provisional_key:
+                    return existing
         return self._jobs.ensure_job(
             session,
             JobSpec(
                 stage,
                 version,
-                content_key(stage, version, replay.sha256, identity),
-                {"replay_public_id": replay.public_id, "replay_sha256": replay.sha256},
+                provisional_key,
+                input_json,
                 replay.id,
             ),
         )
+
+    # TheSuperHackers @feature Leex 22/08/2026 Bind observation imports to immutable selected dependency evidence before claim. (#TBD)
+    def _materialize_ready_observation_jobs(self) -> None:
+        with self._session_factory.begin() as session:
+            candidates = list(
+                session.scalars(
+                    select(Job)
+                    .where(
+                        Job.stage == IMPORT_OBSERVATIONS,
+                        Job.component_version == IMPORT_OBSERVATIONS_VERSION,
+                        Job.status == "pending",
+                        Job.lease_owner.is_(None),
+                        Job.lease_expires_at.is_(None),
+                    )
+                    .order_by(Job.id)
+                )
+            )
+            for candidate in candidates:
+                candidate_input = cast(Mapping[str, Any], candidate.input_json)
+                provisional_key = candidate_input.get("provisional_idempotency_key")
+                if (
+                    candidate_input.get("dependency_identity_bound") is not False
+                    or not isinstance(provisional_key, str)
+                ):
+                    continue
+                dependencies = list(
+                    session.scalars(
+                        select(Job)
+                        .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
+                        .where(JobDependency.job_id == candidate.id)
+                    )
+                )
+                if not dependencies or any(dependency.status != "succeeded" for dependency in dependencies):
+                    continue
+                dependencies.sort(
+                    key=lambda dependency: (
+                        _STAGE_ORDER.get(dependency.stage, len(_STAGE_ORDER)),
+                        dependency.component_version,
+                    )
+                )
+                replay_sha256 = candidate_input.get("replay_sha256")
+                branch_recipe = candidate_input.get("branch_recipe")
+                if not isinstance(replay_sha256, str) or not isinstance(branch_recipe, Mapping):
+                    raise TypeError("provisional observation job has invalid semantic input")
+                selected_identity = {
+                    "replay_sha256": replay_sha256,
+                    "branch_recipe": dict(branch_recipe),
+                    "dependencies": [
+                        _dependency_identity(dependency)
+                        for dependency in dependencies
+                    ],
+                }
+                selected_digest = input_digest(selected_identity)
+                materialized_key = content_key(
+                    IMPORT_OBSERVATIONS,
+                    IMPORT_OBSERVATIONS_VERSION,
+                    replay_sha256,
+                    selected_identity,
+                )
+                materialized_input = dict(candidate_input)
+                materialized_input["dependency_identity_bound"] = True
+                materialized_input["selected_dependency_digest"] = selected_digest
+                current_key = candidate.idempotency_key
+                try:
+                    with session.begin_nested():
+                        result = session.execute(
+                            update(Job)
+                            .where(
+                                Job.id == candidate.id,
+                                Job.idempotency_key == current_key,
+                                Job.status == "pending",
+                                Job.lease_owner.is_(None),
+                                Job.lease_expires_at.is_(None),
+                            )
+                            .values(
+                                idempotency_key=materialized_key,
+                                input_json=materialized_input,
+                            )
+                            .execution_options(synchronize_session=False)
+                        )
+                        if getattr(result, "rowcount", 0) != 1:
+                            continue
+                except IntegrityError:
+                    winner = session.scalar(select(Job).where(Job.idempotency_key == materialized_key))
+                    if winner is None:
+                        raise
+                    self._coalesce_provisional_job(session, candidate, winner)
+
+    def _coalesce_provisional_job(self, session: Session, loser: Job, winner: Job) -> None:
+        if loser.id == winner.id:
+            return
+        if loser.status != "pending" or loser.lease_owner is not None or loser.lease_expires_at is not None:
+            raise RuntimeError("claimed observation jobs cannot be coalesced")
+        incoming = list(session.scalars(select(JobDependency).where(JobDependency.job_id == loser.id)))
+        outgoing = list(
+            session.scalars(select(JobDependency).where(JobDependency.depends_on_job_id == loser.id))
+        )
+        for edge in incoming:
+            if edge.depends_on_job_id != winner.id and session.get(
+                JobDependency, (winner.id, edge.depends_on_job_id)
+            ) is None:
+                session.add(
+                    JobDependency(
+                        job_id=winner.id,
+                        depends_on_job_id=edge.depends_on_job_id,
+                        created_at=edge.created_at,
+                    )
+                )
+        for edge in outgoing:
+            if edge.job_id != winner.id and session.get(JobDependency, (edge.job_id, winner.id)) is None:
+                session.add(
+                    JobDependency(
+                        job_id=edge.job_id,
+                        depends_on_job_id=winner.id,
+                        created_at=edge.created_at,
+                    )
+                )
+        session.delete(loser)
+        session.flush()
 
     def _manage_copy(self, claimed: ClaimedJob) -> Mapping[str, Any]:
         sha256 = cast(str, claimed.input_json["replay_sha256"])
@@ -742,31 +898,46 @@ class ImportService:
         except StageFailure:
             raise
         except OSError as error:
-            raise StageFailure("telemetry_acquisition_failed", str(error), retryable=True) from error
+            raise StageFailure(
+                "telemetry_acquisition_failed",
+                _redacted_diagnostic_message(str(error), replay_input.path, ()),
+                retryable=True,
+            ) from error
         try:
             paths = _validated_artifact_paths(artifact)
         except ValueError as error:
             raise StageFailure("invalid_telemetry_artifact", str(error), retryable=False) from error
 
-        stored_artifacts: list[tuple[str, StoredContent]] = []
+        stored_artifacts: list[tuple[_ArtifactDescriptor, StoredContent]] = []
         try:
-            for kind, path in paths:
-                stored_artifacts.append((kind, self._artifact_store.store_file(path)))
+            for descriptor in paths:
+                stored_artifacts.append((descriptor, self._artifact_store.store_file(descriptor.path)))
         except ContentStorageError as error:
-            raise StageFailure("artifact_copy_failed", str(error), retryable=True) from error
+            raise StageFailure(
+                "artifact_copy_failed",
+                _redacted_diagnostic_message(str(error), replay_input.path, paths),
+                retryable=True,
+            ) from error
         manifest: list[dict[str, Any]] = []
         with self._session_factory.begin() as session:
-            for kind, stored in stored_artifacts:
-                asset = self._register_asset(session, stored, kind)
+            for descriptor, stored in stored_artifacts:
+                asset = self._register_asset(session, stored, descriptor.kind)
                 manifest.append(
                     {
                         "asset_public_id": asset.public_id,
-                        "kind": kind,
+                        "kind": descriptor.kind,
+                        "logical_path": descriptor.logical_path,
                         "sha256": stored.sha256,
                         "size_bytes": stored.size,
                     }
                 )
-        manifest.sort(key=lambda item: (cast(str, item["kind"]), cast(str, item["sha256"])))
+        manifest.sort(
+            key=lambda item: (
+                cast(str, item["logical_path"]).casefold(),
+                cast(str, item["kind"]),
+                cast(str, item["sha256"]),
+            )
+        )
         output: dict[str, Any] = {
             "run_id": artifact.run_id,
             "runner_status": artifact.runner_status,
@@ -776,7 +947,15 @@ class ImportService:
             "engine_build": artifact.engine_build,
             "engine_executable_sha256": artifact.engine_executable_sha256,
             "diagnostics": [
-                {"code": diagnostic.code, "message": diagnostic.message} for diagnostic in artifact.diagnostics
+                {
+                    "code": diagnostic.code,
+                    "message": _redacted_diagnostic_message(
+                        diagnostic.message,
+                        replay_input.path,
+                        paths,
+                    ),
+                }
+                for diagnostic in artifact.diagnostics
             ],
             "artifacts": manifest,
         }
@@ -959,6 +1138,42 @@ def _dependency_output(row: Job) -> StageDependencyOutput:
     )
 
 
+_NON_SEMANTIC_IDENTITY_KEYS = frozenset(
+    {
+        "asset_public_id",
+        "job_public_id",
+        "replay_public_id",
+    }
+)
+
+
+def _semantic_identity_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _semantic_identity_json(value[key])
+            for key in sorted(value)
+            if key not in _NON_SEMANTIC_IDENTITY_KEYS and not key.endswith("_at")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_semantic_identity_json(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"dependency identity contains non-JSON value: {type(value).__name__}")
+
+
+def _dependency_identity(row: Job) -> dict[str, Any]:
+    output = row.output_json
+    input_json = row.input_json
+    if not isinstance(input_json, Mapping) or not isinstance(output, Mapping):
+        raise TypeError("succeeded dependency has invalid canonical evidence")
+    return {
+        "stage": row.stage,
+        "component_version": row.component_version,
+        "input": _semantic_identity_json(input_json),
+        "output": _semantic_identity_json(output),
+    }
+
+
 def _canonical_output(output: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(output, Mapping):
         raise TypeError("stage handler output must be a mapping")
@@ -1005,7 +1220,27 @@ def _validate_reference_digest(path: Path, expected_sha256: str) -> None:
         )
 
 
-def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[tuple[str, Path]]:
+def _validated_logical_path(logical_path: str, seen_casefolded: set[str]) -> str:
+    if (
+        not logical_path
+        or logical_path.startswith("/")
+        or logical_path.endswith("/")
+        or "\\" in logical_path
+        or ":" in logical_path
+        or "\x00" in logical_path
+    ):
+        raise ValueError("telemetry artifact logical path is unsafe")
+    segments = logical_path.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise ValueError("telemetry artifact logical path is unsafe")
+    casefolded = logical_path.casefold()
+    if casefolded in seen_casefolded:
+        raise ValueError("telemetry artifact logical paths must be Windows-case-insensitively unique")
+    seen_casefolded.add(casefolded)
+    return logical_path
+
+
+def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[_ArtifactDescriptor]:
     try:
         parsed_uuid = UUID(artifact.run_id)
     except (ValueError, AttributeError) as error:
@@ -1031,8 +1266,11 @@ def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[tuple[str, Pa
         ("telemetry_stderr", artifact.stderr_path),
     ]
     values.extend(("telemetry_map_asset", path) for path in artifact.map_asset_paths)
-    retained: list[tuple[str, Path]] = []
-    seen: set[Path] = set()
+    if artifact.runner_status == "success" and artifact.trace_path is None:
+        raise ValueError("successful telemetry acquisition requires a trace")
+
+    retained_paths: list[tuple[str, Path, Path]] = []
+    seen_paths: set[str] = set()
     for kind, possible_path in values:
         if possible_path is None:
             continue
@@ -1044,10 +1282,105 @@ def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[tuple[str, Pa
         if not stat.S_ISREG(info.st_mode) or possible_path.is_symlink() or _is_reparse(info):
             raise ValueError("telemetry artifacts must be ordinary non-symlink files")
         path = possible_path.resolve(strict=False)
-        if path in seen:
+        path_key = os.path.normcase(str(path)).casefold()
+        if path_key in seen_paths:
             raise ValueError("telemetry artifact paths must be unique")
-        seen.add(path)
-        retained.append((kind, path))
-    if artifact.runner_status == "success" and artifact.trace_path is None:
-        raise ValueError("successful telemetry acquisition requires a trace")
-    return retained
+        seen_paths.add(path_key)
+        retained_paths.append((kind, possible_path, path))
+
+    descriptors: list[_ArtifactDescriptor] = []
+    seen_logical_paths: set[str] = set()
+    if artifact.trace_path is not None:
+        lexical_root = artifact.trace_path.parent
+        resolved_root = lexical_root.resolve(strict=False)
+        for kind, supplied_path, path in retained_paths:
+            try:
+                relative = supplied_path.relative_to(lexical_root)
+            except ValueError as error:
+                raise ValueError("telemetry artifacts must remain within the trace bundle root") from error
+            logical_path = _validated_logical_path(relative.as_posix(), seen_logical_paths)
+            expected_path = resolved_root.joinpath(*logical_path.split("/")).resolve(strict=False)
+            try:
+                path.relative_to(resolved_root)
+            except ValueError as error:
+                raise ValueError("telemetry artifacts must remain within the trace bundle root") from error
+            if path != expected_path:
+                raise ValueError("telemetry artifact topology cannot contain aliases or traversal")
+            if kind == "telemetry_catalog":
+                _validate_catalog_logical_path(logical_path)
+            elif kind == "telemetry_map_asset":
+                _validate_map_logical_path(logical_path)
+            descriptors.append(_ArtifactDescriptor(kind, path, logical_path))
+        return descriptors
+
+    role_names = {
+        "telemetry_catalog": "catalog.json",
+        "telemetry_outcome": "outcome.json",
+        "telemetry_stdout": "stdout.log",
+        "telemetry_stderr": "stderr.log",
+    }
+    for kind, _supplied_path, path in retained_paths:
+        if kind == "telemetry_map_asset":
+            try:
+                sha256, _size = _hash_file(path)
+            except OSError as error:
+                raise ValueError("telemetry map artifact is unavailable") from error
+            logical_path = f"map-assets/{sha256}.asset"
+        else:
+            logical_path = role_names[kind]
+        descriptors.append(
+            _ArtifactDescriptor(kind, path, _validated_logical_path(logical_path, seen_logical_paths))
+        )
+    return descriptors
+
+
+def _validate_catalog_logical_path(logical_path: str) -> None:
+    prefix = "game-data-catalog-v1-"
+    suffix = ".json"
+    if "/" in logical_path or not logical_path.startswith(prefix) or not logical_path.endswith(suffix):
+        raise ValueError("telemetry catalog must use its validated bundle basename")
+    digest = logical_path[len(prefix) : -len(suffix)]
+    if len(digest) != 64 or digest != digest.lower() or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError("telemetry catalog basename must contain a lowercase SHA-256")
+
+
+def _validate_map_logical_path(logical_path: str) -> None:
+    segments = logical_path.split("/")
+    if len(segments) < 3 or segments[0] not in {"map-assets-v1", "map-assets-v2"}:
+        raise ValueError("telemetry map artifacts must preserve validated bundle topology")
+    content_hash = segments[1]
+    if len(content_hash) != 64 or content_hash != content_hash.lower() or any(
+        character not in "0123456789abcdef" for character in content_hash
+    ):
+        raise ValueError("telemetry map bundle identity must be a lowercase SHA-256")
+
+
+def _redacted_diagnostic_message(
+    message: str,
+    replay_path: Path,
+    descriptors: Iterable[_ArtifactDescriptor],
+) -> str:
+    replacements: dict[str, str] = {}
+
+    def register(path: Path, replacement: str) -> None:
+        replacements.setdefault(str(path), replacement)
+        replacements.setdefault(path.as_posix(), replacement)
+
+    for path_value, replacement in (
+        (replay_path, "[replay]"),
+        (replay_path.parent, "[replay-root]"),
+    ):
+        register(path_value, replacement)
+    for descriptor in descriptors:
+        register(descriptor.path, "[artifact]")
+        register(descriptor.path.parent, "[artifact-root]")
+    redacted = message
+    for source_text, replacement in sorted(
+        replacements.items(),
+        key=lambda item: (-len(item[0]), item[0].casefold(), item[1]),
+    ):
+        if source_text:
+            redacted = re.sub(re.escape(source_text), replacement, redacted, flags=re.IGNORECASE)
+    return redacted
