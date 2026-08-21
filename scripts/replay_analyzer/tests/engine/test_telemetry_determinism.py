@@ -46,6 +46,7 @@ _ELAPSED_TIME_LINE = re.compile(
     rb"^Elapsed Time: [0-9]{2}:[0-9]{2} Game Time: [0-9]{2}:[0-9]{2}/[0-9]{2}:[0-9]{2}\r?\n?$"
 )
 _SHORT_ROOT_MARKER = ".task10-owner.json"
+_EXPECTED_EVIDENCE = Path(__file__).parents[1] / "fixtures" / "task-10-expected-evidence.json"
 _CORPUS_MANIFEST = (
     ("!Golden Replay #1.rep", 1_294_958, "cf56e1081eff70e6cfad972f5b52b096e4540cbc0c144a1becd03820d89b4d8c"),
     (
@@ -245,6 +246,36 @@ def _terminal_facts(outcome: ReplayOutcome) -> tuple[bool, int, int, str, bool, 
         outcome.crc_mismatch,
         outcome.crc_mismatch_frame,
     )
+
+
+def _terminal_evidence(run: RunEvidence) -> dict[str, object]:
+    return {
+        "exit_code": run.exit_code,
+        "playback_started": run.outcome.playback_started,
+        "final_frame": run.outcome.final_frame,
+        "command_count": run.outcome.command_count,
+        "terminal_reason": run.outcome.terminal_reason,
+        "crc_mismatch": run.outcome.crc_mismatch,
+        "crc_mismatch_frame": run.outcome.crc_mismatch_frame,
+    }
+
+
+def _enabled_evidence(run: RunEvidence) -> dict[str, object]:
+    assert run.map_evidence is not None
+    return {
+        "normalized_trace_sha256": run.normalized_trace_sha256,
+        "map": {
+            "schema_version": run.map_evidence.schema_version,
+            "content_sha256": run.map_evidence.content_sha256,
+            "manifest_sha256": run.map_evidence.manifest_sha256,
+            "file_sha256": dict(run.map_evidence.file_sha256),
+        },
+        "match_outcome": run.match_outcome,
+    }
+
+
+def _expected_evidence() -> dict[str, Any]:
+    return json.loads(_EXPECTED_EVIDENCE.read_text(encoding="utf-8"))
 
 
 def _map_evidence(paths: tuple[Path, ...]) -> MapEvidence:
@@ -877,6 +908,8 @@ def test_loaded_user_map_identity_excludes_the_selected_absolute_profile_root(re
     assert '"userdata/maps/"' in source
     assert "TheGlobalData->getPath_UserData()" in source
     assert canonicalizer.count("GetFullPathNameA") == 1
+    assert canonicalizer.count("GetFinalPathNameByHandleA") == 1
+    assert "CreateFileA(value, FILE_READ_ATTRIBUTES" in canonicalizer
     assert canonicalizer.count("canonicalAbsolutePath(") >= 4
     assert "isPathComponentWithin" in canonicalizer
     assert "isTextualUserMapsCandidate" in canonicalizer
@@ -884,6 +917,7 @@ def test_loaded_user_map_identity_excludes_the_selected_absolute_profile_root(re
     assert 'path.compare(cursor, separator - cursor, "maps")' in canonicalizer
     assert "textualUserMapsCandidate" in canonicalizer
     assert "candidateEscapesUserMaps" in canonicalizer
+    assert "isPathComponentWithin(finalMapPath, finalUserMaps)" in canonicalizer
     assert "std::tolower" not in canonicalizer
     assert "asciiLowerPath" in canonicalizer
     assert "canonicalReplayMapIdentity(TheRecorder->getGameInfo()->getMap(), s_mapIdentity)" in source
@@ -893,6 +927,7 @@ def test_loaded_user_map_identity_excludes_the_selected_absolute_profile_root(re
 def test_verification_document_hash_tables_are_exact_and_cross_bound(repository_root: Path) -> None:
     """Catch malformed or contradictory authoritative hashes in the Task 10 handoff."""
     document = (repository_root / "docs/replay-analyzer/telemetry-verification.md").read_text(encoding="utf-8")
+    expected = _expected_evidence()
     top_table = document.split("| # | Replay |", maxsplit=1)[1].split(
         "All six emitted-file hashes", maxsplit=1
     )[0]
@@ -912,13 +947,40 @@ def test_verification_document_hash_tables_are_exact_and_cross_bound(repository_
     member_rows = rows(member_table)
     assert set(top_rows) == set(member_rows) == set(range(1, 11))
     for index in range(1, 11):
+        expected_run = expected["corpus"][index - 1]
+        expected_map = expected_run["enabled"]["map"]
         top_hashes = [value.strip("`") for value in top_rows[index][3:4] + top_rows[index][5:8]]
         member_hashes = [value.strip("`") for value in member_rows[index][1:]]
         assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (*top_hashes, *member_hashes))
         assert top_rows[index][7] == member_rows[index][2]
+        assert top_rows[index][1] == f"`{expected_run['replay']}`"
+        assert top_rows[index][5] == f"`{expected_run['enabled']['normalized_trace_sha256']}`"
+        assert top_rows[index][6] == f"`{expected_map['content_sha256']}`"
+        assert top_rows[index][7] == f"`{expected_map['manifest_sha256']}`"
+        expected_terminal = expected_run["terminal"]
+        assert top_rows[index][4] == (
+            f"`{expected_terminal['exit_code']},"
+            f"{str(expected_terminal['playback_started']).lower()},"
+            f"{expected_terminal['final_frame']},"
+            f"{expected_terminal['command_count']},"
+            f"{expected_terminal['terminal_reason']},"
+            f"{expected_terminal['crc_mismatch_frame']}`"
+        )
+        assert member_hashes == [expected_map["file_sha256"][name] for name in (
+            "height.f32.zlib",
+            "manifest.json",
+            "pathing-amphibious.u8.zlib",
+            "pathing-ground.u8.zlib",
+            "terrain.u8.zlib",
+            "zones.i32.zlib",
+        )]
 
-    assert "4219ea4b378dce32b21ed3694ebf09f75201e6838f27aff674eeef626fe54da8" in document
-    assert "4c1e3e84e2f246c80727c1372cbab698e556c54bf5937442553d24f140491eae" in document
+    pinned = expected["pinned"]["enabled"]
+    assert pinned["normalized_trace_sha256"] in document
+    assert pinned["map"]["content_sha256"] in document
+    assert pinned["map"]["manifest_sha256"] in document
+    for value in expected["provenance"].values():
+        assert value in document
 
 
 def test_pinned_replay_three_runs_are_deterministic_and_non_interfering(
@@ -979,6 +1041,9 @@ def test_pinned_replay_three_runs_are_deterministic_and_non_interfering(
             )
             print(json.dumps([_summary(pinned_replay, "disabled", run) for run in disabled]))
             print(json.dumps([_summary(pinned_replay, "enabled", run) for run in enabled]))
+            expected = _expected_evidence()["pinned"]
+            assert all(_terminal_evidence(run) == expected["terminal"] for run in (*disabled, *enabled))
+            assert all(_enabled_evidence(run) == expected["enabled"] for run in enabled)
     finally:
         assert _sha256_file(pinned_replay) == replay_sha256
         assert _sha256_file(zero_hour_runtime_executable) == executable_sha256
@@ -1090,6 +1155,7 @@ def test_all_retail_replays_match_with_telemetry_disabled_and_enabled(
     executable_sha256 = _sha256_file(zero_hour_runtime_executable)
     user_data_before = _user_data_inventory()
     summaries: list[dict[str, object]] = []
+    corpus_evidence: list[dict[str, object]] = []
     duplicate_label_edges: dict[str, tuple[WaypointEdgeEvidence, ...]] = {}
     try:
         with _short_root(tmp_path, "corpus") as root:
@@ -1118,6 +1184,13 @@ def test_all_retail_replays_match_with_telemetry_disabled_and_enabled(
                 assert enabled.runtime_map_facts is not None
                 if enabled.runtime_map_facts.duplicate_label_edges:
                     duplicate_label_edges[replay.name] = enabled.runtime_map_facts.duplicate_label_edges
+                corpus_evidence.append(
+                    {
+                        "replay": replay.name,
+                        "terminal": _terminal_evidence(disabled),
+                        "enabled": _enabled_evidence(enabled),
+                    }
+                )
                 summaries.extend((_summary(replay, "disabled", disabled), _summary(replay, "enabled", enabled)))
 
             assert {
@@ -1152,6 +1225,7 @@ def test_all_retail_replays_match_with_telemetry_disabled_and_enabled(
                 ),
             }
             print(json.dumps(summaries))
+            assert corpus_evidence == _expected_evidence()["corpus"]
     finally:
         assert {replay: _sha256_file(replay) for replay in replays} == replay_hashes
         assert _relative_file_manifest(repository_root / "GeneralsReplays/GeneralsZH/1.04/Maps") == (
