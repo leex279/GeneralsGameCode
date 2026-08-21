@@ -471,6 +471,47 @@ def test_every_header_string_and_false_return_has_explicit_startup_status(reposi
     assert "REPLAY_OUTCOME_STARTUP_FAILED" not in outcome_header
 
 
+def test_fixed_width_header_scalars_are_committed_only_after_complete_reads(repository_root: Path) -> None:
+    recorder = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    read_header = recorder.split("Bool RecorderClass::readReplayHeader", maxsplit=1)[1].split(
+        "Bool RecorderClass::simulateReplay", maxsplit=1
+    )[0]
+    playback = recorder.split("Bool RecorderClass::playbackFile", maxsplit=1)[1].split(
+        "UnicodeString RecorderClass::readUnicodeString", maxsplit=1
+    )[0]
+    fixed_validation = read_header.index("if (!fixedHeaderComplete)")
+    system_time_validation = read_header.index("if (timeValueBytesRead != sizeof(timeValue))")
+    version_validation = read_header.index("if (versionNumberBytesRead != sizeof(versionNumber)")
+
+    assert "replay_time_t startTime = 0;" in read_header
+    assert "replay_time_t endTime = 0;" in read_header
+    assert "m_file->read(&header." not in read_header
+    for assignment in (
+        "header.startTime = startTime;",
+        "header.endTime = endTime;",
+        "header.frameCount = frameCount;",
+        "header.desyncGame = desyncGame;",
+        "header.quitEarly = quitEarly;",
+        "header.playerDiscons[i] = playerDiscons[i];",
+    ):
+        assert read_header.index(assignment) > fixed_validation
+    assert read_header.index("header.timeVal = timeValue;") > system_time_validation
+    for assignment in (
+        "header.versionNumber = versionNumber;",
+        "header.exeCRC = exeCRC;",
+        "header.iniCRC = iniCRC;",
+    ):
+        assert read_header.index(assignment) > version_validation
+    assert "Int originalGameMode = GAME_NONE;" in playback
+    assert "Int difficulty = 0;" in playback
+    assert "Int rankPoints = 0;" in playback
+    assert "Int maxFPS = 0;" in playback
+    assert "m_file->read(&m_originalGameMode" not in playback
+    assert playback.index("m_originalGameMode = originalGameMode;") > playback.index("if (setupComplete)")
+
+
 def test_telemetry_requires_one_headless_replay_before_playback(
     tmp_path: Path,
     repository_root: Path,
@@ -811,6 +852,38 @@ def test_replay_outcome_settles_every_preplayback_failure_attempt(
             "crc_mismatch_frame": None,
         }
         assert not tuple(tmp_path.glob(f"{label}-outcome.json.tmp.*"))
+
+
+@pytest.mark.parametrize("timestamp_bytes", range(8), ids=lambda count: f"timestamp-bytes-{count}")
+def test_short_fixed_replay_timestamps_settle_as_truncated_without_partial_facts(
+    timestamp_bytes: int,
+    tmp_path: Path,
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+) -> None:
+    replay_bytes = b"GENREP" + (b"\xA5" * timestamp_bytes)
+    replay = tmp_path / f"short-timestamp-{timestamp_bytes}.rep"
+    replay.write_bytes(replay_bytes)
+    outcome = (tmp_path / f"short-timestamp-{timestamp_bytes}.json").resolve()
+    completed = _run_engine(
+        [*_base_command(zero_hour_runtime_executable, replay), "-replay-outcome", str(outcome)],
+        zero_hour_runtime_executable.parent,
+        repository_root,
+    )
+
+    assert completed.returncode not in {0, 3221225477}
+    assert "Cannot open replay" in completed.stdout
+    assert completed.stderr == ""
+    assert json.loads(outcome.read_text(encoding="utf-8")) == {
+        "playback_started": False,
+        "final_frame": 0,
+        "command_count": 0,
+        "terminal_reason": "truncated_input",
+        "crc_mismatch": False,
+        "crc_mismatch_frame": None,
+    }
+    assert not tuple(tmp_path.glob(f"{outcome.name}.tmp.*"))
+    assert replay.read_bytes() == replay_bytes
 
 
 @pytest.mark.parametrize(

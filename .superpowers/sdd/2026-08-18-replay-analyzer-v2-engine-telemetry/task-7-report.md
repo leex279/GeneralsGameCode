@@ -316,6 +316,36 @@ Every malformed-input test preserves the source replay bytes, requires no writer
 the exact passive zero-fact outcome. Natural and interval-density outcomes, command counts, frame/CRC behavior,
 determinism, and the pinned replay SHA-256 remain unchanged.
 
+## Fixed-width scalar read validation
+
+The last source review found that the legacy fixed-width timestamp reader declared an uninitialized `replay_time_t`
+temporary and assigned it into `ReplayHeader` before its read count was validated. A `GENREP`-only input could
+therefore read the uninitialized value even though the central failure seam subsequently classified the replay as
+truncated. A one-to-seven-byte timestamp suffix could also commit a partial timestamp before rejection.
+
+All fixed-width replay-header values are now read into initialized C++98-compatible local storage. Start/end time,
+frame count, desync/quit/disconnect flags, `SYSTEMTIME`, version number, executable CRC, and INI CRC are copied into
+`ReplayHeader` only after exact read counts prove the corresponding block complete. The adjacent playback setup game
+mode is likewise staged locally and committed only when the analyzer's complete setup check passes; non-analyzer
+builds retain the legacy assignment behavior. The existing central header failure, cleanup, and outcome settlement
+seam is unchanged.
+
+Strict TDD and final evidence for this scalar pass:
+
+- RED: **1 failed, 8 passed**; all eight byte-level startup cases already settled as truncated, while the source
+  audit exposed the pre-validation assignment;
+- focused rebuilt GREEN: **9 passed**, covering `GENREP` only and every one-to-seven-byte timestamp suffix;
+- complete startup/outcome/writer suite: **65 passed, 1 symlink-privilege skip**;
+- natural pinned replay CRC/non-interference gate: **1 passed**;
+- full engine suite: **103 passed, 1 symlink-privilege skip**;
+- full non-engine suite: **491 passed, 104 engine tests deselected**;
+- Ruff: **passed**; strict mypy: **passed, 18 source files**; `git diff --check`: **passed**; and
+- modern VS 2022 x86 `z_generals`: **built and linked `generalszh.exe`** after the scalar change.
+
+Each short-timestamp case publishes exactly one `truncated_input` outcome with `playback_started=false`, zero final
+frame and command count, no CRC facts, no access violation, no writer-owned temporary residue, and unchanged replay
+bytes. Valid replay bytes and the natural frame-108/CRC-frame-105 behavior remain unchanged.
+
 ## Toolchain limitations
 
 VC6 and MinGW remain unavailable on this host, so no compile pass is claimed for either toolchain. Compatibility

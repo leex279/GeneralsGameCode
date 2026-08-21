@@ -995,28 +995,39 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	}
 
 	// read in some stats
-	replay_time_t tmp;
-	const Int startTimeBytesRead = m_file->read(&tmp, sizeof(tmp));
-	header.startTime = tmp;
-	const Int endTimeBytesRead = m_file->read(&tmp, sizeof(tmp));
-	header.endTime = tmp;
-
-	const Int frameCountBytesRead = m_file->read(&header.frameCount, sizeof(header.frameCount));
-
-	const Int desyncBytesRead = m_file->read(&header.desyncGame, sizeof(header.desyncGame));
-	const Int quitEarlyBytesRead = m_file->read(&header.quitEarly, sizeof(header.quitEarly));
-	Bool fixedHeaderComplete = startTimeBytesRead == sizeof(tmp) && endTimeBytesRead == sizeof(tmp)
-		&& frameCountBytesRead == sizeof(header.frameCount) && desyncBytesRead == sizeof(header.desyncGame)
-		&& quitEarlyBytesRead == sizeof(header.quitEarly);
+	// TheSuperHackers @feature Leex 20/08/2026 Stage fixed-width replay-header scalars until exact reads prove them complete. (#TBD)
+	replay_time_t startTime = 0;
+	replay_time_t endTime = 0;
+	UnsignedInt frameCount = 0;
+	Bool desyncGame = FALSE;
+	Bool quitEarly = FALSE;
+	Bool playerDiscons[MAX_SLOTS] = { FALSE };
+	const Int startTimeBytesRead = m_file->read(&startTime, sizeof(startTime));
+	const Int endTimeBytesRead = m_file->read(&endTime, sizeof(endTime));
+	const Int frameCountBytesRead = m_file->read(&frameCount, sizeof(frameCount));
+	const Int desyncBytesRead = m_file->read(&desyncGame, sizeof(desyncGame));
+	const Int quitEarlyBytesRead = m_file->read(&quitEarly, sizeof(quitEarly));
+	Bool fixedHeaderComplete = startTimeBytesRead == sizeof(startTime) && endTimeBytesRead == sizeof(endTime)
+		&& frameCountBytesRead == sizeof(frameCount) && desyncBytesRead == sizeof(desyncGame)
+		&& quitEarlyBytesRead == sizeof(quitEarly);
 	for (Int i=0; i<MAX_SLOTS; ++i)
 	{
-		fixedHeaderComplete = m_file->read(&(header.playerDiscons[i]), sizeof(Bool)) == sizeof(Bool)
+		fixedHeaderComplete = m_file->read(&(playerDiscons[i]), sizeof(Bool)) == sizeof(Bool)
 			&& fixedHeaderComplete;
 	}
 	if (!fixedHeaderComplete)
 	{
 		// TheSuperHackers @feature Leex 20/08/2026 Reject exact fixed-field short reads before any later header field is consumed. (#TBD)
 		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
+	}
+	header.startTime = startTime;
+	header.endTime = endTime;
+	header.frameCount = frameCount;
+	header.desyncGame = desyncGame;
+	header.quitEarly = quitEarly;
+	for (Int i=0; i<MAX_SLOTS; ++i)
+	{
+		header.playerDiscons[i] = playerDiscons[i];
 	}
 
 	// Read the Replay Name.  We don't actually do anything with it.  Oh well.
@@ -1029,11 +1040,13 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 	}
 
 	// Read the date and time.  We don't really do anything with this either. Oh well.
-	const Int timeValueBytesRead = m_file->read(&header.timeVal, sizeof(header.timeVal));
-	if (timeValueBytesRead != sizeof(header.timeVal))
+	SYSTEMTIME timeValue = { 0 };
+	const Int timeValueBytesRead = m_file->read(&timeValue, sizeof(timeValue));
+	if (timeValueBytesRead != sizeof(timeValue))
 	{
 		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
 	}
+	header.timeVal = timeValue;
 
 	// Read in the Version info
 	header.versionString = readUnicodeString(stringStatus);
@@ -1048,14 +1061,20 @@ Bool RecorderClass::readReplayHeader(ReplayHeader& header)
 		return failReplayHeader(header, stringStatus == REPLAY_STRING_READ_TRUNCATED
 			? REPLAY_HEADER_TRUNCATED : REPLAY_HEADER_INVALID, FALSE);
 	}
-	const Int versionNumberBytesRead = m_file->read(&header.versionNumber, sizeof(header.versionNumber));
-	const Int exeCRCBytesRead = m_file->read(&header.exeCRC, sizeof(header.exeCRC));
-	const Int iniCRCBytesRead = m_file->read(&header.iniCRC, sizeof(header.iniCRC));
-	if (versionNumberBytesRead != sizeof(header.versionNumber)
-		|| exeCRCBytesRead != sizeof(header.exeCRC) || iniCRCBytesRead != sizeof(header.iniCRC))
+	UnsignedInt versionNumber = 0;
+	UnsignedInt exeCRC = 0;
+	UnsignedInt iniCRC = 0;
+	const Int versionNumberBytesRead = m_file->read(&versionNumber, sizeof(versionNumber));
+	const Int exeCRCBytesRead = m_file->read(&exeCRC, sizeof(exeCRC));
+	const Int iniCRCBytesRead = m_file->read(&iniCRC, sizeof(iniCRC));
+	if (versionNumberBytesRead != sizeof(versionNumber)
+		|| exeCRCBytesRead != sizeof(exeCRC) || iniCRCBytesRead != sizeof(iniCRC))
 	{
 		return failReplayHeader(header, REPLAY_HEADER_TRUNCATED, FALSE);
 	}
+	header.versionNumber = versionNumber;
+	header.exeCRC = exeCRC;
+	header.iniCRC = iniCRC;
 
 	// Read in the GameInfo
 	header.gameOptions = readAsciiString(stringStatus);
@@ -1387,7 +1406,8 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	const Int setupStartOffset = m_file->seek(0, File::CURRENT);
 	const Int difficultyBytesRead = m_file->read(&difficulty, sizeof(difficulty));
 
-	const Int originalGameModeBytesRead = m_file->read(&m_originalGameMode, sizeof(m_originalGameMode));
+	Int originalGameMode = GAME_NONE;
+	const Int originalGameModeBytesRead = m_file->read(&originalGameMode, sizeof(originalGameMode));
 
 	Int rankPoints = 0;
 	const Int rankPointsBytesRead = m_file->read(&rankPoints, sizeof(rankPoints));
@@ -1399,12 +1419,14 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	// TheSuperHackers @feature Leex 18/08/2026 Preserve the four serialized setup integers and their measured source range.
 	const Int setupEndOffset = m_file->seek(0, File::CURRENT);
 	const Bool setupComplete = difficultyBytesRead == sizeof(difficulty)
-		&& originalGameModeBytesRead == sizeof(m_originalGameMode)
+		&& originalGameModeBytesRead == sizeof(originalGameMode)
 		&& rankPointsBytesRead == sizeof(rankPoints)
 		&& maxFPSBytesRead == sizeof(maxFPS)
-		&& setupEndOffset == setupStartOffset + sizeof(difficulty) + sizeof(m_originalGameMode) + sizeof(rankPoints) + sizeof(maxFPS);
+		&& setupEndOffset == setupStartOffset + sizeof(difficulty) + sizeof(originalGameMode) + sizeof(rankPoints) + sizeof(maxFPS);
 	if (setupComplete)
 	{
+		// TheSuperHackers @feature Leex 20/08/2026 Commit the replay game mode only after the complete setup block is source-proven. (#TBD)
+		m_originalGameMode = originalGameMode;
 		ReplayParseDump::writeSetup(difficulty, m_originalGameMode, rankPoints, maxFPS, setupStartOffset, setupEndOffset);
 	}
 	else
@@ -1417,6 +1439,9 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 		ReplayOutcome::finishStartupFailure(REPLAY_OUTCOME_TRUNCATED_INPUT);
 #endif
 	}
+#else
+	// TheSuperHackers @feature Leex 20/08/2026 Preserve legacy setup assignment outside analyzer-only exact validation. (#TBD)
+	m_originalGameMode = originalGameMode;
 #endif
 
 	DEBUG_LOG(("RecorderClass::playbackFile() - original game was mode %d", m_originalGameMode));
