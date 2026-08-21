@@ -7,6 +7,8 @@ import json
 import math
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
@@ -19,8 +21,11 @@ from .parser import ParsedReplay, parse_replay
 from .provenance import sha256_file
 
 if TYPE_CHECKING:
+    from sqlalchemy import Engine
+
     from .engine.config import EngineRunConfig
     from .engine.result import EngineRunResult, EngineRunStatus
+    from .importing import ImportService
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -42,6 +47,15 @@ def _parser() -> argparse.ArgumentParser:
         default=15,
         help="maximum moving-entity sample interval (default: 15)",
     )
+    import_command = subcommands.add_parser("import", help="enqueue a bounded replay file or folder snapshot")
+    import_command.add_argument("path", type=Path)
+    import_command.add_argument("--recursive", action="store_true")
+    import_command.add_argument("--reference-only", action="store_true")
+    import_command.add_argument("--json", action="store_true", dest="json_output")
+    jobs = subcommands.add_parser("jobs", help="manage durable replay-analysis jobs")
+    job_commands = jobs.add_subparsers(dest="jobs_command", required=True)
+    retry = job_commands.add_parser("retry", help="retry one eligible durable job")
+    retry.add_argument("job_id")
     return parser
 
 
@@ -180,12 +194,87 @@ def _run_export(arguments: argparse.Namespace) -> int:
     return _export_exit_code(result.status)
 
 
+# TheSuperHackers @feature Leex 21/08/2026 Initialize resumable replay intake only at an explicit CLI boundary. (#TBD)
+def _import_service() -> tuple[ImportService, Engine]:
+    """Initialize managed paths and the packaged database only at the CLI application boundary."""
+    from .config import AnalyzerSettings
+    from .db import create_database_engine, create_session_factory, upgrade_database
+    from .importing import ImportService
+    from .storage import ContentAddressedStore
+
+    settings = AnalyzerSettings.model_validate({})
+    settings.ensure_directories()
+    upgrade_database(settings.database_path)
+    engine = create_database_engine(settings.database_path)
+    session_factory = create_session_factory(engine)
+    return (
+        ImportService(
+            session_factory,
+            settings,
+            ContentAddressedStore(settings.managed_replay_directory),
+            ContentAddressedStore(settings.cache_directory / "artifacts"),
+            parser=parse_replay,
+            clock=lambda: datetime.now(UTC),
+            parser_version=__version__,
+            telemetry_acquirer_version="none",
+        ),
+        engine,
+    )
+
+
+def _run_import(arguments: argparse.Namespace) -> int:
+    from .importing import ImportRequest
+
+    service, engine = _import_service()
+    try:
+        submission = service.submit(
+            ImportRequest(
+                _absolute_cli_path(arguments.path),
+                recursive=arguments.recursive,
+                reference_only=True if arguments.reference_only else None,
+            )
+        )
+        if arguments.json_output:
+            _write_json_document(asdict(submission))
+        else:
+            print(
+                f"discovery {submission.discovery_job.public_id}: {submission.discovery_job.status}, "
+                f"{submission.accepted_path_count} accepted, {submission.rejected_path_count} rejected"
+            )
+    finally:
+        engine.dispose()
+    return 0
+
+
+def _run_jobs(arguments: argparse.Namespace) -> int:
+    from .importing.jobs import JobStateError
+
+    service, engine = _import_service()
+    try:
+        result = service.retry(arguments.job_id)
+    except JobStateError as error:
+        print(f"replay-analyzer: error: [{error.code}] {error}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
+    _write_json_document(asdict(result))
+    return 0
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Expose deterministic observed replay inspection without LLM or network calls. (#TBD)
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the inspection CLI and return a deterministic process status for replay failures."""
     arguments = _parser().parse_args(argv)
     if arguments.command == "export-telemetry":
         return _run_export(arguments)
+    if arguments.command == "import":
+        try:
+            return _run_import(arguments)
+        except (OSError, ValueError) as error:
+            print(f"replay-analyzer: error: [invalid_import] {error}", file=sys.stderr)
+            return 2
+    if arguments.command == "jobs":
+        return _run_jobs(arguments)
     try:
         parsed = parse_replay(arguments.file)
         if arguments.format == "json":
