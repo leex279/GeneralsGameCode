@@ -50,6 +50,7 @@ from generals_replay_analyzer.importing import (
     TerminalDependencyPolicy,
 )
 from generals_replay_analyzer.importing import telemetry_import as telemetry_import_module
+from generals_replay_analyzer.importing.evidence_identity import telemetry_event_evidence_identity
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.map_import import normalize_map_asset
 from generals_replay_analyzer.importing.parser_import import ParserImportResult, ParserObservationImporter
@@ -651,21 +652,33 @@ def test_v2_import_uses_validated_map_and_stable_raw_event_evidence(
     importer = _importer(session_factory, settings)
 
     result = importer.import_replay(replay_sha256, attempt)
-    cached = importer.import_replay(replay_sha256, attempt)
+    cached = _importer(session_factory, settings, 80_000).import_replay(replay_sha256, attempt)
     with pytest.raises(ValueError, match="collides with another immutable attempt"):
         importer.import_replay(replay_sha256, replace(attempt, replay_quality="partial"))
     assert result.status == "succeeded" and result.event_count == 6, _run_diagnostics(session_factory, run_id)
     assert cached.run_id == run_id and cached.cache_hit is True
     with session_factory() as session:
         events = list(session.scalars(select(TelemetryEvent).order_by(TelemetryEvent.sequence)))
-        evidence = list(session.scalars(select(EvidenceItem).order_by(EvidenceItem.source_key)))
         map_row = session.scalar(select(Map))
         resources = list(session.scalars(select(MapResource).order_by(MapResource.stable_key)))
         assert [event.sequence for event in events] == [0, 1, 2, 3, 4, 5]
         assert events[0].raw_record_json["event_type"] == "manifest"
-        assert {item.source_key for item in evidence} == {
-            f"telemetry:{run_id}:sequence:{sequence}" for sequence in range(6)
-        }
+        event_evidence = list(
+            session.execute(
+                select(TelemetryEvent, EvidenceItem)
+                .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                .order_by(TelemetryEvent.sequence)
+            )
+        )
+        assert len(event_evidence) == 6
+        for event, item in event_evidence:
+            expected = telemetry_event_evidence_identity(run_id, event.sequence)
+            assert (item.public_id, item.source_kind, item.source_key) == (
+                expected.public_id,
+                expected.source_kind,
+                expected.source_key,
+            )
+            assert UUID(item.public_id).version == 5
         assert map_row is not None and map_row.content_sha256 == events[0].payload_json["map_asset"]["content_sha256"]
         projection = map_row.metadata_json["validated_spatial_projection"]
         assert projection == {
@@ -952,6 +965,88 @@ def test_successful_uuid_collision_matrix_compares_every_immutable_attempt_field
             replace(attempt, **{field: changes[field]}),
             idempotency_key="stable",
         )
+
+
+@pytest.mark.parametrize("tamper", ["public_id", "source_kind", "source_key"])
+def test_successful_telemetry_cache_rejects_observed_evidence_identity_drift(
+    tamper: str,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+) -> None:
+    """Catch same-run reuse accepting an event citation that no longer matches its sequence locator."""
+    replay_sha256 = _replay(session_factory, settings, f"telemetry-evidence-drift-{tamper}")
+    run_id = str(UUID(int=25_400 + len(tamper)))
+    trace = _write_v1_bundle(settings.data_root / "evidence-drift" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    canonical_identities = telemetry_import_module.telemetry_event_evidence_identities
+
+    def poisoned_identities(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        identities = list(canonical_identities(*args, **kwargs))  # type: ignore[arg-type]
+        identity = identities[0]
+        if tamper == "public_id":
+            identities[0] = replace(identity, public_id="00000000-0000-0000-0000-00000000ffff")
+        elif tamper == "source_kind":
+            identities[0] = replace(identity, source_kind="parser_command")
+        else:
+            identities[0] = replace(identity, source_key=f"{identity.source_key}:drift")
+        return tuple(identities)
+
+    monkeypatch.setattr(telemetry_import_module, "telemetry_event_evidence_identities", poisoned_identities)
+    importer = _importer(session_factory, settings)
+    assert importer.import_replay(replay_sha256, attempt).status == "succeeded"
+    monkeypatch.setattr(telemetry_import_module, "telemetry_event_evidence_identities", canonical_identities)
+
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        _importer(session_factory, settings, 90_000).import_replay(replay_sha256, attempt)
+
+
+@pytest.mark.parametrize("collision", ["public_id", "source_key"])
+def test_telemetry_evidence_locator_collision_fails_without_overwriting_existing_citation(
+    collision: str,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+) -> None:
+    """Catch one frozen telemetry locator being silently rebound to a foreign evidence row."""
+    replay_sha256 = _replay(session_factory, settings, f"telemetry-evidence-collision-{collision}")
+    run_id = str(UUID(int=25_450 + len(collision)))
+    trace = _write_v1_bundle(settings.data_root / "evidence-collision" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    expected = telemetry_event_evidence_identity(run_id, 0)
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert replay is not None
+        session.add(
+            EvidenceItem(
+                public_id=(
+                    expected.public_id
+                    if collision == "public_id"
+                    else "00000000-0000-0000-0000-00000000fffe"
+                ),
+                replay_id=replay.id,
+                parser_run_id=None,
+                telemetry_run_id=None,
+                tier="observed",
+                source_kind="telemetry_event",
+                source_key=(expected.source_key if collision == "source_key" else "foreign-telemetry-citation"),
+                schema_version=1,
+                created_at=NOW,
+            )
+        )
+
+    result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
+    assert result.status == "failed" and result.event_count == 0
+    with session_factory() as session:
+        poison = session.scalar(
+            select(EvidenceItem).where(
+                (EvidenceItem.public_id == expected.public_id)
+                if collision == "public_id"
+                else (EvidenceItem.source_key == expected.source_key)
+            )
+        )
+        run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == result.run_id))
+        assert poison is not None and run is not None and run.status == "failed"
+        assert session.scalar(select(func.count(TelemetryEvent.id)).where(TelemetryEvent.telemetry_run_id == run.id)) == 0
 
 
 @pytest.mark.parametrize(

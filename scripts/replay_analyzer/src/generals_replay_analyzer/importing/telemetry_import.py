@@ -34,6 +34,7 @@ from ..db.models import (
     TelemetryRun,
 )
 from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundle
+from .evidence_identity import telemetry_event_evidence_identities, validate_observed_evidence_identity
 from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
 from .parser_import import ParserObservationImporter
@@ -367,12 +368,60 @@ class TelemetryObservationImporter:
             )
             if not matches or replay is None:
                 return False
+            if not self._event_evidence_matches(session, run, replay):
+                return False
             try:
                 self._reverify_managed_replay(session, replay, replay_sha256)
                 verified = self._reverify_artifacts(session, attempt.artifacts)
             except (OSError, ValueError):
                 return False
             return self._run_asset_links_match(run, verified)
+
+    # TheSuperHackers @bugfix Leex 23/08/2026 Reuse only telemetry graphs with canonical sequence citations. (#TBD)
+    @staticmethod
+    def _event_evidence_matches(session: Session, run: TelemetryRun, replay: Replay) -> bool:
+        rows = list(
+            session.execute(
+                select(TelemetryEvent, EvidenceItem)
+                .outerjoin(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                .where(TelemetryEvent.telemetry_run_id == run.id)
+                .order_by(TelemetryEvent.sequence)
+            )
+        )
+        try:
+            identities = telemetry_event_evidence_identities(
+                run.run_id,
+                (event.sequence for event, _evidence in rows),
+            )
+            evidence_ids: set[int] = set()
+            for (event, evidence), identity in zip(rows, identities, strict=True):
+                if (
+                    evidence is None
+                    or evidence.id in evidence_ids
+                    or evidence.replay_id != replay.id
+                    or evidence.parser_run_id is not None
+                    or evidence.telemetry_run_id != run.id
+                    or evidence.tier != "observed"
+                    or evidence.schema_version != event.schema_version
+                    or event.schema_version != run.schema_version
+                ):
+                    return False
+                validate_observed_evidence_identity(
+                    identity,
+                    public_id=evidence.public_id,
+                    source_kind=evidence.source_kind,
+                    source_key=evidence.source_key,
+                )
+                evidence_ids.add(evidence.id)
+        except ValueError:
+            return False
+        evidence_count = int(
+            session.scalar(
+                select(func.count(EvidenceItem.id)).where(EvidenceItem.telemetry_run_id == run.id)
+            )
+            or 0
+        )
+        return evidence_count == len(rows)
 
     def _failed_attempt_is_reusable(
         self,
@@ -787,18 +836,31 @@ class TelemetryObservationImporter:
             run.completed_at = now
             session.flush()
 
+            # TheSuperHackers @bugfix Leex 23/08/2026 Keep event citations stable across retries and process order. (#TBD)
             event_rows: dict[int, TelemetryEvent] = {}
+            evidence_identities = {
+                record.sequence: identity
+                for record, identity in zip(
+                    normalized.bundle.records,
+                    telemetry_event_evidence_identities(
+                        run.run_id,
+                        (record.sequence for record in normalized.bundle.records),
+                    ),
+                    strict=True,
+                )
+            }
             for record, raw_record, payload in zip(
                 normalized.bundle.records, normalized.records, normalized.payloads, strict=True
             ):
+                identity = evidence_identities[record.sequence]
                 evidence = EvidenceItem(
-                    public_id=str(self._uuid_factory()),
+                    public_id=identity.public_id,
                     replay_id=replay.id,
                     parser_run_id=None,
                     telemetry_run_id=run.id,
                     tier="observed",
-                    source_kind="telemetry_event",
-                    source_key=f"telemetry:{run.run_id}:sequence:{record.sequence}",
+                    source_kind=identity.source_kind,
+                    source_key=identity.source_key,
                     schema_version=record.schema_version,
                     created_at=now,
                 )

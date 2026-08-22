@@ -28,6 +28,7 @@ from ..db.models import (
 )
 from ..errors import ReplayParseError, UnsupportedArgumentTypeError
 from ..parser import ParsedReplay
+from .evidence_identity import parser_command_evidence_identities, validate_observed_evidence_identity
 from .stages import canonical_json
 
 _SHA256_HEX = frozenset("0123456789abcdef")
@@ -429,9 +430,10 @@ class ParserObservationImporter:
                 )
         return None
 
+    # TheSuperHackers @bugfix Leex 23/08/2026 Reuse only parser graphs whose citations still match byte locators. (#TBD)
     def _successful_run(self, sha256: str, parser_version: str) -> ParserRun | None:
         with self._session_factory() as session:
-            return session.scalar(
+            run = session.scalar(
                 select(ParserRun)
                 .join(Replay, Replay.id == ParserRun.replay_id)
                 .where(
@@ -442,6 +444,56 @@ class ParserObservationImporter:
                     ParserRun.status == "succeeded",
                 )
             )
+            if run is None:
+                return None
+            replay = session.get(Replay, run.replay_id)
+            if replay is None:
+                raise ValueError("parser command evidence identity drift")
+            rows = list(
+                session.execute(
+                    select(ReplayCommand, EvidenceItem)
+                    .outerjoin(EvidenceItem, EvidenceItem.id == ReplayCommand.evidence_item_id)
+                    .where(ReplayCommand.parser_run_id == run.id)
+                    .order_by(ReplayCommand.start_offset)
+                )
+            )
+            identities = parser_command_evidence_identities(
+                replay.public_id,
+                run.parser_version,
+                (command.start_offset for command, _evidence in rows),
+            )
+            evidence_ids: set[int] = set()
+            try:
+                for (command, evidence), identity in zip(rows, identities, strict=True):
+                    if (
+                        evidence is None
+                        or command.replay_id != replay.id
+                        or evidence.replay_id != replay.id
+                        or evidence.parser_run_id != run.id
+                        or evidence.telemetry_run_id is not None
+                        or evidence.tier != "observed"
+                        or evidence.schema_version != run.schema_version
+                        or evidence.id in evidence_ids
+                    ):
+                        raise ValueError("parser command evidence identity drift")
+                    validate_observed_evidence_identity(
+                        identity,
+                        public_id=evidence.public_id,
+                        source_kind=evidence.source_kind,
+                        source_key=evidence.source_key,
+                    )
+                    evidence_ids.add(evidence.id)
+            except ValueError as error:
+                raise ValueError("parser command evidence identity drift") from error
+            evidence_count = int(
+                session.scalar(
+                    select(func.count(EvidenceItem.id)).where(EvidenceItem.parser_run_id == run.id)
+                )
+                or 0
+            )
+            if evidence_count != len(rows):
+                raise ValueError("parser command evidence identity drift")
+            return run
 
     def _command_count(self, parser_run_id: int) -> int:
         with self._session_factory() as session:
@@ -554,15 +606,30 @@ class ParserObservationImporter:
                 )
             session.flush()
 
-            for command_index, command in enumerate(_ordered_commands(parsed)):
+            # TheSuperHackers @bugfix Leex 23/08/2026 Keep command citations stable across runs and process order. (#TBD)
+            ordered_commands = _ordered_commands(parsed)
+            evidence_identities = {
+                command.start_offset: identity
+                for command, identity in zip(
+                    ordered_commands,
+                    parser_command_evidence_identities(
+                        replay.public_id,
+                        run.parser_version,
+                        (command.start_offset for command in ordered_commands),
+                    ),
+                    strict=True,
+                )
+            }
+            for command_index, command in enumerate(ordered_commands):
+                identity = evidence_identities[command.start_offset]
                 evidence = EvidenceItem(
-                    public_id=str(self._uuid_factory()),
+                    public_id=identity.public_id,
                     replay_id=replay.id,
                     parser_run_id=run.id,
                     telemetry_run_id=None,
                     tier="observed",
-                    source_kind="parser_command",
-                    source_key=f"parser:{run.run_id}:command:{command_index}",
+                    source_kind=identity.source_kind,
+                    source_key=identity.source_key,
                     schema_version=run.schema_version,
                     created_at=now,
                 )

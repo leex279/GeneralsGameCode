@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,6 +28,7 @@ from generals_replay_analyzer.db.models import (
 )
 from generals_replay_analyzer.db.models import ReplayCommand as StoredReplayCommand
 from generals_replay_analyzer.importing import parser_import as parser_import_module
+from generals_replay_analyzer.importing.evidence_identity import parser_command_evidence_identity
 from generals_replay_analyzer.importing.parser_import import ParserObservationImporter
 from generals_replay_analyzer.importing.stages import canonical_json
 from generals_replay_analyzer.parser import parse_replay
@@ -117,7 +119,7 @@ def test_complete_parser_import_preserves_commands_and_is_idempotent(
     importer = _importer(session_factory, settings)
 
     result = importer.import_replay(replay_sha256)
-    cached = importer.import_replay(replay_sha256)
+    cached = _importer(session_factory, settings, uuid_start=50_000).import_replay(replay_sha256)
 
     assert result.status == "succeeded"
     assert result.command_count == len(parsed.commands) == 3993
@@ -160,7 +162,27 @@ def test_complete_parser_import_preserves_commands_and_is_idempotent(
         evidence = list(session.scalars(select(EvidenceItem).order_by(EvidenceItem.source_key)))
         assert len(evidence) == 3993
         assert {item.source_kind for item in evidence} == {"parser_command"}
-        assert f"parser:{result.run_id}:command:0" in {item.source_key for item in evidence}
+        command_evidence = list(
+            session.execute(
+                select(StoredReplayCommand, EvidenceItem)
+                .join(EvidenceItem, EvidenceItem.id == StoredReplayCommand.evidence_item_id)
+                .where(StoredReplayCommand.parser_run_id == runs[0].id)
+                .order_by(StoredReplayCommand.command_index)
+            )
+        )
+        assert len(command_evidence) == 3993
+        for stored, item in command_evidence:
+            expected = parser_command_evidence_identity(
+                "00000000-0000-0000-0000-00000000a002",
+                "fixture-parser-1",
+                stored.start_offset,
+            )
+            assert (item.public_id, item.source_kind, item.source_key) == (
+                expected.public_id,
+                expected.source_kind,
+                expected.source_key,
+            )
+            assert UUID(item.public_id).version == 5
         assert session.scalar(select(func.count(Player.id))) == 0
         assert session.scalar(select(func.count(PlayerAlias.id))) == 0
         replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
@@ -355,6 +377,97 @@ def test_parser_command_input_permutation_persists_one_canonical_source_order(
             replace(projected, commands=source)
         )
         assert run.result_sha256 == hashlib.sha256(canonical_json(expected_projection).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("tamper", ["public_id", "source_kind", "source_key"])
+def test_parser_success_cache_rejects_observed_evidence_identity_drift(
+    tamper: str,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    tmp_path: Path,
+) -> None:
+    """Catch successful-run reuse accepting a citation that no longer matches its byte locator."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    base = parse_replay(managed_path)
+    projected = replace(base, commands=base.commands[:3], end_offset=base.commands[2].end_offset)
+    canonical_identities = parser_import_module.parser_command_evidence_identities
+
+    def poisoned_identities(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        identities = list(canonical_identities(*args, **kwargs))  # type: ignore[arg-type]
+        identity = identities[0]
+        if tamper == "public_id":
+            identities[0] = replace(identity, public_id="00000000-0000-0000-0000-00000000ffff")
+        elif tamper == "source_kind":
+            identities[0] = replace(identity, source_kind="telemetry_event")
+        else:
+            identities[0] = replace(identity, source_key=f"{identity.source_key}:drift")
+        return tuple(identities)
+
+    monkeypatch.setattr(parser_import_module, "parser_command_evidence_identities", poisoned_identities)
+    importer = _importer(session_factory, settings, parser=lambda _path: projected)
+    result = importer.import_replay(replay_sha256)
+    assert result.status == "succeeded"
+    monkeypatch.setattr(parser_import_module, "parser_command_evidence_identities", canonical_identities)
+
+    with pytest.raises(ValueError, match="parser command evidence identity drift"):
+        _importer(
+            session_factory,
+            settings,
+            parser=lambda _path: projected,
+            uuid_start=60_000,
+        ).import_replay(replay_sha256)
+
+
+@pytest.mark.parametrize("collision", ["public_id", "source_key"])
+def test_parser_evidence_locator_collision_fails_without_overwriting_existing_citation(
+    collision: str,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    tmp_path: Path,
+) -> None:
+    """Catch one frozen parser locator being silently rebound to a foreign evidence row."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    base = parse_replay(managed_path)
+    projected = replace(base, commands=base.commands[:1], end_offset=base.commands[0].end_offset)
+    expected = parser_command_evidence_identity(
+        "00000000-0000-0000-0000-00000000a002",
+        "fixture-parser-1",
+        base.commands[0].start_offset,
+    )
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert replay is not None
+        poison = EvidenceItem(
+            public_id=(
+                expected.public_id
+                if collision == "public_id"
+                else "00000000-0000-0000-0000-00000000fffe"
+            ),
+            replay_id=replay.id,
+            parser_run_id=None,
+            telemetry_run_id=None,
+            tier="observed",
+            source_kind="parser_command",
+            source_key=(expected.source_key if collision == "source_key" else "foreign-parser-citation"),
+            schema_version=1,
+            created_at=NOW,
+        )
+        session.add(poison)
+
+    result = _importer(session_factory, settings, parser=lambda _path: projected).import_replay(replay_sha256)
+    assert result.status == "failed" and result.command_count == 0
+    with session_factory() as session:
+        poison = session.scalar(
+            select(EvidenceItem).where(
+                (EvidenceItem.public_id == expected.public_id)
+                if collision == "public_id"
+                else (EvidenceItem.source_key == expected.source_key)
+            )
+        )
+        run = session.scalar(select(ParserRun).where(ParserRun.run_id == result.run_id))
+        assert poison is not None and run is not None and run.status == "failed"
+        assert session.scalar(select(func.count(StoredReplayCommand.id)).where(StoredReplayCommand.parser_run_id == run.id)) == 0
 
 
 def test_parser_reverifies_managed_replay_inside_final_transaction(
