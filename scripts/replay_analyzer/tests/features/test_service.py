@@ -1387,3 +1387,966 @@ def test_service_rejects_unknown_identity_extractor_and_duplicate_configuration(
         FeatureExtractionService(feature_factory, extractors=(BuildOrderExtractor(), BuildOrderExtractor()))
     with pytest.raises(ValueError, match="unique"):
         ExtractFeaturesRequest(replay, player, ("build", "build"))
+
+
+def _seed_replay_wide_observations(
+    factory: sessionmaker[Session],
+    *,
+    parser_run_setting: object = "00000000-0000-4000-8000-000000000303",
+    slots: object | None = None,
+    include_conflicting_parser: bool = True,
+    entity_owner_player_index: int = 0,
+) -> tuple[str, str, str, str, dict[str, str]]:
+    replay, target, _ = _seed_replay(factory, finalize=False)
+    peer = "00000000-0000-4000-8000-000000000501"
+    conflicting_peer = "00000000-0000-4000-8000-000000000502"
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+    evidence_ids: dict[str, str] = {}
+    with factory() as session:
+        replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
+        parser = session.scalar(
+            select(ParserRun).where(ParserRun.run_id == "00000000-0000-4000-8000-000000000303")
+        )
+        telemetry = session.scalar(
+            select(TelemetryRun).where(TelemetryRun.run_id == "00000000-0000-4000-8000-000000000304")
+        )
+        assert replay_row is not None and parser is not None and telemetry is not None
+        entity = session.scalar(select(Entity).where(Entity.telemetry_run_id == telemetry.id, Entity.object_id == 7))
+        assert entity is not None
+        entity.initial_owner_player_index = entity_owner_player_index
+        session.add_all(
+            Entity(
+                public_id=str(uuid5(NAMESPACE_URL, f"{telemetry.run_id}:entity:{object_id}")),
+                telemetry_run_id=telemetry.id,
+                replay_id=replay_row.id,
+                object_id=object_id,
+                template_name=template_name,
+                initial_owner_player_index=owner_player_index,
+                kind_of_flags_json=kind_of_flags,
+                creation_sequence=None,
+                creation_frame=0,
+                observed_json={"source": "object_created"},
+            )
+            for object_id, template_name, owner_player_index, kind_of_flags in (
+                (10, "TargetUnit", 0, ["MOBILE"]),
+                (20, "PeerUnit", 1, ["MOBILE"]),
+                (77, "SupplyDock", None, ["SUPPLY_SOURCE"]),
+            )
+        )
+        session.add(
+            ReplayPlayer(
+                public_id=peer,
+                replay_id=replay_row.id,
+                parser_run_id=parser.id,
+                slot_index=1,
+                slot_kind="human",
+                original_name="Peer",
+                normalized_name="peer",
+                player_index=1,
+                observed_json={"player_index": 1},
+            )
+        )
+        if include_conflicting_parser:
+            conflicting = ParserRun(
+                run_id="00000000-0000-4000-8000-000000000509",
+                replay_id=replay_row.id,
+                parser_version="parser-conflicting-v1",
+                schema_version=1,
+                input_sha256=replay_row.sha256,
+                status="running",
+                warnings_json=[],
+                started_at=now,
+            )
+            session.add(conflicting)
+            session.flush()
+            session.add_all(
+                (
+                    ReplayPlayer(
+                        public_id="00000000-0000-4000-8000-000000000503",
+                        replay_id=replay_row.id,
+                        parser_run_id=conflicting.id,
+                        slot_index=0,
+                        slot_kind="human",
+                        original_name="Wrong Target",
+                        normalized_name="wrong target",
+                        player_index=0,
+                        observed_json={"player_index": 0},
+                    ),
+                    ReplayPlayer(
+                        public_id=conflicting_peer,
+                        replay_id=replay_row.id,
+                        parser_run_id=conflicting.id,
+                        slot_index=1,
+                        slot_kind="human",
+                        original_name="Wrong Peer",
+                        normalized_name="wrong peer",
+                        player_index=1,
+                        observed_json={"player_index": 1},
+                    ),
+                )
+            )
+            session.flush()
+            conflicting.status = "succeeded"
+            conflicting.completion_status = "complete"
+            conflicting.result_sha256 = "9" * 64
+            conflicting.completed_at = now
+        telemetry.settings_json = {"parser_run_id": parser_run_setting}
+        resolved_slots = (
+            [
+                {"slot_index": 0, "player_index": 0, "resolution_status": "resolved"},
+                {"slot_index": 1, "player_index": 1, "resolution_status": "resolved"},
+                {"slot_index": 7, "player_index": None, "resolution_status": "not_applicable"},
+            ]
+            if slots is None
+            else slots
+        )
+        event_specs = (
+            (
+                0,
+                "players_initialized",
+                {
+                    "slots": resolved_slots,
+                    "engine_player_indices": [0, 1],
+                    "game_data_catalog": {"path": "C:\\private\\catalog.json"},
+                    "private_locator": "must-not-survive",
+                },
+            ),
+            (30, "supply_collected", {"player_index": 0, "source_object_id": 77, "amount": 100.0}),
+            (31, "supply_collected", {"player_index": 1, "source_object_id": 77, "amount": 200.0}),
+            (
+                40,
+                "entity_sample",
+                {
+                    "object_id": 10,
+                    "owner_player_index": 0,
+                    "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+                    "position_status": "bounded",
+                },
+            ),
+            (
+                41,
+                "entity_sample",
+                {
+                    "object_id": 20,
+                    "owner_player_index": 1,
+                    "position": {"x": 3.0, "y": 4.0, "z": 0.0},
+                    "position_status": "bounded",
+                },
+            ),
+        )
+        for offset, (frame, event_type, payload) in enumerate(event_specs, start=3):
+            public_id = str(uuid5(NAMESPACE_URL, f"{telemetry.run_id}:{offset}"))
+            evidence = EvidenceItem(
+                public_id=public_id,
+                replay_id=replay_row.id,
+                telemetry_run_id=telemetry.id,
+                tier="observed",
+                source_kind="telemetry",
+                source_key=f"telemetry:{telemetry.run_id}:sequence:{offset}",
+                schema_version=2,
+                created_at=now,
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(
+                TelemetryEvent(
+                    telemetry_run_id=telemetry.id,
+                    sequence=offset,
+                    frame=frame,
+                    logic_time_seconds=frame / 30.0,
+                    schema_version=2,
+                    event_type=event_type,
+                    payload_json=payload,
+                    raw_record_json={"event_type": event_type, "payload": payload},
+                    evidence_item_id=evidence.id,
+                )
+            )
+            evidence_ids[f"{event_type}:{frame}"] = public_id
+        parser.status = "succeeded"
+        parser.completion_status = "complete"
+        parser.result_sha256 = "b" * 64
+        parser.completed_at = now
+        telemetry.status = "succeeded"
+        telemetry.final_frame = 120
+        telemetry.command_count = 0
+        telemetry.trace_sha256 = "c" * 64
+        telemetry.completed_at = now
+        session.commit()
+    return replay, target, peer, conflicting_peer, evidence_ids
+
+
+def _context_capture_extractor(policy: str | None = None) -> object:
+    class ContextCaptureExtractor:
+        name = "context_capture"
+        version = "context-capture-v1"
+        feature_names = ("build.completed_count",)
+
+        def __init__(self) -> None:
+            self.context: FeatureContext | None = None
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            self.context = context
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        len(context.observed),
+                        "count",
+                        context.scope,
+                        FeatureWindow(0, context.final_frame or 0),
+                        "complete",
+                        None,
+                        (context.observed[0].ref,),
+                    ),
+                ),
+            )
+
+    extractor = ContextCaptureExtractor()
+    if policy is not None:
+        extractor.observation_policy = policy  # type: ignore[attr-defined]
+    return extractor
+
+
+def test_mixed_scope_extractor_emits_only_definitions_registered_for_context_scope(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    registry = FeatureRegistry(
+        REGISTRY_SCHEMA,
+        (
+            FeatureDefinition("mixed.player_metric", "integer", "count", ("player",), "inclusive", "observed", "mixed"),
+            FeatureDefinition("mixed.replay_metric", "integer", "count", ("replay",), "inclusive", "observed", "mixed"),
+        ),
+    )
+
+    class MixedScopeExtractor:
+        name = "mixed"
+        version = "mixed-v1"
+        feature_names = ("mixed.player_metric", "mixed.replay_metric")
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            name = "mixed.player_metric" if context.scope.scope_type == "player" else "mixed.replay_metric"
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        name,
+                        "integer",
+                        1,
+                        "count",
+                        context.scope,
+                        FeatureWindow(0, context.final_frame or 0),
+                        "complete",
+                        None,
+                        (context.observed[0].ref,),
+                    ),
+                ),
+            )
+
+    service = FeatureExtractionService(feature_factory, extractors=(MixedScopeExtractor(),), registry=registry)
+    player_receipt = service.extract(_request(replay, player, "mixed"))[0]
+    replay_receipt = service.extract(ExtractFeaturesRequest(replay, None, ("mixed",)))[0]
+    assert tuple(value.name for value in player_receipt.features) == ("mixed.player_metric",)
+    assert tuple(value.name for value in replay_receipt.features) == ("mixed.replay_metric",)
+
+
+@pytest.mark.parametrize("defect", ("missing", "extra", "duplicate", "wrong_scope"))
+def test_mixed_scope_bundle_still_rejects_nonexact_or_wrong_scope_values(
+    feature_factory: sessionmaker[Session], defect: str
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    registry = FeatureRegistry(
+        REGISTRY_SCHEMA,
+        (
+            FeatureDefinition("mixed.player_metric", "integer", "count", ("player",), "inclusive", "observed", "mixed"),
+            FeatureDefinition("mixed.replay_metric", "integer", "count", ("replay",), "inclusive", "observed", "mixed"),
+        ),
+    )
+
+    class MixedScopeExtractor:
+        name = "mixed_invalid"
+        version = "mixed-invalid-v1"
+        feature_names = ("mixed.player_metric", "mixed.replay_metric")
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            raise AssertionError("not called")
+
+    extractor = MixedScopeExtractor()
+    service = FeatureExtractionService(feature_factory, extractors=(extractor,), registry=registry)
+    context = service._build_context(_request(replay, player, "mixed_invalid"))
+
+    def value(name: str, scope: FeatureScope) -> FeatureValue:
+        return FeatureValue(
+            name,
+            "integer",
+            1,
+            "count",
+            scope,
+            FeatureWindow(0, context.final_frame or 0),
+            "complete",
+            None,
+            (context.observed[0].ref,),
+        )
+
+    player_value = value("mixed.player_metric", context.scope)
+    defects = {
+        "missing": (),
+        "extra": (player_value, value("mixed.replay_metric", FeatureScope("replay", replay))),
+        "duplicate": (player_value, player_value),
+        "wrong_scope": (value("mixed.player_metric", FeatureScope("replay", replay)),),
+    }
+    bundle = FeatureBundle(extractor.name, extractor.version, defects[defect])
+    with pytest.raises((FeatureExtractionError, ValueError)):
+        service._validated_bundle(bundle, extractor, context)
+
+
+def test_default_observation_policy_keeps_target_player_filtering(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, peer, _, _ = _seed_replay_wide_observations(feature_factory)
+    extractor = _context_capture_extractor()
+    FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+        _request(replay, target, "context_capture")
+    )
+    context = cast(FeatureContext, extractor.context)  # type: ignore[attr-defined]
+    facts = [cast(dict[str, object], thaw_canonical(item.facts)) for item in context.observed]
+    assert any(item.get("replay_player_public_id") == target for item in facts)
+    assert all(item.get("replay_player_public_id") != peer for item in facts)
+    assert [item.frame for item in context.observed if item.event_type == "entity_sample"] == [40]
+
+
+def test_replay_wide_policy_includes_peer_facts_and_projects_selected_parser_owners(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, peer, conflicting_peer, evidence_ids = _seed_replay_wide_observations(feature_factory)
+    extractor = _context_capture_extractor("replay_wide_telemetry")
+    FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+        _request(replay, target, "context_capture")
+    )
+    context = cast(FeatureContext, extractor.context)  # type: ignore[attr-defined]
+    observations = {
+        (item.event_type, item.frame): cast(dict[str, object], thaw_canonical(item.facts))
+        for item in context.observed
+    }
+    assert observations[("entity_sample", 40)] == {
+        "object_id": 10,
+        "object_key": "object:10",
+        "owner_player_index": 0,
+        "owner_scope_key": target,
+        "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+        "position_status": "bounded",
+        "replay_player_public_id": target,
+    }
+    assert observations[("entity_sample", 41)]["owner_scope_key"] == peer
+    assert observations[("entity_sample", 41)]["replay_player_public_id"] == peer
+    assert observations[("supply_collected", 31)]["replay_player_public_id"] == peer
+    assert conflicting_peer not in canonical_json(context)
+    assert "private_locator" not in canonical_json(context)
+    assert "catalog.json" not in canonical_json(context)
+    slots = cast(list[dict[str, object]], observations[("players_initialized", 0)]["slots"])
+    assert slots == [
+        {
+            "owner_scope_key": target,
+            "player_index": 0,
+            "replay_player_public_id": target,
+            "resolution_status": "resolved",
+            "slot_index": 0,
+        },
+        {
+            "owner_scope_key": peer,
+            "player_index": 1,
+            "replay_player_public_id": peer,
+            "resolution_status": "resolved",
+            "slot_index": 1,
+        },
+    ]
+    initialized = next(item for item in context.observed if item.event_type == "players_initialized")
+    assert initialized.ref.public_id == evidence_ids["players_initialized:0"]
+    assert all(item.event_type != "player_start_assignment" for item in context.observed)
+
+
+def test_replay_wide_peer_evidence_is_authorized_and_changes_digest(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, evidence_ids = _seed_replay_wide_observations(feature_factory)
+
+    class PeerEvidenceExtractor:
+        name = "peer_evidence"
+        version = "peer-evidence-v1"
+        feature_names = ("build.completed_count",)
+        observation_policy = "replay_wide_telemetry"
+
+        def __init__(self) -> None:
+            self.context: FeatureContext | None = None
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            self.context = context
+            peer = next(item for item in context.observed if item.ref.public_id == evidence_ids["supply_collected:31"])
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        context.scope,
+                        FeatureWindow(0, context.final_frame or 0),
+                        "complete",
+                        None,
+                        (peer.ref,),
+                    ),
+                ),
+            )
+
+    extractor = PeerEvidenceExtractor()
+    receipt = FeatureExtractionService(feature_factory, extractors=(extractor,)).extract(
+        _request(replay, target, "peer_evidence")
+    )[0]
+    assert receipt.features[0].input_evidence[0].public_id == evidence_ids["supply_collected:31"]
+    assert extractor.context is not None
+    peer_observation = next(
+        item for item in extractor.context.observed if item.ref.public_id == evidence_ids["supply_collected:31"]
+    )
+    changed = replace(
+        peer_observation,
+        facts={**cast(dict[str, object], thaw_canonical(peer_observation.facts)), "amount": 201.0},
+    )
+    changed_context = replace(
+        extractor.context,
+        observed=tuple(changed if item == peer_observation else item for item in extractor.context.observed),
+    )
+    assert input_digest(changed_context) != receipt.input_digest
+    assert cache_key(changed_context, extractor.name, extractor.version) != receipt.cache_key
+
+
+@pytest.mark.parametrize(
+    ("parser_run_setting", "slots"),
+    (
+        (None, None),
+        (123, None),
+        ("00000000-0000-4000-8000-000000000599", None),
+        ("00000000-0000-4000-8000-000000000303", []),
+        ("00000000-0000-4000-8000-000000000303", "not-a-slot-list"),
+        ("00000000-0000-4000-8000-000000000303", [None]),
+        (
+            "00000000-0000-4000-8000-000000000303",
+            [
+                {"slot_index": 0, "player_index": 0, "resolution_status": "resolved"},
+                {"slot_index": 0, "player_index": 1, "resolution_status": "resolved"},
+            ],
+        ),
+        (
+            "00000000-0000-4000-8000-000000000303",
+            [{"slot_index": 7, "player_index": 0, "resolution_status": "resolved"}],
+        ),
+    ),
+)
+def test_replay_wide_policy_rejects_missing_ambiguous_or_mismatched_parser_slot_graph(
+    feature_factory: sessionmaker[Session], parser_run_setting: object, slots: object | None
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(
+        feature_factory,
+        parser_run_setting=parser_run_setting,
+        slots=slots,
+        include_conflicting_parser=False,
+    )
+    extractor = _context_capture_extractor("replay_wide_telemetry")
+    with pytest.raises(FeatureExtractionError, match="telemetry player mapping"):
+        FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+            _request(replay, target, "context_capture")
+        )
+
+
+def test_replay_wide_policy_rejects_request_player_from_a_different_parser_attempt(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(
+        feature_factory,
+        parser_run_setting="00000000-0000-4000-8000-000000000509",
+    )
+    extractor = _context_capture_extractor("replay_wide_telemetry")
+    with pytest.raises(FeatureExtractionError, match="telemetry player mapping"):
+        FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+            _request(replay, target, "context_capture")
+        )
+
+
+def test_service_rejects_unknown_extractor_observation_policy(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(feature_factory)
+    extractor = _context_capture_extractor("all_database_rows")
+    with pytest.raises(FeatureExtractionError, match="observation policy"):
+        FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+            _request(replay, target, "context_capture")
+        )
+
+
+def test_bundle_validation_rejects_unregistered_duplicate_identity_and_context_scope(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    registry = FeatureRegistry(
+        REGISTRY_SCHEMA,
+        (
+            FeatureDefinition(
+                "mixed.shared_metric",
+                "integer",
+                "count",
+                ("player", "replay"),
+                "inclusive",
+                "observed",
+                "mixed",
+            ),
+        ),
+    )
+    context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+
+    class DeclaredExtractor:
+        name = "declared"
+        version = "declared-v1"
+        feature_names = ("mixed.shared_metric",)
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            raise AssertionError("not called")
+
+    service = FeatureExtractionService(feature_factory, extractors=(DeclaredExtractor(),), registry=registry)
+    replay_scoped = FeatureValue(
+        "mixed.shared_metric",
+        "integer",
+        1,
+        "count",
+        FeatureScope("replay", replay),
+        FeatureWindow(0, context.final_frame or 0),
+        "complete",
+        None,
+        (context.observed[0].ref,),
+    )
+    with pytest.raises(FeatureExtractionError, match="scope does not match context"):
+        service._validated_bundle(
+            FeatureBundle("declared", "declared-v1", (replay_scoped,)),
+            DeclaredExtractor(),
+            context,
+        )
+
+    class DuplicateExtractor(DeclaredExtractor):
+        feature_names = ("mixed.shared_metric", "mixed.shared_metric")
+
+    player_scoped = replace(replay_scoped, scope=context.scope)
+    with pytest.raises(FeatureExtractionError, match="duplicate logical feature identity"):
+        service._validated_bundle(
+            FeatureBundle("declared", "declared-v1", (player_scoped, player_scoped)),
+            DuplicateExtractor(),
+            context,
+        )
+
+    class UnregisteredExtractor(DeclaredExtractor):
+        feature_names = ("missing.feature",)
+
+    with pytest.raises(FeatureExtractionError, match="unregistered feature"):
+        service._validated_bundle(
+            FeatureBundle("declared", "declared-v1", ()),
+            UnregisteredExtractor(),
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"object_id": "10", "owner_player_index": 0},
+        {"object_id": 10, "owner_player_index": True},
+        {"object_id": 10, "owner_player_index": 99},
+    ),
+)
+def test_entity_sample_projection_rejects_malformed_or_unmapped_identity(
+    feature_factory: sessionmaker[Session], payload: object
+) -> None:
+    event = TelemetryEvent(event_type="entity_sample", payload_json=payload)
+    with pytest.raises(FeatureExtractionError, match="entity sample"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302"},
+            {10: ("Unit", "00000000-0000-4000-8000-000000000302", None)},
+            None,
+            [],
+        )
+
+
+def test_entity_sample_projection_rejects_object_outside_selected_entity_graph(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="entity_sample",
+        schema_version=2,
+        payload_json={"object_id": 99, "owner_player_index": 0},
+    )
+    with pytest.raises(FeatureExtractionError, match="entity sample object"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302"},
+            {10: ("Unit", "00000000-0000-4000-8000-000000000302", None)},
+            None,
+            [],
+        )
+
+
+def test_entity_sample_projection_accepts_object_in_selected_entity_graph(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    target = "00000000-0000-4000-8000-000000000302"
+    event = TelemetryEvent(
+        event_type="entity_sample",
+        schema_version=2,
+        payload_json={"object_id": 10, "owner_player_index": None},
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: target},
+        {10: ("Unit", target, None)},
+        None,
+        [],
+    )
+    assert facts["object_key"] == "object:10"
+    assert facts["owner_scope_key"] is None
+    assert facts["replay_player_public_id"] is None
+
+
+def test_replay_wide_supply_projection_rejects_unmapped_engine_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="supply_collected",
+        payload_json={"player_index": 99, "source_object_id": 77, "amount": 100.0},
+    )
+    with pytest.raises(FeatureExtractionError, match="economy owner mapping"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302"},
+            {},
+            None,
+            [],
+        )
+
+
+@pytest.mark.parametrize("source_object_id", ("77", True, -1, 99))
+def test_replay_wide_supply_projection_rejects_malformed_or_unknown_source_object(
+    feature_factory: sessionmaker[Session], source_object_id: object
+) -> None:
+    event = TelemetryEvent(
+        event_type="supply_collected",
+        schema_version=2,
+        payload_json={"player_index": 0, "source_object_id": source_object_id, "amount": 100.0},
+    )
+    with pytest.raises(FeatureExtractionError, match="supply source object"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302"},
+            {77: ("SupplyDock", None, None)},
+            None,
+            [],
+        )
+
+
+@pytest.mark.parametrize("source_object_id", (None, 77))
+def test_replay_wide_supply_projection_preserves_legitimate_nullable_source_object(
+    feature_factory: sessionmaker[Session], source_object_id: object
+) -> None:
+    event = TelemetryEvent(
+        event_type="supply_collected",
+        schema_version=2,
+        payload_json={"player_index": 0, "source_object_id": source_object_id, "amount": 100.0},
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: "00000000-0000-4000-8000-000000000302"},
+        {77: ("SupplyDock", None, None)},
+        None,
+        [],
+    )
+    assert facts["source_object_id"] is source_object_id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"source_player_mask": 1, "source_player_indices": [0, 99], "victim_player_index": 1},
+        {"source_player_mask": 1, "source_player_indices": [0, True], "victim_player_index": 1},
+        {"source_player_mask": 1, "source_player_indices": [0, 0], "victim_player_index": 1},
+        {"source_player_mask": 1, "source_player_indices": "0", "victim_player_index": 1},
+        {"source_player_mask": 1, "source_player_indices": [0], "victim_player_index": 99},
+        {"source_player_mask": 1, "source_player_indices": [0], "victim_player_index": True},
+        {"source_player_indices": [0], "victim_player_index": 1},
+        {"source_player_mask": None, "source_player_indices": [0], "victim_player_index": 1},
+        {"source_player_mask": True, "source_player_indices": [0], "victim_player_index": 1},
+        {"source_player_mask": 2**32, "source_player_indices": [0], "victim_player_index": 1},
+        {"source_player_mask": 2, "source_player_indices": [0], "victim_player_index": 1},
+        {"source_player_mask": 0, "source_player_indices": None, "victim_player_index": 1},
+    ),
+)
+def test_replay_wide_damage_projection_rejects_unmapped_ambiguous_or_malformed_players(
+    feature_factory: sessionmaker[Session], payload: object
+) -> None:
+    event = TelemetryEvent(event_type="damage_applied", schema_version=2, payload_json=payload)
+    with pytest.raises(FeatureExtractionError, match="telemetry damage"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {
+                0: "00000000-0000-4000-8000-000000000302",
+                1: "00000000-0000-4000-8000-000000000501",
+            },
+            {10: ("Structure", "00000000-0000-4000-8000-000000000302", None)},
+            None,
+            [],
+        )
+
+
+@pytest.mark.parametrize("source_indices", (None, []))
+def test_replay_wide_damage_projection_preserves_explicit_unknown_players(
+    feature_factory: sessionmaker[Session], source_indices: object
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=1,
+        payload_json={"source_player_indices": source_indices, "victim_player_index": None},
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: "00000000-0000-4000-8000-000000000302"},
+        {},
+        None,
+        [],
+    )
+    assert facts["source_replay_player_public_ids"] == []
+    assert facts["victim_replay_player_public_id"] is None
+
+
+@pytest.mark.parametrize("source_mask", (True, "1", -1, 2**32))
+def test_replay_wide_damage_v1_projection_rejects_malformed_optional_source_mask(
+    feature_factory: sessionmaker[Session], source_mask: object
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=1,
+        payload_json={
+            "source_player_mask": source_mask,
+            "source_player_indices": None,
+            "victim_player_index": None,
+        },
+    )
+    with pytest.raises(FeatureExtractionError, match="telemetry damage source player mask"):
+        FeatureExtractionService(feature_factory)._event_facts(event, {}, {}, None, [])
+
+
+@pytest.mark.parametrize("source_mask", (None, 0, 0xFFFFFFFF))
+def test_replay_wide_damage_v1_projection_accepts_nullable_uint32_source_mask_boundaries(
+    feature_factory: sessionmaker[Session], source_mask: object
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=1,
+        payload_json={
+            "source_player_mask": source_mask,
+            "source_player_indices": None,
+            "victim_player_index": None,
+        },
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(event, {}, {}, None, [])
+    assert facts["source_player_mask"] is source_mask
+    assert facts["source_replay_player_public_ids"] == []
+
+
+@pytest.mark.parametrize("source_index", (32, 2**63))
+def test_replay_wide_damage_v2_projection_rejects_out_of_uint32_mask_source_index_before_shift(
+    feature_factory: sessionmaker[Session], source_index: int
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=2,
+        payload_json={
+            "source_player_mask": 0,
+            "source_player_indices": [source_index],
+            "victim_player_index": None,
+        },
+    )
+    with pytest.raises(FeatureExtractionError, match="telemetry damage source player mapping"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {source_index: f"player-{source_index}"},
+            {},
+            None,
+            [],
+        )
+
+
+def test_replay_wide_damage_v2_projection_accepts_uint32_index_and_mask_boundaries(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    indices = list(range(32))
+    players = {index: f"player-{index}" for index in indices}
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=2,
+        payload_json={
+            "source_player_mask": 0xFFFFFFFF,
+            "source_player_indices": indices,
+            "victim_player_index": None,
+        },
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(event, players, {}, None, [])
+    assert facts["source_replay_player_public_ids"] == [players[index] for index in indices]
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "source_mask", "source_indices", "expected_sources"),
+    (
+        (1, None, None, []),
+        (2, 0, [], []),
+        (2, 3, [0, 1], [
+            "00000000-0000-4000-8000-000000000302",
+            "00000000-0000-4000-8000-000000000501",
+        ]),
+    ),
+)
+def test_replay_wide_damage_projection_resolves_every_present_player_in_source_order(
+    feature_factory: sessionmaker[Session],
+    schema_version: int,
+    source_mask: object,
+    source_indices: object,
+    expected_sources: list[str],
+) -> None:
+    target = "00000000-0000-4000-8000-000000000302"
+    peer = "00000000-0000-4000-8000-000000000501"
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=schema_version,
+        payload_json={
+            "source_player_mask": source_mask,
+            "source_player_indices": source_indices,
+            "victim_player_index": 1,
+        },
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: target, 1: peer},
+        {},
+        None,
+        [],
+    )
+    assert facts["source_replay_player_public_ids"] == expected_sources
+    assert facts["victim_replay_player_public_id"] == peer
+
+
+def test_replay_wide_damage_projection_rejects_unknown_schema_contract(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=3,
+        payload_json={"source_player_indices": None, "victim_player_index": None},
+    )
+    with pytest.raises(FeatureExtractionError, match="telemetry damage schema"):
+        FeatureExtractionService(feature_factory)._event_facts(event, {}, {}, None, [])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"object_id": "10", "owner_player_index": 0, "responsible_player_index": 0},
+        {"object_id": 10, "owner_player_index": 99, "responsible_player_index": None},
+        {"object_id": 10, "owner_player_index": 0, "responsible_player_index": True},
+        {"object_id": 10, "owner_player_index": 0, "responsible_player_index": 1},
+    ),
+)
+def test_replay_wide_construction_projection_rejects_malformed_or_ambiguous_owner_identity(
+    feature_factory: sessionmaker[Session], payload: object
+) -> None:
+    event = TelemetryEvent(event_type="construction_completed", schema_version=2, payload_json=payload)
+    with pytest.raises(FeatureExtractionError, match="telemetry construction"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {
+                0: "00000000-0000-4000-8000-000000000302",
+                1: "00000000-0000-4000-8000-000000000501",
+            },
+            {10: ("Structure", "00000000-0000-4000-8000-000000000302", None)},
+            None,
+            [],
+        )
+
+
+def test_replay_wide_construction_projection_rejects_object_outside_selected_entity_graph(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="construction_completed",
+        schema_version=2,
+        payload_json={"object_id": 11, "owner_player_index": 0, "responsible_player_index": None},
+    )
+    with pytest.raises(FeatureExtractionError, match="construction object"):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302"},
+            {10: ("Structure", "00000000-0000-4000-8000-000000000302", None)},
+            None,
+            [],
+        )
+
+
+def test_replay_wide_construction_projection_preserves_explicit_unknown_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    target = "00000000-0000-4000-8000-000000000302"
+    event = TelemetryEvent(
+        event_type="construction_completed",
+        schema_version=2,
+        payload_json={"object_id": 10, "owner_player_index": None, "responsible_player_index": None},
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: target},
+        {10: ("Structure", target, None)},
+        None,
+        [],
+    )
+    assert facts["replay_player_public_id"] is None
+    assert facts["template_name"] == "Structure"
+
+
+def test_replay_wide_construction_projection_resolves_nullable_responsible_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    target = "00000000-0000-4000-8000-000000000302"
+    event = TelemetryEvent(
+        event_type="construction_completed",
+        schema_version=2,
+        payload_json={"object_id": 10, "owner_player_index": 0, "responsible_player_index": None},
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: target},
+        {10: ("Structure", target, None)},
+        None,
+        [],
+    )
+    assert facts["replay_player_public_id"] == target
+
+
+def test_replay_wide_context_rejects_unmapped_persisted_entity_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(
+        feature_factory,
+        entity_owner_player_index=99,
+    )
+    extractor = _context_capture_extractor("replay_wide_telemetry")
+    with pytest.raises(FeatureExtractionError, match="telemetry entity owner mapping"):
+        FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
+            _request(replay, target, "context_capture")
+        )

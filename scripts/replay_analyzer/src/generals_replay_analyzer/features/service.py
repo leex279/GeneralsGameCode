@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import Literal, Protocol, TypeAlias, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import select
@@ -60,6 +60,14 @@ class RegisteredExtractor(Protocol):
     feature_names: tuple[str, ...]
 
     def extract(self, context: FeatureContext) -> FeatureBundle: ...
+
+
+# TheSuperHackers @fix Leex 22/08/2026 Make extractor observation reach an explicit validated service policy. (#TBD)
+ObservationPolicy: TypeAlias = Literal["target_player", "replay_wide_telemetry"]
+
+
+class ExtractorObservationPolicy(Protocol):
+    observation_policy: ObservationPolicy
 
 
 class FeatureExtractionError(RuntimeError):
@@ -164,7 +172,12 @@ class FeatureExtractionService:
         receipts: list[FeatureSetReceipt] = []
         for extractor_name in request.extractor_names:
             extractor = self._extractors[extractor_name]
-            context = self._build_context(request)
+            observation_policy = self._observation_policy(extractor)
+            context = (
+                self._build_context(request)
+                if observation_policy == "target_player"
+                else self._build_context_with_policy(request, observation_policy)
+            )
             digest = input_digest(context)
             key = cache_key(context, extractor.name, extractor.version, registry_schema=self._registry.schema_version)
             hit = self._load_receipt(key, cache_hit=True)
@@ -182,7 +195,20 @@ class FeatureExtractionService:
                 raise FeatureExtractionError("feature extraction failed") from error
         return tuple(receipts)
 
+    @staticmethod
+    def _observation_policy(extractor: RegisteredExtractor) -> ObservationPolicy:
+        provider = cast(ExtractorObservationPolicy, extractor)
+        policy = getattr(provider, "observation_policy", "target_player")
+        if policy not in ("target_player", "replay_wide_telemetry"):
+            raise FeatureExtractionError("invalid extractor observation policy")
+        return cast(ObservationPolicy, policy)
+
     def _build_context(self, request: ExtractFeaturesRequest) -> FeatureContext:
+        return self._build_context_with_policy(request, "target_player")
+
+    def _build_context_with_policy(
+        self, request: ExtractFeaturesRequest, observation_policy: ObservationPolicy
+    ) -> FeatureContext:
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.public_id == request.replay_public_id))
             if replay is None:
@@ -226,7 +252,15 @@ class FeatureExtractionService:
                 observations.extend(self._parser_observations(session, replay, replay_player, parser))
             if telemetry is not None:
                 versions.append(("telemetry", f"{telemetry.schema_version}:{telemetry.run_id}"))
-                observations.extend(self._telemetry_observations(session, replay, replay_player, telemetry))
+                observations.extend(
+                    self._telemetry_observations(
+                        session,
+                        replay,
+                        replay_player,
+                        telemetry,
+                        observation_policy=observation_policy,
+                    )
+                )
             catalog_identity = None
             if telemetry is not None and telemetry.catalog_asset_id is not None:
                 catalog = session.get(ManagedAsset, telemetry.catalog_asset_id)
@@ -288,13 +322,14 @@ class FeatureExtractionService:
         return tuple(observations)
 
     def _telemetry_observations(
-        self, session: Session, replay: Replay, replay_player: ReplayPlayer | None, telemetry: TelemetryRun
+        self,
+        session: Session,
+        replay: Replay,
+        replay_player: ReplayPlayer | None,
+        telemetry: TelemetryRun,
+        *,
+        observation_policy: ObservationPolicy,
     ) -> tuple[ObservedEvidence, ...]:
-        players = {
-            item.player_index: item.public_id
-            for item in session.scalars(select(ReplayPlayer).where(ReplayPlayer.replay_id == replay.id)).all()
-            if item.player_index is not None
-        }
         statement = (
             select(TelemetryEvent, EvidenceItem)
             .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
@@ -309,8 +344,30 @@ class FeatureExtractionService:
                 parser_run_id=None,
                 telemetry_run_id=telemetry.id,
             )
+        requires_exact_player_mapping = observation_policy == "replay_wide_telemetry" or any(
+            event.event_type in ("players_initialized", "entity_sample") for event, _ in event_rows
+        )
+        if requires_exact_player_mapping:
+            players, projected_slots = self._selected_telemetry_players(session, replay, telemetry, event_rows)
+            if replay_player is not None and replay_player.public_id not in players.values():
+                raise FeatureExtractionError("telemetry player mapping does not include the requested parser player")
+        else:
+            players = {
+                item.player_index: item.public_id
+                for item in session.scalars(select(ReplayPlayer).where(ReplayPlayer.replay_id == replay.id)).all()
+                if item.player_index is not None
+            }
+            projected_slots = None
         spatial_projection = self._validated_spatial_projection(session, replay, telemetry, event_rows)
         evidence_by_sequence = {event.sequence: evidence.public_id for event, evidence in event_rows}
+        entity_rows = tuple(
+            session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id)).all()
+        )
+        if projected_slots is not None and any(
+            item.initial_owner_player_index is not None and item.initial_owner_player_index not in players
+            for item in entity_rows
+        ):
+            raise FeatureExtractionError("telemetry entity owner mapping is invalid")
         entities = {
             item.object_id: (
                 item.template_name,
@@ -319,14 +376,18 @@ class FeatureExtractionService:
                 else None,
                 evidence_by_sequence.get(item.creation_sequence) if item.creation_sequence is not None else None,
             )
-            for item in session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id)).all()
+            for item in entity_rows
         }
         observations = []
         for event, evidence in event_rows:
-            facts = self._event_facts(event, players, entities, replay_player)
+            facts = self._event_facts(event, players, entities, replay_player, projected_slots)
             if event.event_type == "manifest" and spatial_projection is not None:
                 facts["validated_spatial_projection"] = spatial_projection
-            if replay_player is not None and not self._belongs_to_player(event.event_type, facts, replay_player.public_id):
+            if (
+                replay_player is not None
+                and observation_policy == "target_player"
+                and not self._belongs_to_player(event.event_type, facts, replay_player.public_id)
+            ):
                 continue
             observations.append(
                 ObservedEvidence(
@@ -343,6 +404,77 @@ class FeatureExtractionService:
                 )
             )
         return tuple(observations)
+
+    # TheSuperHackers @fix Leex 22/08/2026 Resolve engine owners only through the telemetry attempt's selected parser. (#TBD)
+    def _selected_telemetry_players(
+        self,
+        session: Session,
+        replay: Replay,
+        telemetry: TelemetryRun,
+        event_rows: tuple[Row[tuple[TelemetryEvent, EvidenceItem]], ...],
+    ) -> tuple[dict[int, str], list[dict[str, object]]]:
+        parser_run_id = _mapping(telemetry.settings_json).get("parser_run_id")
+        if type(parser_run_id) is not str or not parser_run_id:
+            raise FeatureExtractionError("telemetry player mapping has no selected parser run")
+        selected = session.scalar(
+            select(ParserRun).where(
+                ParserRun.replay_id == replay.id,
+                ParserRun.run_id == parser_run_id,
+                ParserRun.status == "succeeded",
+            )
+        )
+        if selected is None:
+            raise FeatureExtractionError("telemetry player mapping selected parser run is unavailable")
+        rows = tuple(
+            session.scalars(
+                select(ReplayPlayer)
+                .where(ReplayPlayer.parser_run_id == selected.id, ReplayPlayer.replay_id == replay.id)
+                .order_by(ReplayPlayer.slot_index, ReplayPlayer.public_id)
+            ).all()
+        )
+        by_slot = {row.slot_index: row for row in rows}
+        if len(by_slot) != len(rows):
+            raise FeatureExtractionError("telemetry player mapping selected parser slots are ambiguous")
+        initialization_events = [event for event, _ in event_rows if event.event_type == "players_initialized"]
+        if len(initialization_events) != 1:
+            raise FeatureExtractionError("telemetry player mapping initialization evidence is ambiguous")
+        raw_slots = _mapping(initialization_events[0].payload_json).get("slots")
+        if type(raw_slots) is not list:
+            raise FeatureExtractionError("telemetry player mapping initialization slots are invalid")
+        players: dict[int, str] = {}
+        projected_slots: list[dict[str, object]] = []
+        resolved_slots: set[int] = set()
+        for raw_slot in raw_slots:
+            if type(raw_slot) is not dict:
+                raise FeatureExtractionError("telemetry player mapping initialization slots are invalid")
+            slot = cast(dict[str, object], raw_slot)
+            if slot.get("resolution_status") != "resolved":
+                continue
+            slot_index = slot.get("slot_index")
+            player_index = slot.get("player_index")
+            if (
+                type(slot_index) is not int
+                or type(player_index) is not int
+                or slot_index not in by_slot
+            ):
+                raise FeatureExtractionError("telemetry player mapping resolved slot has no selected parser observation")
+            if slot_index in resolved_slots or player_index in players:
+                raise FeatureExtractionError("telemetry player mapping initialization mapping is ambiguous")
+            replay_player_public_id = by_slot[slot_index].public_id
+            resolved_slots.add(slot_index)
+            players[player_index] = replay_player_public_id
+            projected_slots.append(
+                {
+                    "slot_index": slot_index,
+                    "player_index": player_index,
+                    "resolution_status": "resolved",
+                    "owner_scope_key": replay_player_public_id,
+                    "replay_player_public_id": replay_player_public_id,
+                }
+            )
+        if not players:
+            raise FeatureExtractionError("telemetry player mapping has no resolved selected parser slots")
+        return players, sorted(projected_slots, key=lambda item: cast(int, item["slot_index"]))
 
     # TheSuperHackers @fix Leex 22/08/2026 Authorize spatial facts through one exact persisted telemetry identity graph. (#TBD)
     def _validated_spatial_projection(
@@ -540,17 +672,37 @@ class FeatureExtractionService:
         players: Mapping[int, str],
         entities: Mapping[int, tuple[str, str | None, str | None]],
         replay_player: ReplayPlayer | None,
+        projected_slots: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         facts = _mapping(event.payload_json)
         event_type = event.event_type
         player_index = facts.get("player_index")
         if event_type.startswith("construction_"):
-            owner = facts.get("responsible_player_index", facts.get("owner_player_index"))
+            owner_player_index = facts.get("owner_player_index")
+            responsible_player_index = facts.get("responsible_player_index")
             object_id = facts.get("object_id")
+            if projected_slots is not None and event_type == "construction_completed":
+                if type(object_id) is not int or object_id < 0:
+                    raise FeatureExtractionError("telemetry construction object identity is invalid")
+                if object_id not in entities:
+                    raise FeatureExtractionError("telemetry construction object identity is unknown")
+                for owner_value in (owner_player_index, responsible_player_index):
+                    if owner_value is not None and (type(owner_value) is not int or owner_value not in players):
+                        raise FeatureExtractionError("telemetry construction owner mapping is invalid")
+                if (
+                    owner_player_index is not None
+                    and responsible_player_index is not None
+                    and owner_player_index != responsible_player_index
+                ):
+                    raise FeatureExtractionError("telemetry construction owner identity is ambiguous")
+                owner = responsible_player_index if responsible_player_index is not None else owner_player_index
+                owner_public_id = players[cast(int, owner)] if owner is not None else None
+            else:
+                owner = facts.get("responsible_player_index", owner_player_index)
+                entity_owner = entities.get(object_id) if type(object_id) is int else None
+                owner_public_id = players.get(owner) if type(owner) is int else None if entity_owner is None else entity_owner[1]
             entity = entities.get(object_id) if type(object_id) is int else None
-            facts["replay_player_public_id"] = (
-                players.get(owner) if type(owner) is int else None if entity is None else entity[1]
-            )
+            facts["replay_player_public_id"] = owner_public_id
             facts.pop("template_name", None)
             if entity is not None:
                 facts["template_name"] = entity[0]
@@ -573,22 +725,87 @@ class FeatureExtractionService:
                 facts["item_name"] = facts.get("upgrade_name")
                 facts["production_identity"] = f"upgrade:{facts.get('upgrade_queue_id', facts.get('upgrade_name'))}"
         elif event_type in ("cash_changed", "supply_collected"):
+            if projected_slots is not None and (type(player_index) is not int or player_index not in players):
+                raise FeatureExtractionError("telemetry economy owner mapping is invalid")
+            if projected_slots is not None and event_type == "supply_collected":
+                source_object_id = facts.get("source_object_id")
+                if source_object_id is not None and (
+                    type(source_object_id) is not int or source_object_id < 0 or source_object_id not in entities
+                ):
+                    raise FeatureExtractionError("telemetry supply source object identity is invalid")
             facts["replay_player_public_id"] = players.get(player_index) if type(player_index) is int else None
         elif event_type == "damage_applied":
+            source_mask = facts.get("source_player_mask")
             source_indices = facts.get("source_player_indices")
-            facts["source_replay_player_public_ids"] = [
-                players[index]
-                for index in cast(list[object], source_indices or [])
-                if type(index) is int and index in players
-            ]
             victim = facts.get("victim_player_index")
-            facts["victim_replay_player_public_id"] = players.get(victim) if type(victim) is int else None
+            if projected_slots is not None:
+                if event.schema_version not in (1, 2):
+                    raise FeatureExtractionError("telemetry damage schema is unsupported")
+                if event.schema_version == 2:
+                    if type(source_mask) is not int or not 0 <= source_mask <= 0xFFFFFFFF:
+                        raise FeatureExtractionError("telemetry damage source player mask is invalid")
+                    if type(source_indices) is not list:
+                        raise FeatureExtractionError("telemetry damage source player mapping is invalid")
+                elif source_mask is not None and (
+                    type(source_mask) is not int or not 0 <= source_mask <= 0xFFFFFFFF
+                ):
+                    raise FeatureExtractionError("telemetry damage source player mask is invalid")
+                if source_indices is None:
+                    resolved_source_indices: list[int] = []
+                elif type(source_indices) is not list:
+                    raise FeatureExtractionError("telemetry damage source player mapping is invalid")
+                else:
+                    raw_source_indices = cast(list[object], source_indices)
+                    if (
+                        any(
+                            type(index) is not int
+                            or index < 0
+                            or (event.schema_version == 2 and index > 31)
+                            or index not in players
+                            for index in raw_source_indices
+                        )
+                        or raw_source_indices != sorted(set(cast(list[int], raw_source_indices)))
+                    ):
+                        raise FeatureExtractionError("telemetry damage source player mapping is invalid")
+                    resolved_source_indices = cast(list[int], raw_source_indices)
+                if event.schema_version == 2 and cast(int, source_mask) != sum(
+                    1 << index for index in resolved_source_indices
+                ):
+                    raise FeatureExtractionError("telemetry damage source player mask is inconsistent")
+                if victim is not None and (type(victim) is not int or victim < 0 or victim not in players):
+                    raise FeatureExtractionError("telemetry damage victim player mapping is invalid")
+                facts["source_replay_player_public_ids"] = [players[index] for index in resolved_source_indices]
+                facts["victim_replay_player_public_id"] = players.get(victim) if victim is not None else None
+            else:
+                facts["source_replay_player_public_ids"] = [
+                    players[index]
+                    for index in cast(list[object], source_indices or [])
+                    if type(index) is int and index in players
+                ]
+                facts["victim_replay_player_public_id"] = players.get(victim) if type(victim) is int else None
         elif event_type == "order_issued":
             source = facts.get("source_player_index")
             facts["source_replay_player_public_id"] = players.get(source) if type(source) is int else None
         elif event_type == "entity_state_changed":
             owner = facts.get("owner_player_index")
             facts["replay_player_public_id"] = players.get(owner) if type(owner) is int else None
+        elif event_type == "entity_sample":
+            object_id = facts.get("object_id")
+            owner = facts.get("owner_player_index")
+            if type(object_id) is not int or object_id < 0:
+                raise FeatureExtractionError("telemetry entity sample object identity is invalid")
+            if projected_slots is not None and object_id not in entities:
+                raise FeatureExtractionError("telemetry entity sample object identity is unknown")
+            if owner is not None and (type(owner) is not int or owner not in players):
+                raise FeatureExtractionError("telemetry entity sample owner mapping is invalid")
+            owner_public_id = players.get(owner) if owner is not None else None
+            facts["object_key"] = f"object:{object_id}"
+            facts["owner_scope_key"] = owner_public_id
+            facts["replay_player_public_id"] = owner_public_id
+        elif event_type == "players_initialized":
+            if projected_slots is None:
+                raise FeatureExtractionError("telemetry player mapping initialization projection is unavailable")
+            facts = {"slots": projected_slots}
         elif event_type == "manifest":
             exporter_settings = _mapping(facts.get("exporter_settings"))
             catalog_value = facts.get("game_data_catalog")
@@ -653,7 +870,17 @@ class FeatureExtractionService:
     ) -> tuple[FeatureValue, ...]:
         if bundle.extractor_name != extractor.name or bundle.extractor_version != extractor.version:
             raise FeatureExtractionError("extractor bundle identity mismatch")
-        if tuple(sorted(value.name for value in bundle.values)) != tuple(sorted(extractor.feature_names)):
+        try:
+            expected_names = tuple(
+                sorted(
+                    name
+                    for name in extractor.feature_names
+                    if context.scope.scope_type in self._registry.definition(name).scope_types
+                )
+            )
+        except KeyError as error:
+            raise FeatureExtractionError("extractor owns an unregistered feature") from error
+        if tuple(sorted(value.name for value in bundle.values)) != expected_names:
             raise FeatureExtractionError("extractor must emit each owned feature exactly once")
         values = tuple(validate_feature_value(value, self._registry) for value in bundle.values)
         identities = {
