@@ -152,6 +152,14 @@ class StructuredRequest:
     response_schema: ResponseSchemaResource
     evidence_bundle: EvidenceBundle
     options: GenerationOptions = field(default_factory=GenerationOptions)
+    repair_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.repair_error_code is not None and (
+            type(self.repair_error_code) is not str
+            or re.fullmatch(r"[a-z0-9_]{1,64}", self.repair_error_code) is None
+        ):
+            raise ValueError("repair error code must be a closed diagnostic token")
 
 
 @dataclass(frozen=True)

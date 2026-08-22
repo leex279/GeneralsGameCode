@@ -30,14 +30,28 @@ from generals_replay_analyzer.llm.schema import (
     load_response_schema,
     validate_response,
 )
+from generals_replay_analyzer.llm.service import (
+    AnalysisOutcome,
+    AnalysisRequest,
+    DeterministicFallback,
+    FallbackClaim,
+    HttpxOllamaTransport,
+    OllamaAnalysisService,
+)
 
 __all__ = [
+    "AnalysisOutcome",
+    "AnalysisRequest",
     "CancellationSignal",
+    "DeterministicFallback",
     "EvidenceBundle",
     "EvidenceBundleError",
     "EvidenceClaim",
+    "FallbackClaim",
     "GenerationOptions",
+    "HttpxOllamaTransport",
     "ModelIdentity",
+    "OllamaAnalysisService",
     "OllamaClientConfig",
     "OllamaProvider",
     "OllamaTransport",

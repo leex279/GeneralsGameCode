@@ -7,6 +7,7 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "alembic>=1.16,<2",
     "fastapi>=0.116,<1",
+    "httpx>=0.28,<1",
     "jinja2>=3.1,<4",
     "jsonschema>=4.25,<5",
     "numpy>=2.2,<2.5",
@@ -48,6 +49,8 @@ exclude = [
 "src/generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py" = "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py"
 "src/generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py" = "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py"
 "src/generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py" = "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py"
+"src/generals_replay_analyzer/data/strategy-report-v1.txt" = "generals_replay_analyzer/data/strategy-report-v1.txt"
+"src/generals_replay_analyzer/data/strategy-report-response-v1.schema.json" = "generals_replay_analyzer/data/strategy-report-response-v1.schema.json"
 "src/generals_replay_analyzer/web/templates/base.html" = "generals_replay_analyzer/web/templates/base.html"
 "src/generals_replay_analyzer/web/templates/dashboard.html" = "generals_replay_analyzer/web/templates/dashboard.html"
 "src/generals_replay_analyzer/web/templates/identity/landing.html" = "generals_replay_analyzer/web/templates/identity/landing.html"
@@ -93,4 +96,5 @@ files = ["src"]
 pythonpath = ["tests"]
 markers = [
     "engine: launches the modern Zero Hour executable for authoritative parser parity",
+    "ollama: opt-in live loopback Ollama integration",
 ]

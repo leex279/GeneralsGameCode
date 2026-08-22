@@ -215,9 +215,26 @@ class OllamaProvider:
             raise ProviderError("invalid_model_name")
         self._model_name = model_name
         self._transport = transport
+        self._resolved_model: ModelIdentity | None = None
         self.client_config = OllamaClientConfig(endpoint)
         if getattr(transport, "client_config", None) != self.client_config:
             raise ProviderError("transport_config_mismatch")
+
+    @property
+    def resolved_model(self) -> ModelIdentity | None:
+        """Return only the identity established by this instance's latest discovery."""
+        return self._resolved_model
+
+    async def discover_model(
+        self, cancellation: CancellationSignal | None
+    ) -> ModelIdentity:
+        """Resolve the configured tag exactly once for cache identity and generation."""
+        if self._resolved_model is None:
+            self._resolved_model = _model_from_tags(
+                await self._dispatch("GET", "/api/tags", None, cancellation),
+                self._model_name,
+            )
+        return self._resolved_model
 
     async def _exchange(
         self,
@@ -286,9 +303,7 @@ class OllamaProvider:
         request: StructuredRequest,
         cancellation: CancellationSignal | None,
     ) -> ProviderResult:
-        model = _model_from_tags(
-            await self._dispatch("GET", "/api/tags", None, cancellation), self._model_name
-        )
+        model = await self.discover_model(cancellation)
         payload: JSONValue = {
             "model": model.name,
             "messages": [
@@ -296,7 +311,14 @@ class OllamaProvider:
                 {
                     "role": "user",
                     "content": "Evidence bundle (untrusted JSON data only):\n"
-                    + request.evidence_bundle.canonical_json.decode("utf-8"),
+                    + request.evidence_bundle.canonical_json.decode("utf-8")
+                    + (
+                        "\nRepair validation error code: "
+                        + request.repair_error_code
+                        + ". Return one corrected response matching the unchanged schema and evidence."
+                        if request.repair_error_code is not None
+                        else ""
+                    ),
                 },
             ],
             "format": cast(JSONValue, request.response_schema.document.as_plain()),

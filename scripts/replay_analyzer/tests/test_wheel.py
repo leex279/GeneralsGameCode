@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import textwrap
 import tomllib
 import zipfile
@@ -23,6 +24,10 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py",
     "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py",
     "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py",
+}
+LLM_RESOURCES = {
+    "generals_replay_analyzer/data/strategy-report-v1.txt",
+    "generals_replay_analyzer/data/strategy-report-response-v1.schema.json",
 }
 WEB_BOUNDARY_RESOURCES = {
     "generals_replay_analyzer/web/app.py",
@@ -83,7 +88,9 @@ def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_r
         "generals_replay_analyzer/web/presentation/shell.py",
     }
     assert all(Path(source).suffix for source in force_include)
-    assert not any("*" in source or ".task" in source or "cache" in source or "secret" in source for source in force_include)
+    assert not any(
+        "*" in source or ".task" in source or "cache" in source or "secret" in source for source in force_include
+    )
 
 
 def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path: Path) -> None:
@@ -100,9 +107,7 @@ def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path
             web_resources = {
                 name
                 for name in archive.namelist()
-                if name.startswith(
-                    ("generals_replay_analyzer/web/templates/", "generals_replay_analyzer/web/static/")
-                )
+                if name.startswith(("generals_replay_analyzer/web/templates/", "generals_replay_analyzer/web/static/"))
             }
             assert web_resources == WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES - {
                 "generals_replay_analyzer/web/presentation/__init__.py",
@@ -129,9 +134,9 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
     wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        assert MIGRATION_RESOURCES <= set(archive.namelist())
+        assert MIGRATION_RESOURCES | LLM_RESOURCES <= set(archive.namelist())
         assert WEB_BOUNDARY_RESOURCES <= set(archive.namelist())
-        for resource in MIGRATION_RESOURCES:
+        for resource in MIGRATION_RESOURCES | LLM_RESOURCES:
             assert archive.read(resource) == _source_resource(resource).read_bytes()
 
     environment_directory = tmp_path / "migration-wheel-environment"
@@ -141,6 +146,7 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     database_path = tmp_path / "wheel-library.sqlite3"
     migration_script = textwrap.dedent(
         """
+        import hashlib
         import os
         import sqlite3
         from pathlib import Path
@@ -148,12 +154,23 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
         import generals_replay_analyzer
         from generals_replay_analyzer.db import downgrade_database, upgrade_database
         from generals_replay_analyzer.importing.job_contracts import JobState, WorkerLeaseDTO
+        from generals_replay_analyzer.llm import (
+            AnalysisOutcome,
+            AnalysisRequest,
+            DeterministicFallback,
+            HttpxOllamaTransport,
+            OllamaAnalysisService,
+        )
+        from generals_replay_analyzer.llm.schema import load_prompt, load_response_schema
         from generals_replay_analyzer.web.resources import PackagedResourceError, package_resource
 
         database = Path(os.environ["TEST_DATABASE_PATH"])
         assert "migration-wheel-environment" in str(generals_replay_analyzer.__file__)
         assert tuple(state.value for state in JobState) == ("pending", "running", "succeeded", "failed", "cancelled")
         assert WorkerLeaseDTO.__module__ == "generals_replay_analyzer.importing.job_contracts"
+        assert all((AnalysisOutcome, AnalysisRequest, DeterministicFallback, HttpxOllamaTransport, OllamaAnalysisService))
+        assert hashlib.sha256(load_prompt().content).hexdigest() == os.environ["TEST_PROMPT_SHA256"]
+        assert hashlib.sha256(load_response_schema().content).hexdigest() == os.environ["TEST_RESPONSE_SCHEMA_SHA256"]
         assert package_resource("db/migrations/env.py").is_file()
         try:
             package_resource("web/templates/not-created-by-task-1.html")
@@ -164,6 +181,15 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004_job_lifecycle",)
+            assert {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(job_log_snapshots)").fetchall()
+            } >= {
+                "byte_count",
+                "integrity_version",
+                "integrity_root_sha256",
+                "integrity_chunk_size",
+            }
             assert connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'player_identity_operations'"
             ).fetchone() == ("player_identity_operations",)
@@ -185,7 +211,13 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     )
     environment = os.environ.copy()
     environment["TEST_DATABASE_PATH"] = str(database_path)
-    environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
+    environment["TEST_PROMPT_SHA256"] = hashlib.sha256(
+        _source_resource("generals_replay_analyzer/data/strategy-report-v1.txt").read_bytes()
+    ).hexdigest()
+    environment["TEST_RESPONSE_SCHEMA_SHA256"] = hashlib.sha256(
+        _source_resource("generals_replay_analyzer/data/strategy-report-response-v1.schema.json").read_bytes()
+    ).hexdigest()
+    environment["PYTHONPATH"] = str(Path(sysconfig.get_paths()["purelib"]))
     result = _run([str(environment_python), "-c", migration_script], tmp_path, environment)
     assert result.returncode == 0
 
