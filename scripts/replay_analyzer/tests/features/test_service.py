@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -15,19 +16,33 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.db.models import (
+    Entity,
     EvidenceItem,
     Feature,
     FeatureEvidence,
     FeatureSet,
     ParserRun,
     Replay,
+    ReplayCommand,
     ReplayPlayer,
     TelemetryEvent,
     TelemetryRun,
 )
-from generals_replay_analyzer.features.base import FeatureBundle, FeatureScope, FeatureValue, FeatureWindow
+from generals_replay_analyzer.features.base import (
+    FeatureBundle,
+    FeatureScope,
+    FeatureValue,
+    FeatureWindow,
+    validate_feature_value,
+)
 from generals_replay_analyzer.features.build_order import BuildOrderExtractor
-from generals_replay_analyzer.features.evidence import EvidenceRef
+from generals_replay_analyzer.features.context import FeatureContext, cache_key, canonical_json, input_digest
+from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence, thaw_canonical
+from generals_replay_analyzer.features.registry import (
+    REGISTRY_SCHEMA,
+    FeatureDefinition,
+    FeatureRegistry,
+)
 from generals_replay_analyzer.features.service import (
     ExtractFeaturesRequest,
     FeatureExtractionError,
@@ -65,9 +80,14 @@ def _seed_replay(
     player_index = 0
     events = (
         (
+            10,
+            "object_created",
+            {"object_id": 7, "owner_player_index": player_index, "template_name": "FabricatedObjectTemplate"},
+        ),
+        (
             20,
             "construction_completed",
-            {"object_id": 7, "owner_player_index": player_index, "template_name": "ChinaPowerPlant"},
+            {"object_id": 7, "owner_player_index": player_index, "template_name": "FabricatedCompletionTemplate"},
         ),
         (
             120,
@@ -138,6 +158,20 @@ def _seed_replay(
         )
         session.add(telemetry)
         session.flush()
+        session.add(
+            Entity(
+                public_id=str(uuid5(NAMESPACE_URL, f"{telemetry_run_id}:entity:7")),
+                telemetry_run_id=telemetry.id,
+                replay_id=replay.id,
+                object_id=7,
+                template_name="ChinaPowerPlant",
+                initial_owner_player_index=player_index,
+                kind_of_flags_json=["STRUCTURE"],
+                creation_sequence=0,
+                creation_frame=10,
+                observed_json={"source": "object_created"},
+            )
+        )
         evidence_ids: list[str] = []
         for sequence, (frame, event_type, payload) in enumerate(events):
             public_id = str(uuid5(NAMESPACE_URL, f"{telemetry_run_id}:{sequence}"))
@@ -167,6 +201,50 @@ def _seed_replay(
                 )
             )
             evidence_ids.append(public_id)
+        parser_evidence_public_id = str(uuid5(NAMESPACE_URL, f"{parser_run_id}:command:0"))
+        parser_evidence = EvidenceItem(
+            public_id=parser_evidence_public_id,
+            replay_id=replay.id,
+            parser_run_id=parser.id,
+            tier="observed",
+            source_kind="parser",
+            source_key=f"parser:{parser_run_id}:command:0",
+            schema_version=1,
+            created_at=now,
+        )
+        session.add(parser_evidence)
+        session.flush()
+        session.add(
+            ReplayCommand(
+                parser_run_id=parser.id,
+                replay_id=replay.id,
+                replay_player_id=replay_player.id,
+                command_index=0,
+                frame=5,
+                player_index=player_index,
+                message_type=1074,
+                message_name="MSG_DO_STOP",
+                start_offset=1,
+                end_offset=2,
+                arguments_json=[],
+                evidence_item_id=parser_evidence.id,
+            )
+        )
+        evidence_ids.append(parser_evidence_public_id)
+        orphan_public_id = str(uuid5(NAMESPACE_URL, f"{telemetry_run_id}:orphan"))
+        session.add(
+            EvidenceItem(
+                public_id=orphan_public_id,
+                replay_id=replay.id,
+                telemetry_run_id=telemetry.id,
+                tier="observed",
+                source_kind="telemetry",
+                source_key=f"telemetry:{telemetry_run_id}:orphan",
+                schema_version=2,
+                created_at=now,
+            )
+        )
+        evidence_ids.append(orphan_public_id)
         session.commit()
         parser.status = "succeeded"
         parser.completion_status = "complete"
@@ -208,6 +286,84 @@ def test_service_reuses_immutable_success_and_persists_direct_same_replay_links(
         replay_id = session.scalar(select(Replay.id).where(Replay.public_id == replay))
         assert {public_id for public_id, _ in linked} <= set(evidence_ids)
         assert all(link_replay_id == replay_id for _, link_replay_id in linked)
+
+
+def test_build_template_uses_and_links_authoritative_object_creation_evidence(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    receipt = FeatureExtractionService(feature_factory).extract(_request(replay, player, "build"))[0]
+    sequence = next(value for value in receipt.features if value.name == "build.completed_sequence")
+    assert sequence.raw_value == ((("frame", 20), ("template_name", "ChinaPowerPlant")),)
+    assert {ref.source_key for ref in sequence.input_evidence} == {
+        "telemetry:00000000-0000-4000-8000-000000000304:sequence:0",
+        "telemetry:00000000-0000-4000-8000-000000000304:sequence:1",
+    }
+    with feature_factory() as session:
+        persisted = session.scalar(select(Feature).where(Feature.name == "build.completed_sequence"))
+        assert persisted is not None and persisted.json_value == [{"frame": 20, "template_name": "ChinaPowerPlant"}]
+        linked = session.scalars(
+            select(EvidenceItem.source_key)
+            .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
+            .where(FeatureEvidence.feature_id == persisted.id)
+        ).all()
+        assert set(linked) == {
+            "telemetry:00000000-0000-4000-8000-000000000304:sequence:0",
+            "telemetry:00000000-0000-4000-8000-000000000304:sequence:1",
+        }
+
+
+@pytest.mark.parametrize("source_kind", ["parser", "telemetry"])
+@pytest.mark.parametrize("defect", ["tier", "replay", "run"])
+def test_context_boundary_rejects_malformed_persisted_evidence_links(
+    feature_factory: sessionmaker[Session],
+    feature_engine: Engine,
+    source_kind: str,
+    defect: str,
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    other_replay, _, _ = _seed_replay(
+        feature_factory,
+        replay_public_id="00000000-0000-4000-8000-000000000311",
+        replay_sha256="d" * 64,
+        replay_player_public_id="00000000-0000-4000-8000-000000000312",
+        parser_run_id="00000000-0000-4000-8000-000000000313",
+        telemetry_run_id="00000000-0000-4000-8000-000000000314",
+    )
+    with feature_engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER trg_evidence_items_observed_no_update"))
+        evidence_id = connection.execute(
+            text(
+                "SELECT id FROM evidence_items WHERE source_kind = :source_kind AND replay_id = "
+                "(SELECT id FROM replays WHERE public_id = :replay) ORDER BY id LIMIT 1"
+            ),
+            {"source_kind": source_kind, "replay": replay},
+        ).scalar_one()
+        if defect == "tier":
+            connection.execute(
+                text("UPDATE evidence_items SET tier = 'derived' WHERE id = :id"), {"id": evidence_id}
+            )
+        elif defect == "replay":
+            connection.execute(
+                text(
+                    "UPDATE evidence_items SET replay_id = (SELECT id FROM replays WHERE public_id = :other) "
+                    "WHERE id = :id"
+                ),
+                {"other": other_replay, "id": evidence_id},
+            )
+        else:
+            run_column = "parser_run_id" if source_kind == "parser" else "telemetry_run_id"
+            run_table = "parser_runs" if source_kind == "parser" else "telemetry_runs"
+            connection.execute(
+                text(
+                    f"UPDATE evidence_items SET {run_column} = "
+                    f"(SELECT id FROM {run_table} WHERE replay_id = "
+                    "(SELECT id FROM replays WHERE public_id = :other)) WHERE id = :id"
+                ),
+                {"other": other_replay, "id": evidence_id},
+            )
+    with pytest.raises(FeatureExtractionError, match="malformed persisted evidence"):
+        FeatureExtractionService(feature_factory).extract(_request(replay, player, "build"))
 
 
 def test_cache_changes_for_settings_and_extractor_version_without_mutating_old_sets(
@@ -317,23 +473,285 @@ def test_cross_replay_or_inferred_input_is_rejected_without_persisted_children(
         assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
 
 
-def test_one_hundred_request_permutations_have_stable_receipt_order_and_raw_values(
+@pytest.mark.parametrize("source", ["absent_context", "other_run"])
+def test_persistence_rejects_same_replay_evidence_not_authorized_by_exact_context(
+    feature_factory: sessionmaker[Session],
+    source: str,
+) -> None:
+    replay, player, evidence_ids = _seed_replay(feature_factory)
+    with feature_factory() as session:
+        replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
+        assert replay_row is not None
+        if source == "absent_context":
+            evidence = session.scalar(select(EvidenceItem).where(EvidenceItem.public_id == evidence_ids[-1]))
+        else:
+            run = TelemetryRun(
+                run_id="00000000-0000-4000-8000-000000000318",
+                replay_id=replay_row.id,
+                schema_version=2,
+                engine_build="fixture-other",
+                settings_json={},
+                status="failed",
+                runner_status="failed",
+                diagnostics_json={},
+                started_at=datetime(2026, 8, 22, tzinfo=UTC),
+                completed_at=datetime(2026, 8, 22, tzinfo=UTC),
+            )
+            session.add(run)
+            session.flush()
+            evidence = EvidenceItem(
+                public_id="00000000-0000-4000-8000-000000000319",
+                replay_id=replay_row.id,
+                telemetry_run_id=run.id,
+                tier="observed",
+                source_kind="telemetry",
+                source_key="telemetry:other-run:orphan",
+                schema_version=2,
+                created_at=datetime(2026, 8, 22, tzinfo=UTC),
+            )
+            session.add(evidence)
+            session.commit()
+        assert evidence is not None
+        ref = EvidenceRef(
+            evidence.public_id,
+            "observed",
+            evidence.source_kind,
+            evidence.source_key,
+            f"{evidence.source_kind}-v{evidence.schema_version}",
+        )
+
+    class DefectiveExtractor:
+        name = "defective"
+        version = "defective-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, context: object) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        FeatureScope("player", player, player),
+                        FeatureWindow(0, 120),
+                        "complete",
+                        None,
+                        (ref,),
+                    ),
+                ),
+            )
+
+    with pytest.raises(FeatureExtractionError, match="feature persistence failed") as caught:
+        FeatureExtractionService(feature_factory, extractors=(DefectiveExtractor(),)).extract(
+            _request(replay, player, "defective")
+        )
+    assert caught.value.__cause__ is not None
+    assert str(caught.value.__cause__) == "feature evidence is not authorized by exact feature context"
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Feature)) == 0
+        assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
+
+
+def _permuted_json(value: object, randomizer: random.Random) -> object:
+    if isinstance(value, dict):
+        items = list(value.items())
+        randomizer.shuffle(items)
+        return {key: _permuted_json(item, randomizer) for key, item in items}
+    if isinstance(value, list):
+        return [_permuted_json(item, randomizer) for item in value]
+    return value
+
+
+def test_one_hundred_semantic_permutations_have_identical_context_cache_receipt_and_persistence(
     feature_factory: sessionmaker[Session],
 ) -> None:
     replay, player, _ = _seed_replay(feature_factory)
-    service = FeatureExtractionService(feature_factory)
-    expected: tuple[tuple[str, tuple[tuple[str, object], ...]], ...] | None = None
+    base_service = FeatureExtractionService(feature_factory)
+    base = base_service._build_context(_request(replay, player, "build"))
     randomizer = random.Random(0x6A11CE)
+    contexts: list[FeatureContext] = []
+    evidence_link_orders: list[tuple[EvidenceRef, ...]] = []
     for _ in range(100):
-        names = ["build", "activity"]
-        randomizer.shuffle(names)
-        receipts = service.extract(_request(replay, player, *names, settings={"b": 2, "a": 1}))
-        actual = tuple(
-            (receipt.extractor_name, tuple((value.name, value.raw_value) for value in receipt.features))
-            for receipt in receipts
+        observed_items = [
+            ObservedEvidence(
+                item.ref,
+                item.frame,
+                item.event_type,
+                _permuted_json(thaw_canonical(item.facts), randomizer),
+            )
+            for item in base.observed
+        ]
+        randomizer.shuffle(observed_items)
+        link_order = [item.ref for item in observed_items]
+        randomizer.shuffle(link_order)
+        evidence_link_orders.append(tuple(link_order))
+        settings_items = [("alpha", {"x": 1, "y": 2}), ("beta", [3, 2, 1]), ("gamma", True)]
+        randomizer.shuffle(settings_items)
+        contexts.append(
+            replace(
+                base,
+                observed=tuple(observed_items),
+                settings=_permuted_json(dict(settings_items), randomizer),
+            )
         )
-        expected = actual if expected is None else expected
-        assert actual == expected
+    expected_json = canonical_json(contexts[0])
+    expected_digest = input_digest(contexts[0])
+    expected_key = cache_key(contexts[0], "permutation", "permutation-v1")
+    assert all(canonical_json(context) == expected_json for context in contexts)
+    assert all(input_digest(context) == expected_digest for context in contexts)
+    assert all(cache_key(context, "permutation", "permutation-v1") == expected_key for context in contexts)
+
+    class PermutationExtractor:
+        name = "permutation"
+        version = "permutation-v1"
+        feature_names = ("build.completed_count",)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            refs = [item.ref for item in context.observed]
+            random.Random(self.calls).shuffle(refs)
+            self.calls += 1
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        len(context.observed),
+                        "count",
+                        context.scope,
+                        FeatureWindow(0, context.final_frame or 0),
+                        "complete",
+                        None,
+                        tuple(refs),
+                    ),
+                ),
+            )
+
+    class PermutedContextService(FeatureExtractionService):
+        def __init__(self, contexts: list[FeatureContext], extractor: PermutationExtractor) -> None:
+            super().__init__(feature_factory, extractors=(extractor,))
+            self._contexts = iter(contexts)
+
+        def _build_context(self, request: ExtractFeaturesRequest) -> FeatureContext:
+            return next(self._contexts)
+
+    extractor = PermutationExtractor()
+    service = PermutedContextService(contexts, extractor)
+    receipts = [service.extract(_request(replay, player, "permutation"))[0] for _ in range(100)]
+    expected_receipt = (
+        receipts[0].feature_set_public_id,
+        receipts[0].input_digest,
+        receipts[0].cache_key,
+        receipts[0].features,
+    )
+    assert all(
+        (receipt.feature_set_public_id, receipt.input_digest, receipt.cache_key, receipt.features) == expected_receipt
+        for receipt in receipts
+    )
+    assert extractor.calls == 1
+    for link_order in evidence_link_orders:
+        validated = validate_feature_value(
+            replace(receipts[0].features[0], input_evidence=link_order),
+            service._registry,
+        )
+        assert validated.input_evidence == receipts[0].features[0].input_evidence
+    with feature_factory() as session:
+        persisted = session.scalar(select(Feature).where(Feature.name == "build.completed_count"))
+        assert persisted is not None and persisted.integer_value == len(base.observed)
+        links = session.scalars(
+            select(EvidenceItem.public_id)
+            .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
+            .where(FeatureEvidence.feature_id == persisted.id)
+            .order_by(EvidenceItem.source_kind, EvidenceItem.source_key, EvidenceItem.public_id)
+        ).all()
+        assert tuple(links) == tuple(ref.public_id for ref in receipts[0].features[0].input_evidence)
+
+
+def test_service_cache_invalidates_for_observed_fact_scope_catalog_and_schema_identity(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    base = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+    first_observation = base.observed[0]
+    changed_facts = replace(
+        first_observation,
+        facts={
+            **cast(dict[str, object], thaw_canonical(first_observation.facts)),
+            "semantic_change": "observed",
+        },
+    )
+    variants = [
+        base,
+        replace(base, observed=(changed_facts,) + base.observed[1:]),
+        replace(
+            base,
+            replay_player_public_id=None,
+            scope=FeatureScope("replay", base.replay_public_id),
+        ),
+        replace(base, catalog_identity="f" * 64),
+        replace(base, observation_schema_versions=(("parser", "1:changed"), ("telemetry", "2:changed"))),
+    ]
+    registry = FeatureRegistry(
+        REGISTRY_SCHEMA,
+        (
+            FeatureDefinition(
+                "build.completed_count",
+                "integer",
+                "count",
+                ("player", "replay"),
+                "inclusive",
+                "observed",
+                "build",
+            ),
+        ),
+    )
+
+    class InvalidationExtractor:
+        name = "invalidation"
+        version = "invalidation-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        len(context.observed),
+                        "count",
+                        context.scope,
+                        FeatureWindow(0, context.final_frame or 0),
+                        "complete",
+                        None,
+                        (context.observed[0].ref,),
+                    ),
+                ),
+            )
+
+    class VariantService(FeatureExtractionService):
+        def __init__(self) -> None:
+            super().__init__(feature_factory, extractors=(InvalidationExtractor(),), registry=registry)
+            self._variants = iter(variants)
+
+        def _build_context(self, request: ExtractFeaturesRequest) -> FeatureContext:
+            return next(self._variants)
+
+    service = VariantService()
+    receipts = [service.extract(_request(replay, player, "invalidation"))[0] for _ in variants]
+    assert len({receipt.input_digest for receipt in receipts}) == len(variants)
+    assert len({receipt.cache_key for receipt in receipts}) == len(variants)
+    assert all(receipt.cache_hit is False for receipt in receipts)
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(FeatureSet).where(FeatureSet.status == "succeeded")) == 5
 
 
 def test_service_rejects_unknown_identity_extractor_and_duplicate_configuration(

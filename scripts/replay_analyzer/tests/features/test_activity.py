@@ -5,7 +5,40 @@ from collections.abc import Callable
 from generals_replay_analyzer.features.activity import ActivityExtractor
 from generals_replay_analyzer.features.context import FeatureContext
 from generals_replay_analyzer.features.evidence import ObservedEvidence, thaw_canonical
-from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
+
+EXPECTED_ORDER_COVERAGE = {
+    "coverage": "closed_supported_subset",
+    "dispatch_seam": "GameLogic::logicMessageDispatcher_post_resolution",
+    "command_frame_source": "GameLogic::getFrame",
+    "source_player_policy": "message_player_resolved_to_engine_player",
+    "selected_reference_policy": "current_live_post_dispatch_source_order",
+    "target_reference_policy": "current_live_post_dispatch",
+    "historical_provenance_policy": "order_facts_remain_historical_after_entity_destruction",
+    "sample_order_reference_policy": "last_supported_post_dispatch_order_not_execution_state",
+    "supported_commands": [
+        {"message_type": 1056, "message_name": "MSG_COMBATDROP_AT_LOCATION", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1057, "message_name": "MSG_COMBATDROP_AT_OBJECT", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1059, "message_name": "MSG_DO_ATTACK_OBJECT", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1060, "message_name": "MSG_DO_FORCE_ATTACK_OBJECT", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1061, "message_name": "MSG_DO_FORCE_ATTACK_GROUND", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1062, "message_name": "MSG_GET_REPAIRED", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1063, "message_name": "MSG_GET_HEALED", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1064, "message_name": "MSG_DO_REPAIR", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1065, "message_name": "MSG_RESUME_CONSTRUCTION", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1066, "message_name": "MSG_ENTER", "target_kind": "object", "target_argument_index": 1},
+        {"message_type": 1067, "message_name": "MSG_DOCK", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1068, "message_name": "MSG_DO_MOVETO", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1069, "message_name": "MSG_DO_ATTACKMOVETO", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1070, "message_name": "MSG_DO_FORCEMOVETO", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1071, "message_name": "MSG_ADD_WAYPOINT", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1072, "message_name": "MSG_DO_GUARD_POSITION", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1073, "message_name": "MSG_DO_GUARD_OBJECT", "target_kind": "object", "target_argument_index": 0},
+        {"message_type": 1074, "message_name": "MSG_DO_STOP", "target_kind": "none", "target_argument_index": None},
+        {"message_type": 1075, "message_name": "MSG_DO_SCATTER", "target_kind": "none", "target_argument_index": None},
+        {"message_type": 1087, "message_name": "MSG_DO_SALVAGE", "target_kind": "location", "target_argument_index": 0},
+        {"message_type": 1094, "message_name": "MSG_CREATE_FORMATION", "target_kind": "none", "target_argument_index": None},
+    ],
+}
 
 
 def _values(context: FeatureContext) -> dict[str, object]:
@@ -62,7 +95,7 @@ def test_activity_uses_exact_closed_manifest_dedup_policy_and_source_grounded_st
             source_key="telemetry:manifest",
             frame=0,
             event_type="manifest",
-            facts={"order_coverage": canonical_order_coverage()},
+            facts={"order_coverage": EXPECTED_ORDER_COVERAGE},
         ),
         observed(
             public_id="00000000-0000-4000-8000-000000000297",
@@ -92,7 +125,7 @@ def test_activity_uses_exact_closed_manifest_dedup_policy_and_source_grounded_st
     values = _values(context)
     assert values["activity.supported_order_action_count"].raw_value == 3  # type: ignore[attr-defined]
     assert values["activity.effective_actions_per_minute"].raw_value == 18.0  # type: ignore[attr-defined]
-    assert thaw_canonical(values["activity.supported_order_coverage"].raw_value) == canonical_order_coverage()  # type: ignore[attr-defined]
+    assert thaw_canonical(values["activity.supported_order_coverage"].raw_value) == EXPECTED_ORDER_COVERAGE  # type: ignore[attr-defined]
     details = thaw_canonical(values["activity.effective_actions_per_minute"].details)  # type: ignore[attr-defined]
     assert details["policy_version"] == "effective-apm-policy-v1"
     assert details["deduplication_window_frames"] == 3
@@ -116,7 +149,7 @@ def test_activity_count_and_coverage_survive_missing_terminal_but_rate_does_not(
         public_id="00000000-0000-4000-8000-0000000002b1",
         source_key="telemetry:manifest:missing-terminal",
         event_type="manifest",
-        facts={"order_coverage": canonical_order_coverage()},
+        facts={"order_coverage": EXPECTED_ORDER_COVERAGE},
         frame=0,
     )
     order = observed(
@@ -146,7 +179,7 @@ def test_activity_rejects_changed_manifest_and_suppresses_consecutive_duplicate_
     observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
 ) -> None:
     player = "00000000-0000-4000-8000-000000000250"
-    changed = canonical_order_coverage()
+    changed = {**EXPECTED_ORDER_COVERAGE, "supported_commands": list(EXPECTED_ORDER_COVERAGE["supported_commands"])}
     changed["coverage"] = "full"
     bad = _values(player_context(observed(event_type="manifest", facts={"order_coverage": changed}, frame=0)))
     assert bad["activity.supported_order_coverage"].quality_reason == "changed_order_coverage_manifest"  # type: ignore[attr-defined]
@@ -155,7 +188,7 @@ def test_activity_rejects_changed_manifest_and_suppresses_consecutive_duplicate_
         public_id="00000000-0000-4000-8000-0000000002b3",
         source_key="telemetry:manifest:dedup",
         event_type="manifest",
-        facts={"order_coverage": canonical_order_coverage()},
+        facts={"order_coverage": EXPECTED_ORDER_COVERAGE},
         frame=0,
     )
 

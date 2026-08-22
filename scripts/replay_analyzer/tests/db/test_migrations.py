@@ -356,8 +356,152 @@ def test_feature_partial_quality_migration_preserves_rows_and_enforces_states(da
         for statement in invalid_statements:
             with migrated.begin() as connection, pytest.raises(IntegrityError):
                 connection.execute(text(statement))
+        with migrated.begin() as connection:
+            replay_id = connection.execute(text("SELECT id FROM replays")).scalar_one()
+            feature_set_id = connection.execute(text("SELECT id FROM feature_sets")).scalar_one()
+            feature_id = connection.execute(
+                text("SELECT id FROM features WHERE name = 'fixture.partial'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO players (public_id, display_name, identity_revision, updated_at, created_at) VALUES "
+                    "('00000000-0000-4000-8000-000000000108', 'Fixture', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            player_id = connection.execute(text("SELECT id FROM players")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO parser_runs (run_id, replay_id, parser_version, schema_version, input_sha256, status, "
+                    "completion_status, warnings_json, started_at, completed_at) VALUES "
+                    "('00000000-0000-4000-8000-000000000109', :replay_id, 'fixture-v1', 1, :input_sha256, 'failed', "
+                    "'failed', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"replay_id": replay_id, "input_sha256": "1" * 64},
+            )
+            parser_run_id = connection.execute(text("SELECT id FROM parser_runs")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO replay_players (public_id, replay_id, parser_run_id, player_id, slot_index, "
+                    "slot_kind, original_name, normalized_name, player_index, observed_json) VALUES "
+                    "('00000000-0000-4000-8000-00000000010a', :replay_id, :parser_run_id, :player_id, 0, 'human', "
+                    "'Fixture', 'fixture', 0, '{}')"
+                ),
+                {"replay_id": replay_id, "parser_run_id": parser_run_id, "player_id": player_id},
+            )
+            replay_player_id = connection.execute(text("SELECT id FROM replay_players")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO evidence_items (public_id, replay_id, tier, source_kind, source_key, schema_version, "
+                    "created_at) VALUES ('00000000-0000-4000-8000-00000000010b', :replay_id, 'derived', "
+                    "'longitudinal', 'longitudinal:fixture:result', 1, CURRENT_TIMESTAMP)"
+                ),
+                {"replay_id": replay_id},
+            )
+            longitudinal_evidence_id = connection.execute(
+                text("SELECT id FROM evidence_items WHERE source_kind = 'longitudinal'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO longitudinal_runs (run_id, player_id, identity_revision, analyzer_name, "
+                    "analyzer_version, segment_key_json, settings_json, input_digest, cache_key, status, created_at, "
+                    "completed_at) VALUES ('00000000-0000-4000-8000-00000000010c', :player_id, 0, 'fixture', 'v1', "
+                    "'{}', '{}', :input_digest, :cache_key, 'succeeded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"player_id": player_id, "input_digest": "4" * 64, "cache_key": "5" * 64},
+            )
+            longitudinal_run_id = connection.execute(text("SELECT id FROM longitudinal_runs")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO longitudinal_results (public_id, longitudinal_run_id, evidence_item_id, result_name, "
+                    "result_kind, sample_count, missing_count, quality, statistics_json) VALUES "
+                    "('00000000-0000-4000-8000-00000000010d', :run_id, :evidence_id, 'fixture.result', 'real', "
+                    "1, 0, 'available', '{}')"
+                ),
+                {"run_id": longitudinal_run_id, "evidence_id": longitudinal_evidence_id},
+            )
+            longitudinal_result_id = connection.execute(text("SELECT id FROM longitudinal_results")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO longitudinal_members (longitudinal_result_id, replay_id, replay_player_id, "
+                    "feature_set_id, feature_id, evidence_item_id) VALUES (:result_id, :replay_id, :replay_player_id, "
+                    ":feature_set_id, :feature_id, :evidence_id)"
+                ),
+                {
+                    "result_id": longitudinal_result_id,
+                    "replay_id": replay_id,
+                    "replay_player_id": replay_player_id,
+                    "feature_set_id": feature_set_id,
+                    "feature_id": feature_id,
+                    "evidence_id": longitudinal_evidence_id,
+                },
+            )
+            member_id = connection.execute(text("SELECT id FROM longitudinal_members")).scalar_one()
+            feature_indexes = {
+                row[1] for row in connection.execute(text("PRAGMA index_list('features')"))
+            }
     finally:
         migrated.dispose()
+
+    downgrade_database(database_path, "0002_player_identity_audit")
+    downgraded = create_database_engine(database_path)
+    try:
+        with downgraded.connect() as connection:
+            partial = connection.execute(
+                text(
+                    "SELECT id, public_id, real_value, quality, quality_reason, details_json FROM features "
+                    "WHERE name = 'fixture.partial'"
+                )
+            ).one()
+            assert partial[:5] == (
+                feature_id,
+                "00000000-0000-4000-8000-000000000107",
+                1.234567890123,
+                "partial",
+                None,
+            )
+            compatibility = json.loads(partial.details_json)
+            assert compatibility == {
+                "__task6_partial_quality_compatibility__": {
+                    "details_json": "{}",
+                    "feature_public_id": "00000000-0000-4000-8000-000000000107",
+                    "quality_reason": "omitted_unknown_source",
+                    "schema": "task6-partial-quality-downgrade-v1",
+                }
+            }
+            assert connection.execute(
+                text("SELECT feature_id FROM longitudinal_members WHERE id = :id"), {"id": member_id}
+            ).scalar_one() == feature_id
+            assert connection.execute(text("SELECT role FROM feature_evidence")).scalar_one() == "input"
+            assert {row[1] for row in connection.execute(text("PRAGMA index_list('features')"))} == feature_indexes
+            assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+    finally:
+        downgraded.dispose()
+
+    upgrade_database(database_path, "0003_feature_partial_quality")
+    reupgraded = create_database_engine(database_path)
+    try:
+        with reupgraded.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT id, public_id, real_value, quality, quality_reason, details_json FROM features "
+                    "WHERE name = 'fixture.partial'"
+                )
+            ).one() == (
+                feature_id,
+                "00000000-0000-4000-8000-000000000107",
+                1.234567890123,
+                "partial",
+                "omitted_unknown_source",
+                "{}",
+            )
+            assert connection.execute(
+                text("SELECT feature_id FROM longitudinal_members WHERE id = :id"), {"id": member_id}
+            ).scalar_one() == feature_id
+            assert connection.execute(text("SELECT role FROM feature_evidence")).scalar_one() == "input"
+            assert {row[1] for row in connection.execute(text("PRAGMA index_list('features')"))} == feature_indexes
+            assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+    finally:
+        reupgraded.dispose()
 
 
 def test_baseline_does_not_create_tables_owned_by_future_revisions(database_path: Path) -> None:

@@ -232,6 +232,12 @@ class FeatureExtractionService:
         )
         observations = []
         for command, evidence in session.execute(statement):
+            self._validate_observed_evidence(
+                evidence,
+                replay,
+                parser_run_id=parser.id,
+                telemetry_run_id=None,
+            )
             if replay_player is not None and command.replay_player_id != replay_player.id:
                 continue
             facts = {
@@ -264,18 +270,33 @@ class FeatureExtractionService:
             for item in session.scalars(select(ReplayPlayer).where(ReplayPlayer.replay_id == replay.id)).all()
             if item.player_index is not None
         }
-        entities = {
-            item.object_id: item.template_name
-            for item in session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id)).all()
-        }
         statement = (
             select(TelemetryEvent, EvidenceItem)
             .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
             .where(TelemetryEvent.telemetry_run_id == telemetry.id)
             .order_by(TelemetryEvent.frame, EvidenceItem.source_key, EvidenceItem.public_id)
         )
+        event_rows = tuple(session.execute(statement))
+        for _, evidence in event_rows:
+            self._validate_observed_evidence(
+                evidence,
+                replay,
+                parser_run_id=None,
+                telemetry_run_id=telemetry.id,
+            )
+        evidence_by_sequence = {event.sequence: evidence.public_id for event, evidence in event_rows}
+        entities = {
+            item.object_id: (
+                item.template_name,
+                players.get(item.initial_owner_player_index)
+                if item.initial_owner_player_index is not None
+                else None,
+                evidence_by_sequence.get(item.creation_sequence) if item.creation_sequence is not None else None,
+            )
+            for item in session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id)).all()
+        }
         observations = []
-        for event, evidence in session.execute(statement):
+        for event, evidence in event_rows:
             facts = self._event_facts(event, players, entities, replay_player)
             if replay_player is not None and not self._belongs_to_player(event.event_type, facts, replay_player.public_id):
                 continue
@@ -295,11 +316,27 @@ class FeatureExtractionService:
             )
         return tuple(observations)
 
+    def _validate_observed_evidence(
+        self,
+        evidence: EvidenceItem,
+        replay: Replay,
+        *,
+        parser_run_id: int | None,
+        telemetry_run_id: int | None,
+    ) -> None:
+        if (
+            evidence.tier != "observed"
+            or evidence.replay_id != replay.id
+            or evidence.parser_run_id != parser_run_id
+            or evidence.telemetry_run_id != telemetry_run_id
+        ):
+            raise FeatureExtractionError("malformed persisted evidence link")
+
     def _event_facts(
         self,
         event: TelemetryEvent,
         players: Mapping[int, str],
-        entities: Mapping[int, str],
+        entities: Mapping[int, tuple[str, str | None, str | None]],
         replay_player: ReplayPlayer | None,
     ) -> dict[str, object]:
         facts = _mapping(event.payload_json)
@@ -307,10 +344,22 @@ class FeatureExtractionService:
         player_index = facts.get("player_index")
         if event_type.startswith("construction_"):
             owner = facts.get("responsible_player_index", facts.get("owner_player_index"))
-            facts["replay_player_public_id"] = players.get(owner) if type(owner) is int else None
             object_id = facts.get("object_id")
-            if "template_name" not in facts and type(object_id) is int:
-                facts["template_name"] = entities.get(object_id)
+            entity = entities.get(object_id) if type(object_id) is int else None
+            facts["replay_player_public_id"] = (
+                players.get(owner) if type(owner) is int else None if entity is None else entity[1]
+            )
+            facts.pop("template_name", None)
+            if entity is not None:
+                facts["template_name"] = entity[0]
+                facts["template_evidence_public_id"] = entity[2]
+        elif event_type == "object_created":
+            object_id = facts.get("object_id")
+            entity = entities.get(object_id) if type(object_id) is int else None
+            facts.pop("template_name", None)
+            if entity is not None:
+                facts["template_name"] = entity[0]
+                facts["replay_player_public_id"] = entity[1]
         elif event_type.startswith(("production_", "upgrade_")):
             facts["replay_player_public_id"] = players.get(player_index) if type(player_index) is int else None
             if event_type.startswith("production_"):
@@ -525,7 +574,14 @@ class FeatureExtractionService:
             )
             session.add(feature_set)
             session.flush()
-            self._persist_values(session, replay, replay_player, feature_set, values)
+            self._persist_values(
+                session,
+                replay,
+                replay_player,
+                feature_set,
+                values,
+                {item.ref.public_id: item.ref for item in context.observed},
+            )
             feature_set.status = "succeeded"
             feature_set.completed_at = _now()
             session.commit()
@@ -555,12 +611,15 @@ class FeatureExtractionService:
         replay_player: ReplayPlayer | None,
         feature_set: FeatureSet,
         values: tuple[FeatureValue, ...],
+        authorized_evidence: Mapping[str, EvidenceRef],
     ) -> None:
         refs = {
             ref.public_id: ref
             for value in values
             for ref in value.input_evidence + value.supporting_evidence + value.contradicting_evidence
         }
+        if any(authorized_evidence.get(public_id) != ref for public_id, ref in refs.items()):
+            raise ValueError("feature evidence is not authorized by exact feature context")
         evidence_rows = {
             item.public_id: item
             for item in session.scalars(select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(refs)))).all()
@@ -571,7 +630,12 @@ class FeatureExtractionService:
             row = evidence_rows[public_id]
             if row.replay_id != replay.id:
                 raise ValueError("cross-replay feature evidence is forbidden")
-            if row.tier != ref.tier or row.source_kind != ref.source_kind or row.source_key != ref.source_key:
+            if (
+                row.tier != ref.tier
+                or row.source_kind != ref.source_kind
+                or row.source_key != ref.source_key
+                or _schema_label(row.source_kind, row.schema_version) != ref.schema_version
+            ):
                 raise ValueError("feature evidence identity mismatch")
         for value in values:
             source_key = (

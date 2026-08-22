@@ -35,12 +35,30 @@ class BuildOrderExtractor:
             return self._unavailable(context, window, "ambiguous_player_attribution")
         if not completions:
             return self._unavailable(context, window, "no_observed_events")
-        if any(item.frame is None or type(fact(item, "template_name")) is not str for item in completions):
-            return self._unavailable(context, window, "no_observed_events")
-        refs = tuple(item.ref for item in completions)
+        observed_by_public_id = {item.ref.public_id: item for item in context.observed}
+        template_sources = []
+        for completion in completions:
+            source_public_id = fact(completion, "template_evidence_public_id")
+            source = observed_by_public_id.get(source_public_id) if type(source_public_id) is str else None
+            if (
+                completion.frame is None
+                or source is None
+                or source.event_type != "object_created"
+                or fact(source, "object_id") != fact(completion, "object_id")
+                or type(fact(source, "template_name")) is not str
+            ):
+                return self._unavailable(context, window, "missing_template_provenance")
+            template_sources.append(source)
+        refs_by_public_id = {
+            item.ref.public_id: item.ref for item in completions + tuple(template_sources)
+        }
+        refs = tuple(refs_by_public_id.values())
         sequence = tuple(
-            {"frame": cast(int, item.frame), "template_name": cast(str, fact(item, "template_name"))}
-            for item in completions
+            {
+                "frame": cast(int, completion.frame),
+                "template_name": cast(str, fact(source, "template_name")),
+            }
+            for completion, source in zip(completions, template_sources, strict=True)
         )
         values = (
             complete_value("build.completed_count", len(completions), context.scope, window, refs, BASE_REGISTRY),

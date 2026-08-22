@@ -1,5 +1,7 @@
 """Allow partial features to retain a stable omission reason."""
 
+import json
+
 from alembic import op
 
 revision = "0003_feature_partial_quality"
@@ -33,9 +35,56 @@ _NEW_QUALITY = (
     f"(quality = 'unavailable' AND {_NULL_VALUE} AND quality_reason IS NOT NULL "
     "AND length(trim(quality_reason)) > 0)"
 )
+_COMPATIBILITY_KEY = "__task6_partial_quality_compatibility__"
+_COMPATIBILITY_SCHEMA = "task6-partial-quality-downgrade-v1"
 
 
-def _replace_quality_constraint(expression: str) -> None:
+def _compatible_feature_rows(connection: object, columns: str, direction: str) -> list[tuple[object, ...]]:
+    rows = [
+        list(row)
+        for row in connection.exec_driver_sql(  # type: ignore[attr-defined]
+            f"SELECT {columns} FROM features ORDER BY id"
+        )
+    ]
+    for row in rows:
+        if row[17] != "partial":
+            continue
+        if direction == "downgrade":
+            marker = {
+                _COMPATIBILITY_KEY: {
+                    "details_json": row[21],
+                    "feature_public_id": row[23],
+                    "quality_reason": row[18],
+                    "schema": _COMPATIBILITY_SCHEMA,
+                }
+            }
+            row[18] = None
+            row[21] = json.dumps(marker, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+            continue
+        if row[18] is not None or not isinstance(row[21], str):
+            continue
+        try:
+            marker_value = json.loads(row[21])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(marker_value, dict) or set(marker_value) != {_COMPATIBILITY_KEY}:
+            continue
+        compatibility = marker_value[_COMPATIBILITY_KEY]
+        if (
+            not isinstance(compatibility, dict)
+            or compatibility.get("schema") != _COMPATIBILITY_SCHEMA
+            or compatibility.get("feature_public_id") != row[23]
+            or not isinstance(compatibility.get("quality_reason"), str)
+            or not compatibility["quality_reason"].strip()
+            or not isinstance(compatibility.get("details_json"), str)
+        ):
+            continue
+        row[18] = compatibility["quality_reason"]
+        row[21] = compatibility["details_json"]
+    return [tuple(row) for row in rows]
+
+
+def _replace_quality_constraint(expression: str, direction: str) -> None:
     connection = op.get_bind()
     evidence_links = [
         tuple(row)
@@ -98,9 +147,13 @@ def _replace_quality_constraint(expression: str) -> None:
         "json_value, unit, scope_type, scope_key, replay_player_id, team_id, entity_id, frame_start, frame_end, quality, "
         "quality_reason, confidence, explanation, details_json, id, public_id"
     )
-    connection.exec_driver_sql(
-        f"INSERT INTO task6_features_replacement ({columns}) SELECT {columns} FROM features"
-    )
+    feature_rows = _compatible_feature_rows(connection, columns, direction)
+    if feature_rows:
+        placeholders = ", ".join("?" for _ in range(24))
+        connection.exec_driver_sql(
+            f"INSERT INTO task6_features_replacement ({columns}) VALUES ({placeholders})",
+            feature_rows,
+        )
     connection.exec_driver_sql("DROP TABLE features")
     connection.exec_driver_sql("ALTER TABLE task6_features_replacement RENAME TO features")
     for index_statement in (
@@ -123,8 +176,9 @@ def _replace_quality_constraint(expression: str) -> None:
 
 # TheSuperHackers @bugfix Leex 22/08/2026 Preserve truthful omission reasons on partial derived features. (#TBD)
 def upgrade() -> None:
-    _replace_quality_constraint(_NEW_QUALITY)
+    _replace_quality_constraint(_NEW_QUALITY, "upgrade")
 
 
 def downgrade() -> None:
-    _replace_quality_constraint(_OLD_QUALITY)
+    # TheSuperHackers @fix Leex 22/08/2026 Carry partial reasons reversibly through the exact old constraint. (#TBD)
+    _replace_quality_constraint(_OLD_QUALITY, "downgrade")

@@ -21,21 +21,38 @@ def test_build_order_uses_only_observed_construction_completions_in_source_key_o
             source_key="telemetry:z",
             frame=60,
             event_type="construction_completed",
-            facts={"template_name": "ChinaBarracks", "replay_player_public_id": player},
+            facts={
+                "object_id": 8,
+                "template_name": "FabricatedCompletion",
+                "template_evidence_public_id": "00000000-0000-4000-8000-000000000255",
+                "replay_player_public_id": player,
+            },
         ),
         observed(
             public_id="00000000-0000-4000-8000-000000000252",
             source_key="telemetry:a",
             frame=60,
             event_type="construction_completed",
-            facts={"template_name": "ChinaPowerPlant", "replay_player_public_id": player},
+            facts={
+                "object_id": 7,
+                "template_name": "FabricatedCompletion",
+                "template_evidence_public_id": "00000000-0000-4000-8000-000000000253",
+                "replay_player_public_id": player,
+            },
         ),
         observed(
             public_id="00000000-0000-4000-8000-000000000253",
             source_key="telemetry:creation",
             frame=10,
             event_type="object_created",
-            facts={"template_name": "FakeEarlyBuilding", "replay_player_public_id": player},
+            facts={"object_id": 7, "template_name": "ChinaPowerPlant", "replay_player_public_id": player},
+        ),
+        observed(
+            public_id="00000000-0000-4000-8000-000000000255",
+            source_key="telemetry:creation:z",
+            frame=11,
+            event_type="object_created",
+            facts={"object_id": 8, "template_name": "ChinaBarracks", "replay_player_public_id": player},
         ),
         observed(
             public_id="00000000-0000-4000-8000-000000000254",
@@ -55,6 +72,8 @@ def test_build_order_uses_only_observed_construction_completions_in_source_key_o
     assert _by_name(bundle, "build.completed_count").raw_value == 2  # type: ignore[attr-defined]
     assert tuple(ref.public_id for ref in sequence.input_evidence) == (  # type: ignore[attr-defined]
         "00000000-0000-4000-8000-000000000252",
+        "00000000-0000-4000-8000-000000000253",
+        "00000000-0000-4000-8000-000000000255",
         "00000000-0000-4000-8000-000000000251",
     )
 
