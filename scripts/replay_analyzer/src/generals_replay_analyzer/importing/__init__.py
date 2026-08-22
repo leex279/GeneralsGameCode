@@ -45,6 +45,7 @@ from .service import (
     TelemetryAcquirer,
     TelemetryArtifact,
     TerminalDependencyPolicy,
+    VerifiedReplaySubmission,
 )
 
 __all__ = [
@@ -87,6 +88,7 @@ __all__ = [
     "TelemetryAcquirer",
     "TelemetryArtifact",
     "TerminalDependencyPolicy",
+    "VerifiedReplaySubmission",
     "WorkerCancellationDTO",
     "WorkerControlPort",
     "WorkerLeaseDTO",

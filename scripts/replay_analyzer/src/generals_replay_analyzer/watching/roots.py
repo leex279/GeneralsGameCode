@@ -22,6 +22,8 @@ from threading import Lock, RLock
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from ..ingress_contract import IngressIdentityError, validate_replay_relative_name
+
 _REGISTRY_NAME = "watched-roots-v1.json"
 _LOCK_NAME = ".watched-roots-v1.lock"
 _REGISTRY_VERSION = 1
@@ -29,14 +31,6 @@ _MAX_REGISTRY_BYTES = 256 * 1024
 _MAX_REGISTRY_ENTRIES = 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _GENERIC_LABEL_PATTERN = re.compile(r"^Replay folder ([1-9][0-9]{0,8})$")
-_WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('<>:"\\|?*')
-_WINDOWS_RESERVED_BASENAMES = frozenset(
-    {"con", "prn", "aux", "nul", "clock$"}
-    | {f"com{number}" for number in range(1, 10)}
-    | {f"lpt{number}" for number in range(1, 10)}
-    | {f"com{number}" for number in ("\u00b9", "\u00b2", "\u00b3")}
-    | {f"lpt{number}" for number in ("\u00b9", "\u00b2", "\u00b3")}
-)
 _READ_CHUNK_SIZE = 1024 * 1024
 _THREAD_LOCKS_GUARD = Lock()
 _THREAD_LOCKS: dict[str, RLock] = {}
@@ -1687,33 +1681,10 @@ def _revalidate_secure_source(root: Path, components: Sequence[str], opened: _Op
 
 
 def _validated_relative_name(value: str) -> tuple[str, ...]:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 1024
-        or value.startswith(("/", "\\"))
-        or value.endswith(("/", "\\"))
-        or "\\" in value
-        or ":" in value
-        or "%" in value
-        or unicodedata.normalize("NFC", value) != value
-        or any(character in _WINDOWS_INVALID_COMPONENT_CHARACTERS for character in value)
-        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
-    ):
+    try:
+        return validate_replay_relative_name(value)
+    except IngressIdentityError:
         raise SnapshotIngressError("replay_relative_name_invalid")
-    components = value.split("/")
-    if any(component in {"", ".", ".."} or component.endswith((".", " ")) for component in components):
-        raise SnapshotIngressError("replay_relative_name_invalid")
-    if any(
-        component.split(".", 1)[0].rstrip(" .").casefold() in _WINDOWS_RESERVED_BASENAMES for component in components
-    ):
-        raise SnapshotIngressError("replay_relative_name_invalid")
-    filename = components[-1]
-    suffixes = filename.split(".")[1:]
-    stem = filename[: -len(".rep")] if filename.endswith(".rep") else ""
-    if len(suffixes) != 1 or suffixes[0] != "rep" or not stem:
-        raise SnapshotIngressError("replay_relative_name_invalid")
-    return tuple(components)
 
 
 def _contained(root: Path, candidate: Path) -> bool:

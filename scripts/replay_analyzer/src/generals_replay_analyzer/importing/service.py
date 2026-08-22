@@ -8,19 +8,21 @@ import os
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol, TypeAlias, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import AnalyzerSettings
 from ..db.models import Job, JobDependency, ManagedAsset, Replay, Source
+from ..ingress_contract import ReplayIngressIdentity
 from ..parser import ParsedReplay
 from ..provenance import SourceProvenance, extract_source_provenance
 from ..storage import ContentAddressedStore, ContentStorageError, StoredContent
@@ -119,6 +121,30 @@ class ImportRequest:
     recursive: bool = False
     reference_only: bool | None = None
     request_telemetry: bool = False
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Accept verified watched replay bytes without retaining caller paths. (#TBD)
+@dataclass(frozen=True, slots=True)
+class VerifiedReplaySubmission:
+    """Immutable path-free replay content and opaque watched-source provenance."""
+
+    content: bytes = field(repr=False)
+    expected_sha256: str
+    root_public_id: str
+    relative_name: str
+    import_mode: Literal["copy"] = "copy"
+    request_telemetry: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, bytes) or not self.content:
+            raise ValueError("verified replay content must be nonempty immutable bytes")
+        if _safe_sha256(self.expected_sha256) is None:
+            raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+        ReplayIngressIdentity(self.root_public_id, self.relative_name)
+        if self.import_mode != "copy":
+            raise ValueError("verified replay submissions require copy import mode")
+        if type(self.request_telemetry) is not bool:
+            raise TypeError("request_telemetry must be bool")
 
 
 @dataclass(frozen=True)
@@ -262,6 +288,18 @@ _TELEMETRY_FAILURE_ENVELOPE_VERSION = 1
 _ResultT = TypeVar("_ResultT")
 
 
+class _VerifiedDiscoveryConflict(RuntimeError):
+    """Internal rollback signal translated after leaving SQLAlchemy's context manager."""
+
+
+class _VerifiedManagedAssetInvalid(RuntimeError):
+    """Internal rollback signal for verified discovery against invalid managed metadata."""
+
+
+class _ManagedAssetRegistrationConflict(RuntimeError):
+    """Internal rollback signal for metadata that does not bind exact managed bytes."""
+
+
 # TheSuperHackers @feature Leex 21/08/2026 Import replay bytes transactionally without coupling analytics to engine internals. (#TBD)
 class ImportService:
     """Accept bounded snapshots and execute only registered, dependency-ready stages."""
@@ -375,6 +413,30 @@ class ImportService:
             )
         )
         return ImportSubmissionDTO(self._dto(snapshot), 0, 0)
+
+    def submit_verified(self, request: VerifiedReplaySubmission) -> ImportSubmissionDTO:
+        """Adopt exact verified bytes before queuing a path-free watched-source discovery."""
+        if not isinstance(request, VerifiedReplaySubmission):
+            raise TypeError("verified replay submission must use the typed application contract")
+        self._replay_store.store_bytes(request.content, expected_sha256=request.expected_sha256)
+        invocation_id = str(uuid4())
+        snapshot = self._jobs.create_job(
+            JobSpec(
+                stage=DISCOVER,
+                component_version=DISCOVER_VERSION,
+                idempotency_key=f"{DISCOVER}:{DISCOVER_VERSION}:{invocation_id}",
+                input_json={
+                    "invocation_id": invocation_id,
+                    "source_kind": "verified_watched_replay",
+                    "replay_sha256": request.expected_sha256,
+                    "root_public_id": request.root_public_id,
+                    "relative_name": request.relative_name,
+                    "import_mode": request.import_mode,
+                    "request_telemetry": request.request_telemetry,
+                },
+            )
+        )
+        return ImportSubmissionDTO(self._dto(snapshot), 1, 0)
 
     def run_available(self, worker_id: str, *, limit: int = 1) -> tuple[JobDTO, ...]:
         if limit < 1:
@@ -517,6 +579,8 @@ class ImportService:
         )
 
     def _discover(self, claimed: ClaimedJob) -> Mapping[str, Any]:
+        if claimed.input_json.get("source_kind") == "verified_watched_replay":
+            return self._discover_verified(claimed)
         path = Path(cast(str, claimed.input_json["path"]))
         recursive = bool(claimed.input_json["recursive"])
         mode = cast(str, claimed.input_json["import_mode"])
@@ -577,6 +641,109 @@ class ImportService:
             "diagnostics": diagnostics,
         }
 
+    def _discover_verified(self, claimed: ClaimedJob) -> Mapping[str, Any]:
+        sha256 = cast(str, claimed.input_json["replay_sha256"])
+        root_public_id = cast(str, claimed.input_json["root_public_id"])
+        relative_name = cast(str, claimed.input_json["relative_name"])
+        invocation_id = cast(str, claimed.input_json["invocation_id"])
+        mode = cast(str, claimed.input_json["import_mode"])
+        request_telemetry = bool(claimed.input_json["request_telemetry"])
+        try:
+            stored = self._replay_store.verify(sha256)
+        except ContentStorageError as error:
+            raise StageFailure(
+                "managed_asset_invalid",
+                "verified managed replay bytes are missing or corrupt",
+                retryable=False,
+            ) from error
+
+        locator = f"watched-root/{root_public_id}/{invocation_id}"
+        try:
+            with self._session_factory.begin() as session:
+                discovery = session.scalar(select(Job).where(Job.public_id == claimed.public_id))
+                assert discovery is not None
+                try:
+                    asset = self._register_asset(session, stored, "replay")
+                except _ManagedAssetRegistrationConflict as error:
+                    raise _VerifiedManagedAssetInvalid from error
+                replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
+                if replay is None:
+                    session.execute(
+                        sqlite_insert(Replay)
+                        .values(
+                            public_id=str(uuid4()),
+                            sha256=sha256,
+                            managed_asset_id=asset.id,
+                            map_id=None,
+                            replay_name=relative_name.rsplit("/", 1)[-1],
+                            version_string="pending",
+                            version_number=0,
+                            frame_count=0,
+                            start_time=0,
+                            end_time=0,
+                            exe_crc=0,
+                            ini_crc=0,
+                            map_crc=0,
+                            map_name="pending",
+                            seed=0,
+                            starting_cash=None,
+                            header_json={"status": "pending"},
+                            lifecycle_state="discovered",
+                            updated_at=self._jobs.now(),
+                        )
+                        .on_conflict_do_nothing(index_elements=["sha256"])
+                    )
+                    replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
+                    if replay is None:
+                        raise _VerifiedDiscoveryConflict
+                if replay.managed_asset_id not in (None, asset.id):
+                    raise _VerifiedDiscoveryConflict
+                replay.managed_asset_id = asset.id
+                source = self._find_discovery_source(session, claimed.public_id, locator)
+                if source is None:
+                    source = Source(
+                        public_id=str(uuid4()),
+                        replay_id=replay.id,
+                        source_kind="watched_root",
+                        original_locator=locator,
+                        original_filename=relative_name.rsplit("/", 1)[-1],
+                        strata_match_id=None,
+                        strata_source_user_token=None,
+                        file_size_bytes=stored.size,
+                        source_modified_at=None,
+                        discovered_at=self._jobs.now(),
+                        provenance_json={
+                            "content_sha256": sha256,
+                            "discovery_job_public_id": claimed.public_id,
+                            "import_mode": mode,
+                            "relative_name": relative_name,
+                            "request_telemetry": request_telemetry,
+                            "root_public_id": root_public_id,
+                        },
+                    )
+                    session.add(source)
+                    session.flush()
+                hash_spec = self._hash_spec(sha256)
+                existing_hash = session.scalar(select(Job).where(Job.idempotency_key == hash_spec.idempotency_key))
+                hash_job = self._jobs.ensure_job(session, hash_spec)
+                if existing_hash is None or hash_job.status == "pending":
+                    self._jobs.ensure_dependency(session, hash_job.id, discovery.id)
+                self._ensure_content_graph(session, replay, mode, request_telemetry)
+        except _VerifiedDiscoveryConflict as error:
+            raise StageFailure(
+                "managed_asset_conflict",
+                "replay identity is linked to different managed bytes",
+                retryable=False,
+            ) from error
+        except _VerifiedManagedAssetInvalid as error:
+            raise StageFailure(
+                "managed_asset_invalid",
+                "managed replay registration does not match its immutable bytes",
+                retryable=False,
+            ) from error
+
+        return {"accepted_path_count": 1, "rejected_path_count": 0, "diagnostics": []}
+
     @staticmethod
     def _find_discovery_source(session: Session, discovery_public_id: str, locator: str) -> Source | None:
         for source in session.scalars(select(Source).where(Source.original_locator == locator)):
@@ -597,6 +764,34 @@ class ImportService:
 
     def _hash(self, claimed: ClaimedJob) -> Mapping[str, Any]:
         expected_sha256 = cast(str, claimed.input_json["replay_sha256"]).lower()
+        managed = self._managed_replay_content(expected_sha256)
+        if managed is not None:
+            stored, _asset_public_id = managed
+            with self._session_factory.begin() as session:
+                replay = session.scalar(select(Replay).where(Replay.sha256 == expected_sha256))
+                assert replay is not None
+                matching = self._matching_sources(session, expected_sha256)
+                managed_variants: set[tuple[str, bool]] = set()
+                for source in matching:
+                    source.replay_id = replay.id
+                    provenance = cast(Mapping[str, Any], source.provenance_json)
+                    managed_variants.add(
+                        (
+                            cast(str, provenance["import_mode"]),
+                            bool(provenance["request_telemetry"]),
+                        )
+                    )
+                hash_row = session.scalar(select(Job).where(Job.public_id == claimed.public_id))
+                assert hash_row is not None
+                hash_row.replay_id = replay.id
+                for mode, request_telemetry in sorted(managed_variants):
+                    self._ensure_content_graph(session, replay, mode, request_telemetry)
+                replay_public_id = replay.public_id
+            return {
+                "replay_public_id": replay_public_id,
+                "sha256": expected_sha256,
+                "size_bytes": stored.size,
+            }
         candidates = self._unlinked_source_records(expected_sha256)
         source_path = _first_regular_path(source.original_locator for source in candidates)
         if source_path is None:
@@ -963,6 +1158,15 @@ class ImportService:
         mode = cast(str, claimed.input_json["import_mode"])
         if mode == "reference":
             return {"copied": False, "sha256": sha256}
+        managed = self._managed_replay_content(sha256)
+        if managed is not None:
+            stored, asset_public_id = managed
+            return {
+                "copied": True,
+                "sha256": stored.sha256,
+                "size_bytes": stored.size,
+                "asset_public_id": asset_public_id,
+            }
         source_path = self._source_path_for_replay(sha256, mode)
         if source_path is None:
             raise StageFailure("source_missing", "no ordinary source remains for managed copy", retryable=False)
@@ -970,15 +1174,26 @@ class ImportService:
             stored = self._replay_store.store_file(source_path, expected_sha256=sha256)
         except ContentStorageError as error:
             raise StageFailure("managed_copy_failed", str(error), retryable=True) from error
-        with self._session_factory.begin() as session:
-            asset = self._register_asset(session, stored, "replay")
-            replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
-            if replay is None:
-                raise StageFailure("replay_missing", "replay identity disappeared", retryable=False)
-            if replay.managed_asset_id not in (None, asset.id):
-                raise StageFailure("managed_asset_conflict", "replay is linked to different managed bytes", retryable=False)
-            replay.managed_asset_id = asset.id
-            asset_public_id = asset.public_id
+        try:
+            with self._session_factory.begin() as session:
+                asset = self._register_asset(session, stored, "replay")
+                replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
+                if replay is None:
+                    raise StageFailure("replay_missing", "replay identity disappeared", retryable=False)
+                if replay.managed_asset_id not in (None, asset.id):
+                    raise StageFailure(
+                        "managed_asset_conflict",
+                        "replay is linked to different managed bytes",
+                        retryable=False,
+                    )
+                replay.managed_asset_id = asset.id
+                asset_public_id = asset.public_id
+        except _ManagedAssetRegistrationConflict as error:
+            raise StageFailure(
+                "managed_asset_invalid",
+                "managed replay registration does not match its immutable bytes",
+                retryable=False,
+            ) from error
         return {
             "copied": True,
             "sha256": stored.sha256,
@@ -1127,31 +1342,60 @@ class ImportService:
         return output
 
     def _register_asset(self, session: Session, stored: StoredContent, kind: str) -> ManagedAsset:
+        relative_path = self._asset_relative_path(stored)
         asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
         if asset is not None:
-            if asset.kind != kind or asset.size_bytes != stored.size:
-                raise ValueError("managed content is already registered for another telemetry role")
+            if not self._asset_registration_matches(asset, stored, kind, relative_path):
+                raise _ManagedAssetRegistrationConflict
             return asset
-        relative_path = stored.path.relative_to(self._settings.data_root).as_posix()
-        try:
-            with session.begin_nested():
-                asset = ManagedAsset(
-                    public_id=str(uuid4()),
-                    sha256=stored.sha256,
-                    kind=kind,
-                    relative_path=relative_path,
-                    size_bytes=stored.size,
-                    media_type=None,
-                )
-                session.add(asset)
-                session.flush()
-        except IntegrityError:
-            asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
-            if asset is None:
-                raise
-            if asset.kind != kind or asset.size_bytes != stored.size:
-                raise ValueError("managed content is already registered for another telemetry role")
+        session.execute(
+            sqlite_insert(ManagedAsset)
+            .values(
+                public_id=str(uuid4()),
+                sha256=stored.sha256,
+                kind=kind,
+                relative_path=relative_path,
+                size_bytes=stored.size,
+                media_type=None,
+            )
+            .on_conflict_do_nothing()
+        )
+        asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
+        if asset is None or not self._asset_registration_matches(asset, stored, kind, relative_path):
+            raise _ManagedAssetRegistrationConflict
         return asset
+
+    def _asset_relative_path(self, stored: StoredContent) -> str:
+        try:
+            relative = stored.path.relative_to(self._settings.data_root)
+        except ValueError as error:
+            raise _ManagedAssetRegistrationConflict from error
+        relative_path = relative.as_posix()
+        expected = (self._settings.data_root / Path(*relative.parts)).absolute()
+        if stored.path.absolute() != expected or not relative.parts:
+            raise _ManagedAssetRegistrationConflict
+        return relative_path
+
+    @staticmethod
+    def _asset_registration_matches(
+        asset: ManagedAsset,
+        stored: StoredContent,
+        kind: str,
+        relative_path: str,
+    ) -> bool:
+        try:
+            public_id = UUID(asset.public_id)
+        except (AttributeError, ValueError):
+            return False
+        return (
+            str(public_id) == asset.public_id
+            and public_id.version == 4
+            and asset.sha256 == stored.sha256
+            and asset.kind == kind
+            and asset.relative_path == relative_path
+            and asset.size_bytes == stored.size
+            and asset.media_type is None
+        )
 
     def _source_path_for_replay(self, sha256: str, mode: str) -> Path | None:
         with self._session_factory() as session:
@@ -1162,19 +1406,46 @@ class ImportService:
             ]
             return _first_regular_path(source.original_locator for source in sources)
 
+    def _managed_replay_content(self, sha256: str) -> tuple[StoredContent, str] | None:
+        with self._session_factory() as session:
+            replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
+            if replay is None or replay.managed_asset_id is None:
+                return None
+            asset = session.get(ManagedAsset, replay.managed_asset_id)
+            if asset is None:
+                raise StageFailure(
+                    "managed_asset_invalid",
+                    "managed replay metadata is missing or invalid",
+                    retryable=False,
+                )
+            try:
+                stored = self._replay_store.verify(sha256)
+            except ContentStorageError as error:
+                raise StageFailure(
+                    "managed_asset_invalid",
+                    "managed replay bytes are missing or corrupt",
+                    retryable=False,
+                ) from error
+            try:
+                relative_path = self._asset_relative_path(stored)
+            except _ManagedAssetRegistrationConflict:
+                relative_path = ""
+            if not self._asset_registration_matches(asset, stored, "replay", relative_path):
+                raise StageFailure(
+                    "managed_asset_invalid",
+                    "managed replay metadata does not match its immutable bytes",
+                    retryable=False,
+                )
+            return stored, asset.public_id
+
     def _replay_input(self, sha256: str, mode: str) -> _ReplayInput:
+        managed = self._managed_replay_content(sha256)
+        if managed is not None:
+            return _ReplayInput(managed[0].path, revalidate_reference=False)
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.sha256 == sha256))
             if replay is None:
                 raise StageFailure("replay_missing", "replay identity disappeared", retryable=False)
-            if replay.managed_asset_id is not None:
-                asset = session.get(ManagedAsset, replay.managed_asset_id)
-                if asset is None:
-                    raise StageFailure("managed_asset_missing", "managed replay metadata disappeared", retryable=False)
-                try:
-                    return _ReplayInput(self._replay_store.verify(sha256).path, revalidate_reference=False)
-                except ContentStorageError as error:
-                    raise StageFailure("managed_asset_invalid", str(error), retryable=False) from error
         source_path = self._source_path_for_replay(sha256, mode)
         if source_path is None:
             raise StageFailure("source_missing", "reference source is no longer an ordinary file", retryable=False)
