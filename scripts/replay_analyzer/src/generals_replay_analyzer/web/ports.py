@@ -29,6 +29,10 @@ _SECRET_MARKERS = ("api_key", "apikey", "credential", "password", "private_key",
 _LOCAL_FILE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _MAX_PERCENT_DECODE_PASSES = 3
+_WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('"<>|?*')
+_RESERVED_WINDOWS_DEVICE_BASENAMES = frozenset(
+    {"con", "prn", "aux", "nul", *(f"com{index}" for index in range(1, 10)), *(f"lpt{index}" for index in range(1, 10))}
+)
 DiagnosticCandidate = tuple[Literal["uri", "locator", "traversal"], int, int]
 
 
@@ -322,10 +326,186 @@ class IdentityLandingDTO(TimestampedWebDTO):
     availability: AvailabilityDTO
 
 
-# TheSuperHackers @feature Leex 22/08/2026 Keep web routes isolated from ORM and mutable analytics state. (#TBD)
+# TheSuperHackers @feature Leex 22/08/2026 Preserve replay presentation, provenance, and analysis filters as immutable public DTOs. (#0)
+class ReplayPlayerDisplayDTO(WebDTO):
+    """A replay-local player presentation value, not a canonical identity record."""
+
+    display_name: str = Field(min_length=1, max_length=256)
+    slot: int = Field(ge=1, le=16)
+    faction: str | None = Field(default=None, min_length=1, max_length=64)
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ReplayProvenanceDTO(WebDTO):
+    """Explicitly labelled public provenance that cannot become player identity."""
+
+    source_public_id: PublicId | None = None
+    source_kind: str | None = Field(default=None, min_length=1, max_length=64)
+    strata_match_token: str | None = Field(default=None, min_length=1, max_length=128)
+    strata_user_token: str | None = Field(default=None, min_length=1, max_length=128)
+    availability: AvailabilityDTO
+    evidence_tier: Literal["observed", "derived", "inferred"] | None = None
+    evidence_public_id: PublicId | None = None
+
+
+class ReplayLibraryQueryDTO(WebDTO):
+    """Frozen, deterministic filter state accepted by the replay-library port."""
+
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+    search: str | None = Field(default=None, max_length=256)
+    player_public_id: PublicId | None = None
+    faction: str | None = Field(default=None, min_length=1, max_length=64)
+    matchup: str | None = Field(default=None, min_length=1, max_length=128)
+    map_public_id: PublicId | None = None
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    strategy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    analysis_status: Literal["discovered", "parsed", "engine_verified", "partial", "desynced", "unsupported", "failed"] | None = None
+    evidence_tier: Literal["observed", "derived", "inferred"] | None = None
+    lifecycle_state: str | None = Field(default=None, min_length=1, max_length=64)
+    source_kind: str | None = Field(default=None, min_length=1, max_length=64)
+    date_from_utc: AwareDatetime | None = None
+    date_to_utc: AwareDatetime | None = None
+
+    @field_validator(
+        "search",
+        "faction",
+        "matchup",
+        "result",
+        "patch",
+        "strategy_id",
+        "lifecycle_state",
+        "source_kind",
+    )
+    @classmethod
+    def _normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("date_from_utc", "date_to_utc")
+    @classmethod
+    def _require_utc_filter_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("library filter timestamps must use UTC")
+        return value
+
+    @model_validator(mode="after")
+    def _require_ordered_dates(self) -> Self:
+        if self.date_from_utc is not None and self.date_to_utc is not None and self.date_from_utc > self.date_to_utc:
+            raise ValueError("date_from_utc must not follow date_to_utc")
+        return self
+
+
+class ReplayLibraryItemDTO(WebDTO):
+    replay_public_id: PublicId
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    display_filename: str | None = Field(default=None, min_length=1, max_length=256)
+    players: tuple[ReplayPlayerDisplayDTO, ...]
+    map_public_id: PublicId | None = None
+    map_display_name: str | None = Field(default=None, min_length=1, max_length=256)
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+    lifecycle_state: str = Field(min_length=1, max_length=64)
+    pipeline: PipelineStateDTO | None = None
+    terminal_quality: TerminalQualityDTO | None = None
+    availability: AvailabilityDTO
+    provenance: ReplayProvenanceDTO
+    observed_at_utc: AwareDatetime | None = None
+
+    @field_validator("observed_at_utc")
+    @classmethod
+    def _require_utc_observation_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("observed_at_utc must use UTC")
+        return value
+
+
+class ReplayLibraryPageDTO(WebDTO):
+    query: ReplayLibraryQueryDTO
+    items: tuple[ReplayLibraryItemDTO, ...]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total_items: int = Field(ge=0)
+    availability: AvailabilityDTO
+
+
+class ImportRootDTO(WebDTO):
+    """An allow-listed root disclosure with no locator or browser-facing path."""
+
+    root_public_id: PublicId
+    label: str = Field(min_length=1, max_length=256)
+    availability: AvailabilityDTO
+    reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class UploadImportCommandDTO(WebDTO):
+    """Opaque ingress metadata; web routes never receive the uploaded bytes or locator."""
+
+    ingress_public_id: PublicId
+    original_filename: str = Field(min_length=1, max_length=256)
+    byte_count: int = Field(ge=1, le=64 * 1024 * 1024)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Keep configured-root commands as opaque identifiers plus a closed portable replay-name contract. (#0)
+class RootImportCommandDTO(WebDTO):
+    root_public_id: PublicId
+    relative_path: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("relative_path")
+    @classmethod
+    def _require_safe_relative_posix_name(cls, value: str) -> str:
+        if (
+            value.startswith(("/", "\\"))
+            or value.endswith(("/", "\\"))
+            or "\\" in value
+            or ":" in value
+            or any(character in _WINDOWS_INVALID_COMPONENT_CHARACTERS for character in value)
+            # A closed contract rejects percent escapes before component validation, including nested encodings.
+            or "%" in value
+            or len(value) >= 2
+            and value[1] == ":"
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("relative_path must be a normalized POSIX relative name")
+        components = value.split("/")
+        if any(component in {"", ".", ".."} or component.endswith((".", " ")) for component in components):
+            raise ValueError("relative_path must be a normalized POSIX relative name")
+        if any(component.split(".", 1)[0].casefold() in _RESERVED_WINDOWS_DEVICE_BASENAMES for component in components):
+            raise ValueError("relative_path must be a normalized POSIX relative name")
+        filename = components[-1]
+        suffixes = filename.split(".")[1:]
+        stem = filename[: -len(".rep")] if filename.endswith(".rep") else ""
+        if len(suffixes) != 1 or suffixes[0] != "rep" or not stem:
+            raise ValueError("relative_path must end in one lower-case .rep suffix")
+        return value
+
+
+class ImportSubmissionDTO(WebDTO):
+    submission_public_id: PublicId
+    replay_public_id: PublicId | None = None
+    duplicate_of_replay_public_id: PublicId | None = None
+    pipeline: PipelineStateDTO | None = None
+    availability: AvailabilityDTO
+    problem_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Keep web routes isolated from ORM and mutable analytics state. (#0)
 class WebApplicationPort(Protocol):
     def readiness(self) -> ReadinessDTO: ...
 
     def dashboard(self) -> DashboardDTO: ...
 
     def identity_landing(self) -> IdentityLandingDTO: ...
+
+    # TheSuperHackers @feature Leex 22/08/2026 Expose replay-library snapshots and commands without persistence values. (#0)
+    def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO: ...
+
+    def import_roots(self) -> tuple[ImportRootDTO, ...]: ...
+
+    def submit_upload(self, command: UploadImportCommandDTO) -> ImportSubmissionDTO: ...
+
+    def submit_root_selection(self, command: RootImportCommandDTO) -> ImportSubmissionDTO: ...

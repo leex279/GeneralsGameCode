@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Replay library</h1>
+  <p><a class="button" href="/imports/dialog">Import replay</a></p>
+  <form action="/replays" method="get" aria-label="Replay library filters">
+    <label for="replay-search">Search <input id="replay-search" name="search" value="{{ library.page.query.search or '' }}"></label>
+    <label for="replay-player">Player public ID <input id="replay-player" name="player_public_id" value="{{ library.page.query.player_public_id or '' }}"></label>
+    <label for="replay-faction">Faction <input id="replay-faction" name="faction" value="{{ library.page.query.faction or '' }}"></label>
+    <label for="replay-matchup">Matchup <input id="replay-matchup" name="matchup" value="{{ library.page.query.matchup or '' }}"></label>
+    <label for="replay-map">Map public ID <input id="replay-map" name="map_public_id" value="{{ library.page.query.map_public_id or '' }}"></label>
+    <label for="replay-result">Result <input id="replay-result" name="result" value="{{ library.page.query.result or '' }}"></label>
+    <label for="replay-patch">Patch <input id="replay-patch" name="patch" value="{{ library.page.query.patch or '' }}"></label>
+    <label for="replay-strategy">Strategy <input id="replay-strategy" name="strategy_id" value="{{ library.page.query.strategy_id or '' }}"></label>
+    <label for="replay-analysis-status">Analysis status <select id="replay-analysis-status" name="analysis_status"><option value="">Any analysis status</option>{% for status in ('discovered', 'parsed', 'engine_verified', 'partial', 'desynced', 'unsupported', 'failed') %}<option value="{{ status }}"{% if library.page.query.analysis_status == status %} selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+    <label for="replay-tier">Evidence tier <input id="replay-tier" name="evidence_tier" value="{{ library.page.query.evidence_tier or '' }}"></label>
+    <label for="replay-lifecycle">Lifecycle <input id="replay-lifecycle" name="lifecycle_state" value="{{ library.page.query.lifecycle_state or '' }}"></label>
+    <label for="replay-source">Source kind <input id="replay-source" name="source_kind" value="{{ library.page.query.source_kind or '' }}"></label>
+    <label for="replay-from">Observed from UTC <input id="replay-from" name="date_from_utc" value="{{ library.page.query.date_from_utc or '' }}"></label>
+    <label for="replay-to">Observed to UTC <input id="replay-to" name="date_to_utc" value="{{ library.page.query.date_to_utc or '' }}"></label>
+    <input type="hidden" name="page" value="{{ library.page.query.page }}">
+    <input type="hidden" name="page_size" value="{{ library.page.query.page_size }}">
+    <button type="submit">Apply filters</button>
+  </form>
+  <p><a href="{{ library.canonical_url }}">Canonical library URL</a></p>
+  <nav aria-label="Replay library pagination">
+    <p>Page {{ library.page.page }} of {{ library.total_pages }}</p>
+    {% if library.previous_url %}<a href="{{ library.previous_url }}">Previous page</a>{% endif %}
+    {% if library.next_url %}<a href="{{ library.next_url }}">Next page</a>{% endif %}
+  </nav>
+  {% include "replays/_table.html" %}
+{% endblock %}

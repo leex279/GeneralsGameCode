@@ -13,7 +13,13 @@ from generals_replay_analyzer.web.ports import (
     DashboardDTO,
     DiagnosticDTO,
     IdentityLandingDTO,
+    ImportRootDTO,
+    ImportSubmissionDTO,
     ReadinessDTO,
+    ReplayLibraryPageDTO,
+    ReplayLibraryQueryDTO,
+    RootImportCommandDTO,
+    UploadImportCommandDTO,
 )
 
 
@@ -46,6 +52,33 @@ class FakeWebApplicationPort:
                 reason_codes=("identity_adapter_pending",),
                 evidence_references=(),
             ),
+        )
+
+    def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO:
+        return ReplayLibraryPageDTO(
+            query=query,
+            items=(),
+            page=query.page,
+            page_size=query.page_size,
+            total_items=0,
+            availability=AvailabilityDTO(state="unavailable", reason_codes=("replay_library_adapter_pending",)),
+        )
+
+    def import_roots(self) -> tuple[ImportRootDTO, ...]:
+        return ()
+
+    def submit_upload(self, _command: UploadImportCommandDTO) -> ImportSubmissionDTO:
+        return ImportSubmissionDTO(
+            submission_public_id="123e4567-e89b-42d3-a456-426614174098",
+            availability=AvailabilityDTO(state="unavailable", reason_codes=("opaque_ingress_handoff_pending",)),
+            problem_code="opaque_ingress_handoff_pending",
+        )
+
+    def submit_root_selection(self, _command: RootImportCommandDTO) -> ImportSubmissionDTO:
+        return ImportSubmissionDTO(
+            submission_public_id="123e4567-e89b-42d3-a456-426614174099",
+            availability=AvailabilityDTO(state="unavailable", reason_codes=("import_adapter_pending",)),
+            problem_code="dependency_unavailable",
         )
 
 

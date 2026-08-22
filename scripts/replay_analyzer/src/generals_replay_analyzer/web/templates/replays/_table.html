@@ -1,0 +1,27 @@
+<p>Availability: {{ library.page.availability.state }}. Reason: {{ library.page.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
+<table>
+  <caption>Replay library results</caption>
+  <thead><tr><th scope="col">Replay</th><th scope="col">Players</th><th scope="col">Lifecycle and state</th><th scope="col">Provenance</th></tr></thead>
+  <tbody>
+  {% if library.page.availability.state == 'unavailable' %}
+    <tr><td colspan="4">No replay library snapshot is available.</td></tr>
+  {% else %}
+  {% for replay in library.page.items %}
+    <tr data-replay-public-id="{{ replay.replay_public_id }}">
+      <td>{{ replay.display_filename or replay.replay_public_id }}</td>
+      <td>{% for player in replay.players %}<span>{{ player.display_name }} (slot {{ player.slot }}, {{ player.faction or 'faction unavailable' }}, {{ player.result or 'result unavailable' }})</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+      <td>
+        <p>Lifecycle: {{ replay.lifecycle_state }}</p>
+        <p>Pipeline: {% if replay.pipeline %}{{ replay.pipeline.stage }} / {{ replay.pipeline.state }}{% else %}unavailable{% endif %}</p>
+        <p>Availability: {{ replay.availability.state }}. Reason: {{ replay.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
+        <p>Terminal quality: {{ replay.terminal_quality.lifecycle if replay.terminal_quality else 'unavailable' }}</p>
+        <p>Evidence tier: {{ replay.provenance.evidence_tier or 'unavailable' }}</p>
+      </td>
+      <td><details><summary>Provenance disclosure</summary><p>Source public ID: {{ replay.provenance.source_public_id or 'unavailable' }}</p><p>Source kind: {{ replay.provenance.source_kind or 'unavailable' }}</p>{% if replay.provenance.strata_match_token %}<p>Strata match token: {{ replay.provenance.strata_match_token }}</p>{% endif %}{% if replay.provenance.strata_user_token %}<p>Strata user token: {{ replay.provenance.strata_user_token }}</p>{% endif %}</details></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4">{% if library.page.availability.state == 'unavailable' %}No replay library snapshot is available.{% else %}No replay results match the current filters.{% endif %}</td></tr>
+  {% endfor %}
+  {% endif %}
+  </tbody>
+</table>

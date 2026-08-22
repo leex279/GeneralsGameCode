@@ -1,0 +1,21 @@
+<dialog id="import-dialog" open role="dialog" aria-modal="true" aria-labelledby="import-dialog-title">
+  <h1 id="import-dialog-title">Import replay</h1>
+  <p>Choose a configured replay root or provide an upload after opaque ingress is available.</p>
+  <form method="dialog"><button type="submit" autofocus aria-label="Close import dialog">Close</button></form>
+  <form action="/imports/uploads" method="post" enctype="multipart/form-data">
+    <label for="upload-file">Replay upload (.rep, maximum 64 MiB)</label>
+    <input id="upload-file" name="upload" type="file" accept=".rep" disabled aria-describedby="upload-status">
+    <p id="upload-status">Upload unavailable: opaque_ingress_handoff_pending.</p>
+  </form>
+  <form action="/imports/root-selections" method="post">
+    {% if csrf_token %}<input type="hidden" name="_csrf" value="{{ csrf_token }}">{% endif %}
+    <label for="configured-root">Configured replay root</label>
+    {% if has_available_roots %}<select id="configured-root" name="root_public_id" required>{% else %}{% if roots %}<p>No configured replay roots are currently available.</p>{% else %}<p>No configured replay roots are available.</p>{% endif %}<select id="configured-root" name="root_public_id" required disabled>{% endif %}
+      {% for root in roots %}<option value="{{ root.root_public_id }}"{% if root.availability.state != 'available' %} disabled{% endif %}>{{ root.label }}{% if root.availability.state != 'available' %}: {{ root.availability.reason_codes|join(', ') or root.reason_code or 'unavailable' }}{% endif %}</option>{% endfor %}
+    </select>
+    <label for="relative-path">Relative replay name</label>
+    <input id="relative-path" name="relative_path" required pattern="[^\\/][^\\]*\\.rep"{% if not has_available_roots %} disabled{% endif %}>
+    <button type="submit"{% if not has_available_roots %} disabled{% endif %}>Import configured replay</button>
+  </form>
+  <noscript><p>JavaScript is unavailable. {% if has_available_roots %}Use the configured-root form with its rendered security token.{% else %}No configured roots can be imported.{% endif %} Uploads remain unavailable until opaque ingress is installed.</p></noscript>
+</dialog>

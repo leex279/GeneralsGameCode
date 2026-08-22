@@ -49,6 +49,19 @@ WEB_SHELL_RESOURCES = {
     "generals_replay_analyzer/web/static/vendor/vendor-manifest.json",
     "generals_replay_analyzer/web/static/vendor/THIRD_PARTY_LICENSES.md",
 }
+WEB_LIBRARY_TEMPLATE_RESOURCES = {
+    "generals_replay_analyzer/web/templates/replays/index.html",
+    "generals_replay_analyzer/web/templates/replays/_table.html",
+    "generals_replay_analyzer/web/templates/imports/dialog.html",
+}
+WEB_LIBRARY_SOURCE_RESOURCES = {
+    "generals_replay_analyzer/web/routes/replays.py",
+    "generals_replay_analyzer/web/routes/imports.py",
+    "generals_replay_analyzer/web/viewmodels/__init__.py",
+    "generals_replay_analyzer/web/viewmodels/replays.py",
+}
+WEB_LIBRARY_RESOURCES = WEB_LIBRARY_TEMPLATE_RESOURCES | WEB_LIBRARY_SOURCE_RESOURCES
+WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = WEB_SHELL_RESOURCES | WEB_LIBRARY_TEMPLATE_RESOURCES
 
 
 def _source_resource(resource_name: str) -> Path:
@@ -64,7 +77,7 @@ def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_r
         for source, destination in force_include.items()
         if source.startswith("src/generals_replay_analyzer/web/")
     }
-    assert web_force_includes == WEB_SHELL_RESOURCES - {
+    assert web_force_includes == WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES - {
         "generals_replay_analyzer/web/presentation/__init__.py",
         "generals_replay_analyzer/web/presentation/shell.py",
     }
@@ -90,7 +103,7 @@ def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path
                     ("generals_replay_analyzer/web/templates/", "generals_replay_analyzer/web/static/")
                 )
             }
-            assert web_resources == WEB_SHELL_RESOURCES - {
+            assert web_resources == WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES - {
                 "generals_replay_analyzer/web/presentation/__init__.py",
                 "generals_replay_analyzer/web/presentation/shell.py",
             }
@@ -179,8 +192,8 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
     _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
     wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        assert WEB_SHELL_RESOURCES <= set(archive.namelist())
-        for resource_name in WEB_SHELL_RESOURCES:
+        assert WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES <= set(archive.namelist())
+        for resource_name in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES:
             assert archive.read(resource_name) == _source_resource(resource_name).read_bytes()
 
     environment_directory = tmp_path / "shell-wheel-environment"
@@ -197,7 +210,14 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
 
         import generals_replay_analyzer
         from generals_replay_analyzer.web.app import create_app
-        from generals_replay_analyzer.web.ports import AvailabilityDTO, DashboardDTO, IdentityLandingDTO, ReadinessDTO
+        from generals_replay_analyzer.web.ports import (
+            AvailabilityDTO,
+            DashboardDTO,
+            IdentityLandingDTO,
+            ImportSubmissionDTO,
+            ReadinessDTO,
+            ReplayLibraryPageDTO,
+        )
         from generals_replay_analyzer.web.resources import package_resource
 
         class Port:
@@ -209,6 +229,14 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
             def identity_landing(self):
                 from datetime import UTC, datetime
                 return IdentityLandingDTO(generated_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC), availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+            def list_replays(self, query):
+                return ReplayLibraryPageDTO(query=query, items=(), page=query.page, page_size=query.page_size, total_items=0, availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+            def import_roots(self):
+                return ()
+            def submit_upload(self, command):
+                return ImportSubmissionDTO(submission_public_id="123e4567-e89b-42d3-a456-426614174020", availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)), problem_code="opaque_ingress_handoff_pending")
+            def submit_root_selection(self, command):
+                return ImportSubmissionDTO(submission_public_id="123e4567-e89b-42d3-a456-426614174021", availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)), problem_code="dependency_unavailable")
         class Factory:
             def __enter__(self): return Port()
             def __exit__(self, *args): return None
@@ -228,6 +256,13 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
                 assert heading in response.text
                 assert 'src="/static/vendor/htmx.min.js"' not in response.text
                 assert 'src="/static/vendor/echarts.min.js"' not in response.text
+            library = client.get("/replays", headers={"host": "localhost", "accept": "text/html"})
+            assert library.status_code == 200
+            assert "Replay library" in library.text
+            assert "wheel_fixture" in library.text
+            dialog = client.get("/imports/dialog", headers={"host": "localhost", "accept": "text/html"})
+            assert dialog.status_code == 200
+            assert "Import replay" in dialog.text
             stylesheet = client.get("/static/css/app.css", headers={"host": "localhost"})
             assert stylesheet.status_code == 200
             assert stylesheet.headers["content-security-policy"]
@@ -236,7 +271,10 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
     environment["WHEEL_WEB_RESOURCE_HASHES"] = json.dumps(
-        {resource: hashlib.sha256(_source_resource(resource).read_bytes()).hexdigest() for resource in WEB_SHELL_RESOURCES},
+        {
+            resource: hashlib.sha256(_source_resource(resource).read_bytes()).hexdigest()
+            for resource in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES
+        },
         separators=(",", ":"),
         sort_keys=True,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from typing import Literal, Self
+from urllib.parse import urlencode
 
 from fastapi import Request
 from jinja2 import BaseLoader, Environment, TemplateNotFound, select_autoescape
@@ -17,6 +18,8 @@ from generals_replay_analyzer.web.ports import (
     DashboardDTO,
     IdentityLandingDTO,
     PipelineStateDTO,
+    ReplayLibraryPageDTO,
+    ReplayLibraryQueryDTO,
     TerminalQualityDTO,
     _contains_filesystem_locator,
 )
@@ -38,7 +41,7 @@ class PresentationDTO(BaseModel):
 
 def _presentation_strings(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return () if value in {"/", "/players"} else (value,)
+        return () if value in {"/", "/players", "/replays"} else (value,)
     if isinstance(value, BaseModel):
         return tuple(text for field in type(value).model_fields for text in _presentation_strings(getattr(value, field)))
     if isinstance(value, tuple):
@@ -60,7 +63,7 @@ class ShellContextDTO(PresentationDTO):
     """Immutable values shared by every first-party shell page."""
 
     page_title: str
-    current_path: Literal["/", "/players"]
+    current_path: Literal["/", "/players", "/replays"]
     navigation: tuple[NavigationItemDTO, ...]
     pipeline: PipelineStateDTO | None
     availability: AvailabilityDTO
@@ -68,18 +71,21 @@ class ShellContextDTO(PresentationDTO):
     correlation_id: str | None = None
 
 
-_UPCOMING_ITEMS = ("Library", "Compare", "Jobs", "Settings")
+_UPCOMING_ITEMS = ("Compare", "Jobs", "Settings")
 _HTML_MEDIA_RANGE_PRECEDENCE = {"*/*": 0, "text/*": 1, "text/html": 2}
 _QVALUE = re.compile(r"(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\Z")
 
 
-def _navigation(current_path: Literal["/", "/players"]) -> tuple[NavigationItemDTO, ...]:
+def _navigation(current_path: Literal["/", "/players", "/replays"]) -> tuple[NavigationItemDTO, ...]:
     available = (
         NavigationItemDTO(
             label="Dashboard", href="/", active=current_path == "/", availability="available"
         ),
         NavigationItemDTO(
             label="Players", href="/players", active=current_path == "/players", availability="available"
+        ),
+        NavigationItemDTO(
+            label="Library", href="/replays", active=current_path == "/replays", availability="available"
         ),
     )
     upcoming = tuple(
@@ -137,6 +143,73 @@ def identity_shell(snapshot: IdentityLandingDTO) -> ShellContextDTO:
     )
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Keep replay pagination and canonical filters as a frozen presentation boundary. (#0)
+class ReplayLibraryViewModel(BaseModel):
+    """Immutable library display state with its canonical query URL."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    page: ReplayLibraryPageDTO
+    canonical_url: str
+    previous_url: str | None
+    next_url: str | None
+    total_pages: int
+
+
+_QUERY_ORDER = (
+    "page",
+    "page_size",
+    "search",
+    "player_public_id",
+    "faction",
+    "matchup",
+    "map_public_id",
+    "result",
+    "patch",
+    "strategy_id",
+    "analysis_status",
+    "evidence_tier",
+    "lifecycle_state",
+    "source_kind",
+    "date_from_utc",
+    "date_to_utc",
+)
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Preserve replay filters in one deterministic public URL. (#0)
+def replay_library_url(query: ReplayLibraryQueryDTO) -> str:
+    values = query.model_dump(mode="json", exclude_none=True)
+    return "/replays?" + urlencode([(name, values[name]) for name in _QUERY_ORDER if name in values])
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Map library snapshots without deriving quality from pipeline state. (#0)
+def replay_library_view(page: ReplayLibraryPageDTO) -> ReplayLibraryViewModel:
+    total_pages = max(1, (page.total_items + page.page_size - 1) // page.page_size)
+    previous_url = replay_library_url(page.query.model_copy(update={"page": page.page - 1})) if page.page > 1 else None
+    next_url = (
+        replay_library_url(page.query.model_copy(update={"page": page.page + 1})) if page.page < total_pages else None
+    )
+    return ReplayLibraryViewModel(
+        page=page,
+        canonical_url=replay_library_url(page.query),
+        previous_url=previous_url,
+        next_url=next_url,
+        total_pages=total_pages,
+    )
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Reuse the shell while keeping the Library navigation item current. (#0)
+def replay_library_shell(availability: AvailabilityDTO) -> ShellContextDTO:
+    return ShellContextDTO(
+        page_title="Replay library | Generals Replay Analyzer",
+        current_path="/replays",
+        navigation=_navigation("/replays"),
+        pipeline=None,
+        availability=availability,
+        terminal_quality=None,
+    )
+
+
 # TheSuperHackers @info Leex 22/08/2026 Resolve Jinja templates only from installed package resources. (#TBD)
 class _PackageTemplateLoader(BaseLoader):
     """Load Jinja sources through ``importlib.resources`` only."""
@@ -190,6 +263,11 @@ def accepts_html(accept: str | None) -> bool:
     return min(qualities_by_precedence[most_specific]) > 0
 
 
-def template_response(request: Request, name: str, shell: ShellContextDTO) -> Response:
+def template_response(
+    request: Request, name: str, shell: ShellContextDTO, *, context: dict[str, object] | None = None
+) -> Response:
     """Render a package-owned template with no checkout-relative fallback."""
-    return _TEMPLATES.TemplateResponse(request=request, name=name, context={"shell": shell})
+    values: dict[str, object] = {"shell": shell}
+    if context is not None:
+        values.update(context)
+    return _TEMPLATES.TemplateResponse(request=request, name=name, context=values)
