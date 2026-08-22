@@ -3,11 +3,13 @@
 import hashlib
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn
+from typing import BinaryIO, NoReturn
 
 import pytest
 from telemetry.test_telemetry_v2_contract import _write_catalog, _write_v2_trace
@@ -72,6 +74,50 @@ def _config(executable: Path, data_root: Path, **changes: object) -> EngineRunCo
     }
     values.update(changes)
     return EngineRunConfig(**values)  # type: ignore[arg-type]
+
+
+def _process_launch_request(
+    tmp_path: Path,
+    stdout_handle: BinaryIO,
+    stderr_handle: BinaryIO,
+) -> ProcessLaunchRequest:
+    return ProcessLaunchRequest(
+        run_id="a23e4567-e89b-42d3-a456-426614174000",
+        run_dir=tmp_path,
+        argv=(sys.executable, "-c", "pass"),
+        cwd=Path(sys.executable).parent,
+        stdout_path=tmp_path / "stdout.log",
+        stderr_path=tmp_path / "stderr.log",
+        stdout_handle=stdout_handle,
+        stderr_handle=stderr_handle,
+        timeout_seconds=17,
+    )
+
+
+class _ScriptedPosixProcess:
+    pid = 24680
+
+    def __init__(self, *wait_outcomes: int | BaseException) -> None:
+        self.wait_outcomes = list(wait_outcomes)
+        self.wait_calls: list[int | None] = []
+
+    def wait(self, timeout: int | None = None) -> int:
+        self.wait_calls.append(timeout)
+        outcome = self.wait_outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _install_noop_posix_signal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_module.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIG_SETMASK", 2, raising=False)
+    monkeypatch.setattr(
+        runner_module.signal,
+        "pthread_sigmask",
+        lambda operation, _mask: set() if operation == signal.SIG_BLOCK else {signal.SIGTERM},
+        raising=False,
+    )
 
 
 def _argument_path(request: ProcessLaunchRequest, option: str) -> Path:
@@ -794,6 +840,293 @@ def test_startup_outcome_rejects_contradictory_playback_artifacts(tmp_path: Path
 
     assert result.status is EngineRunStatus.OUTCOME_MISMATCH
     assert result.trace_path is None
+
+
+def test_posix_launcher_interruption_settles_exact_child_process_group_before_reraising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch an interrupted wait orphaning the engine session or signaling a looked-up PID."""
+
+    class InjectedInterruption(BaseException):
+        pass
+
+    interruption = InjectedInterruption("cancel supervisor")
+
+    class InterruptedProcess:
+        pid = 24680
+
+        def __init__(self) -> None:
+            self.wait_calls: list[int | None] = []
+
+        def wait(self, timeout: int | None = None) -> int:
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) == 1:
+                raise interruption
+            return -int(signal.SIGKILL)
+
+    process = InterruptedProcess()
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+    killpg_calls: list[tuple[int, int]] = []
+
+    def fake_popen(argv: list[str], **kwargs: object) -> InterruptedProcess:
+        popen_calls.append((argv, kwargs))
+        return process
+
+    def kill_exact_group(process_group_id: int, requested_signal: int) -> None:
+        killpg_calls.append((process_group_id, requested_signal))
+
+    def forbid_pid_lookup_or_signal(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("launcher must use the known new-session process group directly")
+
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    _install_noop_posix_signal_mask(monkeypatch)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runner_module.os, "killpg", kill_exact_group, raising=False)
+    monkeypatch.setattr(runner_module.os, "getpgid", forbid_pid_lookup_or_signal, raising=False)
+    monkeypatch.setattr(runner_module.os, "kill", forbid_pid_lookup_or_signal)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(runner_module.ProcessTreeSettledInterruption) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value.__cause__ is interruption
+    assert process.wait_calls == [17, None]
+    assert killpg_calls == [(process.pid, signal.SIGKILL)]
+    assert len(popen_calls) == 1
+    assert popen_calls[0][1]["start_new_session"] is True
+
+
+@pytest.mark.parametrize("cleanup_failure", ["killpg", "wait"])
+def test_posix_launcher_cleanup_failure_preserves_original_interruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_failure: str,
+) -> None:
+    """Catch cleanup errors replacing the interruption that initiated owned-tree settlement."""
+
+    class InjectedInterruption(BaseException):
+        pass
+
+    interruption = InjectedInterruption("cancel supervisor")
+    cleanup_error = OSError(f"injected {cleanup_failure} failure")
+
+    class InterruptedProcess:
+        pid = 13579
+
+        def __init__(self) -> None:
+            self.wait_calls: list[int | None] = []
+
+        def wait(self, timeout: int | None = None) -> int:
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) == 1:
+                raise interruption
+            if cleanup_failure == "wait":
+                raise cleanup_error
+            return -int(signal.SIGKILL)
+
+    process = InterruptedProcess()
+
+    def fake_popen(_argv: list[str], **_kwargs: object) -> InterruptedProcess:
+        return process
+
+    def terminate_group(_process_group_id: int, _requested_signal: int) -> None:
+        if cleanup_failure == "killpg":
+            raise cleanup_error
+
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    _install_noop_posix_signal_mask(monkeypatch)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runner_module.os, "killpg", terminate_group, raising=False)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(InjectedInterruption) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value is interruption
+    assert caught.value.__cause__ is cleanup_error
+    expected_waits = [17] if cleanup_failure == "killpg" else [17, None]
+    assert process.wait_calls == expected_waits
+
+
+@pytest.mark.parametrize("pending_before_spawn", [True, False])
+def test_posix_launcher_defers_pending_sigterm_until_spawn_is_guarded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pending_before_spawn: bool,
+) -> None:
+    """Catch a pending SIGTERM escaping between child creation and the settlement guard."""
+
+    class InjectedInterruption(BaseException):
+        pass
+
+    interruption = InjectedInterruption("pending SIGTERM")
+    process = _ScriptedPosixProcess(-9)
+    pending = pending_before_spawn
+    events: list[str] = []
+    previous_mask = {signal.SIGINT}
+
+    def pthread_sigmask(operation: int, mask: set[int]) -> set[int]:
+        nonlocal pending
+        if operation == signal.SIG_BLOCK:
+            events.append("block")
+            assert mask == {signal.SIGTERM}
+            return previous_mask
+        assert operation == signal.SIG_SETMASK
+        assert mask == previous_mask
+        events.append("unblock")
+        if pending:
+            raise interruption
+        return {signal.SIGTERM}
+
+    def popen(_argv: list[str], **_kwargs: object) -> _ScriptedPosixProcess:
+        nonlocal pending
+        events.append("spawn")
+        if not pending_before_spawn:
+            pending = True
+        return process
+
+    def killpg(process_group_id: int, requested_signal: int) -> None:
+        assert (process_group_id, requested_signal) == (process.pid, signal.SIGKILL)
+        events.append("killpg")
+
+    monkeypatch.setattr(runner_module.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIG_SETMASK", 2, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(runner_module.signal, "pthread_sigmask", pthread_sigmask, raising=False)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(runner_module.os, "killpg", killpg, raising=False)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(runner_module.ProcessTreeSettledInterruption) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value.__cause__ is interruption
+    assert events == ["block", "spawn", "unblock", "killpg"]
+    assert process.wait_calls == [None]
+
+
+@pytest.mark.parametrize("interruption_point", ["timeout_killpg", "timeout_wait"])
+def test_posix_launcher_interruption_during_timeout_cleanup_retries_exact_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption_point: str,
+) -> None:
+    """Catch timeout cleanup being outside the interruption settlement guard."""
+
+    class InjectedInterruption(BaseException):
+        pass
+
+    interruption = InjectedInterruption(interruption_point)
+    timeout = subprocess.TimeoutExpired(("engine",), 17)
+    wait_outcomes: tuple[int | BaseException, ...]
+    if interruption_point == "timeout_wait":
+        wait_outcomes = (timeout, interruption, -9)
+    else:
+        wait_outcomes = (timeout, -9)
+    process = _ScriptedPosixProcess(*wait_outcomes)
+    killpg_calls: list[tuple[int, int]] = []
+
+    def pthread_sigmask(operation: int, _mask: set[int]) -> set[int]:
+        return set() if operation == signal.SIG_BLOCK else {signal.SIGTERM}
+
+    def killpg(process_group_id: int, requested_signal: int) -> None:
+        killpg_calls.append((process_group_id, requested_signal))
+        if interruption_point == "timeout_killpg" and len(killpg_calls) == 1:
+            raise interruption
+
+    monkeypatch.setattr(runner_module.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIG_SETMASK", 2, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(runner_module.signal, "pthread_sigmask", pthread_sigmask, raising=False)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(runner_module.os, "killpg", killpg, raising=False)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(runner_module.ProcessTreeSettledInterruption) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value.__cause__ is interruption
+    assert killpg_calls == [(process.pid, signal.SIGKILL), (process.pid, signal.SIGKILL)]
+    expected_waits = [17, None, None] if interruption_point == "timeout_wait" else [17, None]
+    assert process.wait_calls == expected_waits
+
+
+def test_posix_launcher_process_lookup_then_exact_reap_is_positive_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a concurrently exited process group preventing exact child reap acknowledgement."""
+
+    class InjectedInterruption(BaseException):
+        pass
+
+    interruption = InjectedInterruption("cancel supervisor")
+    process = _ScriptedPosixProcess(interruption, 0)
+    monkeypatch.setattr(runner_module.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIG_SETMASK", 2, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(
+        runner_module.signal,
+        "pthread_sigmask",
+        lambda operation, _mask: set() if operation == signal.SIG_BLOCK else {signal.SIGTERM},
+        raising=False,
+    )
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        runner_module.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(ProcessLookupError("group already exited")),
+        raising=False,
+    )
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(runner_module.ProcessTreeSettledInterruption) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value.__cause__ is interruption
+    assert process.wait_calls == [17, None]
+
+
+def test_posix_launcher_signal_mask_restore_failure_is_not_positive_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a failed SIGTERM-mask restore being misreported as a settled cancellation."""
+
+    restore_error = OSError("injected mask restore failure")
+    process = _ScriptedPosixProcess(-9)
+
+    def pthread_sigmask(operation: int, _mask: set[int]) -> set[int]:
+        if operation == signal.SIG_BLOCK:
+            return set()
+        raise restore_error
+
+    monkeypatch.setattr(runner_module.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIG_SETMASK", 2, raising=False)
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(runner_module.signal, "pthread_sigmask", pthread_sigmask, raising=False)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(runner_module.os, "killpg", lambda *_args: None, raising=False)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = _process_launch_request(tmp_path, stdout_handle, stderr_handle)
+        with pytest.raises(OSError) as caught:
+            runner_module._posix_process_launcher(request)
+
+    assert caught.value is restore_error
+    assert process.wait_calls == [None]
 
 
 def test_windows_launcher_source_marks_child_owned_before_fallible_handle_reset(repository_root: Path) -> None:

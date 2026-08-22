@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol, cast
+from typing import BinaryIO, Literal, NoReturn, Protocol, cast
 from uuid import UUID, uuid4
 
 from generals_replay_analyzer.engine.config import (
@@ -71,10 +71,21 @@ class ProcessExecution:
     termination_method: str | None
 
 
+# TheSuperHackers @fix Leex 22/08/2026 Mark only positively settled interrupted POSIX engine trees. (#TBD)
+class ProcessTreeSettledInterruption(BaseException):
+    """Signal that an interrupted POSIX launcher killed and reaped its exact child tree."""
+
+
 class ProcessLauncher(Protocol):
     """Injected external-process seam used by unit tests and the production launcher."""
 
     def __call__(self, request: ProcessLaunchRequest) -> ProcessExecution: ...
+
+
+class _PosixSignalModule(Protocol):
+    SIG_BLOCK: int
+    SIG_SETMASK: int
+    pthread_sigmask: Callable[[int, set[signal.Signals]], set[signal.Signals]]
 
 
 def _utc_now() -> str:
@@ -823,28 +834,66 @@ def export_telemetry(
     )
 
 
+# TheSuperHackers @fix Leex 22/08/2026 Guard POSIX child ownership and settle only its exact new-session group. (#TBD)
+def _settle_posix_process_group(process: subprocess.Popen[bytes]) -> int:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+    except ProcessLookupError:
+        pass
+    return process.wait()
+
+
+def _raise_settled_posix_interruption(
+    process: subprocess.Popen[bytes],
+    interruption: BaseException,
+) -> NoReturn:
+    if isinstance(interruption, Exception):
+        raise interruption
+    try:
+        _settle_posix_process_group(process)
+    except BaseException as cleanup_error:
+        raise interruption from cleanup_error
+    raise ProcessTreeSettledInterruption from interruption
+
+
 def _posix_process_launcher(request: ProcessLaunchRequest) -> ProcessExecution:
     started = time.monotonic()
     timed_out = False
     tree_terminated = False
     termination_method: str | None = None
-    process = subprocess.Popen(
-        list(request.argv),
-        cwd=request.cwd,
-        stdout=request.stdout_handle,
-        stderr=request.stderr_handle,
-        stdin=subprocess.DEVNULL,
-        shell=False,
-        start_new_session=True,
-    )
+    posix_signal = cast(_PosixSignalModule, signal)
+    previous_mask = posix_signal.pthread_sigmask(posix_signal.SIG_BLOCK, {signal.SIGTERM})
     try:
-        exit_code = process.wait(timeout=request.timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
-        exit_code = process.wait()
-        tree_terminated = True
-        termination_method = "posix_process_group"
+        process = subprocess.Popen(
+            list(request.argv),
+            cwd=request.cwd,
+            stdout=request.stdout_handle,
+            stderr=request.stderr_handle,
+            stdin=subprocess.DEVNULL,
+            shell=False,
+            start_new_session=True,
+        )
+    except BaseException:
+        posix_signal.pthread_sigmask(posix_signal.SIG_SETMASK, previous_mask)
+        raise
+    try:
+        try:
+            posix_signal.pthread_sigmask(posix_signal.SIG_SETMASK, previous_mask)
+        except Exception as restore_error:
+            try:
+                _settle_posix_process_group(process)
+            except BaseException as cleanup_error:
+                raise restore_error from cleanup_error
+            raise
+        try:
+            exit_code = process.wait(timeout=request.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            exit_code = _settle_posix_process_group(process)
+            tree_terminated = True
+            termination_method = "posix_process_group"
+    except BaseException as interruption:  # noqa: BLE001 - POSIX signal handlers raise outside Exception.
+        _raise_settled_posix_interruption(process, interruption)
     return ProcessExecution(exit_code, timed_out, time.monotonic() - started, tree_terminated, termination_method)
 
 
