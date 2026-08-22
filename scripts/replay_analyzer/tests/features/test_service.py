@@ -555,6 +555,99 @@ def test_persistence_rejects_same_replay_evidence_not_authorized_by_exact_contex
         assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
 
 
+def test_persistence_rejects_forged_input_hidden_by_exact_later_cross_role_duplicates(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    base_service = FeatureExtractionService(feature_factory)
+    context = base_service._build_context(_request(replay, player, "build"))
+    exact = context.observed[0].ref
+    forged = replace(exact, source_key=f"{exact.source_key}:forged")
+
+    class CrossRoleCollisionExtractor:
+        name = "cross_role_collision"
+        version = "cross-role-collision-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        FeatureScope("player", player, player),
+                        FeatureWindow(0, 120),
+                        "complete",
+                        None,
+                        (forged,),
+                        (exact,),
+                        (exact,),
+                    ),
+                ),
+            )
+
+    with pytest.raises(FeatureExtractionError, match="feature persistence failed") as caught:
+        FeatureExtractionService(
+            feature_factory,
+            extractors=(CrossRoleCollisionExtractor(),),
+        ).extract(_request(replay, player, "cross_role_collision"))
+    assert caught.value.__cause__ is not None
+    assert str(caught.value.__cause__) == "feature evidence is not authorized by exact feature context"
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Feature)) == 0
+        assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
+
+
+def test_persistence_allows_one_exact_context_reference_in_each_evidence_role(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+    exact = context.observed[0].ref
+
+    class ExactRolesExtractor:
+        name = "exact_roles"
+        version = "exact-roles-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        FeatureScope("player", player, player),
+                        FeatureWindow(0, 120),
+                        "complete",
+                        None,
+                        (exact,),
+                        (exact,),
+                        (exact,),
+                    ),
+                ),
+            )
+
+    receipt = FeatureExtractionService(
+        feature_factory,
+        extractors=(ExactRolesExtractor(),),
+    ).extract(_request(replay, player, "exact_roles"))[0]
+    assert receipt.features[0].input_evidence == (exact,)
+    assert receipt.features[0].supporting_evidence == (exact,)
+    assert receipt.features[0].contradicting_evidence == (exact,)
+    with feature_factory() as session:
+        assert tuple(
+            session.scalars(select(FeatureEvidence.role).order_by(FeatureEvidence.role)).all()
+        ) == ("contradicting", "input", "supporting")
+
+
 def _permuted_json(value: object, randomizer: random.Random) -> object:
     if isinstance(value, dict):
         items = list(value.items())

@@ -613,13 +613,17 @@ class FeatureExtractionService:
         values: tuple[FeatureValue, ...],
         authorized_evidence: Mapping[str, EvidenceRef],
     ) -> None:
-        refs = {
-            ref.public_id: ref
+        original_refs = tuple(
+            ref
             for value in values
             for ref in value.input_evidence + value.supporting_evidence + value.contradicting_evidence
-        }
-        if any(authorized_evidence.get(public_id) != ref for public_id, ref in refs.items()):
+        )
+        if any(authorized_evidence.get(ref.public_id) != ref for ref in original_refs):
             raise ValueError("feature evidence is not authorized by exact feature context")
+        refs = {
+            ref.public_id: ref
+            for ref in original_refs
+        }
         evidence_rows = {
             item.public_id: item
             for item in session.scalars(select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(refs)))).all()
