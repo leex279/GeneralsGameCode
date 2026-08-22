@@ -23,6 +23,10 @@ from generals_replay_analyzer.importing import (
     StageExecutionOutcomeDTO,
     WorkerControlPort,
 )
+from generals_replay_analyzer.importing.job_contracts import (
+    DEFAULT_JOB_CLAIM_SELECTOR,
+    JobClaimSelectorDTO,
+)
 
 LOGGER = logging.getLogger(__name__)
 _POSIX_TREE_SETTLED_EXIT_CODE = 75
@@ -163,13 +167,19 @@ class WorkerRuntime:
             return
         self._watch_scanner.request_scan()
 
-    def run_once(self) -> bool:
+    def run_once(self, selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR) -> bool:
+        if type(selector) is not JobClaimSelectorDTO:
+            raise TypeError("selector must be an exact JobClaimSelectorDTO")
         self._scan_watcher()
         if not self.control.registered_stages():
+            if selector != DEFAULT_JOB_CLAIM_SELECTOR:
+                return False
             self.stop_requested = self.waiter.wait(self.poll_seconds)
             return False
-        claim = self.control.claim_next(self.worker_public_id, self.lease_seconds)
+        claim = self.control.claim_next(self.worker_public_id, self.lease_seconds, selector)
         if claim is None:
+            if selector != DEFAULT_JOB_CLAIM_SELECTOR:
+                return False
             self.stop_requested = self.waiter.wait(self.poll_seconds)
             return False
         cancellation = self.control.cancellation(self.worker_public_id, claim)

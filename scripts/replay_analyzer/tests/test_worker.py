@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Lock, Thread
+from typing import cast
 
 import pytest
 
@@ -20,12 +21,16 @@ import generals_replay_analyzer.worker as worker_module
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.engine import runner as engine_runner_module
 from generals_replay_analyzer.importing import (
+    JobClaimSelectorDTO,
     JobLifecycleError,
     JobLifecycleService,
     OwnedExecutionSettlementDTO,
     StageExecutionOutcomeDTO,
     WorkerCancellationDTO,
     WorkerLeaseDTO,
+)
+from generals_replay_analyzer.importing.job_contracts import (
+    DEFAULT_JOB_CLAIM_SELECTOR,
 )
 from generals_replay_analyzer.importing.jobs import JobCoordinator, JobSpec
 from generals_replay_analyzer.worker import (
@@ -54,6 +59,7 @@ class FakeControl:
         default_factory=lambda: [WorkerCancellationDTO(False, None)]
     )
     claims: int = 0
+    selectors: list[JobClaimSelectorDTO] = field(default_factory=list)
     heartbeats: int = 0
     successes: list[str] = field(default_factory=list)
     failures: list[StageExecutionOutcomeDTO] = field(default_factory=list)
@@ -64,8 +70,14 @@ class FakeControl:
     def registered_stages(self) -> tuple[str, ...]:
         return self.stages
 
-    def claim_next(self, _worker_public_id: str, _lease_seconds: int) -> WorkerLeaseDTO | None:
+    def claim_next(
+        self,
+        _worker_public_id: str,
+        _lease_seconds: int,
+        selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR,
+    ) -> WorkerLeaseDTO | None:
         self.claims += 1
+        self.selectors.append(selector)
         value, self.next_claim = self.next_claim, None
         return value
 
@@ -161,6 +173,31 @@ def test_worker_does_not_claim_when_no_handler_is_registered() -> None:
     worker = runtime(control, FakeSupervisor([]))
 
     assert worker.run_once() is False
+    assert control.claims == 0
+
+
+def test_one_shot_worker_forwards_an_exact_selector_without_idle_wait() -> None:
+    """Catch the analyze command claiming another replay or sleeping after its exact queue drains."""
+    control = FakeControl(next_claim=None)
+    waiter = FakeWaiter()
+    worker = runtime(control, FakeSupervisor([]), waiter)
+    selector = JobClaimSelectorDTO(
+        "123e4567-e89b-42d3-a456-426614174099",
+        ("derive_features", "render_report"),
+    )
+
+    assert worker.run_once(selector) is False
+    assert control.selectors == [selector]
+    assert waiter.calls == 0
+
+
+def test_one_shot_worker_rejects_a_noncontract_selector_before_watcher_or_claim() -> None:
+    """Catch arbitrary selector-shaped values bypassing validation on an idle worker."""
+    control = FakeControl(stages=())
+    worker = runtime(control, FakeSupervisor([]))
+
+    with pytest.raises(TypeError, match="exact JobClaimSelectorDTO"):
+        worker.run_once(cast(JobClaimSelectorDTO, object()))
     assert control.claims == 0
 
 

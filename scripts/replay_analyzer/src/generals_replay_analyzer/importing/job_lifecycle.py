@@ -346,6 +346,7 @@ class JobLifecycleService:
                     now,
                     replay_id=selected_replay_id,
                     selected_stages=selected_stages,
+                    selected_public_ids=selector.job_public_ids or None,
                 )
             )
             for candidate in session.scalars(candidate_query):
@@ -365,6 +366,8 @@ class JobLifecycleService:
                     claim_conditions.append(Job.replay_id == selected_replay_id)
                 if selector != DEFAULT_JOB_CLAIM_SELECTOR:
                     claim_conditions.append(Job.stage.in_(selected_stages))
+                if selector.job_public_ids:
+                    claim_conditions.append(Job.public_id.in_(selector.job_public_ids))
                 result = session.execute(
                     update(Job)
                     .where(*claim_conditions)
@@ -412,6 +415,7 @@ class JobLifecycleService:
         *,
         replay_id: int | None = None,
         selected_stages: tuple[str, ...] | None = None,
+        selected_public_ids: tuple[str, ...] | None = None,
     ) -> Select[tuple[Job]]:
         stages = self._stages if selected_stages is None else selected_stages
         query = (
@@ -426,6 +430,8 @@ class JobLifecycleService:
         )
         if replay_id is not None:
             query = query.where(Job.replay_id == replay_id)
+        if selected_public_ids is not None:
+            query = query.where(Job.public_id.in_(selected_public_ids))
         return query
 
     def _dependencies_satisfied(self, session: Session, row: Job) -> bool:

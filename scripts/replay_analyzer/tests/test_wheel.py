@@ -32,7 +32,11 @@ LLM_RESOURCES = {
     "generals_replay_analyzer/data/strategy-taxonomy-v1.json",
     "generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json",
 }
-DATA_RESOURCES = LLM_RESOURCES | {
+REPORT_RESOURCES = {
+    "generals_replay_analyzer/data/replay-report-v1.html",
+    "generals_replay_analyzer/data/replay-report-v1.schema.json",
+}
+DATA_RESOURCES = LLM_RESOURCES | REPORT_RESOURCES | {
     "generals_replay_analyzer/data/zero_hour_1_04_message_types.json",
     "generals_replay_analyzer/data/telemetry-v1.schema.json",
     "generals_replay_analyzer/data/telemetry-v2.schema.json",
@@ -221,6 +225,7 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
             OllamaAnalysisService,
         )
         from generals_replay_analyzer.llm.schema import load_prompt, load_response_schema
+        from generals_replay_analyzer.report.resources import load_report_resources
         from generals_replay_analyzer.web.resources import PackagedResourceError, package_resource
 
         database = Path(os.environ["TEST_DATABASE_PATH"])
@@ -230,6 +235,9 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
         assert all((AnalysisOutcome, AnalysisRequest, DeterministicFallback, HttpxOllamaTransport, OllamaAnalysisService))
         assert hashlib.sha256(load_prompt().content).hexdigest() == os.environ["TEST_PROMPT_SHA256"]
         assert hashlib.sha256(load_response_schema().content).hexdigest() == os.environ["TEST_RESPONSE_SCHEMA_SHA256"]
+        report_resources = load_report_resources()
+        assert report_resources.html_template_sha256 == os.environ["TEST_REPORT_TEMPLATE_SHA256"]
+        assert report_resources.document_schema_sha256 == os.environ["TEST_REPORT_SCHEMA_SHA256"]
         assert package_resource("db/migrations/env.py").is_file()
         try:
             package_resource("web/templates/not-created-by-task-1.html")
@@ -277,6 +285,12 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     ).hexdigest()
     environment["TEST_RESPONSE_SCHEMA_SHA256"] = hashlib.sha256(
         _source_resource("generals_replay_analyzer/data/strategy-report-response-v1.schema.json").read_bytes()
+    ).hexdigest()
+    environment["TEST_REPORT_TEMPLATE_SHA256"] = hashlib.sha256(
+        _source_resource("generals_replay_analyzer/data/replay-report-v1.html").read_bytes()
+    ).hexdigest()
+    environment["TEST_REPORT_SCHEMA_SHA256"] = hashlib.sha256(
+        _source_resource("generals_replay_analyzer/data/replay-report-v1.schema.json").read_bytes()
     ).hexdigest()
     environment["PYTHONPATH"] = str(Path(sysconfig.get_paths()["purelib"]))
     result = _run([str(environment_python), "-c", migration_script], tmp_path, environment)
@@ -431,6 +445,10 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     export_help = _run([str(executable), "export-telemetry", "--help"], tmp_path)
     assert "--engine ENGINE" in export_help.stdout
     assert "--movement-sample-frames" in export_help.stdout
+    analyze_help = _run([str(executable), "analyze", "--help"], tmp_path)
+    assert "--execute" in analyze_help.stdout
+    assert "--allow-ollama" in analyze_help.stdout
+    assert "--json" in analyze_help.stdout
     inspection = _run([str(executable), "inspect", str(FIXTURE_PATH), "--format", "json"], tmp_path)
     output = json.loads(inspection.stdout)
     assert output["command_stream_offset"] == 342

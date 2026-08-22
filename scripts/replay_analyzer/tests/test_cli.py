@@ -5,6 +5,8 @@ import json
 import struct
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,6 +15,12 @@ from fixture_builder import command_bytes, replay_header_bytes
 
 from generals_replay_analyzer import __version__
 from generals_replay_analyzer import cli as cli_module
+from generals_replay_analyzer.analysis_pipeline.command import (
+    AnalysisCommandResult,
+    AnalysisJobStatusDTO,
+    AnalysisReportStatusDTO,
+)
+from generals_replay_analyzer.analysis_pipeline.planner import AnalysisPlanningError
 from generals_replay_analyzer.cli import main
 from generals_replay_analyzer.engine.config import EngineRunConfig, EngineRunConfigurationError
 from generals_replay_analyzer.engine.result import (
@@ -428,3 +436,399 @@ def test_worker_command_reports_unsettled_owned_child_without_private_traceback(
     captured = capsys.readouterr()
     assert "owned_child_settlement_failed" in captured.err
     assert "Traceback" not in captured.err
+
+
+@dataclass
+class _AnalyzeApplication:
+    result: AnalysisCommandResult | None = None
+    error: Exception | None = None
+    calls: list[tuple[str, bool, bool]] | None = None
+    closed: bool = False
+    close_error: Exception | None = None
+
+    def run(self, replay_public_id: str, *, execute: bool, allow_ollama: bool) -> AnalysisCommandResult:
+        if self.calls is not None:
+            self.calls.append((replay_public_id, execute, allow_ollama))
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+    def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _analysis_result(status: str, *, allow_ollama: bool = False) -> AnalysisCommandResult:
+    return AnalysisCommandResult(
+        status,  # type: ignore[arg-type]
+        "123e4567-e89b-42d3-a456-426614174120",
+        allow_ollama,
+        0,
+        (
+            AnalysisJobStatusDTO(
+                "123e4567-e89b-42d3-a456-426614174121",
+                "render_report",
+                "succeeded" if status == "succeeded" else "pending",
+                "a" * 64,
+                "123e4567-e89b-42d3-a456-426614174122" if status == "succeeded" else None,
+            ),
+        ),
+        (
+            AnalysisReportStatusDTO(
+                "123e4567-e89b-42d3-a456-426614174123",
+                "b" * 64,
+                "c" * 64,
+                "123e4567-e89b-42d3-a456-426614174124",
+                "d" * 64,
+                "123e4567-e89b-42d3-a456-426614174125",
+                "e" * 64,
+            ),
+        )
+        if status == "succeeded"
+        else (),
+    )
+
+
+def test_analyze_defaults_to_plan_only_and_ollama_opt_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the safe default starting execution or silently opting into a model."""
+    calls: list[tuple[str, bool, bool]] = []
+    application = _AnalyzeApplication(_analysis_result("planned"), calls=calls)
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 0
+    assert calls == [("123e4567-e89b-42d3-a456-426614174120", False, False)]
+    assert application.closed is True
+
+
+def test_analyze_json_is_path_free_and_preserves_opt_in_and_report_digests(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch machine output leaking locators or dropping the durable Ollama opt-in identity."""
+    calls: list[tuple[str, bool, bool]] = []
+    application = _AnalyzeApplication(_analysis_result("succeeded", allow_ollama=True), calls=calls)
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(
+        [
+            "analyze",
+            "123e4567-e89b-42d3-a456-426614174120",
+            "--execute",
+            "--allow-ollama",
+            "--json",
+        ]
+    ) == 0
+
+    output = _json_output(capsys)
+    assert calls == [("123e4567-e89b-42d3-a456-426614174120", True, True)]
+    assert output["status"] == "succeeded"
+    assert output["allow_ollama"] is True
+    assert output["reports"][0]["structured_asset_sha256"] == "d" * 64
+    serialized = json.dumps(output)
+    assert "\\" not in serialized and "://" not in serialized and "relative_path" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [
+        ("awaiting_observations", 3),
+        ("incomplete", 3),
+        ("claim_limit_reached", 3),
+        ("failed", 5),
+    ],
+)
+def test_analyze_returns_stable_nonzero_statuses(
+    status: str,
+    exit_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = _AnalyzeApplication(_analysis_result(status))
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120", "--json"]) == exit_code
+    assert application.closed is True
+
+
+def test_analyze_rejects_invalid_replay_identity_before_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_analyze_application",
+        lambda: pytest.fail("invalid public identity reached application composition"),
+    )
+
+    assert main(["analyze", "NOT-A-REPLAY"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "invalid_analysis_request" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_analyze_rejects_unknown_replay_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    application = _AnalyzeApplication(error=AnalysisPlanningError("unknown_replay", "unknown replay public ID"))
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174999"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "invalid_analysis_request" in captured.err
+    assert "Traceback" not in captured.err
+    assert application.closed is True
+
+
+def test_analyze_maps_persisted_graph_corruption_to_exit_five(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch internal evidence corruption being mislabeled as a user request error."""
+    application = _AnalyzeApplication(
+        error=AnalysisPlanningError("invalid_observation_graph", "C:\\private\\corrupt graph")
+    )
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 5
+    captured = capsys.readouterr()
+    assert "analysis_execution_failed" in captured.err
+    assert "private" not in captured.err and "Traceback" not in captured.err
+
+
+def test_analyze_execution_failure_is_exit_five_without_private_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch foreground worker faults escaping as tracebacks or request-validation failures."""
+    application = _AnalyzeApplication(error=RuntimeError("C:\\private\\worker failure"))
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120", "--execute"]) == 5
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "analysis_execution_failed" in captured.err
+    assert "private" not in captured.err and "Traceback" not in captured.err
+    assert application.closed is True
+
+
+def test_analyze_unexpected_application_exception_is_stable_exit_five(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    class UnexpectedAnalysisFailure(Exception):
+        pass
+
+    application = _AnalyzeApplication(error=UnexpectedAnalysisFailure("private"))
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 5
+    captured = capsys.readouterr()
+    assert "analysis_execution_failed" in captured.err
+    assert "private" not in captured.err and "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("error", [TypeError("private graph type"), ValueError("private graph value")])
+def test_analyze_internal_type_or_value_fault_is_exit_five(
+    error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch persisted graph/data faults being mislabeled as invalid user input."""
+    application = _AnalyzeApplication(error=error)
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 5
+    captured = capsys.readouterr()
+    assert "analysis_execution_failed" in captured.err
+    assert "private" not in captured.err and "Traceback" not in captured.err
+    assert application.closed is True
+
+
+def test_analyze_initialization_failure_is_path_free_exit_five(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_analyze_application",
+        lambda: (_ for _ in ()).throw(OSError("C:\\private\\database")),
+    )
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 5
+    captured = capsys.readouterr()
+    assert "analysis_initialization_failed" in captured.err
+    assert "private" not in captured.err
+
+
+def test_analyze_maps_owned_settlement_and_lifecycle_failures_to_exit_five(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    from generals_replay_analyzer.importing import JobLifecycleError
+    from generals_replay_analyzer.worker import OwnedChildSettlementError
+
+    for error in (
+        OwnedChildSettlementError("unsettled"),
+        JobLifecycleError("lifecycle_conflict", "private lifecycle state"),
+    ):
+        application = _AnalyzeApplication(error=error)
+        monkeypatch.setattr(cli_module, "_analyze_application", lambda application=application: application)
+        assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120", "--execute"]) == 5
+        captured = capsys.readouterr()
+        assert "analysis_execution_failed" in captured.err
+        assert "private" not in captured.err
+        assert application.closed is True
+
+
+def test_analyze_human_output_contains_only_public_status_and_digest_values(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    application = _AnalyzeApplication(_analysis_result("succeeded"))
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 0
+    captured = capsys.readouterr()
+    assert "render_report succeeded" in captured.out
+    assert "report 123e4567-e89b-42d3-a456-426614174123" in captured.out
+    assert "\\" not in captured.out and "://" not in captured.out
+
+
+def test_analyze_parent_and_stage_child_share_the_exact_production_composition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the foreground command drifting to a second handler registration list."""
+    from generals_replay_analyzer import worker as worker_module
+
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(tmp_path / "product"))
+    application = cli_module._analyze_application()
+    service, child_engine, _settings = worker_module._worker_service()
+    try:
+        assert application._runtime.control.registered_stages() == service.worker_control_port().registered_stages()
+        assert application._runtime.watcher is None
+        assert application._runtime.control.registered_stages() == (
+            "analyze_llm",
+            "assess_strategies",
+            "derive_features",
+            "discover",
+            "hash",
+            "import_observations",
+            "manage_copy",
+            "parse",
+            "render_report",
+        )
+    finally:
+        application.close()
+        child_engine.dispose()
+
+
+def test_analyze_application_disposes_engine_when_runtime_shutdown_fails() -> None:
+    """Catch a foreground cleanup fault leaking the SQLite engine."""
+    class Command:
+        pass
+
+    class Runtime:
+        def shutdown(self) -> None:
+            raise OSError("shutdown failed")
+
+    class Engine:
+        disposed = False
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    engine = Engine()
+    application = cli_module._AnalyzeApplication(Command(), Runtime(), engine)  # type: ignore[arg-type]
+
+    with pytest.raises(OSError, match="shutdown failed"):
+        application.close()
+    assert engine.disposed is True
+
+
+def test_analyze_cleanup_failure_is_stable_exit_five_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch disposal or runtime-shutdown errors escaping after a successful plan."""
+    application = _AnalyzeApplication(
+        _analysis_result("planned"),
+        close_error=OSError("C:\\private\\close failure"),
+    )
+    monkeypatch.setattr(cli_module, "_analyze_application", lambda: application)
+
+    assert main(["analyze", "123e4567-e89b-42d3-a456-426614174120"]) == 5
+    captured = capsys.readouterr()
+    assert "analysis_cleanup_failed" in captured.err
+    assert "private" not in captured.err and "Traceback" not in captured.err
+    assert application.closed is True
+
+
+@pytest.mark.parametrize("forbidden_constructor", ["supervisor", "worker"])
+def test_default_analyze_uses_no_execution_or_ollama_machinery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+    forbidden_constructor: str,
+) -> None:
+    """Catch plan-only analysis acquiring execution or network capability as a composition side effect."""
+    from generals_replay_analyzer.config import AnalyzerSettings
+    from generals_replay_analyzer.db import create_database_engine, create_session_factory
+    from generals_replay_analyzer.db.models import Replay
+    from generals_replay_analyzer.llm.service import HttpxOllamaTransport
+    from generals_replay_analyzer.web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
+    from generals_replay_analyzer.worker import SubprocessSupervisorFactory, WorkerRuntime
+
+    data_root = tmp_path / "product"
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+    settings = AnalyzerSettings.model_validate({})
+    create_production_bootstrapper(BootstrapReadinessState()).prepare(settings)
+    engine = create_database_engine(settings.database_path)
+    sessions = create_session_factory(engine)
+    replay_id = "123e4567-e89b-42d3-a456-426614174140"
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    with sessions.begin() as session:
+        session.add(
+            Replay(
+                public_id=replay_id,
+                sha256="f" * 64,
+                replay_name="fixture.rep",
+                version_string="1.04",
+                version_number=1,
+                frame_count=1,
+                start_time=0,
+                end_time=1,
+                exe_crc=1,
+                ini_crc=2,
+                map_crc=3,
+                map_name="fixture.map",
+                seed=4,
+                header_json={},
+                lifecycle_state="parsed",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    engine.dispose()
+    forbidden_type = SubprocessSupervisorFactory if forbidden_constructor == "supervisor" else WorkerRuntime
+    monkeypatch.setattr(
+        forbidden_type,
+        "__init__",
+        lambda *_args, **_kwargs: pytest.fail(f"plan-only analysis constructed {forbidden_constructor} machinery"),
+    )
+    monkeypatch.setattr(
+        HttpxOllamaTransport,
+        "__init__",
+        lambda *_args, **_kwargs: pytest.fail("plan-only analysis created an Ollama transport"),
+    )
+
+    assert main(["analyze", replay_id, "--json"]) == 3
+    output = _json_output(capsys)
+    assert output["status"] == "awaiting_observations"
+    assert output["allow_ollama"] is False

@@ -160,6 +160,7 @@ class JobClaimSelectorDTO:
 
     replay_public_id: str | None = None
     stages: tuple[str, ...] = ()
+    job_public_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.replay_public_id is not None:
@@ -172,6 +173,14 @@ class JobClaimSelectorDTO:
             raise ValueError("stages must use the closed replay-analysis vocabulary")
         if self.stages != tuple(sorted(set(self.stages))):
             raise ValueError("stages must be sorted and unique")
+        if type(self.job_public_ids) is not tuple:
+            raise TypeError("job_public_ids must be an immutable tuple")
+        if len(self.job_public_ids) > 32:
+            raise ValueError("job_public_ids may contain at most 32 entries")
+        for public_id in self.job_public_ids:
+            _uuid(public_id, "job_public_id")
+        if self.job_public_ids != tuple(sorted(set(self.job_public_ids))):
+            raise ValueError("job_public_ids must be sorted and unique")
 
 
 DEFAULT_JOB_CLAIM_SELECTOR = JobClaimSelectorDTO()

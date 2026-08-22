@@ -3,6 +3,7 @@
 from .job_contracts import (
     CancelJobCommandDTO,
     CancellationReasonCode,
+    JobClaimSelectorDTO,
     JobDetailDTO,
     JobEventKind,
     JobLifecycleError,
@@ -58,6 +59,7 @@ __all__ = [
     "ImportService",
     "ImportStageExecutor",
     "ImportSubmissionDTO",
+    "JobClaimSelectorDTO",
     "JobDTO",
     "JobDetailDTO",
     "JobEventKind",

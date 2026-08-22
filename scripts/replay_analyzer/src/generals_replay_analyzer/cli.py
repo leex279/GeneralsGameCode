@@ -24,9 +24,11 @@ from .provenance import sha256_file
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
+    from .analysis_pipeline.command import AnalysisCommandResult, AnalysisCommandService
     from .engine.config import EngineRunConfig
     from .engine.result import EngineRunResult, EngineRunStatus
-    from .importing import ImportService
+    from .importing import ImportService, JobClaimSelectorDTO, WorkerControlPort
+    from .worker import WorkerRuntime
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -63,6 +65,11 @@ def _parser() -> argparse.ArgumentParser:
     worker = subcommands.add_parser("worker", help="run the external replay-analysis worker")
     worker.add_argument("--poll-seconds", type=int, default=1, help="interruptible idle poll interval (default: 1)")
     worker.add_argument("--lease-seconds", type=int, default=120, help="durable job lease duration (default: 120)")
+    analyze = subcommands.add_parser("analyze", help="plan or execute one replay analysis")
+    analyze.add_argument("replay_public_id")
+    analyze.add_argument("--execute", action="store_true", help="execute only safe analytics jobs for this replay")
+    analyze.add_argument("--allow-ollama", action="store_true", help="opt into local Ollama interpretation")
+    analyze.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
 
@@ -347,6 +354,160 @@ def _run_worker(arguments: argparse.Namespace) -> int:
     return 0
 
 
+class _LazyAnalysisRuntime:
+    """Acquire worker/subprocess capability only for an explicit execution claim."""
+
+    watcher = None
+
+    def __init__(self, control: WorkerControlPort) -> None:
+        self.control = control
+        self._runtime: WorkerRuntime | None = None
+
+    def run_once(self, selector: JobClaimSelectorDTO) -> bool:
+        if self._runtime is None:
+            from uuid import uuid4
+
+            from .worker import EventWaiter, SubprocessSupervisorFactory, WorkerRuntime
+
+            self._runtime = WorkerRuntime(
+                control=self.control,
+                supervisors=SubprocessSupervisorFactory(),
+                waiter=EventWaiter(),
+                worker_public_id=str(uuid4()),
+                poll_seconds=1,
+                lease_seconds=120,
+            )
+        return self._runtime.run_once(selector)
+
+    def shutdown(self) -> None:
+        if self._runtime is not None:
+            self._runtime.shutdown()
+
+
+class _AnalyzeApplication:
+    """Own the foreground command runtime and its database engine."""
+
+    def __init__(self, command: AnalysisCommandService, runtime: _LazyAnalysisRuntime, engine: Engine) -> None:
+        self._command = command
+        self._runtime = runtime
+        self._engine = engine
+
+    def run(self, replay_public_id: str, *, execute: bool, allow_ollama: bool) -> AnalysisCommandResult:
+        return self._command.run(replay_public_id, execute=execute, allow_ollama=allow_ollama)
+
+    def close(self) -> None:
+        try:
+            self._runtime.shutdown()
+        finally:
+            self._engine.dispose()
+
+
+def _analyze_application() -> _AnalyzeApplication:
+    """Compose planning and foreground execution from the sole production stage root."""
+    from .analysis_pipeline.command import AnalysisCommandService
+    from .analysis_pipeline.composition import create_production_import_service
+    from .analysis_pipeline.planner import AnalysisPlanner
+    from .config import AnalyzerSettings
+    from .db import create_database_engine, create_session_factory
+    from .storage import ContentAddressedStore
+    from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
+
+    settings = AnalyzerSettings.model_validate({})
+    create_production_bootstrapper(BootstrapReadinessState()).prepare(settings)
+    engine = create_database_engine(settings.database_path)
+    session_factory = create_session_factory(engine)
+    clock = lambda: datetime.now(UTC)
+    service = create_production_import_service(
+        session_factory,
+        settings,
+        ContentAddressedStore(settings.managed_replay_directory),
+        ContentAddressedStore(settings.cache_directory / "artifacts"),
+        parser=parse_replay,
+        telemetry_acquirer=None,
+        clock=clock,
+        parser_version=__version__,
+        telemetry_acquirer_version="none",
+    )
+    planner = AnalysisPlanner(session_factory, clock=clock)
+    # TheSuperHackers @feature Leex 23/08/2026 Defer foreground worker capability until explicit execution. (#TBD)
+    runtime = _LazyAnalysisRuntime(service.worker_control_port())
+    return _AnalyzeApplication(AnalysisCommandService(session_factory, planner, runtime), runtime, engine)
+
+
+def _analysis_exit_code(status: str) -> int:
+    if status in {"planned", "succeeded"}:
+        return 0
+    if status in {"awaiting_observations", "incomplete", "claim_limit_reached"}:
+        return 3
+    return 5
+
+
+def _write_analysis_result(result: AnalysisCommandResult, *, json_output: bool) -> None:
+    if json_output:
+        _write_json_document(asdict(result))
+        return
+    print(
+        f"replay {result.replay_public_id}: {result.status}; "
+        f"claims={result.claims_executed}; ollama={'enabled' if result.allow_ollama else 'disabled'}"
+    )
+    for job in result.jobs:
+        print(f"job {job.public_id} {job.stage} {job.status} {job.job_identity_digest}")
+    for report in result.reports:
+        print(f"report {report.public_id} {report.input_digest} {report.cache_key}")
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Expose bounded replay-scoped analysis with explicit local-model consent. (#TBD)
+def _run_analyze(arguments: argparse.Namespace) -> int:
+    from uuid import UUID
+
+    from .analysis_pipeline.planner import AnalysisPlanningError
+    from .importing import JobLifecycleError
+    from .worker import OwnedChildSettlementError
+
+    try:
+        if str(UUID(arguments.replay_public_id)) != arguments.replay_public_id:
+            raise ValueError("replay public ID is not canonical")
+    except (AttributeError, TypeError, ValueError):
+        print("replay-analyzer: error: [invalid_analysis_request] replay analysis request is invalid", file=sys.stderr)
+        return 2
+
+    try:
+        application = _analyze_application()
+    except Exception:  # noqa: BLE001 - public CLI boundary must never expose private tracebacks.
+        print("replay-analyzer: error: [analysis_initialization_failed] analysis is unavailable", file=sys.stderr)
+        return 5
+    result: AnalysisCommandResult | None = None
+    failure: tuple[int, str] | None = None
+    try:
+        result = application.run(
+            arguments.replay_public_id,
+            execute=arguments.execute,
+            allow_ollama=arguments.allow_ollama,
+        )
+    except OwnedChildSettlementError:
+        failure = (5, "replay-analyzer: error: [analysis_execution_failed] analysis execution did not settle")
+    except JobLifecycleError:
+        failure = (5, "replay-analyzer: error: [analysis_execution_failed] analysis execution failed")
+    except AnalysisPlanningError as error:
+        if error.code == "unknown_replay":
+            failure = (2, "replay-analyzer: error: [invalid_analysis_request] replay analysis request is invalid")
+        else:
+            failure = (5, "replay-analyzer: error: [analysis_execution_failed] analysis execution failed")
+    except Exception:  # noqa: BLE001 - public CLI boundary translates unknown application faults.
+        failure = (5, "replay-analyzer: error: [analysis_execution_failed] analysis execution failed")
+    try:
+        application.close()
+    except Exception:  # noqa: BLE001 - cleanup failures must become a stable public exit.
+        print("replay-analyzer: error: [analysis_cleanup_failed] analysis cleanup failed", file=sys.stderr)
+        return 5
+    if failure is not None:
+        print(failure[1], file=sys.stderr)
+        return failure[0]
+    assert result is not None
+    _write_analysis_result(result, json_output=arguments.json_output)
+    return _analysis_exit_code(result.status)
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Expose deterministic observed replay inspection without LLM or network calls. (#TBD)
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the inspection CLI and return a deterministic process status for replay failures."""
@@ -373,6 +534,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as error:
             print(f"replay-analyzer: error: [invalid_worker_options] {error}", file=sys.stderr)
             return 2
+    if arguments.command == "analyze":
+        return _run_analyze(arguments)
     try:
         parsed = parse_replay(arguments.file)
         if arguments.format == "json":
