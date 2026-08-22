@@ -276,7 +276,7 @@ class JobLogQueryDTO:
         _uuid(self.log_public_id, "log_public_id")
         _integer(self.offset, "offset")
         _integer(self.limit, "limit", minimum=1)
-        if self.offset < 0 or self.limit < 1 or self.limit > 65_536:
+        if self.offset < 0 or self.limit < 4 or self.limit > 65_536:
             raise ValueError("log read bounds are invalid")
 
 

@@ -7,7 +7,7 @@ import hashlib
 import re
 import secrets
 import stat
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -28,7 +28,7 @@ from generals_replay_analyzer.db.models import (
     ManagedAsset,
     Replay,
 )
-from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
+from generals_replay_analyzer.storage import ContentAddressedStore, StoredContent
 
 from .job_contracts import (
     CancelJobCommandDTO,
@@ -57,7 +57,8 @@ from .job_contracts import (
 )
 
 _MAX_LOG_READ = 65_536
-_LOG_REDACTION_OVERLAP = 4_096
+_BASE_LOG_REDACTION_OVERLAP = 4_096
+_MAX_REDACTION_VALUE_BYTES = 16_384
 _ANSI_PATTERN = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))")
 _URL_CREDENTIALS = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _COMMAND_CREDENTIALS = re.compile(
@@ -165,8 +166,23 @@ class JobLifecycleService:
         self._retry_max_delay = retry_max_delay
         self._log_store = log_store
         self._log_data_root = resolved_log_root
-        self._redaction_values = tuple(sorted({value for value in redaction_values if value}, key=len, reverse=True))
+        normalized_redactions: set[str] = set()
+        maximum_redaction_bytes = 0
+        for value in redaction_values:
+            if not isinstance(value, str) or not value:
+                raise ValueError("log redaction values must be nonempty strings")
+            value_bytes = len(value.encode("utf-8"))
+            if value_bytes > _MAX_REDACTION_VALUE_BYTES:
+                raise ValueError("log redaction value exceeds the operational byte bound")
+            normalized_redactions.add(value)
+            maximum_redaction_bytes = max(maximum_redaction_bytes, value_bytes)
+        self._redaction_values = tuple(sorted(normalized_redactions, key=len, reverse=True))
+        self._log_redaction_overlap = max(
+            _BASE_LOG_REDACTION_OVERLAP,
+            maximum_redaction_bytes + 4,
+        )
         self._allow_legacy_worker_identifiers = _allow_legacy_worker_identifiers
+        self._log_read_states: OrderedDict[tuple[str, int], tuple[bool, bool]] = OrderedDict()
 
     def registered_stages(self) -> tuple[str, ...]:
         return self._stages
@@ -1121,34 +1137,55 @@ class JobLifecycleService:
             if asset is None:
                 return JobLogChunkDTO("unavailable", "", None)
             digest = asset.sha256
+        stored_path = (self._log_store.root / digest[:2] / digest).resolve(strict=False)
         try:
-            stored = self._log_store.verify(digest)
-        except (ContentStorageError, OSError):
+            stored_info = stored_path.lstat()
+        except OSError:
             return JobLogChunkDTO("unavailable", "", None)
         try:
-            expected_path = stored.path.relative_to(self._log_data_root).as_posix() if self._log_data_root else ""
+            expected_path = stored_path.relative_to(self._log_data_root).as_posix() if self._log_data_root else ""
         except ValueError:
             return JobLogChunkDTO("unavailable", "", None)
         if (
-            asset.kind != "job_log_snapshot"
+            not stat.S_ISREG(stored_info.st_mode)
+            or stored_path.is_symlink()
+            or asset.kind != "job_log_snapshot"
             or asset.relative_path != expected_path
             or asset.media_type != "text/plain"
-            or asset.size_bytes != stored.size
-            or snapshot.byte_count != stored.size
+            or asset.size_bytes != stored_info.st_size
+            or snapshot.byte_count != stored_info.st_size
         ):
             return JobLogChunkDTO("unavailable", "", None)
-        if query.offset >= stored.size:
+        if query.offset >= stored_info.st_size:
             return JobLogChunkDTO("rotated", "", None)
         limit = min(query.limit, _MAX_LOG_READ)
+        state_key = (digest, query.offset)
+        state_known = query.offset == 0 or state_key in self._log_read_states
+        stream_state = self._log_read_states.get(state_key, (False, False))
         try:
-            end = self._complete_utf8_end(stored.path, query.offset, limit, stored.size)
+            end = self._complete_utf8_end(stored_path, query.offset, limit, stored_info.st_size)
             if end <= query.offset:
                 return JobLogChunkDTO("unavailable", "", None)
-            content = self._redacted_log_range(stored.path, query.offset, end, stored.size)
+            content, next_state = self._redacted_log_range(
+                stored_path,
+                query.offset,
+                end,
+                stored_info.st_size,
+                stream_state=stream_state,
+            )
         except (OSError, UnicodeDecodeError):
             return JobLogChunkDTO("unavailable", "", None)
         content = self._bounded_utf8(content, limit)
-        return JobLogChunkDTO("available", content, end if end < stored.size else None)
+        if state_known and end < stored_info.st_size:
+            self._remember_log_read_state(digest, end, next_state)
+        return JobLogChunkDTO("available", content, end if end < stored_info.st_size else None)
+
+    def _remember_log_read_state(self, digest: str, offset: int, state: tuple[bool, bool]) -> None:
+        key = (digest, offset)
+        self._log_read_states[key] = state
+        self._log_read_states.move_to_end(key)
+        while len(self._log_read_states) > 2_048:
+            self._log_read_states.popitem(last=False)
 
     @staticmethod
     def _complete_utf8_end(path: Path, offset: int, limit: int, size: int) -> int:
@@ -1160,8 +1197,16 @@ class JobLifecycleService:
         pending, _state = decoder.getstate()
         return offset + len(data) - len(pending)
 
-    def _redacted_log_range(self, path: Path, offset: int, end: int, size: int) -> str:
-        context_start = max(0, offset - _LOG_REDACTION_OVERLAP)
+    def _redacted_log_range(
+        self,
+        path: Path,
+        offset: int,
+        end: int,
+        size: int,
+        *,
+        stream_state: tuple[bool, bool],
+    ) -> tuple[str, tuple[bool, bool]]:
+        context_start = max(0, offset - self._log_redaction_overlap)
         with path.open("rb") as source:
             source.seek(context_start)
             while context_start < offset:
@@ -1171,7 +1216,7 @@ class JobLifecycleService:
                         source.seek(-1, 1)
                     break
                 context_start += 1
-            context_limit = min(size, end + _LOG_REDACTION_OVERLAP + 3)
+            context_limit = min(size, end + self._log_redaction_overlap + 3)
             data = source.read(context_limit - context_start)
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         text = decoder.decode(data, final=context_start + len(data) == size)
@@ -1181,20 +1226,46 @@ class JobLifecycleService:
             text = data.decode("utf-8", errors="strict")
         mask = self._redaction_mask(
             text,
-            initial_traceback=self._traceback_state_before(path, context_start),
+            context_start=context_start,
+            context_end=context_start + len(data),
+            size=size,
         )
         output: list[str] = []
         raw_position = context_start
+        in_osc, pending_escape = stream_state
         for index, character in enumerate(text):
             character_end = raw_position + len(character.encode("utf-8"))
-            if raw_position >= offset and character_end <= end and not mask[index]:
-                output.append(character)
+            if raw_position >= offset and character_end <= end:
+                stream_hidden = False
+                if in_osc:
+                    stream_hidden = True
+                    if character == "\x07" or (pending_escape and character == "\\"):
+                        in_osc = False
+                        pending_escape = False
+                    else:
+                        pending_escape = character == "\x1b"
+                elif pending_escape:
+                    stream_hidden = True
+                    in_osc = character == "]"
+                    pending_escape = False
+                elif character == "\x1b":
+                    stream_hidden = True
+                    pending_escape = True
+                if not mask[index] and not stream_hidden:
+                    output.append(character)
             raw_position = character_end
             if raw_position >= end:
                 break
-        return "".join(output)
+        return "".join(output), (in_osc, pending_escape)
 
-    def _redaction_mask(self, value: str, *, initial_traceback: bool) -> list[bool]:
+    def _redaction_mask(
+        self,
+        value: str,
+        *,
+        context_start: int,
+        context_end: int,
+        size: int,
+    ) -> list[bool]:
         mask = [False] * len(value)
 
         def hide(start: int, end: int) -> None:
@@ -1207,11 +1278,22 @@ class JobLifecycleService:
             for match in re.finditer(re.escape(secret), value, flags=re.IGNORECASE):
                 hide(match.start(), match.end())
 
-        in_traceback = initial_traceback
+        if context_start > 0:
+            first_newline = value.find("\n")
+            hide(0, len(value) if first_newline < 0 else first_newline + 1)
+        if context_end < size:
+            last_newline = value.rfind("\n")
+            hide(0 if last_newline < 0 else last_newline + 1, len(value))
+
+        in_traceback = False
         position = 0
         for line in value.splitlines(keepends=True):
             stripped = line.lstrip()
-            if stripped.startswith("Traceback ("):
+            if stripped.startswith("Traceback (") or (
+                not in_traceback
+                and line[:1].isspace()
+                and (stripped.startswith("File ") or "=" in stripped)
+            ):
                 in_traceback = True
                 hide(position, position + len(line))
             elif in_traceback:
@@ -1222,37 +1304,6 @@ class JobLifecycleService:
                 hide(position, position + len(line))
             position += len(line)
         return mask
-
-    @staticmethod
-    def _traceback_state_before(path: Path, end: int) -> bool:
-        if end <= 0:
-            return False
-        decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        in_traceback = False
-        line_prefix = ""
-
-        def finish_line() -> None:
-            nonlocal in_traceback, line_prefix
-            stripped = line_prefix.lstrip()
-            if stripped.startswith("Traceback ("):
-                in_traceback = True
-            elif in_traceback and _TRACEBACK_TERMINAL.match(stripped):
-                in_traceback = False
-            line_prefix = ""
-
-        with path.open("rb") as source:
-            remaining = end
-            while remaining:
-                chunk = source.read(min(8_192, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                for character in decoder.decode(chunk, final=remaining == 0):
-                    if character == "\n":
-                        finish_line()
-                    elif len(line_prefix) < 512:
-                        line_prefix += character
-        return in_traceback
 
     def _redact(self, value: str) -> str:
         redacted = _ANSI_PATTERN.sub("", value)

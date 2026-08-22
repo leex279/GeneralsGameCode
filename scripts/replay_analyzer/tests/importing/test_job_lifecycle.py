@@ -12,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Event, Lock, get_ident
 from types import ModuleType
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from sqlalchemy import Engine, event, select
@@ -190,6 +190,27 @@ class _BlockingStore:
 
     def verify(self, sha256: str) -> StoredContent:
         return self._delegate.verify(sha256)
+
+
+class _CountingReader:
+    def __init__(self, delegate: Any, counter: list[int]) -> None:
+        self._delegate = delegate
+        self._counter = counter
+
+    def __enter__(self) -> Self:
+        self._delegate.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> object:
+        return self._delegate.__exit__(*args)
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._delegate.read(size)
+        self._counter[0] += len(data)
+        return data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
 
 
 def test_contract_module_is_orm_free_immutable_and_contains_no_privileged_job_views() -> None:
@@ -750,6 +771,14 @@ def test_contracts_validate_public_ids_states_outcomes_and_export_frozen_domain_
             -1,
             1,
         )
+    for unsafe_utf8_limit in (1, 2, 3):
+        with pytest.raises(ValueError):
+            JobLogQueryDTO(
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+                0,
+                unsafe_utf8_limit,
+            )
     summary = contracts.JobSummaryDTO(
         "00000000-0000-4000-8000-000000000001",
         None,
@@ -1089,6 +1118,175 @@ def test_log_pagination_consumes_complete_utf8_and_redacts_patterns_across_chunk
     assert str(tmp_path) not in reconstructed
     assert "Traceback" not in reconstructed
     assert "local_secret" not in reconstructed
+
+
+def test_four_byte_minimum_log_page_reconstructs_every_utf8_scalar_once(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch continuation advancing past a scalar that could not fit in the requested public page."""
+    _job(session_factory, clock, idempotency_key="minimum-utf8-page")
+    service = _service(session_factory, clock, tmp_path)
+    worker = "00000000-0000-4000-8000-000000000901"
+    claim = _claim(service, worker)
+    expected = "a😀b😀c"
+    reference = service.publish_log(worker, claim, "stdout", 0, expected.encode())
+    chunks: list[str] = []
+    offset: int | None = 0
+    for _ in range(10):
+        assert offset is not None
+        page = service.read_log(JobLogQueryDTO(claim.job_public_id, reference.public_id, offset, 4))
+        assert page.state == "available"
+        chunks.append(page.content)
+        offset = page.next_offset
+        if offset is None:
+            break
+    else:
+        pytest.fail("minimum-width UTF-8 pagination did not terminate")
+    assert "".join(chunks) == expected
+
+
+def test_read_redaction_bounds_configured_secrets_and_unbounded_sensitive_lines(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch fixed-overlap leakage from long secrets, credentials, paths, commands, or OSC control strings."""
+    job_id = _job(session_factory, clock, idempotency_key="long-boundary-redaction")
+    secret = "s" * 12_000
+    sensitive_lines = (
+        secret,
+        "https://user:" + ("q" * 12_000) + "@example.invalid/private",
+        "--token " + ("t" * 12_000),
+        "C:\\" + ("p" * 12_000) + "\\private.log",
+        "\x1b]0;" + (("o" * 1_000 + "\n") * 30) + "\x07",
+    )
+    safe_lines = tuple(f"safe-{index}" for index in range(len(sensitive_lines) + 1))
+    raw_parts: list[str] = []
+    for index, sensitive in enumerate(sensitive_lines):
+        raw_parts.extend((safe_lines[index], sensitive))
+    raw_parts.append(safe_lines[-1])
+    raw = ("\n".join(raw_parts) + "\n").encode()
+    store = ContentAddressedStore(tmp_path / "managed-logs")
+    stored = store.store_bytes(raw)
+    log_public_id = "00000000-0000-4000-8000-000000000994"
+    with session_factory.begin() as session:
+        job = session.scalar(select(Job).where(Job.public_id == job_id))
+        assert job is not None
+        asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000993",
+            sha256=stored.sha256,
+            kind="job_log_snapshot",
+            relative_path=stored.path.relative_to(tmp_path).as_posix(),
+            size_bytes=stored.size,
+            media_type="text/plain",
+            created_at=clock.current,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(
+            JobLogSnapshot(
+                public_id=log_public_id,
+                job_id=job.id,
+                attempt_count=0,
+                label="stderr",
+                sequence=0,
+                managed_asset_id=asset.id,
+                media_type="text/plain",
+                byte_count=stored.size,
+                redaction_version="job-log-redaction-v1",
+                created_at=clock.current,
+            )
+        )
+    service = JobLifecycleService(
+        session_factory,
+        registered_stages=("parse",),
+        clock=clock,
+        log_store=store,
+        log_data_root=tmp_path,
+        redaction_values=(secret,),
+    )
+    with pytest.raises(ValueError, match="redaction"):
+        JobLifecycleService(
+            session_factory,
+            registered_stages=("parse",),
+            clock=clock,
+            redaction_values=("x" * 16_385,),
+        )
+
+    chunks: list[str] = []
+    offset: int | None = 0
+    for _ in range(100):
+        assert offset is not None
+        page = service.read_log(JobLogQueryDTO(job_id, log_public_id, offset, 1_024))
+        assert page.state == "available"
+        assert len(page.content.encode()) <= 1_024
+        chunks.append(page.content)
+        offset = page.next_offset
+        if offset is None:
+            break
+    else:
+        pytest.fail("long sensitive log pagination did not terminate")
+
+    reconstructed = "".join(chunks)
+    positions = [reconstructed.index(value) for value in safe_lines]
+    assert positions == sorted(positions)
+    assert all(reconstructed.count(value) == 1 for value in safe_lines)
+    for leaked_run in ("s" * 128, "q" * 128, "t" * 128, "p" * 128, "o" * 128):
+        assert leaked_run not in reconstructed
+    assert "\x1b" not in reconstructed
+
+
+def test_far_offset_log_read_has_constant_bounded_file_io(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch full-object hashing or traceback-state rescans from byte zero for every range request."""
+    job_id = _job(session_factory, clock, idempotency_key="far-offset-budget")
+    raw = b"safe-line\n" * 20_000
+    store = ContentAddressedStore(tmp_path / "managed-logs")
+    stored = store.store_bytes(raw)
+    log_public_id = "00000000-0000-4000-8000-000000000992"
+    with session_factory.begin() as session:
+        job = session.scalar(select(Job).where(Job.public_id == job_id))
+        assert job is not None
+        asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000991",
+            sha256=stored.sha256,
+            kind="job_log_snapshot",
+            relative_path=stored.path.relative_to(tmp_path).as_posix(),
+            size_bytes=stored.size,
+            media_type="text/plain",
+            created_at=clock.current,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(
+            JobLogSnapshot(
+                public_id=log_public_id,
+                job_id=job.id,
+                attempt_count=0,
+                label="supervisor",
+                sequence=0,
+                managed_asset_id=asset.id,
+                media_type="text/plain",
+                byte_count=stored.size,
+                redaction_version="job-log-redaction-v1",
+                created_at=clock.current,
+            )
+        )
+    real_open = Path.open
+    bytes_read = [0]
+
+    def counted_open(path: Path, *args: object, **kwargs: object) -> Any:
+        opened = real_open(path, *args, **kwargs)
+        if path.resolve(strict=False) == stored.path:
+            return _CountingReader(opened, bytes_read)
+        return opened
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    service = _service(session_factory, clock, tmp_path)
+    page = service.read_log(JobLogQueryDTO(job_id, log_public_id, 150_000, 256))
+    assert page.state == "available"
+    assert page.content.startswith("safe-line\n")
+    assert page.next_offset is not None and page.next_offset > 150_000
+    assert bytes_read[0] <= 20_000
 
 
 def test_stale_log_publisher_is_rejected_before_any_managed_bytes_are_written(
