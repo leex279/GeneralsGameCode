@@ -21,6 +21,12 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py",
     "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py",
 }
+WEB_BOUNDARY_RESOURCES = {
+    "generals_replay_analyzer/web/app.py",
+    "generals_replay_analyzer/web/resources.py",
+    "generals_replay_analyzer/web/routes/dashboard.py",
+    "generals_replay_analyzer/web/routes/identity.py",
+}
 
 
 def _run(
@@ -39,6 +45,7 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
         assert MIGRATION_RESOURCES <= set(archive.namelist())
+        assert WEB_BOUNDARY_RESOURCES <= set(archive.namelist())
 
     environment_directory = tmp_path / "migration-wheel-environment"
     _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
@@ -53,9 +60,17 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
 
         import generals_replay_analyzer
         from generals_replay_analyzer.db import downgrade_database, upgrade_database
+        from generals_replay_analyzer.web.resources import PackagedResourceError, package_resource
 
         database = Path(os.environ["TEST_DATABASE_PATH"])
         assert "migration-wheel-environment" in str(generals_replay_analyzer.__file__)
+        assert package_resource("db/migrations/env.py").is_file()
+        try:
+            package_resource("web/templates/not-created-by-task-1.html")
+        except PackagedResourceError as error:
+            assert str(error) == "packaged resource is unavailable"
+        else:
+            raise AssertionError("missing packaged resource did not produce a controlled error")
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003_feature_partial_quality",)

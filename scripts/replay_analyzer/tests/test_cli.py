@@ -1,9 +1,12 @@
 """Behavioral contract tests for the deterministic replay inspection CLI."""
 
+import argparse
 import json
 import struct
+import subprocess
+import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fixture_builder import command_bytes, replay_header_bytes
@@ -236,3 +239,105 @@ def test_export_telemetry_cli_does_not_silently_resolve_parent_aliases(
 
     assert main(["export-telemetry", str(aliased_replay), "--engine", executable.name]) == 2
     assert _json_output(capsys)["status"] == "request_invalid"
+
+
+def test_importing_cli_keeps_optional_web_stack_lazy() -> None:
+    """Catch inspect/parser commands importing the web server stack as a module side effect."""
+    script = (
+        "import sys; import generals_replay_analyzer.cli; "
+        "assert 'fastapi' not in sys.modules; assert 'uvicorn' not in sys.modules"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_web_command_parses_default_loopback_bind_without_starting_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catch a default bind or port drifting away from the local product contract."""
+    captured: dict[str, object] = {}
+
+    def fake_run_web(arguments: argparse.Namespace) -> int:
+        captured["host"] = arguments.host
+        captured["port"] = arguments.port
+        return 0
+
+    monkeypatch.setattr(cli_module, "_run_web", fake_run_web)
+
+    assert main(["web"]) == 0
+    assert captured == {"host": "127.0.0.1", "port": 8765}
+
+
+def test_web_command_accepts_ipv6_loopback_and_passes_an_already_created_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch Uvicorn receiving an import string or a non-loopback rewritten bind."""
+    application = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "_web_application", lambda: application)
+
+    def fake_serve(app: object, host: str, port: int) -> None:
+        captured.update({"app": app, "host": host, "port": port})
+
+    monkeypatch.setattr(cli_module, "_serve_web", fake_serve)
+
+    assert main(["web", "--host", "::1", "--port", "9876"]) == 0
+    assert captured == {"app": application, "host": "::1", "port": 9876}
+
+
+@pytest.mark.parametrize("host", ["localhost", "0.0.0.0", "::", "example.test"])
+def test_web_command_rejects_every_nonliteral_bind_before_composition(
+    host: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch remote or ambiguous hosts reaching application construction or Uvicorn."""
+    monkeypatch.setattr(
+        cli_module,
+        "_web_application",
+        lambda: pytest.fail("invalid host reached web composition"),
+    )
+    monkeypatch.setattr(cli_module, "_serve_web", lambda *_args: pytest.fail("invalid host reached Uvicorn"))
+
+    assert main(["web", "--host", host]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "literal loopback" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_import_service_uses_the_single_production_bootstrap_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch import/jobs bypassing backup, lock, integrity, and schema-identity bootstrap."""
+    from generals_replay_analyzer import db
+    from generals_replay_analyzer.web import bootstrap as web_bootstrap
+
+    prepared: list[Path] = []
+
+    class FakeCoordinator:
+        def prepare(self, settings: Any) -> None:
+            prepared.append(settings.data_root)
+            settings.ensure_directories()
+
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(tmp_path / "product"))
+    monkeypatch.setattr(
+        db,
+        "upgrade_database",
+        lambda *_args, **_kwargs: pytest.fail("legacy direct migration owner was called"),
+    )
+    monkeypatch.setattr(web_bootstrap, "create_production_bootstrapper", lambda _readiness: FakeCoordinator())
+
+    _service, engine = cli_module._import_service()
+    try:
+        assert prepared == [(tmp_path / "product").resolve()]
+    finally:
+        engine.dispose()

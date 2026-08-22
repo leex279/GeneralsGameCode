@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from . import __version__
 from .binary import Coord3D, ICoord2D, IRegion2D
@@ -56,6 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     job_commands = jobs.add_subparsers(dest="jobs_command", required=True)
     retry = job_commands.add_parser("retry", help="retry one eligible durable job")
     retry.add_argument("job_id")
+    web = subcommands.add_parser("web", help="serve the local replay library")
+    web.add_argument("--host", default="127.0.0.1", help="literal loopback bind (default: 127.0.0.1)")
+    web.add_argument("--port", type=int, default=8765, help="loopback TCP port (default: 8765)")
     return parser
 
 
@@ -198,13 +202,14 @@ def _run_export(arguments: argparse.Namespace) -> int:
 def _import_service() -> tuple[ImportService, Engine]:
     """Initialize managed paths and the packaged database only at the CLI application boundary."""
     from .config import AnalyzerSettings
-    from .db import create_database_engine, create_session_factory, upgrade_database
+    from .db import create_database_engine, create_session_factory
     from .importing import ImportService
     from .storage import ContentAddressedStore
+    from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
 
     settings = AnalyzerSettings.model_validate({})
-    settings.ensure_directories()
-    upgrade_database(settings.database_path)
+    readiness = BootstrapReadinessState()
+    create_production_bootstrapper(readiness).prepare(settings)
     engine = create_database_engine(settings.database_path)
     session_factory = create_session_factory(engine)
     return (
@@ -261,6 +266,43 @@ def _run_jobs(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Compose the loopback web scaffold without importing it for other commands. (#TBD)
+def _web_application() -> Any:
+    from .config import AnalyzerSettings
+    from .web.app import create_app
+    from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
+    from .web.dependencies import UnavailablePortFactory
+
+    settings = AnalyzerSettings.model_validate({})
+    readiness = BootstrapReadinessState()
+    return create_app(
+        settings,
+        port_factory=UnavailablePortFactory(readiness),
+        bootstrapper=create_production_bootstrapper(readiness),
+    )
+
+
+def _serve_web(app: Any, host: str, port: int) -> None:
+    import uvicorn
+
+    logging.getLogger(__name__).info(
+        "Serving replay analyzer host=%s port=%d analytics_adapter=unavailable",
+        host,
+        port,
+    )
+    uvicorn.run(app, host=host, port=port)
+
+
+def _run_web(arguments: argparse.Namespace) -> int:
+    from .web.app import validate_loopback_host, validate_port
+
+    host = validate_loopback_host(arguments.host)
+    port = validate_port(arguments.port)
+    app = _web_application()
+    _serve_web(app, host, port)
+    return 0
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Expose deterministic observed replay inspection without LLM or network calls. (#TBD)
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the inspection CLI and return a deterministic process status for replay failures."""
@@ -275,6 +317,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if arguments.command == "jobs":
         return _run_jobs(arguments)
+    if arguments.command == "web":
+        try:
+            return _run_web(arguments)
+        except ValueError as error:
+            print(f"replay-analyzer: error: [invalid_web_bind] {error}", file=sys.stderr)
+            return 2
     try:
         parsed = parse_replay(arguments.file)
         if arguments.format == "json":
