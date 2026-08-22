@@ -9,6 +9,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Column, Integer, MetaData, Table, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from generals_replay_analyzer.db import (
     Base,
@@ -170,7 +171,7 @@ def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_pa
     """Compare every table, named index/check/FK, predicate, action, and trigger to a frozen oracle."""
     config = make_alembic_config(database_path)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0002_player_identity_audit"]
+    assert scripts.get_heads() == ["0003_feature_partial_quality"]
 
     upgrade_database(database_path, "0001_replay_analyzer_v2")
     engine = create_database_engine(database_path)
@@ -227,6 +228,136 @@ def test_downgrade_and_reupgrade_restore_identical_schema(database_path: Path) -
 
     upgrade_database(database_path)
     assert _schema_fingerprint(database_path) == first
+
+
+def test_feature_partial_quality_migration_preserves_rows_and_enforces_states(database_path: Path) -> None:
+    """Catch a feature-table rebuild that loses evidence links or cannot persist truthful partial reasons."""
+    upgrade_database(database_path, "0002_player_identity_audit")
+    engine = create_database_engine(database_path)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO replays (public_id, sha256, replay_name, version_string, version_number, frame_count, "
+                    "start_time, end_time, exe_crc, ini_crc, map_crc, map_name, seed, header_json, lifecycle_state, "
+                    "created_at, updated_at) VALUES (:public_id, :sha256, 'fixture', '1.04', 1, 30, 0, 30, 1, 2, 3, "
+                    "'map', 4, '{}', 'parsed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"public_id": "00000000-0000-4000-8000-000000000101", "sha256": "1" * 64},
+            )
+            replay_id = connection.execute(text("SELECT id FROM replays")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO evidence_items (public_id, replay_id, tier, source_kind, source_key, schema_version, "
+                    "created_at) VALUES (:public_id, :replay_id, :tier, :source_kind, :source_key, 1, CURRENT_TIMESTAMP)"
+                ),
+                [
+                    {
+                        "public_id": "00000000-0000-4000-8000-000000000102",
+                        "replay_id": replay_id,
+                        "tier": "observed",
+                        "source_kind": "telemetry",
+                        "source_key": "telemetry:fixture:1",
+                    },
+                    {
+                        "public_id": "00000000-0000-4000-8000-000000000103",
+                        "replay_id": replay_id,
+                        "tier": "derived",
+                        "source_kind": "feature",
+                        "source_key": "feature:fixture:complete",
+                    },
+                ],
+            )
+            observed_id = connection.execute(
+                text("SELECT id FROM evidence_items WHERE tier = 'observed'")
+            ).scalar_one()
+            derived_id = connection.execute(
+                text("SELECT id FROM evidence_items WHERE tier = 'derived'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO feature_sets (public_id, replay_id, extractor_name, extractor_version, input_digest, "
+                    "cache_key, status, settings_json, created_at, completed_at) VALUES (:public_id, :replay_id, "
+                    "'fixture', 'v1', :input_digest, :cache_key, 'succeeded', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "public_id": "00000000-0000-4000-8000-000000000104",
+                    "replay_id": replay_id,
+                    "input_digest": "2" * 64,
+                    "cache_key": "3" * 64,
+                },
+            )
+            feature_set_id = connection.execute(text("SELECT id FROM feature_sets")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO features (public_id, feature_set_id, evidence_item_id, name, value_type, integer_value, "
+                    "unit, scope_type, scope_key, frame_start, frame_end, quality, details_json) VALUES (:public_id, "
+                    ":feature_set_id, :evidence_item_id, 'fixture.complete', 'integer', 7, 'count', 'replay', 'fixture', "
+                    "0, 30, 'available', '{}')"
+                ),
+                {
+                    "public_id": "00000000-0000-4000-8000-000000000105",
+                    "feature_set_id": feature_set_id,
+                    "evidence_item_id": derived_id,
+                },
+            )
+            feature_id = connection.execute(text("SELECT id FROM features")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO feature_evidence (feature_id, evidence_item_id, role) "
+                    "VALUES (:feature_id, :evidence_item_id, 'input')"
+                ),
+                {"feature_id": feature_id, "evidence_item_id": observed_id},
+            )
+    finally:
+        engine.dispose()
+
+    upgrade_database(database_path, "0003_feature_partial_quality")
+    migrated = create_database_engine(database_path)
+    try:
+        with migrated.begin() as connection:
+            assert connection.execute(text("SELECT integer_value FROM features")).scalar_one() == 7
+            assert connection.execute(text("SELECT role FROM feature_evidence")).scalar_one() == "input"
+            assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+            replay_id = connection.execute(text("SELECT id FROM replays")).scalar_one()
+            feature_set_id = connection.execute(text("SELECT id FROM feature_sets")).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO evidence_items (public_id, replay_id, tier, source_kind, source_key, schema_version, "
+                    "created_at) VALUES ('00000000-0000-4000-8000-000000000106', :replay_id, 'derived', 'feature', "
+                    "'feature:fixture:partial', 1, CURRENT_TIMESTAMP)"
+                ),
+                {"replay_id": replay_id},
+            )
+            partial_evidence_id = connection.execute(
+                text("SELECT id FROM evidence_items WHERE source_key = 'feature:fixture:partial'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO features (public_id, feature_set_id, evidence_item_id, name, value_type, real_value, "
+                    "unit, scope_type, scope_key, frame_start, frame_end, quality, quality_reason, details_json) VALUES "
+                    "('00000000-0000-4000-8000-000000000107', :feature_set_id, :evidence_item_id, 'fixture.partial', "
+                    "'real', 1.234567890123, 'ratio', 'replay', 'fixture', 0, 30, 'partial', 'omitted_unknown_source', '{}')"
+                ),
+                {"feature_set_id": feature_set_id, "evidence_item_id": partial_evidence_id},
+            )
+            assert connection.execute(
+                text("SELECT real_value, quality_reason FROM features WHERE quality = 'partial'")
+            ).one() == (1.234567890123, "omitted_unknown_source")
+
+        invalid_statements = (
+            "UPDATE features SET quality = 'partial', quality_reason = NULL WHERE name = 'fixture.complete'",
+            "UPDATE features SET quality = 'available', quality_reason = 'not_allowed' WHERE name = 'fixture.complete'",
+            (
+                "UPDATE features SET quality = 'unavailable', integer_value = NULL, quality_reason = '' "
+                "WHERE name = 'fixture.complete'"
+            ),
+        )
+        for statement in invalid_statements:
+            with migrated.begin() as connection, pytest.raises(IntegrityError):
+                connection.execute(text(statement))
+    finally:
+        migrated.dispose()
 
 
 def test_baseline_does_not_create_tables_owned_by_future_revisions(database_path: Path) -> None:

@@ -323,11 +323,10 @@ class PlayerIdentityService:
                     linked_player = session.get(Player, slot.player_id)
                     if (
                         alias is not None
-                        and cast(PlayerAlias, alias).player_id == slot.player_id
+                        and alias.player_id == slot.player_id
                         and linked_player is not None
                         and linked_player.retired_at is None
                     ):
-                        alias = cast(PlayerAlias, alias)
                         decisions.append(
                             self._decision(
                                 slot,
@@ -346,7 +345,7 @@ class PlayerIdentityService:
                                 normalized,
                                 "manual_review",
                                 None if linked_player is None else linked_player.public_id,
-                                None if alias is None else cast(PlayerAlias, alias).public_id,
+                                None if alias is None else alias.public_id,
                                 None,
                                 "existing_link_conflicts_with_exact_alias",
                             )
@@ -385,7 +384,6 @@ class PlayerIdentityService:
                     outcome = "created"
                     reason_code = "created_exact_embedded_alias"
                 else:
-                    alias = cast(PlayerAlias, alias)
                     linked_alias_player = session.get(Player, alias.player_id)
                     if linked_alias_player is None or linked_alias_player.retired_at is not None:
                         decisions.append(

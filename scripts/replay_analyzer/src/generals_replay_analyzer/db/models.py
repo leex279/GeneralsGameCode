@@ -666,9 +666,7 @@ class Feature(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
         CheckConstraint("confidence IS NULL OR (confidence >= 0 AND confidence <= 1)", name="confidence_bounded"),
         CheckConstraint("boolean_value IS NULL OR boolean_value IN (0, 1)", name="boolean_value_boolean"),
         CheckConstraint(
-            "(quality = 'unavailable' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
-            "AND boolean_value IS NULL AND json_value IS NULL AND quality_reason IS NOT NULL) OR "
-            "(quality != 'unavailable' AND quality_reason IS NULL AND "
+            "(quality = 'available' AND quality_reason IS NULL AND "
             "((value_type = 'integer' AND integer_value IS NOT NULL AND real_value IS NULL AND text_value IS NULL "
             "AND boolean_value IS NULL AND json_value IS NULL) OR "
             "(value_type = 'real' AND integer_value IS NULL AND real_value IS NOT NULL AND text_value IS NULL "
@@ -678,7 +676,21 @@ class Feature(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
             "(value_type = 'boolean' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
             "AND boolean_value IS NOT NULL AND json_value IS NULL) OR "
             "(value_type = 'json' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
-            "AND boolean_value IS NULL AND json_value IS NOT NULL)))",
+            "AND boolean_value IS NULL AND json_value IS NOT NULL))) OR "
+            "(quality = 'partial' AND quality_reason IS NOT NULL AND length(trim(quality_reason)) > 0 AND "
+            "((value_type = 'integer' AND integer_value IS NOT NULL AND real_value IS NULL AND text_value IS NULL "
+            "AND boolean_value IS NULL AND json_value IS NULL) OR "
+            "(value_type = 'real' AND integer_value IS NULL AND real_value IS NOT NULL AND text_value IS NULL "
+            "AND boolean_value IS NULL AND json_value IS NULL) OR "
+            "(value_type = 'text' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NOT NULL "
+            "AND boolean_value IS NULL AND json_value IS NULL) OR "
+            "(value_type = 'boolean' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
+            "AND boolean_value IS NOT NULL AND json_value IS NULL) OR "
+            "(value_type = 'json' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
+            "AND boolean_value IS NULL AND json_value IS NOT NULL))) OR "
+            "(quality = 'unavailable' AND integer_value IS NULL AND real_value IS NULL AND text_value IS NULL "
+            "AND boolean_value IS NULL AND json_value IS NULL AND quality_reason IS NOT NULL "
+            "AND length(trim(quality_reason)) > 0)",
             name="typed_value_matches_quality",
         ),
         Index("ix_features_name_scope_window", "name", "scope_type", "scope_key", "frame_start", "frame_end"),
