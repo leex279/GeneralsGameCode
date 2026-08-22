@@ -9,9 +9,10 @@ import os
 import stat
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
@@ -118,6 +119,43 @@ def test_disabled_root_is_retained_and_reenabled_with_the_same_id(tmp_path: Path
     assert len(_registry_document(data_root)["roots"]) == 2  # type: ignore[arg-type]
 
 
+def test_temporarily_missing_root_keeps_its_id_when_the_same_configured_path_returns(tmp_path: Path) -> None:
+    """Including opened-object identity in the persistent key must allocate a second ID while a root is missing."""
+    data_root = tmp_path / "product"
+    source = tmp_path / "season-replays"
+    displaced = tmp_path / "season-replays-away"
+    source.mkdir()
+    registry = WatchedRootRegistry(data_root)
+    original = registry.reconcile((source,))[0]
+
+    source.rename(displaced)
+    missing = registry.reconcile((source,))[0]
+    displaced.rename(source)
+    returned = registry.reconcile((source,))[0]
+
+    assert missing.root_public_id == original.root_public_id
+    assert missing.available is False
+    assert returned.root_public_id == original.root_public_id
+    assert returned.available is True
+    assert len(_registry_document(data_root)["roots"]) == 1  # type: ignore[arg-type]
+
+
+def test_recreated_root_at_the_same_configured_path_keeps_its_id(tmp_path: Path) -> None:
+    """Persisting an inode or Windows file ID must regenerate the public ID after legitimate directory recreation."""
+    data_root = tmp_path / "product"
+    source = tmp_path / "recreated-replays"
+    source.mkdir()
+    registry = WatchedRootRegistry(data_root)
+    original = registry.reconcile((source,))[0]
+
+    source.rmdir()
+    source.mkdir()
+    recreated = registry.reconcile((source,))[0]
+
+    assert recreated.root_public_id == original.root_public_id
+    assert len(_registry_document(data_root)["roots"]) == 1  # type: ignore[arg-type]
+
+
 def test_concurrent_reconciliation_serializes_read_modify_publish(tmp_path: Path) -> None:
     """Removing the narrow lock must cause one concurrent root registration to be lost."""
     data_root = tmp_path / "product"
@@ -131,6 +169,58 @@ def test_concurrent_reconciliation_serializes_read_modify_publish(tmp_path: Path
     final = WatchedRootRegistry(data_root).reconcile(sources)
     assert {root.root_public_id for root in final} == set(ids)
     assert len(_registry_document(data_root)["roots"]) == 2  # type: ignore[arg-type]
+
+
+def test_registry_lock_serializes_the_exact_read_modify_publish_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moving the lock outside the registry read/modify boundary must admit two readers of the same bytes."""
+    data_root = tmp_path / "product"
+    first = tmp_path / "barrier-first"
+    second = tmp_path / "barrier-second"
+    third = tmp_path / "barrier-third"
+    for source in (first, second, third):
+        source.mkdir()
+    registry = WatchedRootRegistry(data_root)
+    registry.reconcile((first,))
+    first_read = Event()
+    release_first = Event()
+    second_started = Event()
+    second_read = Event()
+    hook_guard = Lock()
+    read_count = 0
+
+    def block_first_reader(event: str) -> None:
+        nonlocal read_count
+        if event != "registry_after_read":
+            return
+        with hook_guard:
+            read_count += 1
+            current = read_count
+        if current == 1:
+            first_read.set()
+            assert release_first.wait(10)
+        else:
+            second_read.set()
+
+    def reconcile_second() -> tuple[object, ...]:
+        second_started.set()
+        return registry.reconcile((first, third))
+
+    monkeypatch.setattr(roots_module, "_race_hook", block_first_reader)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(registry.reconcile, (first, second))
+        assert first_read.wait(10)
+        second_future = executor.submit(reconcile_second)
+        assert second_started.wait(10)
+        assert second_read.wait(0.25) is False
+        release_first.set()
+        first_future.result(timeout=10)
+        second_future.result(timeout=10)
+
+    assert second_read.is_set()
+    final = registry.reconcile((first, second, third))
+    assert len({root.root_public_id for root in final}) == 3
 
 
 @pytest.mark.parametrize(
@@ -264,8 +354,8 @@ def test_verified_native_root_aliases_cannot_receive_two_public_ids(
     second.mkdir()
     monkeypatch.setattr(
         roots_module,
-        "_native_root_identity_key",
-        lambda _path, _directory: "fixed-volume:file-id:canonical-root",
+        "_verified_root_alias_identity",
+        lambda _path: roots_module._ObjectIdentity(7, 11, stat.S_IFDIR, 0),
     )
     registry = WatchedRootRegistry(tmp_path / "product")
 
@@ -561,7 +651,7 @@ def test_snapshot_copies_verified_descriptor_to_immutable_owned_content(tmp_path
     assert source.stat().st_mtime_ns == source_before.st_mtime_ns
     assert str(source_root) not in repr(snapshot)
     assert str(registry.data_root) not in repr(snapshot)
-    assert set(snapshot.__dataclass_fields__) == {
+    assert {name for name in snapshot.__dataclass_fields__ if not name.startswith("_")} == {
         "snapshot_path",
         "sha256",
         "size_bytes",
@@ -571,6 +661,40 @@ def test_snapshot_copies_verified_descriptor_to_immutable_owned_content(tmp_path
     }
     with pytest.raises(FrozenInstanceError):
         snapshot.size_bytes = 0  # type: ignore[misc]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux O_TMPFILE publication requires a POSIX runtime")
+def test_linux_anonymous_ingress_temp_publishes_and_cleans_up_without_an_invented_name(tmp_path: Path) -> None:
+    """Calling lstat or unlink on an invented name for O_TMPFILE must make every Linux snapshot fail."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    payload = b"linux anonymous immutable ingress"
+    (source_root / "anonymous.rep").write_bytes(payload)
+
+    snapshot = registry.snapshot_replay(root_public_id, "anonymous.rep")
+
+    assert snapshot.created is True
+    assert snapshot.read_verified_bytes() == payload
+    assert snapshot.snapshot_path.read_bytes() == payload
+    assert _owned_temporary_files(registry.data_root) == []
+
+
+def test_verified_snapshot_reader_rejects_replaced_ingress_lineage_even_with_identical_bytes(tmp_path: Path) -> None:
+    """Reopening only the final pathname and digest must accept an attacker-replaced ingress tree with copied bytes."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    payload = b"lineage-bound immutable bytes"
+    (source_root / "lineage.rep").write_bytes(payload)
+    snapshot = registry.snapshot_replay(root_public_id, "lineage.rep")
+    ingress = registry.data_root / "ingress"
+    displaced = registry.data_root / "ingress-displaced"
+    ingress.rename(displaced)
+    replacement = ingress / snapshot.sha256[:2] / f"{snapshot.sha256}.rep"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_bytes(payload)
+
+    with pytest.raises(SnapshotIngressError) as raised:
+        snapshot.read_verified_bytes()
+
+    assert raised.value.code == "ingress_snapshot_collision"
 
 
 def test_each_new_ingress_directory_fsyncs_its_parent_before_use(
@@ -1122,6 +1246,53 @@ def test_digest_lock_directory_cannot_be_replaced_to_split_cross_process_lock(tm
     assert replacement_blocked is True
     assert lock_directory.is_dir()
     assert not displaced.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits renaming an opened directory")
+def test_posix_digest_lock_replacement_cannot_admit_a_second_critical_section(tmp_path: Path) -> None:
+    """Using only a lock-file inode must let a replacement `.locks` directory split POSIX serialization."""
+    lock_directory = tmp_path / "ingress" / ".locks"
+    displaced = tmp_path / "ingress" / ".locks-displaced"
+    lock_directory.mkdir(parents=True)
+    digest = hashlib.sha256(b"posix split lock").hexdigest()
+    first_ready = tmp_path / "posix-first-ready"
+    first_release = tmp_path / "posix-first-release"
+    second_ready = tmp_path / "posix-second-ready"
+    second_release = tmp_path / "posix-second-release"
+    context = multiprocessing.get_context("spawn")
+
+    with ProcessPoolExecutor(max_workers=2, mp_context=context) as executor:
+        holder = executor.submit(
+            _hold_named_digest_lock_in_spawned_process,
+            (str(lock_directory), digest, str(first_ready), str(first_release)),
+        )
+        deadline = time.monotonic() + 10
+        while not first_ready.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        lock_directory.rename(displaced)
+        lock_directory.mkdir()
+        second = executor.submit(
+            _hold_named_digest_lock_in_spawned_process,
+            (str(lock_directory), digest, str(second_ready), str(second_release)),
+        )
+        deadline = time.monotonic() + 0.5
+        while not second_ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        admitted_while_held = second_ready.exists()
+        first_release.write_bytes(b"release")
+        deadline = time.monotonic() + 10
+        while not second_ready.exists() and not second.done():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        second_release.write_bytes(b"release")
+        for future in (holder, second):
+            try:
+                future.result(timeout=10)
+            except SnapshotIngressError:
+                pass
+
+    assert admitted_while_held is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory share-mode enforcement is platform specific")

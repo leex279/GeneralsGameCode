@@ -7,16 +7,19 @@ import hashlib
 import json
 import os
 import re
+import socket
 import stat
+import sys
 import tempfile
+import time
 import unicodedata
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 _REGISTRY_NAME = "watched-roots-v1.json"
@@ -95,10 +98,29 @@ class IngressSnapshot:
     root_public_id: str
     relative_name: str
     created: bool
+    _data_root_path: Path | None = dataclass_field(default=None, repr=False, compare=False)
+    _ingress_identity: _ObjectIdentity | None = dataclass_field(default=None, repr=False, compare=False)
+    _shard_identity: _ObjectIdentity | None = dataclass_field(default=None, repr=False, compare=False)
+    _target_identity: _ObjectIdentity | None = dataclass_field(default=None, repr=False, compare=False)
 
     def read_verified_bytes(self) -> bytes:
         """Reopen product-owned bytes through verified parents and recheck immutable identity."""
-        return _read_verified_ingress_target(self.snapshot_path, self.sha256, self.size_bytes)
+        if (
+            self._data_root_path is None
+            or self._ingress_identity is None
+            or self._shard_identity is None
+            or self._target_identity is None
+        ):
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        return _read_verified_ingress_target(
+            self.snapshot_path,
+            self.sha256,
+            self.size_bytes,
+            data_root=self._data_root_path,
+            ingress_identity=self._ingress_identity,
+            shard_identity=self._shard_identity,
+            target_identity=self._target_identity,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,15 +266,52 @@ def _registry_lock(data_root: Path) -> Iterator[_BoundDirectory]:
 
 
 @contextmanager
-def _digest_lock(lock_directory: Path, digest: str) -> Iterator[None]:
+def _posix_digest_coordination(  # pragma: no cover - exercised on Linux hosts
+    lock_directory: Path, digest: str
+) -> Iterator[None]:
+    """Use a Linux abstract socket so directory replacement cannot split digest serialization."""
+    material = f"{_normalized_path_key(lock_directory)}:{digest}".encode("ascii")
+    address = b"\0gra-" + hashlib.sha256(material).hexdigest().encode("ascii")
+    coordinator = socket.socket(cast(Any, socket).AF_UNIX, socket.SOCK_STREAM)
+    try:
+        while True:
+            try:
+                coordinator.bind(address)
+                break
+            except OSError as error:
+                if error.errno not in {98, 10048}:
+                    raise
+                time.sleep(0.01)
+        yield
+    finally:
+        coordinator.close()
+
+
+@contextmanager
+def _digest_lock(
+    lock_directory: Path,
+    digest: str,
+    *,
+    bound_ingress: _BoundDirectory | None = None,
+) -> Iterator[None]:
     lock_path = lock_directory / f"{digest}.lock"
     bound_directory: tuple[_BoundDirectory, ...] = ()
     try:
-        _ensure_owned_directory(lock_directory.parent)
-        _ensure_owned_directory(lock_directory, enforcement_site="locks")
-        bound_directory = _open_absolute_directory_chain(lock_directory)
+        if bound_ingress is None:
+            _ensure_owned_directory(lock_directory.parent)
+            _ensure_owned_directory(lock_directory, enforcement_site="locks")
+            bound_directory = _open_absolute_directory_chain(lock_directory)
+        else:
+            bound_directory = (
+                _ensure_owned_child_directory(bound_ingress, lock_directory.name, enforcement_site="locks"),
+            )
         _race_hook("digest_lock_directory_bound")
-        with _thread_lock(lock_path):
+        coordination = (
+            _posix_digest_coordination(lock_directory, digest)
+            if os.name != "nt"
+            else nullcontext()
+        )
+        with coordination, _thread_lock(lock_path):
             if os.name == "nt":
                 handle = _win_open_relative(
                     bound_directory[-1],
@@ -307,7 +366,7 @@ def _digest_lock(lock_directory: Path, digest: str) -> Iterator[None]:
                 if opened.st_size == 0:
                     os.write(descriptor, b"\0")
                     os.fsync(descriptor)
-                    _fsync_directory(lock_directory)
+                    _fsync_bound_directory(bound_directory[-1])
                     if os.name == "nt":
                         lock_identity = _win_file_identity(msvcrt.get_osfhandle(descriptor))
                 _lock_descriptor(descriptor)
@@ -327,7 +386,10 @@ def _digest_lock(lock_directory: Path, digest: str) -> Iterator[None]:
                         )
                     if changed:
                         raise SnapshotIngressError("ingress_snapshot_changed")
-                    _revalidate_bound_directory_chain(lock_directory, bound_directory)
+                    if bound_ingress is None:
+                        _revalidate_bound_directory_chain(lock_directory, bound_directory)
+                    else:
+                        _revalidate_bound_child(bound_ingress, lock_directory.name, bound_directory[-1])
                     _unlock_descriptor(descriptor)
             finally:
                 os.close(descriptor)
@@ -533,6 +595,31 @@ def _fsync_directory(path: Path) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def _fsync_bound_directory(directory: _BoundDirectory) -> None:
+    if directory._windows:
+        path = _win_final_path(directory.handle)
+        flush_handle = _KERNEL32.CreateFileW(
+            path,
+            0x80000000 | 0x40000000,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+            None,
+            3,
+            0x02000000 | _FILE_OPEN_REPARSE_POINT,
+            None,
+        )
+        if flush_handle == _INVALID_HANDLE_VALUE:
+            _win_raise_last_error()
+        try:
+            if _win_file_identity(int(flush_handle)).object_identity != directory.identity.object_identity:
+                raise OSError("bound directory changed before flush")
+            if not _KERNEL32.FlushFileBuffers(flush_handle):
+                _win_raise_last_error()
+        finally:
+            _win_close(int(flush_handle))
+        return
+    os.fsync(directory.handle)  # pragma: no cover - exercised on POSIX hosts
 
 
 def _unlink_if_identity(path: Path, expected: _FileIdentity) -> None:
@@ -840,6 +927,38 @@ class _OpenedSource:
                 directory.close()
 
 
+@dataclass(slots=True)
+class _OwnedTemporary:
+    descriptor: int = dataclass_field(repr=False)
+    identity: _FileIdentity
+    path: Path | None
+    name: str | None
+    anonymous: bool
+
+
+@dataclass(slots=True)
+class _SourceMutationGuard:
+    descriptor: int = dataclass_field(repr=False)
+
+    def assert_unchanged(self) -> None:
+        if self.descriptor >= 0:  # pragma: no cover - exercised on Linux hosts
+            _assert_linux_source_unchanged(self.descriptor)
+
+    def close(self) -> None:
+        if self.descriptor >= 0:  # pragma: no cover - exercised on Linux hosts
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+def _assert_linux_source_unchanged(descriptor: int) -> None:  # pragma: no cover - exercised on Linux hosts
+    try:
+        changed = os.read(descriptor, 4096)
+    except BlockingIOError:
+        return
+    if changed:
+        raise SnapshotIngressError("replay_source_changed")
+
+
 if os.name == "nt":
     import msvcrt
     from ctypes import wintypes
@@ -1091,8 +1210,14 @@ def _posix_link_handle(  # pragma: no cover - exercised on Linux hosts
     linkat = libc.linkat
     linkat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
     linkat.restype = ctypes.c_int
-    if linkat(descriptor, b"", target_directory.handle, os.fsencode(target_name), 0x1000) != 0:
+    target = os.fsencode(target_name)
+    result = linkat(descriptor, b"", target_directory.handle, target, 0x1000)
+    error = ctypes.get_errno()
+    if result != 0 and error in {1, 2, 13}:
+        descriptor_path = os.fsencode(f"/proc/self/fd/{descriptor}")
+        result = linkat(-100, descriptor_path, target_directory.handle, target, 0x400)
         error = ctypes.get_errno()
+    if result != 0:
         if error == 17:
             raise FileExistsError(error, "immutable snapshot target exists")
         raise OSError(error, "secure POSIX descriptor link failed")
@@ -1278,25 +1403,17 @@ def _revalidate_bound_directory_chain(path: Path, expected: Sequence[_BoundDirec
             directory.close()
 
 
-def _native_root_identity_key(path: Path, directory: _BoundDirectory) -> str:
-    if os.name == "nt":
-        object_identity = directory.identity.object_identity
-        canonical_path = unicodedata.normalize("NFC", _win_final_path(directory.handle)).casefold()
-        return f"windows:{object_identity.device}:{object_identity.inode}:{canonical_path}"
-    return unicodedata.normalize("NFC", os.path.normpath(os.fspath(path))).casefold()  # pragma: no cover - POSIX
-
-
-def _verified_root_path_key(path: Path) -> str:
+def _verified_root_alias_identity(path: Path) -> _ObjectIdentity | None:
+    """Return opened-object identity only for simultaneous configured-root alias rejection."""
     directories: tuple[_BoundDirectory, ...] = ()
     try:
         directories = _open_absolute_directory_chain(path)
-        material = _native_root_identity_key(path, directories[-1])
+        return directories[-1].identity.object_identity
     except OSError:
-        return _normalized_path_key(path)
+        return None
     finally:
         for directory in reversed(directories):
             directory.close()
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _open_child_directory(parent: _BoundDirectory, name: str) -> _BoundDirectory:
@@ -1339,6 +1456,120 @@ def _open_child_directory(parent: _BoundDirectory, name: str) -> _BoundDirectory
     raise OSError("unsupported filesystem platform")  # pragma: no cover
 
 
+def _ensure_owned_child_directory(
+    parent: _BoundDirectory, name: str, *, enforcement_site: str = "ingress"
+) -> _BoundDirectory:
+    created = False
+    child: _BoundDirectory | None = None
+    try:
+        try:
+            child = _open_child_directory(parent, name)
+        except OSError as error:
+            if os.name == "nt":
+                if error.errno not in {2, 3}:
+                    raise
+                handle = _win_open_relative(
+                    parent,
+                    name,
+                    directory=True,
+                    deny_mutation=False,
+                    prevent_rename=True,
+                    disposition=_FILE_OPEN_IF,
+                )
+                child = _BoundDirectory(handle, _win_file_identity(handle), True)
+            else:  # pragma: no cover - exercised on POSIX hosts
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent.handle)
+                    created = True
+                except FileExistsError:
+                    pass
+                child = _open_child_directory(parent, name)
+            if os.name == "nt":
+                created = True
+        if (
+            _enforce_reparse_identity(
+                enforcement_site, bool(child.identity.object_identity.reparse_attributes)
+            )
+            or child.identity.object_identity.file_type != stat.S_IFDIR
+        ):
+            raise OSError("unsafe owned directory")
+        if created:
+            _fsync_bound_directory(parent)
+            _race_hook("owned_directory_parent_fsynced")
+        return child
+    except Exception:
+        if child is not None:
+            child.close()
+        raise
+
+
+def _revalidate_bound_child(parent: _BoundDirectory, name: str, expected: _BoundDirectory) -> None:
+    current = _open_child_directory(parent, name)
+    try:
+        if current.identity.object_identity != expected.identity.object_identity:
+            raise OSError("bound child identity changed")
+    finally:
+        current.close()
+
+
+def _revalidate_ingress_lineage(
+    data_root: Path,
+    data_root_chain: Sequence[_BoundDirectory],
+    ingress: _BoundDirectory,
+) -> None:
+    _revalidate_bound_directory_chain(data_root, data_root_chain)
+    _revalidate_bound_child(data_root_chain[-1], "ingress", ingress)
+
+
+def _require_snapshot_lineage(
+    data_root: Path,
+    data_root_chain: Sequence[_BoundDirectory],
+    ingress: _BoundDirectory,
+    *children: tuple[str, _BoundDirectory],
+) -> None:
+    try:
+        _revalidate_ingress_lineage(data_root, data_root_chain, ingress)
+        for name, child in children:
+            _revalidate_bound_child(ingress, name, child)
+    except OSError:
+        raise SnapshotIngressError("ingress_snapshot_changed") from None
+
+
+def _unlink_bound_child_if_identity(
+    parent: _BoundDirectory, name: str, expected: _FileIdentity
+) -> None:
+    descriptor = -1
+    try:
+        descriptor = _open_child_file_descriptor(parent, name, deny_mutation=True)
+        current = os.fstat(descriptor)
+        if (
+            _file_identity(current).object_identity != expected.object_identity
+            or not stat.S_ISREG(current.st_mode)
+            or _is_reparse(current)
+        ):
+            return
+        if os.name == "nt":
+            _win_mark_delete(msvcrt.get_osfhandle(descriptor))
+        else:  # pragma: no cover - exercised on POSIX hosts
+            named = os.stat(name, dir_fd=parent.handle, follow_symlinks=False)
+            if not _same_opened_identity(current, named):
+                return
+            os.unlink(name, dir_fd=parent.handle)
+    except FileNotFoundError:
+        return
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _bound_child_file_identity(parent: _BoundDirectory, name: str) -> _FileIdentity:
+    descriptor = _open_child_file_descriptor(parent, name, deny_mutation=True)
+    try:
+        return _file_identity(os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+
+
 def _open_child_file_descriptor(parent: _BoundDirectory, name: str, *, deny_mutation: bool) -> int:
     if os.name == "nt":
         handle = _win_open_relative(parent, name, directory=False, deny_mutation=deny_mutation)
@@ -1354,6 +1585,46 @@ def _open_child_file_descriptor(parent: _BoundDirectory, name: str, *, deny_muta
             dir_fd=parent.handle,
         )
     raise OSError("unsupported filesystem platform")  # pragma: no cover
+
+
+def _source_mutation_guard(root: Path, components: Sequence[str]) -> _SourceMutationGuard:
+    if sys.platform == "linux":  # pragma: no cover - exercised on Linux hosts
+        return _linux_source_mutation_guard(root, components)
+    return _SourceMutationGuard(-1)
+
+
+def _linux_source_mutation_guard(  # pragma: no cover - exercised on Linux hosts
+    root: Path, components: Sequence[str]
+) -> _SourceMutationGuard:
+    libc = ctypes.CDLL(None, use_errno=True)
+    inotify_init1 = libc.inotify_init1
+    inotify_init1.argtypes = [ctypes.c_int]
+    inotify_init1.restype = ctypes.c_int
+    inotify_add_watch = libc.inotify_add_watch
+    inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    inotify_add_watch.restype = ctypes.c_int
+    descriptor = inotify_init1(getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    if descriptor < 0:
+        raise SnapshotIngressError("replay_source_changed")
+    directories: list[_BoundDirectory] = []
+    mask = 0x00000004 | 0x00000008 | 0x00000100 | 0x00000200 | 0x00000400 | 0x00000800 | 0x00000040 | 0x00000080
+    try:
+        directories.extend(_open_absolute_directory_chain(root))
+        watched = [directories[-1]]
+        for component in components[:-1]:
+            directories.append(_open_child_directory(directories[-1], component))
+            watched.append(directories[-1])
+        for directory in watched:
+            descriptor_path = os.fsencode(f"/proc/self/fd/{directory.handle}")
+            if inotify_add_watch(descriptor, descriptor_path, mask) < 0:
+                raise OSError(ctypes.get_errno(), "secure Linux source watch failed")
+        return _SourceMutationGuard(descriptor)
+    except Exception:
+        os.close(descriptor)
+        raise
+    finally:
+        for directory in reversed(directories):
+            directory.close()
 
 
 def _open_source_securely(root: Path, components: Sequence[str], max_replay_bytes: int) -> _OpenedSource:
@@ -1582,9 +1853,11 @@ def _copy_descriptor(
     max_replay_bytes: int,
     *,
     bound_staging: _BoundDirectory | None = None,
-) -> tuple[Path, str, int, int]:
+) -> tuple[_OwnedTemporary, str, int]:
     temporary_path: Path | None = None
+    temporary_name: str | None = None
     temporary_identity: _FileIdentity | None = None
+    anonymous = False
     descriptor = -1
     try:
         if os.name == "nt" and bound_staging is not None:
@@ -1609,8 +1882,6 @@ def _copy_descriptor(
                 raise
             temporary_path = staging_directory / temporary_name
         elif os.name != "nt" and bound_staging is not None:  # pragma: no cover - exercised on POSIX hosts
-            temporary_name = f".anonymous-{uuid4().hex}.tmp"
-            temporary_path = staging_directory / temporary_name
             temporary_flags = getattr(os, "O_TMPFILE", 0)
             if temporary_flags == 0:
                 raise SnapshotIngressError("ingress_snapshot_unavailable")
@@ -1620,9 +1891,11 @@ def _copy_descriptor(
                 0o600,
                 dir_fd=bound_staging.handle,
             )
+            anonymous = True
         else:  # pragma: no cover - legacy direct helper calls
             descriptor, temporary_name = tempfile.mkstemp(prefix=".replay-", suffix=".tmp", dir=staging_directory)
             temporary_path = Path(temporary_name)
+            temporary_name = temporary_path.name
         temporary_identity = _file_identity(os.fstat(descriptor))
         digest = hashlib.sha256()
         size = 0
@@ -1642,11 +1915,17 @@ def _copy_descriptor(
                 view = view[written:]
             digest.update(chunk)
         os.fsync(descriptor)
-        return temporary_path, digest.hexdigest(), size, descriptor
+        return (
+            _OwnedTemporary(descriptor, temporary_identity, temporary_path, temporary_name, anonymous),
+            digest.hexdigest(),
+            size,
+        )
     except SnapshotIngressError:  # pragma: no cover - POSIX concurrent growth path
         if descriptor >= 0:
             os.close(descriptor)
-        if temporary_path is not None and temporary_identity is not None:
+        if temporary_identity is not None and temporary_name is not None and bound_staging is not None:
+            _unlink_bound_child_if_identity(bound_staging, temporary_name, temporary_identity)
+        elif temporary_path is not None and temporary_identity is not None:
             _unlink_if_identity(temporary_path, temporary_identity)
         raise
     except OSError:  # pragma: no cover - defensive low-level write failure cleanup
@@ -1655,12 +1934,30 @@ def _copy_descriptor(
                 os.close(descriptor)
             except OSError:
                 pass
-        if temporary_path is not None and temporary_identity is not None:
+        if temporary_identity is not None and temporary_name is not None and bound_staging is not None:
+            try:
+                _unlink_bound_child_if_identity(bound_staging, temporary_name, temporary_identity)
+            except OSError:
+                pass
+        elif temporary_path is not None and temporary_identity is not None:
             try:
                 _unlink_if_identity(temporary_path, temporary_identity)
             except OSError:
                 pass
         raise SnapshotIngressError("ingress_snapshot_unavailable") from None
+
+
+def _dispose_owned_temporary(temporary: _OwnedTemporary, staging: _BoundDirectory) -> None:
+    if temporary.descriptor >= 0:
+        if os.name == "nt":
+            _win_mark_delete(msvcrt.get_osfhandle(temporary.descriptor))
+        os.close(temporary.descriptor)
+        temporary.descriptor = -1
+    if temporary.name is not None:
+        _unlink_bound_child_if_identity(staging, temporary.name, temporary.identity)
+        _fsync_bound_directory(staging)
+        temporary.name = None
+        temporary.path = None
 
 
 def _hash_open_descriptor(descriptor: int, max_bytes: int) -> tuple[str, int]:
@@ -1739,18 +2036,39 @@ def _verify_ingress_target(
         raise SnapshotIngressError("ingress_snapshot_collision")
 
 
-def _read_verified_ingress_target(target: Path, expected_sha256: str, expected_size: int) -> bytes:
-    directories: tuple[_BoundDirectory, ...] = ()
+def _read_verified_ingress_target(
+    target: Path,
+    expected_sha256: str,
+    expected_size: int,
+    *,
+    data_root: Path,
+    ingress_identity: _ObjectIdentity,
+    shard_identity: _ObjectIdentity,
+    target_identity: _ObjectIdentity,
+) -> bytes:
+    data_root_directories: tuple[_BoundDirectory, ...] = ()
+    ingress: _BoundDirectory | None = None
+    shard: _BoundDirectory | None = None
     descriptor = -1
     fresh_descriptor = -1
     try:
-        directories = _open_absolute_directory_chain(target.parent)
-        descriptor = _open_child_file_descriptor(directories[-1], target.name, deny_mutation=True)
+        canonical_target = data_root / "ingress" / expected_sha256[:2] / f"{expected_sha256}.rep"
+        if target != canonical_target:
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        data_root_directories = _open_absolute_directory_chain(data_root)
+        ingress = _open_child_directory(data_root_directories[-1], "ingress")
+        if ingress.identity.object_identity != ingress_identity:
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        shard = _open_child_directory(ingress, expected_sha256[:2])
+        if shard.identity.object_identity != shard_identity:
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        descriptor = _open_child_file_descriptor(shard, target.name, deny_mutation=True)
         opened = os.fstat(descriptor)
         identity = _file_identity(opened)
         if (
             identity.object_identity.reparse_attributes
             or identity.object_identity.file_type != stat.S_IFREG
+            or identity.object_identity != target_identity
             or identity.link_count != 1
             or identity.size != expected_size
         ):
@@ -1768,10 +2086,11 @@ def _read_verified_ingress_target(target: Path, expected_sha256: str, expected_s
                 raise SnapshotIngressError("ingress_snapshot_collision")
             chunks.append(chunk)
             digest.update(chunk)
-        fresh_descriptor = _open_child_file_descriptor(directories[-1], target.name, deny_mutation=True)
+        fresh_descriptor = _open_child_file_descriptor(shard, target.name, deny_mutation=True)
         if not _same_opened_identity(os.fstat(fresh_descriptor), os.fstat(descriptor)):
             raise SnapshotIngressError("ingress_snapshot_collision")
-        _revalidate_bound_directory_chain(target.parent, directories)
+        _revalidate_bound_child(ingress, expected_sha256[:2], shard)
+        _revalidate_ingress_lineage(data_root, data_root_directories, ingress)
         if size != expected_size or digest.hexdigest() != expected_sha256:
             raise SnapshotIngressError("ingress_snapshot_collision")
         return b"".join(chunks)
@@ -1784,12 +2103,16 @@ def _read_verified_ingress_target(target: Path, expected_sha256: str, expected_s
             os.close(fresh_descriptor)
         if descriptor >= 0:
             os.close(descriptor)
-        for directory in reversed(directories):
+        if shard is not None:
+            shard.close()
+        if ingress is not None:
+            ingress.close()
+        for directory in reversed(data_root_directories):
             directory.close()
 
 
 def _publish_snapshot(
-    temporary_path: Path,
+    temporary_path: Path | None,
     target: Path,
     expected_sha256: str,
     expected_size: int,
@@ -1803,13 +2126,18 @@ def _publish_snapshot(
         elif os.name != "nt" and source_descriptor is not None and target_directory is not None:  # pragma: no cover
             _posix_link_handle(source_descriptor, target_directory, target.name)
         else:  # pragma: no cover - exercised on POSIX hosts and legacy direct helper calls
+            if temporary_path is None:
+                raise OSError("named immutable ingress temp is unavailable")
             os.link(temporary_path, target)
     except FileExistsError:
         _verify_ingress_target(target, expected_sha256, expected_size, bound_parent=target_directory)
         return False
     except OSError:
         raise SnapshotIngressError("ingress_snapshot_unavailable") from None
-    _fsync_directory(target.parent)
+    if target_directory is not None:
+        _fsync_bound_directory(target_directory)
+    else:  # pragma: no cover - legacy direct helper calls
+        _fsync_directory(target.parent)
     return True
 
 
@@ -1838,17 +2166,24 @@ class WatchedRootRegistry:
         """Persist new opaque identities and return only currently configured roots."""
         configured: list[tuple[str, Path]] = []
         configured_keys: set[str] = set()
+        configured_aliases: set[_ObjectIdentity] = set()
         for folder in watched_folders:
             path = _absolute_without_following(Path(folder))
-            key = _verified_root_path_key(path)
+            key = _normalized_path_key(path)
             if key in configured_keys:
                 raise RootRegistryError("watched_root_path_collision")
+            alias_identity = _verified_root_alias_identity(path)
+            if alias_identity is not None and alias_identity in configured_aliases:
+                raise RootRegistryError("watched_root_path_collision")
             configured_keys.add(key)
+            if alias_identity is not None:
+                configured_aliases.add(alias_identity)
             configured.append((key, path))
 
         registry_path = self._data_root / _REGISTRY_NAME
         with _registry_lock(self._data_root) as bound_data_root:
             entries, original_bytes, original_identity = _read_registry(registry_path)
+            _race_hook("registry_after_read")
             by_key = {entry.path_key_sha256: entry for entry in entries}
             next_label = max(
                 (int(match.group(1)) for entry in entries if (match := _GENERIC_LABEL_PATTERN.fullmatch(entry.label))),
@@ -1898,23 +2233,35 @@ class WatchedRootRegistry:
         if not _contained(root, source_path):
             raise SnapshotIngressError("replay_relative_name_invalid")
 
-        directory_chain = _capture_directory_chain(root, components)
-        initial_info, _initial_identity = _require_source_leaf(source_path, self._max_replay_bytes)
-        _race_hook("before_open")
         try:
-            opened_source = _open_source_securely(root, components, self._max_replay_bytes)
+            mutation_guard = _source_mutation_guard(root, components)
+        except OSError:
+            _capture_directory_chain(root, components)
+            raise SnapshotIngressError("replay_source_changed") from None
+        try:
+            directory_chain = _capture_directory_chain(root, components)
+            initial_info, _initial_identity = _require_source_leaf(source_path, self._max_replay_bytes)
         except SnapshotIngressError:
+            mutation_guard.close()
+            raise
+        try:
+            _race_hook("before_open")
+            mutation_guard.assert_unchanged()
+            opened_source = _open_source_securely(root, components, self._max_replay_bytes)
+            mutation_guard.assert_unchanged()
+        except SnapshotIngressError:
+            mutation_guard.close()
             raise SnapshotIngressError("replay_source_changed") from None
         except OSError:
+            mutation_guard.close()
             raise SnapshotIngressError("replay_source_changed") from None
 
-        temporary_path: Path | None = None
-        temporary_identity: _FileIdentity | None = None
-        temporary_descriptor = -1
+        temporary: _OwnedTemporary | None = None
         created_target_identity: _FileIdentity | None = None
-        ingress_bound: tuple[_BoundDirectory, ...] = ()
-        staging_bound: tuple[_BoundDirectory, ...] = ()
-        shard_bound: tuple[_BoundDirectory, ...] = ()
+        data_root_bound: tuple[_BoundDirectory, ...] = ()
+        ingress_bound: _BoundDirectory | None = None
+        staging_bound: _BoundDirectory | None = None
+        shard_bound: _BoundDirectory | None = None
         target: Path | None = None
         created = False
         try:
@@ -1930,26 +2277,26 @@ class WatchedRootRegistry:
 
             ingress_root = self._data_root / "ingress"
             staging_directory = ingress_root / ".staging"
-            _ensure_owned_directory(ingress_root)
-            _ensure_owned_directory(staging_directory)
-            ingress_bound = _open_absolute_directory_chain(ingress_root)
-            staging_bound = _open_absolute_directory_chain(staging_directory)
-            staging_identity = _object_identity(staging_directory.lstat())
+            data_root_bound = _open_absolute_directory_chain(self._data_root)
+            ingress_bound = _ensure_owned_child_directory(data_root_bound[-1], "ingress")
+            staging_bound = _ensure_owned_child_directory(ingress_bound, ".staging")
             try:
-                temporary_path, digest, size, temporary_descriptor = _copy_descriptor(
+                temporary, digest, size = _copy_descriptor(
                     opened_source.descriptor,
                     staging_directory,
                     self._max_replay_bytes,
-                    bound_staging=staging_bound[-1],
+                    bound_staging=staging_bound,
                 )
             except OSError:
                 raise SnapshotIngressError("ingress_snapshot_changed") from None
-            temporary_identity = _file_identity(temporary_path.lstat())
-            _revalidate_bound_directory_chain(ingress_root, ingress_bound)
-            _revalidate_bound_directory_chain(staging_directory, staging_bound)
-            if _object_identity(staging_directory.lstat()) != staging_identity:
-                raise SnapshotIngressError("ingress_snapshot_changed")
+            _require_snapshot_lineage(
+                self._data_root, data_root_bound, ingress_bound, (".staging", staging_bound)
+            )
             _race_hook("after_copy")
+            mutation_guard.assert_unchanged()
+            _require_snapshot_lineage(
+                self._data_root, data_root_bound, ingress_bound, (".staging", staging_bound)
+            )
             try:
                 after_copy = os.fstat(opened_source.descriptor)
             except OSError:
@@ -1961,69 +2308,89 @@ class WatchedRootRegistry:
             _revalidate_secure_source(root, components, opened_source)
 
             lock_directory = ingress_root / ".locks"
-            with _digest_lock(lock_directory, digest):
+            with _digest_lock(lock_directory, digest, bound_ingress=ingress_bound):
+                _require_snapshot_lineage(self._data_root, data_root_bound, ingress_bound)
                 shard = ingress_root / digest[:2]
-                _ensure_owned_directory(shard)
-                shard_bound = _open_absolute_directory_chain(shard)
-                shard_identity = _object_identity(shard.lstat())
+                shard_bound = _ensure_owned_child_directory(ingress_bound, digest[:2])
                 target = shard / f"{digest}.rep"
                 try:
                     _race_hook("before_publish")
                 except OSError:
                     raise SnapshotIngressError("ingress_snapshot_changed") from None
-                created = _publish_snapshot(
-                    temporary_path,
-                    target,
-                    digest,
-                    size,
-                    source_descriptor=temporary_descriptor,
-                    target_directory=shard_bound[-1],
+                _require_snapshot_lineage(
+                    self._data_root, data_root_bound, ingress_bound, (digest[:2], shard_bound)
                 )
-                if os.name == "nt":
-                    _win_mark_delete(msvcrt.get_osfhandle(temporary_descriptor))
-                os.close(temporary_descriptor)
-                temporary_descriptor = -1
-                if created:
-                    created_target_identity = _file_identity(target.lstat())
-                    _unlink_if_identity(temporary_path, temporary_identity)
-                    _fsync_directory(staging_directory)
-                    temporary_path = None
-                    temporary_identity = None
-                    created_target_identity = _file_identity(target.lstat())
-                if _object_identity(shard.lstat()) != shard_identity:
-                    if created_target_identity is not None:
-                        _unlink_if_identity(target, created_target_identity)
-                        _fsync_directory(shard)
+                try:
+                    created = _publish_snapshot(
+                        temporary.path,
+                        target,
+                        digest,
+                        size,
+                        source_descriptor=temporary.descriptor,
+                        target_directory=shard_bound,
+                    )
+                    if created:
+                        created_target_identity = _file_identity(os.fstat(temporary.descriptor))
+                    _dispose_owned_temporary(temporary, staging_bound)
+                    temporary = None
+                    created_target_identity = _bound_child_file_identity(shard_bound, target.name)
+                    _require_snapshot_lineage(
+                        self._data_root,
+                        data_root_bound,
+                        ingress_bound,
+                        (".staging", staging_bound),
+                        (digest[:2], shard_bound),
+                    )
+                    _verify_ingress_target(target, digest, size, bound_parent=shard_bound)
+                    _require_snapshot_lineage(
+                        self._data_root, data_root_bound, ingress_bound, (digest[:2], shard_bound)
+                    )
+                    _race_hook("after_final_verify")
+                    _verify_ingress_target(target, digest, size, bound_parent=shard_bound)
+                    _require_snapshot_lineage(
+                        self._data_root, data_root_bound, ingress_bound, (digest[:2], shard_bound)
+                    )
+                except Exception as error:
+                    if created and created_target_identity is not None:
+                        try:
+                            _unlink_bound_child_if_identity(shard_bound, target.name, created_target_identity)
+                            _fsync_bound_directory(shard_bound)
+                        except OSError:
+                            pass
                         created_target_identity = None
-                    raise SnapshotIngressError("ingress_snapshot_changed")
-                _revalidate_bound_directory_chain(shard, shard_bound)
-                _verify_ingress_target(target, digest, size, bound_parent=shard_bound[-1])
-                _revalidate_bound_directory_chain(shard, shard_bound)
-                _race_hook("after_final_verify")
-                _verify_ingress_target(target, digest, size, bound_parent=shard_bound[-1])
-                _revalidate_bound_directory_chain(shard, shard_bound)
-            return IngressSnapshot(target, digest, size, root_public_id, relative_name, created)
+                    if isinstance(error, OSError):
+                        raise SnapshotIngressError("ingress_snapshot_changed") from None
+                    raise
+            if target is None or shard_bound is None or created_target_identity is None:
+                raise SnapshotIngressError("ingress_snapshot_changed")
+            return IngressSnapshot(
+                target,
+                digest,
+                size,
+                root_public_id,
+                relative_name,
+                created,
+                self._data_root,
+                ingress_bound.identity.object_identity,
+                shard_bound.identity.object_identity,
+                created_target_identity.object_identity,
+            )
         except SnapshotIngressError:
             raise
         except OSError:
             raise SnapshotIngressError("ingress_snapshot_unavailable") from None
         finally:
             opened_source.close()
-            if temporary_path is not None and temporary_identity is not None:
+            mutation_guard.close()
+            if temporary is not None:
                 _race_hook("before_temporary_cleanup")
-            if temporary_descriptor >= 0:
-                if os.name == "nt":
-                    try:
-                        _win_mark_delete(msvcrt.get_osfhandle(temporary_descriptor))
-                    except OSError:
-                        pass
-                os.close(temporary_descriptor)
-            if temporary_path is not None and temporary_identity is not None:
+            if temporary is not None and staging_bound is not None:
                 try:
-                    _unlink_if_identity(temporary_path, temporary_identity)
-                    _fsync_directory(temporary_path.parent)
+                    _dispose_owned_temporary(temporary, staging_bound)
                 except OSError:
                     pass
-            for chain in (shard_bound, staging_bound, ingress_bound):
-                for directory in reversed(chain):
+            for directory in (shard_bound, staging_bound, ingress_bound):
+                if directory is not None:
                     directory.close()
+            for directory in reversed(data_root_bound):
+                directory.close()
