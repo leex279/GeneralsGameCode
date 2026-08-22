@@ -15,8 +15,20 @@ from generals_replay_analyzer.analysis_pipeline.planner import (
     AnalysisPlanDTO,
     AnalysisPlanner,
     AnalysisPlanningError,
+    IdentityInvalidationPlanDTO,
+    IdentityInvalidationReplayPlanDTO,
 )
-from generals_replay_analyzer.db.models import Job, JobDependency, Replay
+from generals_replay_analyzer.db.models import (
+    Job,
+    JobDependency,
+    ParserRun,
+    Player,
+    PlayerAlias,
+    Replay,
+    ReplayPlayer,
+)
+from generals_replay_analyzer.identity.normalize import EMBEDDED_REPLAY_NAME_NAMESPACE
+from generals_replay_analyzer.identity.service import PlayerIdentityService
 from generals_replay_analyzer.importing.jobs import JobCoordinator, JobSpec
 from generals_replay_analyzer.importing.stages import (
     ANALYZE_LLM,
@@ -66,6 +78,70 @@ def _replay(session_factory: sessionmaker[Session], clock: datetime) -> Replay:
         session.flush()
         session.expunge(replay)
         return replay
+
+
+def _identity_subjects(
+    session_factory: sessionmaker[Session],
+    clock: datetime,
+    replay: Replay,
+    *,
+    count: int = 3,
+) -> tuple[tuple[str, str], ...]:
+    with session_factory.begin() as session:
+        parser = ParserRun(
+            run_id="00000000-0000-4000-8000-00000000b100",
+            replay_id=replay.id,
+            parser_version="parser-primary",
+            schema_version=1,
+            input_sha256=replay.sha256,
+            result_sha256="b" * 64,
+            status="running",
+            completion_status="complete",
+            command_stream_offset=0,
+            end_offset=1,
+            warnings_json=[],
+            error_json=None,
+            started_at=clock,
+            completed_at=clock,
+        )
+        session.add(parser)
+        session.flush()
+        subjects: list[tuple[str, str]] = []
+        for index in range(count):
+            player_public_id = f"00000000-0000-4000-8000-{0xB110 + index:012x}"
+            replay_player_public_id = f"00000000-0000-4000-8000-{0xB120 + index:012x}"
+            player = Player(
+                public_id=player_public_id,
+                display_name=f"Identity Player {index}",
+                identity_revision=0,
+                created_at=clock,
+                updated_at=clock,
+            )
+            session.add(player)
+            session.flush()
+            session.add(
+                ReplayPlayer(
+                    public_id=replay_player_public_id,
+                    replay_id=replay.id,
+                    parser_run_id=parser.id,
+                    player_id=player.id,
+                    slot_index=index,
+                    slot_kind="human",
+                    original_name=f"Identity Player {index}",
+                    normalized_name=f"identity player {index}",
+                    player_index=index,
+                    team_id=None,
+                    faction="China",
+                    color=None,
+                    start_position=index,
+                    result=None,
+                    observed_json={},
+                )
+            )
+            subjects.append((replay_player_public_id, player_public_id))
+        session.flush()
+        parser.status = "succeeded"
+        return tuple(subjects)
 
 
 def _observation_authority(
@@ -160,8 +236,39 @@ def _observation_authority(
                 replay.id,
             ),
         )
+        materialized_parser = session.scalar(
+            select(ParserRun).where(
+                ParserRun.replay_id == replay.id,
+                ParserRun.parser_version == f"parser-{branch}",
+            )
+        )
+        if materialized_parser is None:
+            materialized_parser = ParserRun(
+                run_id=f"00000000-0000-4000-8000-{0xB900 + len(branch):012x}",
+                replay_id=replay.id,
+                parser_version=f"parser-{branch}",
+                schema_version=1,
+                input_sha256=replay.sha256,
+                result_sha256="d" * 64,
+                status="succeeded",
+                completion_status="complete",
+                command_stream_offset=0,
+                end_offset=1,
+                warnings_json=[],
+                error_json=None,
+                started_at=clock,
+                completed_at=clock,
+            )
+            session.add(materialized_parser)
+            session.flush()
         observation.status = "succeeded"
-        observation.output_json = {"observation_graph_version": 1}
+        observation.output_json = {
+            "idempotency_key": "planner-observations",
+            "parser_run_id": materialized_parser.run_id,
+            "parser_command_count": 0,
+            "telemetry_run_id": None,
+            "telemetry_event_count": 0,
+        }
         observation.retryable = False
         observation.completed_at = clock
         coordinator.ensure_dependency(session, observation.id, parser.id)
@@ -293,8 +400,32 @@ def _telemetry_observation_authority(
                 replay.id,
             ),
         )
+        materialized_parser = ParserRun(
+            run_id="00000000-0000-4000-8000-00000000b9aa",
+            replay_id=replay.id,
+            parser_version="parser-a",
+            schema_version=1,
+            input_sha256=replay.sha256,
+            result_sha256="d" * 64,
+            status="succeeded",
+            completion_status="complete",
+            command_stream_offset=0,
+            end_offset=1,
+            warnings_json=[],
+            error_json=None,
+            started_at=clock,
+            completed_at=clock,
+        )
+        session.add(materialized_parser)
+        session.flush()
         observation.status = "succeeded"
-        observation.output_json = {"observation_graph_version": 1}
+        observation.output_json = {
+            "idempotency_key": "telemetry-planner-observations",
+            "parser_run_id": materialized_parser.run_id,
+            "parser_command_count": 0,
+            "telemetry_run_id": None,
+            "telemetry_event_count": 0,
+        }
         observation.retryable = False
         observation.completed_at = clock
         coordinator.ensure_dependency(session, observation.id, parser_a.id)
@@ -344,6 +475,43 @@ def test_plan_contract_is_frozen_and_rejects_noncanonical_arguments(
         planner.ensure_analysis_plan(replay.public_id, 1)  # type: ignore[arg-type]
 
 
+def test_plan_dtos_fail_closed_on_inconsistent_identity_and_job_shapes() -> None:
+    job_id = "00000000-0000-4000-8000-00000000b201"
+    replay_player_id = "00000000-0000-4000-8000-00000000b202"
+    with pytest.raises(TypeError, match="exact boolean"):
+        AnalysisPlanDTO("awaiting_observations", REPLAY_PUBLIC_ID, 1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="awaiting plans"):
+        AnalysisPlanDTO("awaiting_observations", REPLAY_PUBLIC_ID, False, job_id)
+    with pytest.raises(ValueError, match="status"):
+        AnalysisPlanDTO("unknown", REPLAY_PUBLIC_ID, False)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="requires deterministic"):
+        AnalysisPlanDTO("planned", REPLAY_PUBLIC_ID, False)
+    with pytest.raises(ValueError, match="LLM job identity"):
+        AnalysisPlanDTO("planned", REPLAY_PUBLIC_ID, False, job_id, job_id, job_id, job_id)
+
+    with pytest.raises(ValueError, match="sorted, unique, and nonempty"):
+        IdentityInvalidationReplayPlanDTO("awaiting_observations", REPLAY_PUBLIC_ID, ())
+    with pytest.raises(ValueError, match="awaiting invalidation"):
+        IdentityInvalidationReplayPlanDTO(
+            "awaiting_observations",
+            REPLAY_PUBLIC_ID,
+            (replay_player_id,),
+            job_id,
+        )
+    with pytest.raises(ValueError, match="requires derive"):
+        IdentityInvalidationReplayPlanDTO("planned", REPLAY_PUBLIC_ID, (replay_player_id,))
+    waiting = IdentityInvalidationReplayPlanDTO(
+        "awaiting_observations",
+        REPLAY_PUBLIC_ID,
+        (replay_player_id,),
+    )
+    with pytest.raises(ValueError, match="sorted and unique"):
+        IdentityInvalidationPlanDTO(
+            "00000000-0000-4000-8000-00000000b203",
+            (waiting, waiting),
+        )
+
+
 def test_awaiting_observations_creates_no_downstream_jobs(
     session_factory: sessionmaker[Session], clock: datetime
 ) -> None:
@@ -378,6 +546,323 @@ def test_opt_out_plan_is_exact_and_idempotent(
         first.assess_job_public_id,
         first.report_job_public_id,
     }
+
+
+def test_plan_persists_the_exact_authoritative_parser_run_and_version(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    _observation_authority(session_factory, clock, replay)
+
+    plan = _planner(session_factory, clock).ensure_analysis_plan(replay.public_id, False)
+    planned_ids = {
+        plan.derive_job_public_id,
+        plan.assess_job_public_id,
+        plan.report_job_public_id,
+    }
+    jobs = tuple(job for job in _planned_jobs(session_factory, replay.id) if job.public_id in planned_ids)
+
+    assert len(jobs) == 3
+    for job in jobs:
+        planned_input = cast(dict[str, Any], job.input_json)
+        assert planned_input["parser_run_id"] == "00000000-0000-4000-8000-00000000b907"
+        assert planned_input["parser_version"] == "parser-primary"
+
+
+def test_identity_revision_changes_player_scoped_job_identity_without_mutating_history(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    planner = _planner(session_factory, clock)
+    first = planner.ensure_analysis_plan(replay.public_id, False)
+    original_jobs = {
+        job.public_id: (job.status, dict(cast(dict[str, Any], job.input_json)))
+        for job in _planned_jobs(session_factory, replay.id)
+    }
+
+    with session_factory.begin() as session:
+        player = session.scalar(select(Player).where(Player.public_id == subjects[0][1]))
+        assert player is not None
+        player.identity_revision += 1
+    second = planner.ensure_analysis_plan(replay.public_id, False)
+
+    assert second.derive_job_public_id != first.derive_job_public_id
+    assert second.assess_job_public_id != first.assess_job_public_id
+    assert second.report_job_public_id != first.report_job_public_id
+    jobs = _planned_jobs(session_factory, replay.id)
+    assert len(jobs) == 6
+    assert {
+        job.public_id: (job.status, dict(cast(dict[str, Any], job.input_json)))
+        for job in jobs
+        if job.public_id in original_jobs
+    } == original_jobs
+    latest_derive = next(job for job in jobs if job.public_id == second.derive_job_public_id)
+    scope = cast(dict[str, Any], cast(dict[str, Any], latest_derive.input_json)["identity_scope"])
+    binding = next(item for item in scope["bindings"] if item["player_public_id"] == subjects[0][1])
+    assert scope["kind"] == "full_replay"
+    assert binding["identity_revision"] == 1
+    assert binding["identity_cache_token"] != ""
+
+
+def test_committed_merge_plans_only_affected_player_work_and_reuses_replay_wide_evidence(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    identity = PlayerIdentityService(session_factory, now_factory=lambda: clock)
+    receipt = identity.merge_players(
+        target_player_public_id=subjects[0][1],
+        source_player_public_ids=(subjects[1][1],),
+        expected_revisions={subjects[0][1]: 0, subjects[1][1]: 0},
+        actor="local operator",
+        reason="same observed player",
+    )
+
+    plan = _planner(session_factory, clock).ensure_identity_invalidation_plan(receipt.operation_public_id)
+
+    assert plan.operation_public_id == receipt.operation_public_id
+    assert len(plan.replays) == 1
+    replay_plan = plan.replays[0]
+    assert replay_plan.status == "planned"
+    assert replay_plan.replay_player_public_ids == tuple(sorted((subjects[0][0], subjects[1][0])))
+    assert replay_plan.llm_job_public_id is None
+    jobs = _planned_jobs(session_factory, replay.id)
+    assert {job.stage for job in jobs} == {DERIVE_FEATURES, ASSESS_STRATEGIES, RENDER_REPORT}
+    for job in jobs:
+        scope = cast(dict[str, Any], cast(dict[str, Any], job.input_json)["identity_scope"])
+        assert scope["kind"] == "identity_invalidation"
+        assert tuple(item["replay_player_public_id"] for item in scope["bindings"]) == tuple(
+            sorted((subjects[0][0], subjects[1][0]))
+        )
+        assert subjects[2][0] not in str(scope)
+
+
+def test_identity_invalidation_requires_a_committed_audit_operation(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+
+    with pytest.raises(AnalysisPlanningError, match="unknown_identity_operation"):
+        _planner(session_factory, clock).ensure_identity_invalidation_plan(
+            "00000000-0000-4000-8000-00000000b999"
+        )
+
+    assert _planned_jobs(session_factory, replay.id) == []
+
+
+def test_identity_invalidation_planning_rolls_back_as_one_graph_and_is_retryable(
+    session_factory: sessionmaker[Session], clock: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    receipt = PlayerIdentityService(session_factory, now_factory=lambda: clock).merge_players(
+        target_player_public_id=subjects[0][1],
+        source_player_public_ids=(subjects[1][1],),
+        expected_revisions={subjects[0][1]: 0, subjects[1][1]: 0},
+        actor="local operator",
+        reason="same observed player",
+    )
+    original = JobCoordinator.ensure_dependency
+    calls = 0
+
+    def fail_second_edge(
+        coordinator: JobCoordinator,
+        session: Session,
+        job_id: int,
+        depends_on_job_id: int,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected invalidation planning failure")
+        original(coordinator, session, job_id, depends_on_job_id)
+
+    monkeypatch.setattr(JobCoordinator, "ensure_dependency", fail_second_edge)
+    with pytest.raises(RuntimeError, match="injected invalidation planning failure"):
+        _planner(session_factory, clock).ensure_identity_invalidation_plan(receipt.operation_public_id)
+    assert _planned_jobs(session_factory, replay.id) == []
+
+    monkeypatch.setattr(JobCoordinator, "ensure_dependency", original)
+    retried = _planner(session_factory, clock).ensure_identity_invalidation_plan(receipt.operation_public_id)
+    assert retried.replays[0].status == "planned"
+    assert len(_planned_jobs(session_factory, replay.id)) == 3
+
+
+def test_concurrent_identity_invalidation_reuses_one_exact_scoped_graph(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    receipt = PlayerIdentityService(session_factory, now_factory=lambda: clock).merge_players(
+        target_player_public_id=subjects[0][1],
+        source_player_public_ids=(subjects[1][1],),
+        expected_revisions={subjects[0][1]: 0, subjects[1][1]: 0},
+        actor="local operator",
+        reason="same observed player",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        plans = tuple(
+            future.result()
+            for future in (
+                executor.submit(
+                    _planner(session_factory, clock).ensure_identity_invalidation_plan,
+                    receipt.operation_public_id,
+                )
+                for _ in range(2)
+            )
+        )
+
+    assert plans[0] == plans[1]
+    assert len(_planned_jobs(session_factory, replay.id)) == 3
+
+
+def test_inverse_identity_operation_gets_new_revision_bound_jobs_without_rewriting_merge_history(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    identity = PlayerIdentityService(session_factory, now_factory=lambda: clock)
+    merged = identity.merge_players(
+        target_player_public_id=subjects[0][1],
+        source_player_public_ids=(subjects[1][1],),
+        expected_revisions={subjects[0][1]: 0, subjects[1][1]: 0},
+        actor="local operator",
+        reason="same observed player",
+    )
+    merge_plan = _planner(session_factory, clock).ensure_identity_invalidation_plan(
+        merged.operation_public_id
+    )
+    merge_jobs = {
+        job.public_id: dict(cast(dict[str, Any], job.input_json))
+        for job in _planned_jobs(session_factory, replay.id)
+    }
+    inverse = identity.inverse_operation(
+        operation_public_id=merged.operation_public_id,
+        expected_revisions=dict(merged.affected_player_revisions),
+        actor="local operator",
+        reason="undo mistaken merge",
+    )
+
+    inverse_plan = _planner(session_factory, clock).ensure_identity_invalidation_plan(
+        inverse.operation_public_id
+    )
+
+    assert inverse_plan.replays[0].derive_job_public_id != merge_plan.replays[0].derive_job_public_id
+    jobs = _planned_jobs(session_factory, replay.id)
+    assert len(jobs) == 6
+    assert {
+        job.public_id: dict(cast(dict[str, Any], job.input_json))
+        for job in jobs
+        if job.public_id in merge_jobs
+    } == merge_jobs
+
+
+def test_split_identity_operation_plans_only_explicitly_changed_membership(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    alias_public_id = "00000000-0000-4000-8000-00000000b190"
+    with session_factory.begin() as session:
+        player_id = session.scalar(select(Player.id).where(Player.public_id == subjects[0][1]))
+        assert player_id is not None
+        session.add(
+            PlayerAlias(
+                public_id=alias_public_id,
+                player_id=player_id,
+                namespace=EMBEDDED_REPLAY_NAME_NAMESPACE,
+                normalized_name="identity player 0",
+                original_name="Identity Player 0",
+                external_subject=None,
+                created_at=clock,
+            )
+        )
+    split = PlayerIdentityService(session_factory, now_factory=lambda: clock).split_alias(
+        alias_public_id=alias_public_id,
+        replay_player_public_ids=(subjects[0][0],),
+        new_display_name="Separated Identity",
+        expected_revisions={subjects[0][1]: 0},
+        actor="local operator",
+        reason="explicit replay membership differs",
+    )
+
+    plan = _planner(session_factory, clock).ensure_identity_invalidation_plan(split.operation_public_id)
+
+    assert plan.replays[0].replay_player_public_ids == (subjects[0][0],)
+    assert len(_planned_jobs(session_factory, replay.id)) == 3
+
+
+def test_identity_invalidation_scope_uses_only_authoritative_observation_membership(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    subjects = _identity_subjects(session_factory, clock, replay)
+    _observation_authority(session_factory, clock, replay)
+    historical_replay_player_id = "00000000-0000-4000-8000-00000000b199"
+    with session_factory.begin() as session:
+        player_id = session.scalar(select(Player.id).where(Player.public_id == subjects[0][1]))
+        assert player_id is not None
+        parser = ParserRun(
+            run_id="00000000-0000-4000-8000-00000000b198",
+            replay_id=replay.id,
+            parser_version="historical-parser-v1",
+            schema_version=1,
+            input_sha256=replay.sha256,
+            result_sha256="c" * 64,
+            status="running",
+            completion_status="complete",
+            command_stream_offset=0,
+            end_offset=1,
+            warnings_json=[],
+            error_json=None,
+            started_at=clock,
+            completed_at=clock,
+        )
+        session.add(parser)
+        session.flush()
+        session.add(
+            ReplayPlayer(
+                public_id=historical_replay_player_id,
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                player_id=player_id,
+                slot_index=0,
+                slot_kind="human",
+                original_name="Historical Player",
+                normalized_name="historical player",
+                player_index=0,
+                team_id=None,
+                faction="China",
+                color=None,
+                start_position=0,
+                result=None,
+                observed_json={},
+            )
+        )
+        session.flush()
+        parser.status = "succeeded"
+    merged = PlayerIdentityService(session_factory, now_factory=lambda: clock).merge_players(
+        target_player_public_id=subjects[0][1],
+        source_player_public_ids=(subjects[1][1],),
+        expected_revisions={subjects[0][1]: 0, subjects[1][1]: 0},
+        actor="local operator",
+        reason="same observed player",
+    )
+
+    plan = _planner(session_factory, clock).ensure_identity_invalidation_plan(merged.operation_public_id)
+
+    assert plan.replays[0].replay_player_public_ids == tuple(sorted((subjects[0][0], subjects[1][0])))
+    assert historical_replay_player_id not in plan.replays[0].replay_player_public_ids
 
 
 def test_exact_production_telemetry_branch_is_authoritative(
@@ -477,6 +962,98 @@ def test_malformed_succeeded_observation_authority_fails_closed(
     assert _planned_jobs(session_factory, replay.id) == []
 
 
+@pytest.mark.parametrize(
+    "invalidity",
+    (
+        "missing_id",
+        "missing_row",
+        "failed",
+        "incomplete",
+        "unfinished",
+        "cross_replay",
+        "historical",
+    ),
+)
+def test_parser_run_authority_must_be_selected_succeeded_complete_and_same_replay_before_writes(
+    session_factory: sessionmaker[Session],
+    clock: datetime,
+    invalidity: str,
+) -> None:
+    replay = _replay(session_factory, clock)
+    authority = _observation_authority(session_factory, clock, replay)
+    with session_factory.begin() as session:
+        observation = session.get(Job, authority.id)
+        assert observation is not None
+        output = dict(cast(dict[str, object], observation.output_json))
+        if invalidity == "missing_id":
+            output.pop("parser_run_id")
+            observation.output_json = output
+        elif invalidity == "missing_row":
+            output["parser_run_id"] = "00000000-0000-4000-8000-00000000ffff"
+            observation.output_json = output
+        else:
+            parser_replay_id = replay.id
+            if invalidity == "cross_replay":
+                other = Replay(
+                    public_id="00000000-0000-4000-8000-00000000a199",
+                    sha256="f" * 64,
+                    replay_name="other.rep",
+                    version_string="1.04",
+                    version_number=104,
+                    frame_count=10,
+                    start_time=0,
+                    end_time=10,
+                    exe_crc=0,
+                    ini_crc=0,
+                    map_crc=0,
+                    map_name="maps/other.map",
+                    seed=2,
+                    starting_cash=10000,
+                    header_json={},
+                    lifecycle_state="engine_verified",
+                    created_at=clock,
+                    updated_at=clock,
+                )
+                session.add(other)
+                session.flush()
+                parser_replay_id = other.id
+            status = "failed" if invalidity == "failed" else (
+                "running" if invalidity in {"incomplete", "unfinished"} else "succeeded"
+            )
+            completion_status = (
+                "failed" if invalidity == "failed" else (
+                    "truncated" if invalidity == "incomplete" else "complete"
+                )
+            )
+            invalid_parser = ParserRun(
+                run_id=f"00000000-0000-4000-8000-{0xBA00 + len(invalidity):012x}",
+                replay_id=parser_replay_id,
+                parser_version=(
+                    "parser-historical" if invalidity == "historical" else "parser-primary"
+                ),
+                schema_version=1,
+                input_sha256=replay.sha256,
+                result_sha256="e" * 64,
+                status=status,
+                completion_status=completion_status,
+                command_stream_offset=0,
+                end_offset=1,
+                warnings_json=[],
+                error_json=None,
+                started_at=clock,
+                completed_at=None if invalidity == "unfinished" else clock,
+            )
+            session.add(invalid_parser)
+            session.flush()
+            output["parser_run_id"] = invalid_parser.run_id
+            observation.output_json = output
+
+    with pytest.raises(AnalysisPlanningError, match="invalid_observation_graph"):
+        _planner(session_factory, clock).ensure_analysis_plan(replay.public_id, False)
+
+    assert _planned_jobs(session_factory, replay.id) == []
+
+
 def test_legacy_permissive_branch_recipe_is_rejected_even_when_digest_matches(
     session_factory: sessionmaker[Session], clock: datetime
 ) -> None:
@@ -557,6 +1134,11 @@ def test_exact_key_collision_with_incompatible_job_fails_and_rolls_back(
         "analysis_plan_version": 1,
         "observation_job_key": observation.idempotency_key,
         "selected_dependency_digest": observation_input["selected_dependency_digest"],
+        "identity_scope": {
+            "schema_version": "analysis-identity-scope-v1",
+            "kind": "full_replay",
+            "bindings": [],
+        },
     }
     poisoned_key = content_key(DERIVE_FEATURES, "1", replay.sha256, identity)
     coordinator = JobCoordinator(session_factory, clock=lambda: clock)

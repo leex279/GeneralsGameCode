@@ -128,7 +128,11 @@ def create_production_import_service(
             "1",
             AnalyzeLLMHandler(settings, transport_factory, analysis_service),
         ),
-        StageHandlerRegistration("render_report", "1", RenderReportHandler(reports)),
+        StageHandlerRegistration(
+            "render_report",
+            "1",
+            RenderReportHandler(reports, session_factory=session_factory),
+        ),
     )
     return ImportService(
         session_factory,

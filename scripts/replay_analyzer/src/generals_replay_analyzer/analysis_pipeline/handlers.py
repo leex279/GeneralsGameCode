@@ -15,6 +15,7 @@ from ..db.models import EvidenceItem, ParserRun, Player, Replay, ReplayPlayer
 from ..features.evidence import EvidenceRef
 from ..features.registry import FeatureRegistry
 from ..features.service import ExtractFeaturesRequest, FeatureSetReceipt
+from ..identity.audit import identity_cache_digest
 from ..importing.jobs import StageFailure
 from ..importing.service import StageDependencyOutput, StageExecutionContext
 from ..importing.stages import (
@@ -58,9 +59,25 @@ from .codecs import (
     encode_feature_output,
     encode_llm_output,
 )
+from .identity_scope import (
+    CanonicalPlayerIdentityBinding,
+    IdentityAnalysisScope,
+    IdentityScopeError,
+)
 
 PRODUCTION_EXTRACTOR_NAMES = ("activity", "build", "combat", "economy", "production", "spatial")
 _LONGITUDINAL_METRICS = ("economy.cash_change_total",)
+_LONGITUDINAL_PATTERNS = (
+    "change_point.economy_cash_change_total",
+    "consistency.economy_cash_change_total",
+    "map_position_habits",
+    "opponent_associated.economy_cash_change_total",
+    "personal_baseline.economy_cash_change_total",
+    "recurring_opening",
+    "timing_band.build_first_completed",
+    "transition_preferences",
+    "trend.economy_cash_change_total",
+)
 
 
 def _extractor_names(replay_player_public_id: str | None) -> tuple[str, ...]:
@@ -171,6 +188,95 @@ def _canonical_uuid(value: object) -> bool:
         return False
 
 
+def _planned_identity_scope(context: StageExecutionContext) -> IdentityAnalysisScope | None:
+    value = context.input.get("identity_scope")
+    if value is None:
+        return None
+    try:
+        return IdentityAnalysisScope.from_json(value)
+    except IdentityScopeError as error:
+        raise _failure("identity_scope_invalid", "planned identity scope is invalid", error) from error
+
+
+def _planned_parser_identity(context: StageExecutionContext) -> tuple[str, str]:
+    parser_run_id = context.input.get("parser_run_id")
+    parser_version = context.input.get("parser_version")
+    if (
+        not _canonical_uuid(parser_run_id)
+        or type(parser_version) is not str
+        or not parser_version
+    ):
+        raise _failure(
+            "identity_scope_invalid",
+            "planned parser identity is invalid",
+        )
+    return cast(str, parser_run_id), parser_version
+
+
+def _validate_identity_scope(
+    session: Session,
+    replay: Replay,
+    scope: IdentityAnalysisScope,
+) -> None:
+    statement = (
+        select(
+            ReplayPlayer.public_id,
+            Player.public_id,
+            Player.identity_revision,
+        )
+        .join(Player, Player.id == ReplayPlayer.player_id)
+        .where(ReplayPlayer.replay_id == replay.id)
+        .order_by(ReplayPlayer.public_id)
+    )
+    statement = statement.where(
+        ReplayPlayer.public_id.in_(
+            tuple(binding.replay_player_public_id for binding in scope.bindings)
+        )
+    )
+    current = tuple(
+        CanonicalPlayerIdentityBinding(
+            replay_player_public_id,
+            player_public_id,
+            revision,
+            identity_cache_digest(player_public_id, revision),
+        )
+        for replay_player_public_id, player_public_id, revision in session.execute(statement)
+    )
+    if current != scope.bindings:
+        raise _failure(
+            "identity_scope_changed",
+            "identity scope changed after durable planning",
+        )
+
+
+def _authoritative_parser_run(
+    session: Session,
+    replay: Replay,
+    parser_run_id: str,
+    parser_version: str | None = None,
+) -> ParserRun:
+    parser = session.scalar(
+        select(ParserRun).where(
+            ParserRun.run_id == parser_run_id,
+            ParserRun.replay_id == replay.id,
+        )
+    )
+    if (
+        parser is None
+        or (parser_version is not None and parser.parser_version != parser_version)
+        or parser.input_sha256 != replay.sha256
+        or parser.status != "succeeded"
+        or parser.completion_status != "complete"
+        or parser.completed_at is None
+        or parser.result_sha256 is None
+    ):
+        raise _failure(
+            "parser_run_not_authoritative",
+            "observation parser run is not authoritative, succeeded, and complete",
+        )
+    return parser
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Derive exact registered features for sorted replay-player identities. (#TBD)
 class DeriveFeaturesHandler:
     def __init__(
@@ -183,6 +289,7 @@ class DeriveFeaturesHandler:
 
     def __call__(self, context: StageExecutionContext) -> Mapping[str, object]:
         _context(context, DERIVE_FEATURES, DERIVE_FEATURES_VERSION)
+        scope = _planned_identity_scope(context)
         parser_run_id = _observation_output(
             _dependency(
                 context,
@@ -190,19 +297,27 @@ class DeriveFeaturesHandler:
                 version=IMPORT_OBSERVATIONS_VERSION,
             )
         )
+        planned_parser_version = None
+        if scope is not None:
+            planned_parser_run_id, planned_parser_version = _planned_parser_identity(context)
+            if parser_run_id != planned_parser_run_id:
+                raise _failure(
+                    "parser_run_not_authoritative",
+                    "observation parser run differs from the durable analysis plan",
+                )
         try:
             with self._session_factory() as session:
                 replay = session.scalar(select(Replay).where(Replay.public_id == context.replay_public_id))
                 if replay is None:
                     raise ValueError("observation parser graph is unavailable")
-                parser = session.scalar(
-                    select(ParserRun).where(
-                        ParserRun.run_id == parser_run_id,
-                        ParserRun.replay_id == replay.id,
-                    )
+                if scope is not None:
+                    _validate_identity_scope(session, replay, scope)
+                parser = _authoritative_parser_run(
+                    session,
+                    replay,
+                    parser_run_id,
+                    planned_parser_version,
                 )
-                if parser is None:
-                    raise ValueError("observation parser graph is unavailable")
                 rows = tuple(
                     session.execute(
                         select(ReplayPlayer.public_id, Player.public_id)
@@ -211,10 +326,36 @@ class DeriveFeaturesHandler:
                         .order_by(ReplayPlayer.public_id)
                     )
                 )
-            subjects: tuple[tuple[str | None, str | None], ...] = (
-                (None, None),
-                *(tuple((row[0], row[1]) for row in rows)),
-            )
+            if scope is not None and scope.kind == "full_replay":
+                selected_bindings = tuple((row[0], row[1]) for row in rows if row[1] is not None)
+                planned_bindings = tuple(
+                    (binding.replay_player_public_id, binding.player_public_id)
+                    for binding in scope.bindings
+                )
+                if selected_bindings != planned_bindings:
+                    raise _failure(
+                        "identity_scope_changed",
+                        "identity scope changed after durable planning",
+                    )
+            if scope is not None and scope.kind == "identity_invalidation":
+                selected_public_ids = {
+                    binding.replay_player_public_id for binding in scope.bindings
+                }
+                subjects: tuple[tuple[str | None, str | None], ...] = tuple(
+                    (row[0], row[1]) for row in rows if row[0] in selected_public_ids
+                )
+                if tuple(subject[0] for subject in subjects) != tuple(
+                    binding.replay_player_public_id for binding in scope.bindings
+                ):
+                    raise _failure(
+                        "identity_scope_changed",
+                        "identity scope changed after durable planning",
+                    )
+            else:
+                subjects = (
+                    (None, None),
+                    *(tuple((row[0], row[1]) for row in rows)),
+                )
             selections: list[PlayerFeatureSelection] = []
             for replay_player_public_id, canonical_player_public_id in subjects:
                 receipts = self._features.extract(
@@ -257,9 +398,42 @@ class AssessStrategiesHandler:
     def __call__(self, context: StageExecutionContext) -> Mapping[str, object]:
         _context(context, ASSESS_STRATEGIES, ASSESS_STRATEGIES_VERSION)
         try:
+            scope = _planned_identity_scope(context)
             selected = decode_feature_output(
                 _dependency(context, stage=DERIVE_FEATURES, version=DERIVE_FEATURES_VERSION)
             )
+            if scope is not None:
+                with self._session_factory() as session:
+                    replay = session.scalar(
+                        select(Replay).where(Replay.public_id == context.replay_public_id)
+                    )
+                    if replay is None:
+                        raise _failure(
+                            "identity_scope_changed",
+                            "identity scope changed after durable planning",
+                        )
+                    parser_run_id, parser_version = _planned_parser_identity(context)
+                    _authoritative_parser_run(
+                        session,
+                        replay,
+                        parser_run_id,
+                        parser_version,
+                    )
+                    _validate_identity_scope(session, replay, scope)
+                selected_bindings = tuple(
+                    (item.replay_player_public_id, item.canonical_player_public_id)
+                    for item in selected
+                    if item.canonical_player_public_id is not None
+                )
+                planned_bindings = tuple(
+                    (binding.replay_player_public_id, binding.player_public_id)
+                    for binding in scope.bindings
+                )
+                if selected_bindings != planned_bindings:
+                    raise _failure(
+                        "identity_scope_changed",
+                        "identity scope changed after durable planning",
+                    )
             players: list[PlayerAssessmentSelection] = []
             for player in selected:
                 receipts = self._features.extract(
@@ -290,13 +464,14 @@ class AssessStrategiesHandler:
                             bootstrap_resamples=100,
                             confidence_level=0.95,
                             enabled_metrics=_LONGITUDINAL_METRICS,
+                            enabled_patterns=_LONGITUDINAL_PATTERNS,
                         )
                         longitudinal = self._longitudinal.analyze(
                             LongitudinalRequest(
                                 player.canonical_player_public_id,
                                 SegmentKey(),
                                 _LONGITUDINAL_METRICS,
-                                (),
+                                _LONGITUDINAL_PATTERNS,
                                 settings,
                             )
                         )
@@ -433,12 +608,67 @@ class AnalyzeLLMHandler:
 
 # TheSuperHackers @feature Leex 22/08/2026 Render exact direct deterministic or LLM-selected report graphs. (#TBD)
 class RenderReportHandler:
-    def __init__(self, report_service: Reports) -> None:
+    def __init__(
+        self,
+        report_service: Reports,
+        *,
+        session_factory: sessionmaker[Session] | None = None,
+    ) -> None:
         self._reports = report_service
+        self._session_factory = session_factory
 
     def __call__(self, context: StageExecutionContext) -> Mapping[str, object]:
         _context(context, RENDER_REPORT, RENDER_REPORT_VERSION)
         try:
+            scope = _planned_identity_scope(context)
+            authoritative_subjects: tuple[tuple[str | None, str | None], ...] | None = None
+            if scope is not None:
+                if self._session_factory is None:
+                    raise _failure(
+                        "identity_scope_invalid",
+                        "report identity scope cannot be verified without its production session",
+                    )
+                with self._session_factory() as session:
+                    replay = session.scalar(
+                        select(Replay).where(Replay.public_id == context.replay_public_id)
+                    )
+                    if replay is None:
+                        raise _failure(
+                            "identity_scope_changed",
+                            "identity scope changed before report publication",
+                        )
+                    _validate_identity_scope(session, replay, scope)
+                    parser_run_id, parser_version = _planned_parser_identity(context)
+                    parser = _authoritative_parser_run(
+                        session,
+                        replay,
+                        parser_run_id,
+                        parser_version,
+                    )
+                    authoritative_subjects = tuple(
+                        (replay_player_public_id, player_public_id)
+                        for replay_player_public_id, player_public_id in session.execute(
+                            select(ReplayPlayer.public_id, Player.public_id)
+                            .outerjoin(Player, Player.id == ReplayPlayer.player_id)
+                            .where(
+                                ReplayPlayer.replay_id == replay.id,
+                                ReplayPlayer.parser_run_id == parser.id,
+                            )
+                            .order_by(ReplayPlayer.public_id)
+                        )
+                    )
+                    planned_bindings = tuple(
+                        (binding.replay_player_public_id, binding.player_public_id)
+                        for binding in scope.bindings
+                    )
+                    current_bindings = tuple(
+                        subject for subject in authoritative_subjects if subject[1] is not None
+                    )
+                    if scope.kind == "full_replay" and current_bindings != planned_bindings:
+                        raise _failure(
+                            "identity_scope_changed",
+                            "canonical parser subjects do not match the planned identity scope",
+                        )
             dependency = context.dependencies[0] if len(context.dependencies) == 1 else None
             if dependency is None:
                 raise PipelineCodecError("report requires one direct dependency")
@@ -446,11 +676,40 @@ class RenderReportHandler:
                 deterministic = decode_assessment_output(
                     _dependency(context, stage=ASSESS_STRATEGIES, version=ASSESS_STRATEGIES_VERSION)
                 )
+                if scope is not None:
+                    expected: tuple[tuple[str | None, str | None], ...] = planned_bindings
+                    if scope.kind == "full_replay":
+                        assert authoritative_subjects is not None
+                        expected = ((None, None), *authoritative_subjects)
+                    actual = tuple(
+                        (item.replay_player_public_id, item.canonical_player_public_id)
+                        for item in deterministic
+                    )
+                    if actual != expected:
+                        raise _failure(
+                            "identity_scope_changed",
+                            "assessment subjects do not match the planned identity scope",
+                        )
                 selected: tuple[tuple[str | None, str | None], ...] = tuple(
                     (item.replay_player_public_id, None) for item in deterministic
                 )
             elif dependency.stage == ANALYZE_LLM:
                 inferred = decode_llm_output(_dependency(context, stage=ANALYZE_LLM, version=ANALYZE_LLM_VERSION))
+                if scope is not None:
+                    expected_ids: tuple[str | None, ...] = tuple(
+                        public_id for public_id, _canonical_id in planned_bindings
+                    )
+                    if scope.kind == "full_replay":
+                        assert authoritative_subjects is not None
+                        expected_ids = (
+                            None,
+                            *(public_id for public_id, _canonical_id in authoritative_subjects),
+                        )
+                    if tuple(item.replay_player_public_id for item in inferred) != expected_ids:
+                        raise _failure(
+                            "identity_scope_changed",
+                            "LLM subjects do not match the planned identity scope",
+                        )
                 selected = tuple((item.replay_player_public_id, item.analysis_run_id) for item in inferred)
             else:
                 raise PipelineCodecError("report dependency stage is invalid")

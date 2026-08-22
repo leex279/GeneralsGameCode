@@ -11,7 +11,16 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..db.models import Job, JobDependency, Replay
+from ..db.models import (
+    Job,
+    JobDependency,
+    ParserRun,
+    Player,
+    PlayerIdentityOperation,
+    Replay,
+    ReplayPlayer,
+)
+from ..identity.audit import identity_cache_digest
 from ..importing.jobs import JobCoordinator, JobSpec, StageFailure
 from ..importing.service import _dependency_identity
 from ..importing.stages import (
@@ -32,6 +41,7 @@ from ..importing.stages import (
     content_key,
     input_digest,
 )
+from .identity_scope import CanonicalPlayerIdentityBinding, IdentityAnalysisScope
 
 _PLAN_VERSION = 1
 _DEPENDENCY_ORDER = {PARSE: 0, TELEMETRY: 1}
@@ -94,10 +104,60 @@ class AnalysisPlanDTO:
                 _canonical_uuid(identifier, "job_public_id")
 
 
+# TheSuperHackers @feature Leex 23/08/2026 Expose durable exact-scope identity invalidation work. (#TBD)
+@dataclass(frozen=True, slots=True)
+class IdentityInvalidationReplayPlanDTO:
+    """One exact replay/player projection queued after an identity operation."""
+
+    status: Literal["awaiting_observations", "planned"]
+    replay_public_id: str
+    replay_player_public_ids: tuple[str, ...]
+    derive_job_public_id: str | None = None
+    assess_job_public_id: str | None = None
+    llm_job_public_id: None = None
+    report_job_public_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _canonical_uuid(self.replay_public_id, "replay_public_id")
+        if (
+            not self.replay_player_public_ids
+            or self.replay_player_public_ids != tuple(sorted(set(self.replay_player_public_ids)))
+        ):
+            raise ValueError("identity invalidation replay players must be sorted, unique, and nonempty")
+        for public_id in self.replay_player_public_ids:
+            _canonical_uuid(public_id, "replay_player_public_id")
+        job_ids = (self.derive_job_public_id, self.assess_job_public_id, self.report_job_public_id)
+        if self.status == "awaiting_observations":
+            if any(public_id is not None for public_id in job_ids):
+                raise ValueError("awaiting invalidation plans cannot expose job identities")
+            return
+        if self.status != "planned" or any(public_id is None for public_id in job_ids):
+            raise ValueError("planned identity invalidation requires derive, assess, and report jobs")
+        for job_public_id in job_ids:
+            assert job_public_id is not None
+            _canonical_uuid(job_public_id, "job_public_id")
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityInvalidationPlanDTO:
+    """Durable idempotent replay work derived from one committed identity audit."""
+
+    operation_public_id: str
+    replays: tuple[IdentityInvalidationReplayPlanDTO, ...]
+
+    def __post_init__(self) -> None:
+        _canonical_uuid(self.operation_public_id, "operation_public_id")
+        replay_ids = tuple(item.replay_public_id for item in self.replays)
+        if replay_ids != tuple(sorted(set(replay_ids))):
+            raise ValueError("identity invalidation replays must be sorted and unique")
+
+
 @dataclass(frozen=True, slots=True)
 class _ObservationAuthority:
     job: Job
     selected_dependency_digest: str
+    parser_run_id: str
+    parser_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,19 +191,177 @@ class AnalysisPlanner:
             authority = self._observation_authority(session, replay)
             if authority is None:
                 return AnalysisPlanDTO("awaiting_observations", replay.public_id, allow_ollama)
-            derive = self._ensure_derive(session, replay, authority)
-            assess = self._ensure_assess(session, replay, authority, derive)
-            llm = self._ensure_llm(session, replay, authority, assess) if allow_ollama else None
-            report = self._ensure_report(session, replay, authority, assess, llm)
-            return AnalysisPlanDTO(
-                "planned",
-                replay.public_id,
-                allow_ollama,
-                derive.public_id,
-                assess.public_id,
-                llm.public_id if llm is not None else None,
-                report.public_id,
+            scope = self._identity_scope(session, replay, "full_replay", authority=authority)
+            assert scope is not None
+            return self._ensure_plan(session, replay, authority, scope, allow_ollama)
+
+    def ensure_identity_invalidation_plan(
+        self, operation_public_id: str
+    ) -> IdentityInvalidationPlanDTO:
+        """Queue only player-scoped deterministic work after a committed audit exists."""
+
+        _canonical_uuid(operation_public_id, "operation_public_id")
+        with self._session_factory.begin() as session:
+            operation = session.scalar(
+                select(PlayerIdentityOperation).where(
+                    PlayerIdentityOperation.public_id == operation_public_id
+                )
             )
+            if operation is None:
+                raise AnalysisPlanningError(
+                    "unknown_identity_operation",
+                    "identity invalidation requires a committed audit operation",
+                )
+            affected_player_ids = self._affected_player_ids(operation)
+            replays = tuple(
+                session.scalars(
+                    select(Replay)
+                    .join(ReplayPlayer, ReplayPlayer.replay_id == Replay.id)
+                    .join(Player, Player.id == ReplayPlayer.player_id)
+                    .where(Player.public_id.in_(affected_player_ids))
+                    .distinct()
+                    .order_by(Replay.public_id)
+                )
+            )
+            plans: list[IdentityInvalidationReplayPlanDTO] = []
+            for replay in replays:
+                authority = self._observation_authority(session, replay)
+                scope = self._identity_scope(
+                    session,
+                    replay,
+                    "identity_invalidation",
+                    affected_player_ids=affected_player_ids,
+                    authority=authority,
+                )
+                if scope is None:
+                    continue
+                replay_player_ids = tuple(binding.replay_player_public_id for binding in scope.bindings)
+                if authority is None:
+                    plans.append(
+                        IdentityInvalidationReplayPlanDTO(
+                            "awaiting_observations",
+                            replay.public_id,
+                            replay_player_ids,
+                        )
+                    )
+                    continue
+                plan = self._ensure_plan(session, replay, authority, scope, False)
+                plans.append(
+                    IdentityInvalidationReplayPlanDTO(
+                        "planned",
+                        replay.public_id,
+                        replay_player_ids,
+                        plan.derive_job_public_id,
+                        plan.assess_job_public_id,
+                        None,
+                        plan.report_job_public_id,
+                    )
+                )
+            return IdentityInvalidationPlanDTO(operation.public_id, tuple(plans))
+
+    def _ensure_plan(
+        self,
+        session: Session,
+        replay: Replay,
+        authority: _ObservationAuthority,
+        scope: IdentityAnalysisScope,
+        allow_ollama: bool,
+    ) -> AnalysisPlanDTO:
+        derive = self._ensure_derive(session, replay, authority, scope)
+        assess = self._ensure_assess(session, replay, authority, scope, derive)
+        llm = self._ensure_llm(session, replay, authority, scope, assess) if allow_ollama else None
+        report = self._ensure_report(session, replay, authority, scope, assess, llm)
+        return AnalysisPlanDTO(
+            "planned",
+            replay.public_id,
+            allow_ollama,
+            derive.public_id,
+            assess.public_id,
+            llm.public_id if llm is not None else None,
+            report.public_id,
+        )
+
+    @staticmethod
+    def _affected_player_ids(operation: PlayerIdentityOperation) -> tuple[str, ...]:
+        value = operation.affected_revisions_json
+        if not isinstance(value, Mapping) or set(value) != {"players"}:
+            raise AnalysisPlanningError(
+                "invalid_identity_operation",
+                "identity audit has invalid affected-player metadata",
+            )
+        raw_players = value["players"]
+        if type(raw_players) is not list or not raw_players:
+            raise AnalysisPlanningError(
+                "invalid_identity_operation",
+                "identity audit must identify at least one affected player",
+            )
+        public_ids: list[str] = []
+        for item in raw_players:
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != {"player_public_id", "identity_revision"}
+                or type(item["identity_revision"]) is not int
+                or item["identity_revision"] < 0
+            ):
+                raise AnalysisPlanningError(
+                    "invalid_identity_operation",
+                    "identity audit affected-player entry is invalid",
+                )
+            public_id = cast(str, item["player_public_id"])
+            try:
+                _canonical_uuid(public_id, "player_public_id")
+            except (TypeError, ValueError) as error:
+                raise AnalysisPlanningError(
+                    "invalid_identity_operation",
+                    "identity audit affected-player public ID is invalid",
+                ) from error
+            public_ids.append(public_id)
+        result = tuple(sorted(set(public_ids)))
+        if len(result) != len(public_ids):
+            raise AnalysisPlanningError(
+                "invalid_identity_operation",
+                "identity audit affected-player identities are duplicated",
+            )
+        return result
+
+    @staticmethod
+    def _identity_scope(
+        session: Session,
+        replay: Replay,
+        kind: Literal["full_replay", "identity_invalidation"],
+        *,
+        affected_player_ids: tuple[str, ...] | None = None,
+        authority: _ObservationAuthority | None = None,
+    ) -> IdentityAnalysisScope | None:
+        statement = (
+            select(
+                ReplayPlayer.public_id,
+                Player.public_id,
+                Player.identity_revision,
+            )
+            .join(Player, Player.id == ReplayPlayer.player_id)
+            .where(ReplayPlayer.replay_id == replay.id)
+            .order_by(ReplayPlayer.public_id)
+        )
+        if authority is not None and authority.parser_run_id is not None:
+            statement = statement.join(
+                ParserRun,
+                ParserRun.id == ReplayPlayer.parser_run_id,
+            ).where(ParserRun.run_id == authority.parser_run_id)
+        if affected_player_ids is not None:
+            statement = statement.where(Player.public_id.in_(affected_player_ids))
+        bindings = tuple(
+            CanonicalPlayerIdentityBinding(
+                replay_player_public_id,
+                player_public_id,
+                identity_revision,
+                identity_cache_digest(player_public_id, identity_revision),
+            )
+            for replay_player_public_id, player_public_id, identity_revision in session.execute(statement)
+        )
+        if kind == "identity_invalidation" and not bindings:
+            return None
+        return IdentityAnalysisScope(kind, bindings)
 
     def _observation_authority(
         self, session: Session, replay: Replay
@@ -177,6 +395,9 @@ class AnalysisPlanner:
         output_json = candidate.output_json
         if not isinstance(input_json, Mapping) or not isinstance(output_json, Mapping):
             self._invalid_authority("succeeded observation job has invalid canonical data")
+        parser_run_id_value = output_json.get("parser_run_id")
+        if type(parser_run_id_value) is not str or not _canonical_uuid_value(parser_run_id_value):
+            self._invalid_authority("observation graph parser-run identity is invalid")
         replay_identity = input_json.get("replay_public_id")
         replay_sha256 = input_json.get("replay_sha256")
         branch_recipe = input_json.get("branch_recipe")
@@ -198,6 +419,22 @@ class AnalysisPlanner:
         if input_json.get("provisional_idempotency_key") != provisional_key:
             self._invalid_authority("observation branch recipe does not match its provisional identity")
         selected_branch = self._selected_branch(branch_recipe)
+        parser_run = session.scalar(
+            select(ParserRun).where(ParserRun.run_id == parser_run_id_value)
+        )
+        if (
+            parser_run is None
+            or parser_run.replay_id != replay.id
+            or parser_run.parser_version != selected_branch.parse_identity["parser_version"]
+            or parser_run.input_sha256 != replay.sha256
+            or parser_run.status != "succeeded"
+            or parser_run.completion_status != "complete"
+            or parser_run.completed_at is None
+            or parser_run.result_sha256 is None
+        ):
+            self._invalid_authority(
+                "observation graph parser run is not the selected complete replay materialization"
+            )
         dependencies = list(
             session.scalars(
                 select(Job)
@@ -291,7 +528,12 @@ class AnalysisPlanner:
         )
         if selected_digest != expected_digest or candidate.idempotency_key != expected_key:
             self._invalid_authority("observation graph materialization identity does not match its dependencies")
-        return _ObservationAuthority(candidate, cast(str, selected_digest))
+        return _ObservationAuthority(
+            candidate,
+            cast(str, selected_digest),
+            parser_run_id_value,
+            cast(str, selected_branch.parse_identity["parser_version"]),
+        )
 
     def _selected_branch(self, branch_recipe: Mapping[str, Any]) -> _SelectedBranch:
         if set(branch_recipe) != {
@@ -343,9 +585,10 @@ class AnalysisPlanner:
         session: Session,
         replay: Replay,
         authority: _ObservationAuthority,
+        scope: IdentityAnalysisScope,
     ) -> Job:
-        identity = self._base_identity(authority)
-        input_json = self._base_input(replay, authority)
+        identity = self._base_identity(authority, scope)
+        input_json = self._base_input(replay, authority, scope)
         row = self._ensure_job(
             session,
             replay,
@@ -362,10 +605,14 @@ class AnalysisPlanner:
         session: Session,
         replay: Replay,
         authority: _ObservationAuthority,
+        scope: IdentityAnalysisScope,
         derive: Job,
     ) -> Job:
-        identity = {**self._base_identity(authority), "derive_job_key": derive.idempotency_key}
-        input_json = {**self._base_input(replay, authority), "derive_input_digest": input_digest(identity)}
+        identity = {**self._base_identity(authority, scope), "derive_job_key": derive.idempotency_key}
+        input_json = {
+            **self._base_input(replay, authority, scope),
+            "derive_input_digest": input_digest(identity),
+        }
         row = self._ensure_job(
             session,
             replay,
@@ -382,15 +629,16 @@ class AnalysisPlanner:
         session: Session,
         replay: Replay,
         authority: _ObservationAuthority,
+        scope: IdentityAnalysisScope,
         assess: Job,
     ) -> Job:
         identity = {
-            **self._base_identity(authority),
+            **self._base_identity(authority, scope),
             "assess_job_key": assess.idempotency_key,
             "provider_mode": "ollama",
         }
         input_json = {
-            **self._base_input(replay, authority),
+            **self._base_input(replay, authority, scope),
             "allow_ollama": True,
             "assess_input_digest": input_digest(identity),
         }
@@ -410,18 +658,19 @@ class AnalysisPlanner:
         session: Session,
         replay: Replay,
         authority: _ObservationAuthority,
+        scope: IdentityAnalysisScope,
         assess: Job,
         llm: Job | None,
     ) -> Job:
         allow_ollama = llm is not None
         identity = {
-            **self._base_identity(authority),
+            **self._base_identity(authority, scope),
             "allow_ollama": allow_ollama,
             "assess_job_key": assess.idempotency_key,
             "llm_job_key": llm.idempotency_key if llm is not None else None,
         }
         input_json = {
-            **self._base_input(replay, authority),
+            **self._base_input(replay, authority, scope),
             "allow_ollama": allow_ollama,
             "report_input_digest": input_digest(identity),
         }
@@ -464,20 +713,28 @@ class AnalysisPlanner:
         return row
 
     @staticmethod
-    def _base_identity(authority: _ObservationAuthority) -> dict[str, Any]:
+    def _base_identity(
+        authority: _ObservationAuthority, scope: IdentityAnalysisScope
+    ) -> dict[str, Any]:
         return {
             "analysis_plan_version": _PLAN_VERSION,
             "observation_job_key": authority.job.idempotency_key,
             "selected_dependency_digest": authority.selected_dependency_digest,
+            "identity_scope": scope.to_json(),
         }
 
     @staticmethod
-    def _base_input(replay: Replay, authority: _ObservationAuthority) -> dict[str, Any]:
+    def _base_input(
+        replay: Replay, authority: _ObservationAuthority, scope: IdentityAnalysisScope
+    ) -> dict[str, Any]:
         return {
             "analysis_plan_version": _PLAN_VERSION,
             "replay_public_id": replay.public_id,
             "replay_sha256": replay.sha256,
+            "parser_run_id": authority.parser_run_id,
+            "parser_version": authority.parser_version,
             "selected_dependency_digest": authority.selected_dependency_digest,
+            "identity_scope": scope.to_json(),
         }
 
 
@@ -488,3 +745,10 @@ def _is_sha256(value: object) -> bool:
         and value == value.lower()
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _canonical_uuid_value(value: str) -> bool:
+    try:
+        return str(UUID(value)) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
