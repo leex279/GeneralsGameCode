@@ -3,13 +3,18 @@
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 from map_asset_support import write_test_map_asset
 
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
-from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
+from generals_replay_analyzer.telemetry.reader import (
+    TelemetryTraceValidationError,
+    iter_validated_trace,
+    load_validated_telemetry_bundle,
+)
 
 RUN_ID = "723e4567-e89b-12d3-a456-426614174000"
 ENGINE_IDENTITY = "zero-hour-test-exe-00000000-ini-00000000"
@@ -311,6 +316,61 @@ def test_reader_preserves_historical_v1_without_catalog_or_players(tmp_path: Pat
         "manifest",
         "complete",
     ]
+
+
+def test_public_bundle_loader_exposes_one_immutable_validated_v1_v2_authority(tmp_path: Path) -> None:
+    """Catch a loader that exposes partial records or loses validated v2 asset identities."""
+    reference = _write_catalog(tmp_path)
+    trace = _write_v2_trace(tmp_path, reference)
+
+    bundle = load_validated_telemetry_bundle(trace)
+    assert bundle.trace_path == trace
+    assert isinstance(bundle.records, tuple)
+    assert bundle.records[0] is bundle.manifest
+    assert bundle.records[-1] is bundle.complete
+    assert tuple(iter_validated_trace(trace)) == bundle.records
+    assert bundle.catalog_path == tmp_path / str(reference["path"])
+    assert bundle.map_manifest_path is not None
+    assert bundle.map_asset is not None
+    assert bundle.map_asset.content_sha256 == bundle.manifest.payload.map_asset.content_sha256
+    assert bundle.map_member_paths == tuple(
+        sorted(
+            (
+                bundle.map_manifest_path,
+                *(bundle.map_manifest_path.parent / name for name in (
+                    "height.f32.zlib",
+                    "pathing-amphibious.u8.zlib",
+                    "pathing-ground.u8.zlib",
+                    "terrain.u8.zlib",
+                    "zones.i32.zlib",
+                )),
+            )
+        )
+    )
+    with pytest.raises(FrozenInstanceError):
+        bundle.trace_path = tmp_path / "mutated.ndjson"  # type: ignore[misc]
+
+    v1_records = [
+        _record(
+            1,
+            0,
+            "manifest",
+            {
+                "engine_build": "historical-build",
+                "replay_version": "1.04",
+                "map_identity": "maps/historical.map",
+                "initial_seed": 1,
+                "exporter_settings": {"movement_sample_frames": 15},
+            },
+        )
+    ]
+    v1_records.append(_completion(1, v1_records))
+    v1_bundle = load_validated_telemetry_bundle(_write_records(tmp_path / "v1-bundle.ndjson", v1_records))
+    assert tuple(record.event_type for record in v1_bundle.records) == ("manifest", "complete")
+    assert v1_bundle.catalog_path is None
+    assert v1_bundle.map_manifest_path is None
+    assert v1_bundle.map_member_paths == ()
+    assert v1_bundle.map_asset is None
 
 
 def test_reader_preserves_frozen_v1_order_and_custom_state_payloads(tmp_path: Path) -> None:

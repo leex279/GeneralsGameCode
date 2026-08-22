@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator, FormatChecker  # type: ignore[impor
 from pydantic import TypeAdapter, ValidationError
 
 from generals_replay_analyzer.contracts import message_name_for
-from generals_replay_analyzer.telemetry.map_asset import MapAsset, MapAssetValidationError, load_map_asset
+from generals_replay_analyzer.telemetry.map_asset import ASSET_NAMES, MapAsset, MapAssetValidationError, load_map_asset
 from generals_replay_analyzer.telemetry.model import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
@@ -37,6 +37,21 @@ _UINT32_MODULUS = 1 << 32
 
 class TelemetryTraceValidationError(ValueError):
     """Raised with the trace path and record identity for invalid observed evidence."""
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Expose one immutable result for the fully validated telemetry evidence set. (#TBD)
+@dataclass(frozen=True)
+class ValidatedTelemetryBundle:
+    """A complete trace and its independently validated authoritative assets."""
+
+    trace_path: Path
+    records: tuple[TelemetryRecord, ...]
+    manifest: ManifestRecord
+    complete: CompleteRecord
+    catalog_path: Path | None
+    map_manifest_path: Path | None
+    map_member_paths: tuple[Path, ...]
+    map_asset: MapAsset | None
 
 
 def _schema(version: int) -> dict[str, object]:
@@ -1689,11 +1704,11 @@ def _validate_v2_order_movement(
 # TheSuperHackers @feature Leex 19/08/2026 Validate immutable observed telemetry before later import stages consume it. (#TBD)
 def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     """Return an iterator only after the complete trace is validated as immutable evidence."""
-    return iter(_validated_records(path))
+    return iter(load_validated_telemetry_bundle(path).records)
 
 
-def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
-    """Read the whole source before exposing any record to callers."""
+def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
+    """Read and validate the whole evidence bundle before exposing any record or asset."""
     try:
         source = path.read_bytes()
     except OSError as error:
@@ -2064,4 +2079,26 @@ def _validated_records(path: Path) -> tuple[TelemetryRecord, ...]:
                 raise TelemetryTraceValidationError(
                     f"trace '{path}': moving entity sample tail gap exceeds movement_sample_frames"
                 )
-    return tuple(validated_records)
+    records = tuple(validated_records)
+    manifest = records[0]
+    complete = records[-1]
+    assert isinstance(manifest, ManifestRecord)
+    assert isinstance(complete, CompleteRecord)
+    if expected_schema_version == 1:
+        return ValidatedTelemetryBundle(path, records, manifest, complete, None, None, (), None)
+    assert expected_catalog is not None
+    assert expected_map_reference is not None
+    assert authoritative_map is not None
+    catalog_path = path.parent / expected_catalog.path
+    map_manifest_path = path.parent / Path(*expected_map_reference.path.split("/"))
+    map_member_paths = tuple(sorted(map_manifest_path.parent / name for name in ASSET_NAMES))
+    return ValidatedTelemetryBundle(
+        path,
+        records,
+        manifest,
+        complete,
+        catalog_path,
+        map_manifest_path,
+        map_member_paths,
+        authoritative_map,
+    )
