@@ -12,6 +12,7 @@ from uuid import UUID
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Freeze the ORM-free lifecycle vocabulary shared by Web and external workers. (#TBD)
 class JobState(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -138,6 +139,18 @@ def _text(value: str, field_name: str, maximum: int) -> None:
         raise ValueError(f"{field_name} is invalid")
 
 
+def _integer(value: int, field_name: str, *, minimum: int = 0) -> None:
+    if type(value) is not int:
+        raise TypeError(f"{field_name} must be an exact integer")
+    if value < minimum:
+        raise ValueError(f"{field_name} must be at least {minimum}")
+
+
+def _boolean(value: bool, field_name: str) -> None:
+    if type(value) is not bool:
+        raise TypeError(f"{field_name} must be an exact boolean")
+
+
 @dataclass(frozen=True)
 class WorkerLeaseDTO:
     job_public_id: str
@@ -152,6 +165,8 @@ class WorkerLeaseDTO:
         _uuid(self.job_public_id, "job_public_id")
         _uuid(self.execution_public_id, "execution_public_id")
         _utc(self.lease_expires_at, "lease_expires_at")
+        _integer(self.attempt_count, "attempt_count", minimum=1)
+        _integer(self.max_attempts, "max_attempts", minimum=1)
         if (
             not self.stage
             or self.stage != self.stage.strip()
@@ -169,6 +184,7 @@ class WorkerCancellationDTO:
     reason_code: CancellationReasonCode | None
 
     def __post_init__(self) -> None:
+        _boolean(self.requested, "requested")
         if self.reason_code is not None:
             object.__setattr__(self, "reason_code", CancellationReasonCode(self.reason_code))
         if self.requested != (self.reason_code is not None):
@@ -184,6 +200,8 @@ class JobProgressDTO:
 
     def __post_init__(self) -> None:
         _utc(self.updated_at, "updated_at")
+        _integer(self.completed, "completed")
+        _integer(self.total, "total", minimum=1)
         if self.completed < 0 or self.total <= 0 or self.completed > self.total:
             raise ValueError("job progress is invalid")
         _text(self.unit, "progress unit", 64)
@@ -198,6 +216,7 @@ class JobErrorSummaryDTO:
     def __post_init__(self) -> None:
         object.__setattr__(self, "code", PublicJobReasonCode(self.code))
         _text(self.message, "job error message", 512)
+        _boolean(self.retryable, "retryable")
 
 
 @dataclass(frozen=True)
@@ -212,6 +231,8 @@ class JobEventSnapshotDTO:
 
     def __post_init__(self) -> None:
         _uuid(self.public_id, "event public_id")
+        _integer(self.revision, "revision")
+        _integer(self.attempt_count, "attempt_count")
         if self.revision < 0 or self.attempt_count < 0:
             raise ValueError("job event counters are invalid")
         object.__setattr__(self, "event_kind", JobEventKind(self.event_kind))
@@ -233,6 +254,9 @@ class JobLogReferenceDTO:
     def __post_init__(self) -> None:
         _uuid(self.public_id, "log public_id")
         _uuid(self.job_public_id, "job_public_id")
+        _integer(self.attempt_count, "attempt_count")
+        _integer(self.sequence, "sequence")
+        _integer(self.byte_count, "byte_count")
         if self.attempt_count < 0 or self.label not in {"stdout", "stderr", "supervisor"}:
             raise ValueError("log stream identity is invalid")
         if self.sequence < 0 or self.byte_count < 0:
@@ -250,6 +274,8 @@ class JobLogQueryDTO:
     def __post_init__(self) -> None:
         _uuid(self.job_public_id, "job_public_id")
         _uuid(self.log_public_id, "log_public_id")
+        _integer(self.offset, "offset")
+        _integer(self.limit, "limit", minimum=1)
         if self.offset < 0 or self.limit < 1 or self.limit > 65_536:
             raise ValueError("log read bounds are invalid")
 
@@ -265,8 +291,8 @@ class JobLogChunkDTO:
             raise ValueError("log chunk state is invalid")
         if len(self.content.encode("utf-8")) > 65_536:
             raise ValueError("log chunk exceeds the public byte bound")
-        if self.next_offset is not None and self.next_offset < 0:
-            raise ValueError("log continuation offset is invalid")
+        if self.next_offset is not None:
+            _integer(self.next_offset, "next_offset")
 
 
 @dataclass(frozen=True)
@@ -297,6 +323,11 @@ class JobSummaryDTO:
         _text(self.stage, "stage", 64)
         _text(self.component_version, "component_version", 255)
         object.__setattr__(self, "state", JobState(self.state))
+        _integer(self.revision, "revision")
+        _integer(self.attempt_count, "attempt_count")
+        _integer(self.max_attempts, "max_attempts", minimum=1)
+        _boolean(self.retryable, "retryable")
+        _boolean(self.cancel_requested, "cancel_requested")
         if self.revision < 0 or self.attempt_count < 0 or self.max_attempts < self.attempt_count:
             raise ValueError("job summary counters are invalid")
         _utc(self.created_at, "created_at")
@@ -338,6 +369,7 @@ class JobQueryDTO:
             _uuid(self.after_public_id, "after_public_id")
         if self.stage is not None:
             _text(self.stage, "stage", 64)
+        _integer(self.limit, "limit", minimum=1)
         if self.limit < 1 or self.limit > 200:
             raise ValueError("job page limit is invalid")
 
@@ -361,6 +393,7 @@ class RetryJobCommandDTO:
 
     def __post_init__(self) -> None:
         _uuid(self.job_public_id, "job_public_id")
+        _integer(self.expected_revision, "expected_revision")
         if self.expected_revision < 0:
             raise ValueError("expected_revision must be nonnegative")
 
@@ -374,6 +407,7 @@ class CancelJobCommandDTO:
 
     def __post_init__(self) -> None:
         _uuid(self.job_public_id, "job_public_id")
+        _integer(self.expected_revision, "expected_revision")
         if self.expected_revision < 0:
             raise ValueError("expected_revision must be nonnegative")
         _text(self.requested_by, "requested_by", 255)
@@ -390,6 +424,8 @@ class JobMutationDTO:
     def __post_init__(self) -> None:
         _uuid(self.public_id, "job public_id")
         object.__setattr__(self, "state", JobState(self.state))
+        _integer(self.revision, "revision")
+        _integer(self.attempt_count, "attempt_count")
         if self.revision < 0 or self.attempt_count < 0:
             raise ValueError("job mutation counters are invalid")
 
@@ -403,6 +439,7 @@ class StageExecutionOutcomeDTO:
     retryable: bool
 
     def __post_init__(self) -> None:
+        _boolean(self.retryable, "retryable")
         if self.status not in {"succeeded", "retryable_failure", "failed"}:
             raise ValueError("stage outcome status is invalid")
         if self.status == "succeeded":
@@ -425,6 +462,7 @@ class OwnedExecutionSettlementDTO:
 
     def __post_init__(self) -> None:
         _uuid(self.execution_public_id, "execution_public_id")
+        _boolean(self.tree_settled, "tree_settled")
 
 
 class WorkerControlPort(Protocol):

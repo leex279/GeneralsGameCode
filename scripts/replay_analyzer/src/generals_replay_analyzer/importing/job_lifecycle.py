@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import re
 import secrets
+import stat
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -26,7 +28,7 @@ from generals_replay_analyzer.db.models import (
     ManagedAsset,
     Replay,
 )
-from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError
+from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 
 from .job_contracts import (
     CancelJobCommandDTO,
@@ -55,6 +57,7 @@ from .job_contracts import (
 )
 
 _MAX_LOG_READ = 65_536
+_LOG_REDACTION_OVERLAP = 4_096
 _ANSI_PATTERN = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))")
 _URL_CREDENTIALS = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _COMMAND_CREDENTIALS = re.compile(
@@ -116,7 +119,7 @@ def _token_digest(token: str) -> str:
 
 
 def _validate_seconds(value: int) -> timedelta:
-    if isinstance(value, bool) or value < 1 or value > 3600:
+    if type(value) is not int or value < 1 or value > 3600:
         raise ValueError("lease_seconds must be between 1 and 3600")
     return timedelta(seconds=value)
 
@@ -137,6 +140,7 @@ class JobLifecycleService:
         log_store: ContentAddressedStore | None = None,
         log_data_root: Path | None = None,
         redaction_values: Collection[str] = (),
+        _allow_legacy_worker_identifiers: bool = False,
     ) -> None:
         stages = tuple(sorted(set(registered_stages)))
         if any(not stage.strip() for stage in stages):
@@ -162,6 +166,7 @@ class JobLifecycleService:
         self._log_store = log_store
         self._log_data_root = resolved_log_root
         self._redaction_values = tuple(sorted({value for value in redaction_values if value}, key=len, reverse=True))
+        self._allow_legacy_worker_identifiers = _allow_legacy_worker_identifiers
 
     def registered_stages(self) -> tuple[str, ...]:
         return self._stages
@@ -206,9 +211,7 @@ class JobLifecycleService:
         return now + delay
 
     def claim_next(self, worker_public_id: str, lease_seconds: int) -> WorkerLeaseDTO | None:
-        worker = worker_public_id.strip()
-        if not worker:
-            raise ValueError("worker_public_id must be nonempty")
+        worker = self._worker_identifier(worker_public_id)
         duration = _validate_seconds(lease_seconds)
         if not self._stages:
             return None
@@ -454,6 +457,7 @@ class JobLifecycleService:
                 progress.completed < current.completed
                 or progress.total < current.total
                 or progress.unit != current.unit
+                or progress.updated_at < current.updated_at
             ):
                 raise JobStateError("progress_regressed", "progress must be monotonic within one attempt")
             now = self.now()
@@ -1014,12 +1018,23 @@ class JobLifecycleService:
             raise TypeError("raw supervisor output must be bytes")
         stored = None
         try:
-            with self._writer() as session:
+            with self._session_factory() as session:
                 self._owned(session, worker_public_id, claim, self.now())
-                redacted = self._redact(raw_output.decode("utf-8", errors="replace")).encode("utf-8")
-                stored = self._log_store.store_bytes(redacted)
+            redacted = self._redact(raw_output.decode("utf-8", errors="replace")).encode("utf-8")
+            stored = self._log_store.store_bytes(redacted)
+            stored_path = stored.path.resolve(strict=False)
+            expected_path = (self._log_store.root / stored.sha256[:2] / stored.sha256).resolve(strict=False)
+            if stored_path != expected_path:
+                raise JobStateError("log_asset_conflict", "managed log store returned an unexpected locator")
+            with self._writer() as session:
                 now = self.now()
                 row = self._owned(session, worker_public_id, claim, now)
+                try:
+                    stored_info = stored_path.lstat()
+                except OSError as error:
+                    raise JobStateError("log_asset_conflict", "managed log object disappeared before registration") from error
+                if not stat.S_ISREG(stored_info.st_mode) or stored_path.is_symlink() or stored_info.st_size != stored.size:
+                    raise JobStateError("log_asset_conflict", "managed log object changed before registration")
                 last_sequence = session.scalar(
                     select(func.max(JobLogSnapshot.sequence)).where(
                         JobLogSnapshot.job_id == row.id,
@@ -1030,7 +1045,7 @@ class JobLifecycleService:
                 expected_sequence = 0 if last_sequence is None else last_sequence + 1
                 if sequence != expected_sequence:
                     raise JobStateError("log_sequence_conflict", "job log sequence is stale or nonmonotonic")
-                relative_path = stored.path.relative_to(self._log_data_root).as_posix()
+                relative_path = stored_path.relative_to(self._log_data_root).as_posix()
                 asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
                 if asset is not None and (
                     asset.kind != "job_log_snapshot"
@@ -1069,11 +1084,26 @@ class JobLifecycleService:
             return reference
         except Exception:
             if stored is not None and stored.created:
-                try:
-                    stored.path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                self._cleanup_unreferenced_log(stored)
             raise
+
+    def _cleanup_unreferenced_log(self, stored: StoredContent) -> None:
+        """Remove only an unregistered CAS object while serialized with registrations."""
+        assert self._log_store is not None
+        try:
+            stored_path = stored.path.resolve(strict=False)
+            expected_path = (self._log_store.root / stored.sha256[:2] / stored.sha256).resolve(strict=False)
+            if stored_path != expected_path:
+                return
+            with self._writer() as session:
+                referenced = session.scalar(
+                    select(ManagedAsset.id).where(ManagedAsset.sha256 == stored.sha256).limit(1)
+                )
+                if referenced is None:
+                    stored_path.unlink(missing_ok=True)
+        except (JobLifecycleError, OSError):
+            # An orphan is safer than deleting a digest whose registration could not be excluded.
+            return
 
     def read_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO:
         if self._log_store is None:
@@ -1110,15 +1140,119 @@ class JobLifecycleService:
         if query.offset >= stored.size:
             return JobLogChunkDTO("rotated", "", None)
         limit = min(query.limit, _MAX_LOG_READ)
-        end = min(stored.size, query.offset + max(1, limit - 4))
         try:
-            with stored.path.open("rb") as source:
-                source.seek(query.offset)
-                data = source.read(end - query.offset)
-        except OSError:
+            end = self._complete_utf8_end(stored.path, query.offset, limit, stored.size)
+            if end <= query.offset:
+                return JobLogChunkDTO("unavailable", "", None)
+            content = self._redacted_log_range(stored.path, query.offset, end, stored.size)
+        except (OSError, UnicodeDecodeError):
             return JobLogChunkDTO("unavailable", "", None)
-        content = self._bounded_utf8(self._redact(data.decode("utf-8", errors="replace")), limit)
+        content = self._bounded_utf8(content, limit)
         return JobLogChunkDTO("available", content, end if end < stored.size else None)
+
+    @staticmethod
+    def _complete_utf8_end(path: Path, offset: int, limit: int, size: int) -> int:
+        with path.open("rb") as source:
+            source.seek(offset)
+            data = source.read(min(size - offset, max(4, limit)))
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        decoder.decode(data, final=offset + len(data) == size)
+        pending, _state = decoder.getstate()
+        return offset + len(data) - len(pending)
+
+    def _redacted_log_range(self, path: Path, offset: int, end: int, size: int) -> str:
+        context_start = max(0, offset - _LOG_REDACTION_OVERLAP)
+        with path.open("rb") as source:
+            source.seek(context_start)
+            while context_start < offset:
+                leading = source.read(1)
+                if not leading or leading[0] & 0xC0 != 0x80:
+                    if leading:
+                        source.seek(-1, 1)
+                    break
+                context_start += 1
+            context_limit = min(size, end + _LOG_REDACTION_OVERLAP + 3)
+            data = source.read(context_limit - context_start)
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        text = decoder.decode(data, final=context_start + len(data) == size)
+        pending, _state = decoder.getstate()
+        if pending:
+            data = data[: -len(pending)]
+            text = data.decode("utf-8", errors="strict")
+        mask = self._redaction_mask(
+            text,
+            initial_traceback=self._traceback_state_before(path, context_start),
+        )
+        output: list[str] = []
+        raw_position = context_start
+        for index, character in enumerate(text):
+            character_end = raw_position + len(character.encode("utf-8"))
+            if raw_position >= offset and character_end <= end and not mask[index]:
+                output.append(character)
+            raw_position = character_end
+            if raw_position >= end:
+                break
+        return "".join(output)
+
+    def _redaction_mask(self, value: str, *, initial_traceback: bool) -> list[bool]:
+        mask = [False] * len(value)
+
+        def hide(start: int, end: int) -> None:
+            mask[start:end] = [True] * (end - start)
+
+        for pattern in (_ANSI_PATTERN, _URL_CREDENTIALS, _COMMAND_CREDENTIALS, _PATH_PATTERN):
+            for match in pattern.finditer(value):
+                hide(match.start(), match.end())
+        for secret in self._redaction_values:
+            for match in re.finditer(re.escape(secret), value, flags=re.IGNORECASE):
+                hide(match.start(), match.end())
+
+        in_traceback = initial_traceback
+        position = 0
+        for line in value.splitlines(keepends=True):
+            stripped = line.lstrip()
+            if stripped.startswith("Traceback ("):
+                in_traceback = True
+                hide(position, position + len(line))
+            elif in_traceback:
+                hide(position, position + len(line))
+                if _TRACEBACK_TERMINAL.match(stripped):
+                    in_traceback = False
+            elif stripped.startswith(_TRACEBACK_CHAIN) or stripped.startswith("File ") or _TRACEBACK_TERMINAL.match(stripped):
+                hide(position, position + len(line))
+            position += len(line)
+        return mask
+
+    @staticmethod
+    def _traceback_state_before(path: Path, end: int) -> bool:
+        if end <= 0:
+            return False
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        in_traceback = False
+        line_prefix = ""
+
+        def finish_line() -> None:
+            nonlocal in_traceback, line_prefix
+            stripped = line_prefix.lstrip()
+            if stripped.startswith("Traceback ("):
+                in_traceback = True
+            elif in_traceback and _TRACEBACK_TERMINAL.match(stripped):
+                in_traceback = False
+            line_prefix = ""
+
+        with path.open("rb") as source:
+            remaining = end
+            while remaining:
+                chunk = source.read(min(8_192, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                for character in decoder.decode(chunk, final=remaining == 0):
+                    if character == "\n":
+                        finish_line()
+                    elif len(line_prefix) < 512:
+                        line_prefix += character
+        return in_traceback
 
     def _redact(self, value: str) -> str:
         redacted = _ANSI_PATTERN.sub("", value)
@@ -1153,15 +1287,16 @@ class JobLifecycleService:
         return encoded[:limit].decode("utf-8", errors="ignore")
 
     def _owned(self, session: Session, worker: str, claim: WorkerLeaseDTO, now: datetime) -> Job:
+        worker = self._worker_identifier(worker)
         row = self._claim_identity(session, claim, now)
         if row.lease_owner != worker:
             raise JobStateError("lease_mismatch", "worker does not own this job lease")
         return row
 
-    @staticmethod
     def _lease_conditions(
-        worker: str, claim: WorkerLeaseDTO, now: datetime
+        self, worker: str, claim: WorkerLeaseDTO, now: datetime
     ) -> tuple[Any, ...]:
+        worker = self._worker_identifier(worker)
         return (
             Job.public_id == claim.job_public_id,
             Job.status == "running",
@@ -1172,6 +1307,25 @@ class JobLifecycleService:
             Job.lease_expires_at.is_not(None),
             Job.lease_expires_at > now,
         )
+
+    def _worker_identifier(self, value: str) -> str:
+        if self._allow_legacy_worker_identifiers:
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > 255
+                or any(character.isspace() or ord(character) < 32 for character in value)
+            ):
+                raise ValueError("legacy worker identifier is invalid")
+            return value
+        try:
+            parsed = UUID(value)
+        except (TypeError, ValueError, AttributeError) as error:
+            raise ValueError("worker_public_id must be a lowercase hyphenated UUID") from error
+        if str(parsed) != value:
+            raise ValueError("worker_public_id must be a lowercase hyphenated UUID")
+        return value
 
     @staticmethod
     def _require_cas(result: Any, code: JobLifecycleErrorCode | str, message: str) -> None:

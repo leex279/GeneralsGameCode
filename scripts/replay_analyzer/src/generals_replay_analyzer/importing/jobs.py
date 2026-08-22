@@ -142,6 +142,7 @@ class JobCoordinator:
             terminal_failure_stages=terminal_failure_stages,
             retry_base_delay=self._retry_base_delay,
             retry_max_delay=self._retry_max_delay,
+            _allow_legacy_worker_identifiers=True,
         )
 
     def create_job(self, spec: JobSpec) -> JobSnapshot:

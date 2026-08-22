@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import fields, replace
 from datetime import timedelta
 from pathlib import Path
-from threading import Barrier, BrokenBarrierError, Lock, get_ident
+from threading import Barrier, BrokenBarrierError, Event, Lock, get_ident
 from types import ModuleType
 from typing import Any
 
@@ -34,7 +34,7 @@ from generals_replay_analyzer.importing.job_contracts import (
 )
 from generals_replay_analyzer.importing.job_lifecycle import JobLifecycleService
 from generals_replay_analyzer.importing.jobs import JobCoordinator, JobSpec, JobStateError
-from generals_replay_analyzer.storage import ContentAddressedStore
+from generals_replay_analyzer.storage import ContentAddressedStore, StoredContent
 
 from .conftest import MutableClock
 
@@ -120,6 +120,78 @@ def _capture(call: Any) -> object:
         return error
 
 
+class _CoordinatedPath:
+    """Schedule a cleanup race while preserving real filesystem behavior."""
+
+    def __init__(self, path: Path, cleanup_entered: Event, winner_registered: Event) -> None:
+        self._path = path
+        self._cleanup_entered = cleanup_entered
+        self._winner_registered = winner_registered
+
+    def __fspath__(self) -> str:
+        return str(self._path)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._path, name)
+
+    def resolve(self, *, strict: bool = False) -> Path:
+        self._wait_for_winner()
+        return self._path.resolve(strict=strict)
+
+    def unlink(self, *, missing_ok: bool = False) -> None:
+        self._wait_for_winner()
+        self._path.unlink(missing_ok=missing_ok)
+
+    def _wait_for_winner(self) -> None:
+        self._cleanup_entered.set()
+        if not self._winner_registered.wait(timeout=5):
+            raise AssertionError("racing publisher did not reach durable registration")
+
+
+class _CleanupRaceStore:
+    def __init__(self, delegate: ContentAddressedStore, cleanup_entered: Event, winner_registered: Event) -> None:
+        self.root = delegate.root
+        self._delegate = delegate
+        self._cleanup_entered = cleanup_entered
+        self._winner_registered = winner_registered
+        self._lock = Lock()
+        self._calls = 0
+
+    def store_bytes(self, data: bytes) -> StoredContent:
+        stored = self._delegate.store_bytes(data)
+        with self._lock:
+            self._calls += 1
+            first = self._calls == 1
+        if not first:
+            return stored
+        return StoredContent(
+            stored.sha256,
+            _CoordinatedPath(stored.path, self._cleanup_entered, self._winner_registered),  # type: ignore[arg-type]
+            stored.size,
+            stored.created,
+        )
+
+    def verify(self, sha256: str) -> StoredContent:
+        return self._delegate.verify(sha256)
+
+
+class _BlockingStore:
+    def __init__(self, delegate: ContentAddressedStore, entered: Event, release: Event) -> None:
+        self.root = delegate.root
+        self._delegate = delegate
+        self._entered = entered
+        self._release = release
+
+    def store_bytes(self, data: bytes) -> StoredContent:
+        self._entered.set()
+        if not self._release.wait(timeout=5):
+            raise AssertionError("test did not release the blocking content store")
+        return self._delegate.store_bytes(data)
+
+    def verify(self, sha256: str) -> StoredContent:
+        return self._delegate.verify(sha256)
+
+
 def test_contract_module_is_orm_free_immutable_and_contains_no_privileged_job_views() -> None:
     """Catch a public DTO importing persistence/runtime layers or leaking raw job implementation fields."""
     import generals_replay_analyzer.importing.job_contracts as contracts
@@ -159,7 +231,11 @@ def test_two_services_atomically_claim_once_and_persist_only_the_token_digest(
         "00000000-0000-4000-8000-000000000912",
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
-        claims = tuple(executor.map(lambda worker: first.claim_next(worker, 30), workers))
+        futures = (
+            executor.submit(first.claim_next, workers[0], 30),
+            executor.submit(second.claim_next, workers[1], 30),
+        )
+        claims = tuple(future.result() for future in futures)
     claim = next(value for value in claims if value is not None)
     assert sum(value is not None for value in claims) == 1
     assert claim.job_public_id == job_public_id
@@ -210,6 +286,12 @@ def test_heartbeat_progress_and_capability_checks_preserve_attempt_and_heartbeat
     assert service.get_job(claim.job_public_id).summary.revision == progressed.summary.revision
     with pytest.raises(JobStateError, match="progress_regressed"):
         service.report_progress(worker, extended, JobProgressDTO(1, 5, "items", clock.current))
+    with pytest.raises(JobStateError, match="progress_regressed"):
+        service.report_progress(
+            worker,
+            extended,
+            JobProgressDTO(3, 5, "items", clock.current - timedelta(microseconds=1)),
+        )
 
     wrong_claims = (
         replace(extended, lease_token="wrong"),
@@ -615,6 +697,12 @@ def test_contracts_validate_public_ids_states_outcomes_and_export_frozen_domain_
         RetryJobCommandDTO("NOT-A-UUID", 0)
     with pytest.raises(ValueError):
         OwnedExecutionSettlementDTO("NOT-A-UUID", True)
+    for invalid_tree_state in ("true", 1, 0, None):
+        with pytest.raises(TypeError):
+            OwnedExecutionSettlementDTO(
+                "00000000-0000-4000-8000-000000000002",
+                invalid_tree_state,  # type: ignore[arg-type]
+            )
     with pytest.raises(ValueError):
         StageExecutionOutcomeDTO("succeeded", None, "unexpected", "unexpected", False)
     with pytest.raises(ValueError):
@@ -662,6 +750,58 @@ def test_contracts_validate_public_ids_states_outcomes_and_export_frozen_domain_
             -1,
             1,
         )
+    summary = contracts.JobSummaryDTO(
+        "00000000-0000-4000-8000-000000000001",
+        None,
+        "parse",
+        "component-v1",
+        JobState.PENDING,
+        0,
+        0,
+        1,
+        True,
+        clock.current,
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+    )
+    with pytest.raises(ValueError):
+        replace(summary, max_attempts=0)
+    for field_name, invalid_integer in (
+        ("revision", True),
+        ("attempt_count", 0.0),
+        ("max_attempts", 1.0),
+    ):
+        with pytest.raises(TypeError):
+            replace(summary, **{field_name: invalid_integer})
+    with pytest.raises(TypeError):
+        JobProgressDTO(True, 1, "items", clock.current)
+    with pytest.raises(TypeError):
+        JobLogQueryDTO(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            False,
+            1,
+        )
+
+
+def test_worker_public_identifier_is_an_exact_lowercase_uuid(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch accepting a display name or normalized variant as a public worker identity."""
+    _job(session_factory, clock, idempotency_key="worker-identity")
+    service = _service(session_factory, clock, tmp_path)
+    for invalid_worker in (
+        "worker-a",
+        " 00000000-0000-4000-8000-000000000901 ",
+        "00000000-0000-4000-8000-00000000090A",
+    ):
+        with pytest.raises(ValueError, match="worker_public_id"):
+            service.claim_next(invalid_worker, 30)
+    assert service.claim_next("00000000-0000-4000-8000-000000000901", 30) is not None
 
 
 def test_log_registration_uses_real_cas_path_validates_existing_asset_and_sequences_atomically(
@@ -711,6 +851,110 @@ def test_log_registration_uses_real_cas_path_validates_existing_asset_and_sequen
     assert isinstance(caught.value, contracts.JobLifecycleError)
 
 
+def test_failed_log_publisher_cannot_delete_a_racing_publishers_registered_blob(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch unlinking a digest after another publisher durably registered the same real CAS object."""
+    _job(session_factory, clock, idempotency_key="cleanup-race")
+    cleanup_entered = Event()
+    winner_registered = Event()
+    delegate = ContentAddressedStore(tmp_path / "managed-logs")
+    coordinated_store = _CleanupRaceStore(delegate, cleanup_entered, winner_registered)
+    service_args = {
+        "registered_stages": ("parse",),
+        "clock": clock,
+        "retry_base_delay": timedelta(0),
+        "retry_max_delay": timedelta(0),
+        "log_store": coordinated_store,
+        "log_data_root": tmp_path,
+    }
+    first = JobLifecycleService(session_factory, **service_args)  # type: ignore[arg-type]
+    second = JobLifecycleService(session_factory, **service_args)  # type: ignore[arg-type]
+    worker = "00000000-0000-4000-8000-000000000901"
+    claim = _claim(first, worker)
+    payload = b"same immutable bytes"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        loser_future = executor.submit(
+            _capture,
+            lambda: first.publish_log(worker, claim, "stderr", 2, payload),
+        )
+        assert cleanup_entered.wait(timeout=3)
+        winner_future = executor.submit(second.publish_log, worker, claim, "stderr", 0, payload)
+        try:
+            winner = winner_future.result(timeout=3)
+        finally:
+            winner_registered.set()
+        loser = loser_future.result(timeout=3)
+
+    assert isinstance(winner, contracts.JobLogReferenceDTO)
+    assert isinstance(loser, contracts.JobLifecycleError)
+    stored = delegate.verify(hashlib.sha256(payload).hexdigest())
+    assert stored.path.is_file()
+    with session_factory() as session:
+        snapshot = session.scalar(select(JobLogSnapshot).where(JobLogSnapshot.public_id == winner.public_id))
+        asset = session.get(ManagedAsset, snapshot.managed_asset_id if snapshot is not None else -1)
+        assert asset is not None and asset.sha256 == stored.sha256
+
+
+def test_slow_log_normalization_and_cas_write_do_not_block_unrelated_lifecycle_mutations(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch holding the global SQLite writer reservation across redaction, file write, or fsync."""
+    first_id = _job(session_factory, clock, idempotency_key="slow-log")
+    second_id = _job(session_factory, clock, idempotency_key="unrelated-heartbeat")
+    pending_id = _job(session_factory, clock, idempotency_key="unrelated-cancel")
+    normal = _service(session_factory, clock, tmp_path)
+    publisher_claim = _claim(normal, "00000000-0000-4000-8000-000000000901")
+    heartbeat_claim = _claim(normal, "00000000-0000-4000-8000-000000000902")
+    assert publisher_claim.job_public_id == first_id
+    assert heartbeat_claim.job_public_id == second_id
+    entered = Event()
+    release = Event()
+    blocking_store = _BlockingStore(ContentAddressedStore(tmp_path / "managed-logs"), entered, release)
+    publisher = JobLifecycleService(
+        session_factory,
+        registered_stages=("parse",),
+        clock=clock,
+        retry_base_delay=timedelta(0),
+        retry_max_delay=timedelta(0),
+        log_store=blocking_store,  # type: ignore[arg-type]
+        log_data_root=tmp_path,
+    )
+    mutator = _service(session_factory, clock, tmp_path)
+    pending = mutator.get_job(pending_id)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        publish_future = executor.submit(
+            publisher.publish_log,
+            "00000000-0000-4000-8000-000000000901",
+            publisher_claim,
+            "stdout",
+            0,
+            b"slow publication",
+        )
+        assert entered.wait(timeout=2)
+        heartbeat_future = executor.submit(
+            mutator.heartbeat,
+            "00000000-0000-4000-8000-000000000902",
+            heartbeat_claim,
+            60,
+        )
+        cancel_future = executor.submit(
+            mutator.cancel_job,
+            CancelJobCommandDTO(pending_id, pending.summary.revision, "operator", "user_request"),
+        )
+        try:
+            heartbeat = heartbeat_future.result(timeout=1)
+            cancelled = cancel_future.result(timeout=1)
+        finally:
+            release.set()
+        assert publish_future.result(timeout=3).job_public_id == first_id
+
+    assert heartbeat.lease_expires_at == clock.current + timedelta(seconds=60)
+    assert cancelled.state is JobState.CANCELLED
+
+
 def test_log_read_streams_bounded_redacted_utf8_and_strips_complete_traceback_blocks(
     session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -757,6 +1001,94 @@ def test_log_read_streams_bounded_redacted_utf8_and_strips_complete_traceback_bl
     managed_path.unlink()
     unavailable = service.read_log(JobLogQueryDTO(claim.job_public_id, reference.public_id, 0, 1024))
     assert unavailable.state == "unavailable"
+
+
+def test_log_pagination_consumes_complete_utf8_and_redacts_patterns_across_chunk_boundaries(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch split code points, duplicated replacement characters, or slice-local defense-in-depth redaction."""
+    job_id = _job(session_factory, clock, idempotency_key="boundary-log-read")
+    raw = bytearray(b"safe-start\n")
+
+    def crossing(value: bytes) -> None:
+        raw.extend(b" " * ((7 - (len(raw) % 9)) % 9))
+        raw.extend(value)
+        raw.extend(b"\n")
+
+    crossing(b"\x1b[31mred\x1b[0m")
+    crossing(b"TOP_SECRET")
+    crossing(b"https://user:pass@example.invalid/private")
+    crossing(b"--token TOP_SECRET")
+    crossing(str(tmp_path).encode("utf-8"))
+    crossing(
+        b"Traceback (most recent call last):\n"
+        b"  File private_worker.py, line 1, in run\n"
+        b"    local_secret = 'TOP_SECRET'\n"
+        b"RuntimeError: private\n"
+    )
+    crossing("😀".encode())
+    raw.extend(b"safe-end\n")
+    store = ContentAddressedStore(tmp_path / "managed-logs")
+    stored = store.store_bytes(bytes(raw))
+    log_public_id = "00000000-0000-4000-8000-000000000996"
+    with session_factory.begin() as session:
+        job = session.scalar(select(Job).where(Job.public_id == job_id))
+        assert job is not None
+        asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000995",
+            sha256=stored.sha256,
+            kind="job_log_snapshot",
+            relative_path=stored.path.relative_to(tmp_path).as_posix(),
+            size_bytes=stored.size,
+            media_type="text/plain",
+            created_at=clock.current,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(
+            JobLogSnapshot(
+                public_id=log_public_id,
+                job_id=job.id,
+                attempt_count=0,
+                label="supervisor",
+                sequence=0,
+                managed_asset_id=asset.id,
+                media_type="text/plain",
+                byte_count=stored.size,
+                redaction_version="job-log-redaction-v1",
+                created_at=clock.current,
+            )
+        )
+    service = _service(session_factory, clock, tmp_path)
+    chunks: list[str] = []
+    offset: int | None = 0
+    previous = 0
+    for _ in range(200):
+        assert offset is not None
+        chunk = service.read_log(JobLogQueryDTO(job_id, log_public_id, offset, 13))
+        assert chunk.state == "available"
+        assert len(chunk.content.encode("utf-8")) <= 13
+        chunks.append(chunk.content)
+        consumed_to = stored.size if chunk.next_offset is None else chunk.next_offset
+        bytes(raw[previous:consumed_to]).decode("utf-8", errors="strict")
+        assert consumed_to > previous
+        previous = consumed_to
+        offset = chunk.next_offset
+        if offset is None:
+            break
+    else:
+        pytest.fail("log pagination did not terminate")
+
+    reconstructed = "".join(chunks)
+    assert "safe-start" in reconstructed and "safe-end" in reconstructed
+    assert reconstructed.count("😀") == 1
+    assert "�" not in reconstructed
+    assert "\x1b" not in reconstructed
+    assert "TOP_SECRET" not in reconstructed
+    assert "user:pass" not in reconstructed
+    assert str(tmp_path) not in reconstructed
+    assert "Traceback" not in reconstructed
+    assert "local_secret" not in reconstructed
 
 
 def test_stale_log_publisher_is_rejected_before_any_managed_bytes_are_written(
