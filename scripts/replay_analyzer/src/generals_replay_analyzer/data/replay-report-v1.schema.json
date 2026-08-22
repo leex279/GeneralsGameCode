@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "replay-report-v1.schema.json",
+  "title": "Replay report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_public_id", "report_version", "input_digest", "cache_key", "replay_public_id", "replay_sha256", "replay_player_public_id", "lifecycle", "evidence_availability", "quality_issues", "observed", "derived", "inferred", "ollama", "warnings"],
+  "properties": {
+    "schema_version": {"const": "replay-report-v1"},
+    "report_public_id": {"$ref": "#/$defs/uuid"},
+    "report_version": {"const": "replay-report-v1"},
+    "input_digest": {"$ref": "#/$defs/sha256"},
+    "cache_key": {"$ref": "#/$defs/sha256"},
+    "replay_public_id": {"$ref": "#/$defs/uuid"},
+    "replay_sha256": {"$ref": "#/$defs/sha256"},
+    "replay_player_public_id": {"oneOf": [{"$ref": "#/$defs/uuid"}, {"type": "null"}]},
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "evidence_availability": {"type": "array", "items": {"$ref": "#/$defs/value"}},
+    "quality_issues": {"type": "array", "items": {"$ref": "#/$defs/quality_issue"}},
+    "observed": {"type": "array", "items": {"$ref": "#/$defs/value"}},
+    "derived": {"type": "array", "items": {"$ref": "#/$defs/value"}},
+    "inferred": {"type": "array", "items": {"$ref": "#/$defs/value"}},
+    "ollama": {"$ref": "#/$defs/ollama"},
+    "warnings": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "json": {
+      "anyOf": [
+        {"type": "null"}, {"type": "boolean"}, {"type": "integer"}, {"type": "number"}, {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/json"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/json"}}
+      ]
+    },
+    "evidence_ref": {
+      "type": "object", "additionalProperties": false, "required": ["public_id", "tier"],
+      "properties": {"public_id": {"$ref": "#/$defs/uuid"}, "tier": {"enum": ["observed", "derived", "inferred"]}}
+    },
+    "value": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_id", "section", "label", "raw_value", "unit", "availability", "unavailable_reason", "scope", "frame_window", "evidence", "details"],
+      "properties": {
+        "claim_id": {"type": "string", "minLength": 1}, "section": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1},
+        "raw_value": {"$ref": "#/$defs/json"}, "unit": {"type": ["string", "null"]},
+        "availability": {"enum": ["available", "partial", "unavailable"]}, "unavailable_reason": {"type": ["string", "null"]},
+        "scope": {"$ref": "#/$defs/json"},
+        "frame_window": {"oneOf": [{"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 0}], "items": false}, {"type": "null"}]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence_ref"}, "uniqueItems": true}, "details": {"$ref": "#/$defs/json"}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lifecycle_state", "parser_completion_status", "telemetry_status", "telemetry_runner_status"],
+      "properties": {
+        "lifecycle_state": {"type": "string", "minLength": 1}, "parser_completion_status": {"type": ["string", "null"]},
+        "telemetry_status": {"type": ["string", "null"]}, "telemetry_runner_status": {"type": ["string", "null"]}
+      }
+    },
+    "quality_issue": {
+      "type": "object", "additionalProperties": false, "required": ["public_id", "stage", "issue_code", "severity", "details", "resolved"],
+      "properties": {"public_id": {"$ref": "#/$defs/uuid"}, "stage": {"type": "string", "minLength": 1}, "issue_code": {"type": "string", "minLength": 1}, "severity": {"type": "string", "minLength": 1}, "details": {"$ref": "#/$defs/json"}, "resolved": {"type": "boolean"}}
+    },
+    "ollama": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "status", "analysis_run_id", "provider", "model_name", "model_digest", "prompt_version", "response_schema_version", "diagnostic_codes", "validated_prose"],
+      "properties": {
+        "requested": {"type": "boolean"}, "status": {"enum": ["not_requested", "disabled", "succeeded", "unavailable", "failed", "invalid", "cancelled"]},
+        "analysis_run_id": {"oneOf": [{"$ref": "#/$defs/uuid"}, {"type": "null"}]}, "provider": {"type": ["string", "null"]},
+        "model_name": {"type": ["string", "null"]}, "model_digest": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "prompt_version": {"type": ["string", "null"]}, "response_schema_version": {"type": ["string", "null"]},
+        "diagnostic_codes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "validated_prose": {"$ref": "#/$defs/json"}
+      }
+    }
+  }
+}
