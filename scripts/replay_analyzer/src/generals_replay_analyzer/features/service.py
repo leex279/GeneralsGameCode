@@ -620,6 +620,13 @@ class FeatureExtractionService:
         )
         if any(authorized_evidence.get(ref.public_id) != ref for ref in original_refs):
             raise ValueError("feature evidence is not authorized by exact feature context")
+        for value in values:
+            supporting_ids = {ref.public_id for ref in value.supporting_evidence}
+            contradicting_ids = {ref.public_id for ref in value.contradicting_evidence}
+            if not supporting_ids.isdisjoint(contradicting_ids):
+                raise FeatureExtractionError(
+                    "feature evidence cannot be both supporting and contradicting"
+                )
         refs = {
             ref.public_id: ref
             for ref in original_refs

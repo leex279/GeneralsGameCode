@@ -602,7 +602,7 @@ def test_persistence_rejects_forged_input_hidden_by_exact_later_cross_role_dupli
         assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
 
 
-def test_persistence_allows_one_exact_context_reference_in_each_evidence_role(
+def test_persistence_rejects_same_reference_as_supporting_and_contradicting_with_full_rollback(
     feature_factory: sessionmaker[Session],
 ) -> None:
     replay, player, _ = _seed_replay(feature_factory)
@@ -635,17 +635,70 @@ def test_persistence_allows_one_exact_context_reference_in_each_evidence_role(
                 ),
             )
 
+    with pytest.raises(
+        FeatureExtractionError,
+        match="feature evidence cannot be both supporting and contradicting",
+    ):
+        FeatureExtractionService(
+            feature_factory,
+            extractors=(ExactRolesExtractor(),),
+        ).extract(_request(replay, player, "exact_roles"))
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(FeatureSet)) == 0
+        assert session.scalar(select(func.count()).select_from(Feature)) == 0
+        assert session.scalar(select(func.count()).select_from(FeatureEvidence)) == 0
+        assert (
+            session.scalar(
+                select(func.count()).select_from(EvidenceItem).where(EvidenceItem.tier == "derived")
+            )
+            == 0
+        )
+
+
+def test_persistence_allows_input_and_supporting_reuse_without_contradiction(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+    exact = context.observed[0].ref
+
+    class ExactInputAndSupportingExtractor:
+        name = "exact_input_supporting"
+        version = "exact-input-supporting-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        FeatureScope("player", player, player),
+                        FeatureWindow(0, 120),
+                        "complete",
+                        None,
+                        (exact,),
+                        (exact,),
+                        (),
+                    ),
+                ),
+            )
+
     receipt = FeatureExtractionService(
         feature_factory,
-        extractors=(ExactRolesExtractor(),),
-    ).extract(_request(replay, player, "exact_roles"))[0]
+        extractors=(ExactInputAndSupportingExtractor(),),
+    ).extract(_request(replay, player, "exact_input_supporting"))[0]
     assert receipt.features[0].input_evidence == (exact,)
     assert receipt.features[0].supporting_evidence == (exact,)
-    assert receipt.features[0].contradicting_evidence == (exact,)
+    assert receipt.features[0].contradicting_evidence == ()
     with feature_factory() as session:
         assert tuple(
             session.scalars(select(FeatureEvidence.role).order_by(FeatureEvidence.role)).all()
-        ) == ("contradicting", "input", "supporting")
+        ) == ("input", "supporting")
 
 
 def _permuted_json(value: object, randomizer: random.Random) -> object:
