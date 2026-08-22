@@ -18,9 +18,9 @@ from generals_replay_analyzer.llm.provider import (
     ProviderResult,
     StructuredRequest,
     TransportResponse,
+    is_literal_loopback_endpoint,
 )
 
-_ENDPOINT = re.compile(r"http://(?:(?:127\.0\.0\.1)|(?:\[::1\])):([1-9][0-9]{0,4})")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_HTTP_BYTES = 262144
 _MAX_MODELS = 256
@@ -51,10 +51,7 @@ _DURATION_KEYS = {
 
 
 def _valid_endpoint(endpoint: str) -> bool:
-    if type(endpoint) is not str:
-        return False
-    match = _ENDPOINT.fullmatch(endpoint)
-    return match is not None and int(match.group(1)) <= 65535
+    return is_literal_loopback_endpoint(endpoint)
 
 
 def _short_text(value: object, *, allow_empty: bool = False) -> bool:

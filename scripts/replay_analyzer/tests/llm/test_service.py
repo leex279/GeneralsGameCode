@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import os
+import subprocess
+import sys
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,8 +15,10 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 
+import generals_replay_analyzer.llm.service as service_module
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.db.models import (
@@ -24,11 +30,12 @@ from generals_replay_analyzer.db.models import (
     Replay,
     ReplayPlayer,
     StrategyAssessment,
+    TelemetryRun,
 )
 from generals_replay_analyzer.features.base import FeatureWindow
 from generals_replay_analyzer.features.evidence import EvidenceRef
 from generals_replay_analyzer.llm.evidence_bundle import EvidenceBundle, EvidenceClaim, build_evidence_bundle
-from generals_replay_analyzer.llm.provider import OllamaClientConfig, ProviderError
+from generals_replay_analyzer.llm.provider import OllamaClientConfig, ProviderError, is_literal_loopback_endpoint
 from generals_replay_analyzer.llm.service import (
     AnalysisRequest,
     DeterministicFallback,
@@ -36,25 +43,38 @@ from generals_replay_analyzer.llm.service import (
     HttpxOllamaTransport,
     OllamaAnalysisService,
 )
-from generals_replay_analyzer.storage import ContentAddressedStore
+from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 from generals_replay_analyzer.strategy.rules import RuleAssessment
+
+_LLM_IMMUTABILITY_TRIGGERS = (
+    "trg_analysis_runs_succeeded_llm_no_update",
+    "trg_analysis_runs_succeeded_llm_no_delete",
+    "trg_managed_assets_succeeded_llm_no_update",
+    "trg_managed_assets_succeeded_llm_no_delete",
+    "trg_strategy_assessments_succeeded_llm_no_insert",
+    "trg_strategy_assessments_succeeded_llm_no_update",
+    "trg_strategy_assessments_succeeded_llm_no_delete",
+    "trg_assessment_evidence_succeeded_llm_no_insert",
+    "trg_assessment_evidence_succeeded_llm_no_update",
+    "trg_assessment_evidence_succeeded_llm_no_delete",
+    "trg_evidence_items_succeeded_llm_no_insert",
+    "trg_evidence_items_succeeded_llm_no_update",
+    "trg_evidence_items_succeeded_llm_no_delete",
+)
 
 
 def test_public_request_and_fallback_contracts_are_frozen_and_orm_free() -> None:
-    claim = FallbackClaim(
-        claim_id="opening",
-        kind="rule_candidate",
-        value={"strategy_id": "oil_grab"},
-        quality="complete",
-        quality_reason=None,
-        evidence_ids=("00000000-0000-0000-0000-000000000001",),
-    )
-    fallback = DeterministicFallback(claims=(claim,))
-    assert fallback.claims[0].value == {"strategy_id": "oil_grab"}
-    assert not hasattr(fallback, "_sa_instance_state")
+    with pytest.raises(TypeError, match="authority"):
+        FallbackClaim(
+            claim_id="opening",
+            kind="rule_candidate",
+            value={"strategy_id": "oil_grab"},
+            quality="complete",
+            quality_reason=None,
+            evidence_ids=("00000000-0000-0000-0000-000000000001",),
+        )
+    assert not hasattr(DeterministicFallback, "_sa_instance_state")
     assert not hasattr(AnalysisRequest, "database_id")
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        fallback.claims = ()  # type: ignore[misc]
     with pytest.raises(ValueError, match="canonical UUID"):
         AnalysisRequest("not-a-uuid", None, object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="canonical UUID"):
@@ -124,6 +144,36 @@ async def test_httpx_transport_rejects_config_mismatch_before_dispatch() -> None
     assert calls == 0
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:11434",
+        "http://10.0.0.1:11434",
+        "https://127.0.0.1:11434",
+        "http://127.0.0.1:11434/path",
+    ],
+)
+async def test_exported_httpx_config_and_adapter_independently_reject_nonliteral_loopback(
+    endpoint: str,
+) -> None:
+    with pytest.raises(ValueError, match="literal loopback"):
+        OllamaClientConfig(endpoint)
+    valid = OllamaClientConfig("http://127.0.0.1:11434")
+    forged = object.__new__(OllamaClientConfig)
+    object.__setattr__(forged, "endpoint", endpoint)
+    object.__setattr__(forged, "timeout", valid.timeout)
+    object.__setattr__(forged, "trust_env", False)
+    object.__setattr__(forged, "follow_redirects", False)
+    constructed: HttpxOllamaTransport | None = None
+    try:
+        with pytest.raises(ValueError, match="literal loopback"):
+            constructed = HttpxOllamaTransport(forged)
+    finally:
+        if constructed is not None:
+            await constructed.aclose()
+
+
 def _uuid(value: int) -> str:
     return str(UUID(int=value))
 
@@ -149,6 +199,42 @@ def _valid_response(evidence_id: str) -> dict[str, object]:
         "vulnerabilities": [],
         "uncertainty_notes": [],
     }
+
+
+def _resolved_cache_identity(request: AnalysisRequest, model_digest: str) -> tuple[str, str]:
+    settings_document = {
+        "endpoint_policy": "loopback-http-literal-v1",
+        "generation": {"seed": 0, "stream": False, "temperature": 0},
+    }
+    def canonical(value: object) -> bytes:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    settings_digest = hashlib.sha256(canonical(settings_document)).hexdigest()
+    cache_document = {
+        "cache_schema": "ollama-analysis-cache-v1",
+        "provider": "ollama",
+        "endpoint_policy": "loopback-http-literal-v1",
+        "model_name": "qwen3.6:27b",
+        "model_digest": model_digest,
+        "prompt": {
+            "version": "strategy-report-v1",
+            "digest": "c2603f4f4cff1b3563801d83a6c2e567700eba4a86fe3af83524bcb98d6693d7",
+        },
+        "response_schema": {
+            "version": "strategy-report-response-v1",
+            "digest": "a758faf24d931094b18ade9cf37c49bbe032686f7499180872f1d7bd7669b76e",
+        },
+        "generation": settings_document["generation"],
+        "evidence_bundle_digest": request.evidence_bundle.digest,
+        "replay_player_public_id": request.replay_player_public_id,
+        "settings_digest": settings_digest,
+    }
+    return settings_digest, hashlib.sha256(canonical(cache_document)).hexdigest()
 
 
 def _seed_request(tmp_path: Path):
@@ -379,6 +465,85 @@ async def test_only_exact_succeeded_cache_is_reused_without_duplicate_graph(tmp_
 
 
 @pytest.mark.anyio
+async def test_nullable_player_public_identity_is_part_of_cache_and_current_request_binding(tmp_path: Path) -> None:
+    settings, engine, factory, first_request, now = _seed_request(tmp_path)
+    second_player_public_id = _uuid(126)
+    with factory() as session:
+        replay = session.scalar(select(Replay))
+        parser = session.scalar(select(ParserRun))
+        assert replay is not None and parser is not None
+        session.add(
+            ReplayPlayer(
+                public_id=second_player_public_id,
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                slot_index=1,
+                slot_kind="human",
+                original_name="Second",
+                normalized_name="second",
+                player_index=1,
+                observed_json={},
+            )
+        )
+        session.commit()
+    second_request = AnalysisRequest(
+        first_request.replay_public_id,
+        second_player_public_id,
+        first_request.evidence_bundle,
+    )
+    response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
+    paths: list[str] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        paths.append(http_request.url.path)
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": response_bytes.decode()},
+                "done": True,
+            },
+        )
+
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    run_ids = iter((_uuid(127), _uuid(128)))
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: next(run_ids),
+        clock=lambda: now,
+    )
+    try:
+        first = await service.analyze(first_request, None)
+        second = await service.analyze(second_request, None)
+    finally:
+        await transport.aclose()
+    assert (first.cache_hit, second.cache_hit) == (False, False)
+    assert first.run_id != second.run_id
+    assert paths == ["/api/tags", "/api/chat", "/api/tags", "/api/chat"]
+    with factory() as session:
+        runs = tuple(session.scalars(select(AnalysisRun).where(AnalysisRun.status == "succeeded")).all())
+        assessments = tuple(
+            session.scalars(select(StrategyAssessment).order_by(StrategyAssessment.analysis_run_id)).all()
+        )
+        assert len(runs) == 2
+        assert len({run.cache_key for run in runs}) == 2
+        player_by_run = {run.id: run.replay_player_id for run in runs}
+        assert all(row.replay_player_id == player_by_run[row.analysis_run_id] for row in assessments)
+    engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_concurrent_cache_race_has_one_complete_winner_and_exact_reuse(tmp_path: Path) -> None:
     settings, engine, factory, request, now = _seed_request(tmp_path)
     response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
@@ -499,6 +664,119 @@ async def test_corrupt_cache_is_never_reused_or_regenerated_under_same_identity(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "success_diagnostics",
+        "success_error",
+        "success_completion",
+        "inferred_parser",
+        "inferred_telemetry",
+        "assessment_nullable",
+        "citation_tier",
+        "citation_source_kind",
+        "citation_source_key",
+    ],
+)
+async def test_succeeded_cache_revalidates_exact_terminal_graph_and_current_citation_contract(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
+    paths: list[str] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        paths.append(http_request.url.path)
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": response_bytes.decode()},
+                "done": True,
+            },
+        )
+
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    run_ids = iter((_uuid(126), _uuid(127)))
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: next(run_ids),
+        clock=lambda: now,
+    )
+    try:
+        first = await service.analyze(request, None)
+        with factory() as session:
+            for trigger_name in _LLM_IMMUTABILITY_TRIGGERS:
+                session.execute(text(f"DROP TRIGGER {trigger_name}"))
+            run = session.scalar(select(AnalysisRun).where(AnalysisRun.status == "succeeded"))
+            inferred = session.scalar(select(EvidenceItem).where(EvidenceItem.tier == "inferred"))
+            assessment = session.scalar(select(StrategyAssessment).where(StrategyAssessment.method == "llm"))
+            citation = session.scalar(select(EvidenceItem).where(EvidenceItem.public_id == _uuid(102)))
+            parser = session.scalar(select(ParserRun))
+            assert run is not None and inferred is not None and assessment is not None
+            assert citation is not None and parser is not None
+            if tamper == "success_diagnostics":
+                run.diagnostics_json = {"code": "poison"}
+            elif tamper == "success_error":
+                run.error_json = {"code": "poison"}
+            elif tamper == "success_completion":
+                run.completed_at = None
+            elif tamper == "inferred_parser":
+                inferred.parser_run_id = parser.id
+            elif tamper == "inferred_telemetry":
+                telemetry = TelemetryRun(
+                    run_id=_uuid(128),
+                    replay_id=run.replay_id,
+                    schema_version=2,
+                    engine_build="test-build",
+                    engine_executable_sha256=None,
+                    settings_json={},
+                    status="running",
+                    runner_status="running",
+                    diagnostics_json={},
+                    started_at=now,
+                )
+                session.add(telemetry)
+                session.flush()
+                inferred.telemetry_run_id = telemetry.id
+            elif tamper == "assessment_nullable":
+                assessment.taxonomy_version = "poison"
+            elif tamper == "citation_tier":
+                citation.tier = "inferred"
+            elif tamper == "citation_source_kind":
+                citation.source_kind = "parser"
+            else:
+                citation.source_key = "event:poison"
+            session.commit()
+        second = await service.analyze(request, None)
+    finally:
+        await transport.aclose()
+    assert (first.llm_status, first.cache_hit) == ("succeeded", False)
+    assert (second.llm_status, second.code, second.cache_hit) == (
+        "failed",
+        "cache_validation_failed",
+        False,
+    )
+    assert paths == ["/api/tags", "/api/chat", "/api/tags"]
+    with factory() as session:
+        assert session.query(StrategyAssessment).count() == 1
+        assert session.query(AnalysisRun).filter(AnalysisRun.status == "succeeded").count() == 1
+    engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_graph_failure_rolls_back_children_and_persists_typed_failed_attempt(tmp_path: Path) -> None:
     settings, engine, factory, request, now = _seed_request(tmp_path)
     response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
@@ -546,6 +824,236 @@ async def test_graph_failure_rolls_back_children_and_persists_typed_failed_attem
         assert session.query(StrategyAssessment).count() == 0
         assert session.query(EvidenceItem).filter(EvidenceItem.tier == "inferred").count() == 0
         assert session.query(ManagedAsset).count() == 0
+    assert not [path for path in (settings.cache_directory / "llm-responses").rglob("*") if path.is_file()]
+    engine.dispose()
+
+
+def test_digest_serialization_orders_creator_rollback_before_cross_connection_reuse(tmp_path: Path) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
+    base_store = ContentAddressedStore(settings.cache_directory / "llm-responses")
+    creator_stored = threading.Event()
+    release_creator = threading.Event()
+    reuser_stored = threading.Event()
+    release_reuser = threading.Event()
+    outcomes: dict[str, object] = {}
+
+    class BlockingStore:
+        def __init__(self, role: str) -> None:
+            self.root = base_store.root
+            self._role = role
+
+        def store_bytes(self, data: bytes, *, expected_sha256: str | None = None):
+            stored = base_store.store_bytes(data, expected_sha256=expected_sha256)
+            if self._role == "creator":
+                creator_stored.set()
+                assert release_creator.wait(10)
+            else:
+                reuser_stored.set()
+                assert release_reuser.wait(10)
+            return stored
+
+        def verify(self, sha256: str):
+            return base_store.verify(sha256)
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": response_bytes.decode()},
+                "done": True,
+            },
+        )
+
+    class RollingBackService(OllamaAnalysisService):
+        def _after_graph_insert(self, session: object) -> None:
+            del session
+            raise RuntimeError("creator rollback")
+
+    def run(role: str, service_type: type[OllamaAnalysisService], run_id: str) -> None:
+        async def execute() -> None:
+            transport = HttpxOllamaTransport(
+                OllamaClientConfig(settings.ollama_url),
+                transport=httpx.MockTransport(handler),
+            )
+            service = service_type(
+                factory,
+                settings=settings,
+                store=BlockingStore(role),  # type: ignore[arg-type]
+                transport=transport,
+                run_id_factory=lambda: run_id,
+                clock=lambda: now,
+            )
+            try:
+                outcomes[role] = await service.analyze(request, None)
+            finally:
+                await transport.aclose()
+
+        asyncio.run(execute())
+
+    creator = threading.Thread(target=run, args=("creator", RollingBackService, _uuid(132)), daemon=True)
+    creator.start()
+    assert creator_stored.wait(10)
+    reuser = threading.Thread(target=run, args=("reuser", OllamaAnalysisService, _uuid(133)), daemon=True)
+    reuser.start()
+    reused_before_creator_finished = reuser_stored.wait(0.5)
+    release_creator.set()
+    creator.join(10)
+    assert not creator.is_alive()
+    assert reuser_stored.wait(10)
+    release_reuser.set()
+    reuser.join(10)
+    assert not reuser.is_alive()
+    assert reused_before_creator_finished is False
+    creator_outcome = outcomes["creator"]
+    reuser_outcome = outcomes["reuser"]
+    assert isinstance(creator_outcome, service_module.AnalysisOutcome)
+    assert isinstance(reuser_outcome, service_module.AnalysisOutcome)
+    assert (creator_outcome.llm_status, creator_outcome.code) == ("failed", "persistence_failed")
+    assert (reuser_outcome.llm_status, reuser_outcome.code) == ("succeeded", "ok")
+    with factory() as session:
+        asset = session.scalar(select(ManagedAsset))
+        assert asset is not None
+        assert base_store.verify(asset.sha256).path.is_file()
+        assert session.query(AnalysisRun).filter(AnalysisRun.status == "succeeded").count() == 1
+    engine.dispose()
+
+
+def test_digest_lock_excludes_a_separate_python_process(tmp_path: Path) -> None:
+    lock_path = tmp_path / "locks" / f"{'a' * 64}.lock"
+    marker = tmp_path / "child-acquired"
+    script = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from generals_replay_analyzer.llm.service import _exclusive_file_lock\n"
+        "with _exclusive_file_lock(Path(sys.argv[1])):\n"
+        "    Path(sys.argv[2]).write_text('acquired', encoding='utf-8')\n"
+    )
+    with service_module._exclusive_file_lock(lock_path):
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(lock_path), str(marker)],
+            cwd=tmp_path,
+        )
+        assert threading.Event().wait(0.3) is False
+        assert process.poll() is None
+        assert not marker.exists()
+    assert process.wait(timeout=10) == 0
+    assert marker.read_text(encoding="utf-8") == "acquired"
+
+
+def test_digest_lock_maps_filesystem_acquisition_failure_to_sanitized_storage_error(tmp_path: Path) -> None:
+    occupied_parent = tmp_path / "not-a-directory"
+    occupied_parent.write_bytes(b"occupied")
+    with (
+        pytest.raises(ContentStorageError, match="lock is unavailable"),
+        service_module._exclusive_file_lock(occupied_parent / "digest.lock"),
+    ):
+        raise AssertionError("unreachable")
+
+
+def test_digest_lock_does_not_relabel_body_io_failures(tmp_path: Path) -> None:
+    with (
+        pytest.raises(OSError, match="body failure"),
+        service_module._exclusive_file_lock(tmp_path / "digest.lock"),
+    ):
+        raise OSError("body failure")
+
+
+def test_service_owned_digest_boundaries_reject_invalid_or_unowned_paths(tmp_path: Path) -> None:
+    settings, engine, factory, _request, _now = _seed_request(tmp_path)
+    store = ContentAddressedStore(settings.cache_directory / "llm-responses")
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=store,
+        transport=object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ContentStorageError, match="digest is invalid"), service._digest_guard("invalid"):
+        raise AssertionError("unreachable")
+
+    digest = "a" * 64
+    outside = tmp_path / "outside"
+    mismatched = store.root / "wrong" / digest
+    service._cleanup_unregistered_content(StoredContent(digest, outside, 0, False))
+    service._cleanup_unregistered_content(StoredContent(digest, outside, 0, True))
+    service._cleanup_unregistered_content(StoredContent(digest, mismatched, 0, True))
+    assert not outside.exists()
+    assert not mismatched.exists()
+    assert is_literal_loopback_endpoint(123) is False
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_analyze_rejects_non_request_before_dispatch(tmp_path: Path) -> None:
+    settings, engine, factory, _request, _now = _seed_request(tmp_path)
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(TypeError, match="exact AnalysisRequest"):
+        await service.analyze(object(), None)  # type: ignore[arg-type]
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_cleanup_query_failure_is_nonthrowing_and_leaves_created_content_fail_safe(tmp_path: Path) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    response_bytes = json.dumps(_valid_response(_uuid(102)), separators=(",", ":")).encode()
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": response_bytes.decode()},
+                "done": True,
+            },
+        )
+
+    class QueryFailingCleanupService(OllamaAnalysisService):
+        def _after_graph_insert(self, session: object) -> None:
+            del session
+            original_factory = self._session_factory
+            calls = 0
+
+            def fail_once():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise SQLAlchemyError("injected registration query failure")
+                return original_factory()
+
+            self._session_factory = fail_once  # type: ignore[assignment]
+            raise RuntimeError("forced rollback")
+
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    service = QueryFailingCleanupService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: _uuid(134),
+        clock=lambda: now,
+    )
+    try:
+        outcome = await service.analyze(request, None)
+    finally:
+        await transport.aclose()
+    assert (outcome.llm_status, outcome.code) == ("failed", "persistence_failed")
+    with factory() as session:
+        assert session.query(ManagedAsset).count() == 0
+        assert session.scalar(select(AnalysisRun)).status == "failed"  # type: ignore[union-attr]
+    assert len([path for path in (settings.cache_directory / "llm-responses").rglob("*") if path.is_file()]) == 1
     engine.dispose()
 
 
@@ -665,6 +1173,106 @@ async def test_validation_failure_gets_one_bounded_repair_then_persists_invalid(
 
 
 @pytest.mark.anyio
+async def test_terminal_raw_collision_fails_closed_without_leaking_exception_or_rows(tmp_path: Path) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    raw_responses = iter((b"{", b'{"schema_version":"wrong"}'))
+    terminal_raw = b'{"schema_version":"wrong"}'
+    digest = hashlib.sha256(terminal_raw).hexdigest()
+    collision = settings.cache_directory / "llm-responses" / digest[:2] / digest
+    collision.parent.mkdir(parents=True)
+    collision.write_bytes(b"poison")
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]})
+        raw = next(raw_responses)
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": raw.decode()},
+                "done": True,
+            },
+        )
+
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: _uuid(141),
+        clock=lambda: now,
+    )
+    try:
+        outcome = await service.analyze(request, None)
+    finally:
+        await transport.aclose()
+    assert (outcome.llm_status, outcome.code) == ("failed", "raw_asset_collision")
+    with factory() as session:
+        run = session.scalar(select(AnalysisRun))
+        assert run is not None and run.status == "failed"
+        assert run.raw_response_asset_id is None
+        assert run.diagnostics_json["code"] == "raw_asset_collision"
+        assert session.query(ManagedAsset).count() == 0
+        assert session.query(StrategyAssessment).count() == 0
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_terminal_transaction_failure_reconciles_new_cas_and_persists_sanitized_failure(tmp_path: Path) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    raw_responses = iter(("{", "{}"))
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": settings.ollama_model,
+                "message": {"role": "assistant", "content": next(raw_responses)},
+                "done": True,
+            },
+        )
+
+    class FailingTerminalService(OllamaAnalysisService):
+        def _after_terminal_asset(self, session: object) -> None:
+            del session
+            raise RuntimeError("sensitive database path")
+
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    service = FailingTerminalService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: _uuid(142),
+        clock=lambda: now,
+    )
+    try:
+        outcome = await service.analyze(request, None)
+    finally:
+        await transport.aclose()
+    assert (outcome.llm_status, outcome.code) == ("failed", "terminal_persistence_failed")
+    with factory() as session:
+        run = session.scalar(select(AnalysisRun))
+        assert run is not None and run.status == "failed"
+        assert run.raw_response_asset_id is None
+        assert run.error_json == {"code": "terminal_persistence_failed"}
+        assert "path" not in json.dumps(run.diagnostics_json)
+        assert session.query(ManagedAsset).count() == 0
+    assert not [path for path in (settings.cache_directory / "llm-responses").rglob("*") if path.is_file()]
+    engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_repair_transport_failure_has_no_third_call_and_retains_first_raw_attempt(tmp_path: Path) -> None:
     settings, engine, factory, request, now = _seed_request(tmp_path)
     paths: list[str] = []
@@ -752,14 +1360,72 @@ async def test_non2xx_provider_failure_has_no_retry_and_returns_unchanged_fallba
     assert (outcome.llm_status, outcome.code) == ("failed", "http_status_error")
     assert paths == ["/api/tags", "/api/chat"]
     assert outcome.fallback.claims[0].evidence_ids == request.evidence_bundle.claims[0].evidence_ids
+    expected_settings, expected_cache = _resolved_cache_identity(request, "d" * 64)
     with factory() as session:
         run = session.scalar(select(AnalysisRun).where(AnalysisRun.run_id == _uuid(150)))
         assert run is not None and run.status == "failed"
         assert run.diagnostics_json["code"] == "http_status_error"
         assert run.diagnostics_json["model_identity_status"] == "resolved"
         assert run.model_digest == "d" * 64
+        assert (run.settings_digest, run.cache_key) == (expected_settings, expected_cache)
         assert run.raw_response_asset_id is None
         assert session.query(StrategyAssessment).count() == 0
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_repair_cancellation_persists_full_resolved_cache_context(tmp_path: Path) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    entered_repair = asyncio.Event()
+    chat_count = 0
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal chat_count
+        if http_request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": settings.ollama_model, "digest": "d" * 64}]},
+            )
+        chat_count += 1
+        if chat_count == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "model": settings.ollama_model,
+                    "message": {"role": "assistant", "content": "{"},
+                    "done": True,
+                },
+            )
+        entered_repair.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    cancellation = asyncio.Event()
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: _uuid(155),
+        clock=lambda: now,
+    )
+    task = asyncio.create_task(service.analyze(request, cancellation))
+    await entered_repair.wait()
+    cancellation.set()
+    outcome = await task
+    await transport.aclose()
+    assert (outcome.llm_status, outcome.code) == ("unavailable", "cancelled")
+    expected_settings, expected_cache = _resolved_cache_identity(request, "d" * 64)
+    with factory() as session:
+        run = session.scalar(select(AnalysisRun))
+        assert run is not None
+        assert run.model_digest == "d" * 64
+        assert (run.settings_digest, run.cache_key) == (expected_settings, expected_cache)
+        assert run.diagnostics_json["model_identity_status"] == "resolved"
     engine.dispose()
 
 
@@ -810,6 +1476,16 @@ async def test_disabled_and_pre_cancelled_requests_send_no_http_and_persist_unav
 
     assert (outcome.llm_status, outcome.code) == ("unavailable", expected_code)
     assert calls == 0
+    value = outcome.fallback.claims[0].value
+    assert isinstance(value, service_module.FrozenJSONMapping)
+    with pytest.raises(TypeError):
+        value["strategy_id"] = "poison"  # type: ignore[index]
+    nested = value["details"]
+    assert isinstance(nested, service_module.FrozenJSONMapping)
+    with pytest.raises(TypeError):
+        nested["poison"] = True  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        outcome.fallback.claims = ()  # type: ignore[misc]
     with factory() as session:
         run = session.scalar(select(AnalysisRun))
         assert run is not None and run.status == "unavailable"
@@ -907,7 +1583,7 @@ async def test_in_flight_cancellation_cancels_http_and_persists_closed_diagnosti
 
 
 @pytest.mark.anyio
-async def test_bundle_oversize_preflight_sends_no_http_and_retains_fallback(tmp_path: Path) -> None:
+async def test_bundle_oversize_preflight_sends_no_http_before_materializing_fallback(tmp_path: Path) -> None:
     settings, engine, factory, base_request, now = _seed_request(tmp_path)
     valid = base_request.evidence_bundle
     forged = object.__new__(EvidenceBundle)
@@ -947,13 +1623,90 @@ async def test_bundle_oversize_preflight_sends_no_http_and_retains_fallback(tmp_
     finally:
         await transport.aclose()
     assert (outcome.llm_status, outcome.code) == ("unavailable", "evidence_bundle_oversize")
-    assert len(outcome.fallback.claims) == 257
+    assert len(outcome.fallback.claims) == len(forged.claims) == 257
+    for source, returned in zip(forged.claims, outcome.fallback.claims, strict=True):
+        source_document = {
+            "claim_id": source.claim_id,
+            "evidence_ids": list(source.evidence_ids),
+            "kind": source.kind,
+            "quality": source.quality,
+            "quality_reason": source.quality_reason,
+            "value": service_module.thaw_canonical(source.value),
+        }
+        returned_document = {
+            "claim_id": returned.claim_id,
+            "evidence_ids": list(returned.evidence_ids),
+            "kind": returned.kind,
+            "quality": returned.quality,
+            "quality_reason": returned.quality_reason,
+            "value": (
+                returned.value.as_plain()
+                if isinstance(returned.value, service_module.FrozenJSONMapping)
+                else returned.value
+            ),
+        }
+        assert json.dumps(returned_document, sort_keys=True, separators=(",", ":")).encode() == json.dumps(
+            source_document,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     assert calls == 0
     with factory() as session:
         run = session.scalar(select(AnalysisRun))
         assert run is not None and run.status == "unavailable"
         assert run.diagnostics_json["code"] == "evidence_bundle_oversize"
         assert session.query(StrategyAssessment).count() == 0
+    engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("loader_name", "expected_code"),
+    [("load_prompt", "resource_unavailable"), ("load_response_schema", "resource_digest_mismatch")],
+)
+async def test_missing_or_corrupt_pinned_resource_persists_sanitized_unavailable_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    loader_name: str,
+    expected_code: str,
+) -> None:
+    settings, engine, factory, request, now = _seed_request(tmp_path)
+    calls = 0
+
+    def fail_resource() -> object:
+        raise service_module.ResponseValidationError(expected_code)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    monkeypatch.setattr(service_module, loader_name, fail_resource)
+    transport = HttpxOllamaTransport(
+        OllamaClientConfig(settings.ollama_url),
+        transport=httpx.MockTransport(handler),
+    )
+    service = OllamaAnalysisService(
+        factory,
+        settings=settings,
+        store=ContentAddressedStore(settings.cache_directory / "llm-responses"),
+        transport=transport,
+        run_id_factory=lambda: _uuid(181),
+        clock=lambda: now,
+    )
+    try:
+        outcome = await service.analyze(request, None)
+    finally:
+        await transport.aclose()
+    assert (outcome.llm_status, outcome.code, calls) == ("unavailable", expected_code, 0)
+    assert len(outcome.fallback.claims) == 1
+    with factory() as session:
+        run = session.scalar(select(AnalysisRun))
+        assert run is not None and run.status == "unavailable"
+        assert run.prompt_digest == service_module.PROMPT_SHA256
+        assert run.response_schema_digest == service_module.RESPONSE_SCHEMA_SHA256
+        assert run.error_json == {"code": expected_code}
+        assert expected_code in json.dumps(run.diagnostics_json)
     engine.dispose()
 
 

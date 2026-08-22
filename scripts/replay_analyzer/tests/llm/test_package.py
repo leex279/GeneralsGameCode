@@ -45,6 +45,14 @@ def test_prompt_and_schema_have_exact_wheel_mappings_and_ollama_marker() -> None
         force_include["src/generals_replay_analyzer/data/strategy-report-response-v1.schema.json"]
         == "generals_replay_analyzer/data/strategy-report-response-v1.schema.json"
     )
+    assert (
+        force_include["src/generals_replay_analyzer/data/strategy-taxonomy-v1.json"]
+        == "generals_replay_analyzer/data/strategy-taxonomy-v1.json"
+    )
+    assert (
+        force_include["src/generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json"]
+        == "generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json"
+    )
     assert any(marker.startswith("ollama:") for marker in configuration["tool"]["pytest"]["ini_options"]["markers"])
 
 

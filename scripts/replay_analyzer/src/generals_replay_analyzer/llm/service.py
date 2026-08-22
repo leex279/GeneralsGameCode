@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal, TypeAlias, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -45,8 +48,13 @@ from generals_replay_analyzer.llm.provider import (
     StructuredRequest,
     TransportHeaders,
     TransportResponse,
+    is_literal_loopback_endpoint,
 )
 from generals_replay_analyzer.llm.schema import (
+    PROMPT_SHA256,
+    PROMPT_VERSION,
+    RESPONSE_SCHEMA_SHA256,
+    RESPONSE_SCHEMA_VERSION,
     FrozenJSONMapping,
     PromptResource,
     ResponseSchemaResource,
@@ -63,6 +71,11 @@ from generals_replay_analyzer.storage import (
     StoredContent,
 )
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 FallbackValue: TypeAlias = None | bool | int | float | str | tuple[object, ...] | FrozenJSONMapping
 LLMStatus: TypeAlias = Literal["succeeded", "failed", "invalid", "unavailable"]
 
@@ -71,6 +84,7 @@ _ENDPOINT_POLICY = "loopback-http-literal-v1"
 _RAW_ASSET_KIND = "analysis_raw_response"
 _RAW_MEDIA_TYPE = "application/json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_FALLBACK_AUTHORITY = object()
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -102,22 +116,79 @@ def _uuid(identity: str) -> str:
     return str(uuid5(NAMESPACE_URL, identity))
 
 
-@dataclass(frozen=True)
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+    except OSError:
+        raise ContentStorageError("analysis response lock is unavailable") from None
+    try:
+        if os.name == "nt":
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+    except OSError:
+        try:
+            handle.close()
+        except OSError:
+            pass
+        raise ContentStorageError("analysis response lock is unavailable") from None
+    try:
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        except OSError:
+            pass
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+@dataclass(frozen=True, init=False)
 class FallbackClaim:
     """One immutable deterministic claim returned unchanged on LLM failure."""
 
     claim_id: str
     kind: EvidenceKind
-    value: object
+    value: FallbackValue
     quality: EvidenceQuality
     quality_reason: str | None
     evidence_ids: tuple[str, ...]
 
-    def __post_init__(self) -> None:
-        if isinstance(self.value, dict):
-            object.__setattr__(self, "value", FrozenJSONMapping(self.value))
-        if type(self.evidence_ids) is not tuple:
-            raise ValueError("fallback evidence IDs must be a tuple")
+    def __init__(
+        self,
+        claim_id: str,
+        kind: EvidenceKind,
+        value: object,
+        quality: EvidenceQuality,
+        quality_reason: str | None,
+        evidence_ids: tuple[str, ...],
+        *,
+        _authority: object,
+    ) -> None:
+        if _authority is not _FALLBACK_AUTHORITY:
+            raise TypeError("fallback claims require service authority")
+        if type(evidence_ids) is not tuple:
+            raise TypeError("fallback evidence IDs must be a tuple")
+        frozen = FrozenJSONMapping({"value": value})["value"]
+        object.__setattr__(self, "claim_id", claim_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "value", cast(FallbackValue, frozen))
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "quality_reason", quality_reason)
+        object.__setattr__(self, "evidence_ids", evidence_ids)
 
 
 @dataclass(frozen=True)
@@ -174,10 +245,24 @@ def _fallback(bundle: EvidenceBundle) -> DeterministicFallback:
                 claim.quality,
                 claim.quality_reason,
                 claim.evidence_ids,
+                _authority=_FALLBACK_AUTHORITY,
             )
             for claim in bundle.claims
         )
     )
+
+
+def _citation_contract(citations: dict[str, EvidenceItem]) -> list[dict[str, object]]:
+    return [
+        {
+            "public_id": public_id,
+            "schema_version": citation.schema_version,
+            "source_key": citation.source_key,
+            "source_kind": citation.source_kind,
+            "tier": citation.tier,
+        }
+        for public_id, citation in sorted(citations.items())
+    ]
 
 
 def _settings_document() -> dict[str, object]:
@@ -193,6 +278,28 @@ def _cache_identity(
     prompt: PromptResource,
     schema: ResponseSchemaResource,
     bundle: EvidenceBundle,
+    replay_player_public_id: str | None,
+) -> tuple[str, str]:
+    return _cache_identity_components(
+        model=model,
+        prompt_version=prompt.version,
+        prompt_digest=prompt.digest,
+        response_schema_version=schema.version,
+        response_schema_digest=schema.digest,
+        bundle=bundle,
+        replay_player_public_id=replay_player_public_id,
+    )
+
+
+def _cache_identity_components(
+    *,
+    model: ModelIdentity,
+    prompt_version: str,
+    prompt_digest: str,
+    response_schema_version: str,
+    response_schema_digest: str,
+    bundle: EvidenceBundle,
+    replay_player_public_id: str | None,
 ) -> tuple[str, str]:
     settings = _settings_document()
     settings_digest = _digest(settings)
@@ -202,10 +309,11 @@ def _cache_identity(
         "endpoint_policy": _ENDPOINT_POLICY,
         "model_name": model.name,
         "model_digest": model.digest,
-        "prompt": {"version": prompt.version, "digest": prompt.digest},
-        "response_schema": {"version": schema.version, "digest": schema.digest},
+        "prompt": {"version": prompt_version, "digest": prompt_digest},
+        "response_schema": {"version": response_schema_version, "digest": response_schema_digest},
         "generation": settings["generation"],
         "evidence_bundle_digest": bundle.digest,
+        "replay_player_public_id": replay_player_public_id,
         "settings_digest": settings_digest,
     }
     return settings_digest, _digest(cache)
@@ -239,6 +347,8 @@ class HttpxOllamaTransport:
     ) -> None:
         if type(client_config) is not OllamaClientConfig:
             raise ValueError("HTTPX transport requires exact Ollama client config")
+        if not is_literal_loopback_endpoint(client_config.endpoint):
+            raise ValueError("Ollama endpoint must be literal loopback HTTP with an explicit port")
         self.client_config = client_config
         timeout = client_config.timeout
         self._client = httpx.AsyncClient(
@@ -334,12 +444,9 @@ class OllamaAnalysisService:
     ) -> AnalysisOutcome:
         if type(request) is not AnalysisRequest:
             raise TypeError("request must be an exact AnalysisRequest")
-        fallback = _fallback(request.evidence_bundle)
-        prompt = load_prompt()
-        response_schema = load_response_schema()
         run_id = self._run_id_factory()
         _public_uuid(run_id, "run_id")
-        self._create_run(request, run_id, prompt, response_schema)
+        fallback = DeterministicFallback(())
         try:
             EvidenceBundle(
                 schema_version=request.evidence_bundle.schema_version,
@@ -351,11 +458,47 @@ class OllamaAnalysisService:
                 digest=request.evidence_bundle.digest,
             )
         except EvidenceBundleError as error:
+            self._create_run(
+                request,
+                run_id,
+                prompt_version=PROMPT_VERSION,
+                prompt_digest=PROMPT_SHA256,
+                response_schema_version=RESPONSE_SCHEMA_VERSION,
+                response_schema_digest=RESPONSE_SCHEMA_SHA256,
+            )
             status: Literal["invalid", "unavailable"] = (
                 "unavailable" if error.code == "evidence_bundle_oversize" else "invalid"
             )
+            if error.code == "evidence_bundle_oversize":
+                try:
+                    fallback = _fallback(request.evidence_bundle)
+                except (AttributeError, TypeError, ValueError):
+                    fallback = DeterministicFallback(())
             self._record_status(run_id, status=status, code=error.code)
             return AnalysisOutcome(run_id, status, error.code, False, fallback)
+        fallback = _fallback(request.evidence_bundle)
+        try:
+            prompt = load_prompt()
+            response_schema = load_response_schema()
+        except ResponseValidationError as error:
+            self._create_run(
+                request,
+                run_id,
+                prompt_version=PROMPT_VERSION,
+                prompt_digest=PROMPT_SHA256,
+                response_schema_version=RESPONSE_SCHEMA_VERSION,
+                response_schema_digest=RESPONSE_SCHEMA_SHA256,
+            )
+            self._record_status(run_id, status="unavailable", code=error.code)
+            return AnalysisOutcome(run_id, "unavailable", error.code, False, fallback)
+        self._create_run(
+            request,
+            run_id,
+            prompt_version=prompt.version,
+            prompt_digest=prompt.digest,
+            response_schema_version=response_schema.version,
+            response_schema_digest=response_schema.digest,
+        )
         if not request.allow_ollama:
             self._record_status(run_id, status="unavailable", code="llm_disabled")
             return AnalysisOutcome(run_id, "unavailable", "llm_disabled", False, fallback)
@@ -363,6 +506,9 @@ class OllamaAnalysisService:
             self._record_status(run_id, status="unavailable", code="cancelled")
             return AnalysisOutcome(run_id, "unavailable", "cancelled", False, fallback)
         provider: OllamaProvider | None = None
+        resolved_model: ModelIdentity | None = None
+        resolved_settings_digest: str | None = None
+        resolved_cache_key: str | None = None
         try:
             provider = OllamaProvider(
                 self._settings.ollama_url,
@@ -375,7 +521,11 @@ class OllamaAnalysisService:
                 prompt=prompt,
                 schema=response_schema,
                 bundle=request.evidence_bundle,
+                replay_player_public_id=request.replay_player_public_id,
             )
+            resolved_model = model
+            resolved_settings_digest = settings_digest
+            resolved_cache_key = cache_key
             try:
                 cached = self._reuse_cached_success(
                     request=request,
@@ -418,7 +568,14 @@ class OllamaAnalysisService:
             )
             result = await provider.generate_structured(structured_request, cancellation)
         except asyncio.CancelledError:
-            self._record_status(run_id, status="unavailable", code="cancelled")
+            self._record_status(
+                run_id,
+                status="unavailable",
+                code="cancelled",
+                model=resolved_model,
+                settings_digest=resolved_settings_digest,
+                cache_key=resolved_cache_key,
+            )
             return AnalysisOutcome(run_id, "unavailable", "cancelled", False, fallback)
         except ProviderError as error:
             provider_status = self._provider_failure_status(error.code)
@@ -426,7 +583,9 @@ class OllamaAnalysisService:
                 run_id,
                 status=provider_status,
                 code=error.code,
-                model=None if provider is None else provider.resolved_model,
+                model=resolved_model if provider is not None else None,
+                settings_digest=resolved_settings_digest,
+                cache_key=resolved_cache_key,
             )
             return AnalysisOutcome(run_id, provider_status, error.code, False, fallback)
         attempts: list[dict[str, object]] = []
@@ -458,11 +617,13 @@ class OllamaAnalysisService:
                     status="unavailable",
                     code="cancelled",
                     model=result.model,
+                    settings_digest=resolved_settings_digest,
+                    cache_key=resolved_cache_key,
                 )
                 return AnalysisOutcome(run_id, "unavailable", "cancelled", False, fallback)
             except ProviderError as error:
                 provider_status = self._provider_failure_status(error.code)
-                self._record_terminal_raw(
+                terminal_error = self._record_terminal_raw(
                     run_id=run_id,
                     status=provider_status,
                     code=error.code,
@@ -470,9 +631,12 @@ class OllamaAnalysisService:
                     prompt=prompt,
                     response_schema=response_schema,
                     bundle=request.evidence_bundle,
+                    replay_player_public_id=request.replay_player_public_id,
                     raw=result.response_bytes,
                     attempts=attempts,
                 )
+                if terminal_error is not None:
+                    return AnalysisOutcome(run_id, "failed", terminal_error, False, fallback)
                 return AnalysisOutcome(run_id, provider_status, error.code, False, fallback)
             result = repaired
             try:
@@ -486,7 +650,7 @@ class OllamaAnalysisService:
                         "code": second_error.code,
                     }
                 )
-                self._record_terminal_raw(
+                terminal_error = self._record_terminal_raw(
                     run_id=run_id,
                     status="invalid",
                     code="response_validation_failed",
@@ -494,9 +658,12 @@ class OllamaAnalysisService:
                     prompt=prompt,
                     response_schema=response_schema,
                     bundle=request.evidence_bundle,
+                    replay_player_public_id=request.replay_player_public_id,
                     raw=result.response_bytes,
                     attempts=attempts,
                 )
+                if terminal_error is not None:
+                    return AnalysisOutcome(run_id, "failed", terminal_error, False, fallback)
                 return AnalysisOutcome(
                     run_id,
                     "invalid",
@@ -509,12 +676,45 @@ class OllamaAnalysisService:
             prompt=prompt,
             schema=response_schema,
             bundle=request.evidence_bundle,
+            replay_player_public_id=request.replay_player_public_id,
         )
         try:
-            stored = self._store.store_bytes(
-                result.response_bytes,
-                expected_sha256=result.response_digest,
-            )
+            with self._digest_guard(result.response_digest):
+                stored = self._store.store_bytes(
+                    result.response_bytes,
+                    expected_sha256=result.response_digest,
+                )
+                try:
+                    return self._persist_success(
+                        request=request,
+                        run_id=run_id,
+                        model=result.model,
+                        prompt=prompt,
+                        response_schema=response_schema,
+                        settings_digest=settings_digest,
+                        cache_key=cache_key,
+                        stored=stored,
+                        validated=validated,
+                        fallback=fallback,
+                        attempts=attempts,
+                    )
+                except Exception:  # noqa: BLE001 -- persistence failures become closed diagnostics.
+                    self._cleanup_unregistered_content(stored)
+                    self._record_status(
+                        run_id,
+                        status="failed",
+                        code="persistence_failed",
+                        model=result.model,
+                        settings_digest=settings_digest,
+                        cache_key=cache_key,
+                    )
+                    return AnalysisOutcome(
+                        run_id,
+                        "failed",
+                        "persistence_failed",
+                        False,
+                        fallback,
+                    )
         except (ContentCollisionError, ContentStorageError):
             self._record_status(
                 run_id,
@@ -531,38 +731,47 @@ class OllamaAnalysisService:
                 False,
                 fallback,
             )
-        try:
-            return self._persist_success(
+
+    def _reuse_cached_success(
+        self,
+        *,
+        request: AnalysisRequest,
+        run_id: str,
+        model: ModelIdentity,
+        prompt: PromptResource,
+        response_schema: ResponseSchemaResource,
+        settings_digest: str,
+        cache_key: str,
+        fallback: DeterministicFallback,
+    ) -> AnalysisOutcome | None:
+        with self._session_factory() as lookup:
+            winner = lookup.scalar(
+                select(AnalysisRun).where(
+                    AnalysisRun.cache_key == cache_key,
+                    AnalysisRun.status == "succeeded",
+                )
+            )
+            if winner is None:
+                return None
+            if winner.raw_response_asset_id is None:
+                raise ValueError("analysis cache raw asset linkage is absent")
+            asset = lookup.get(ManagedAsset, winner.raw_response_asset_id)
+            if asset is None or not _SHA256.fullmatch(asset.sha256):
+                raise ValueError("analysis cache raw asset identity is invalid")
+            digest = asset.sha256
+        with self._digest_guard(digest):
+            return self._reuse_cached_success_locked(
                 request=request,
                 run_id=run_id,
-                model=result.model,
+                model=model,
                 prompt=prompt,
                 response_schema=response_schema,
                 settings_digest=settings_digest,
                 cache_key=cache_key,
-                stored=stored,
-                validated=validated,
                 fallback=fallback,
-                attempts=attempts,
-            )
-        except Exception:  # noqa: BLE001 -- persistence failures become closed diagnostics.
-            self._record_status(
-                run_id,
-                status="failed",
-                code="persistence_failed",
-                model=result.model,
-                settings_digest=settings_digest,
-                cache_key=cache_key,
-            )
-            return AnalysisOutcome(
-                run_id,
-                "failed",
-                "persistence_failed",
-                False,
-                fallback,
             )
 
-    def _reuse_cached_success(
+    def _reuse_cached_success_locked(
         self,
         *,
         request: AnalysisRequest,
@@ -598,6 +807,7 @@ class OllamaAnalysisService:
                 response_schema,
                 settings_digest,
                 cache_key,
+                current_run=run,
             )
             run.model_name = model.name
             run.model_digest = model.digest
@@ -631,15 +841,21 @@ class OllamaAnalysisService:
         self,
         request: AnalysisRequest,
         run_id: str,
-        prompt: PromptResource,
-        response_schema: ResponseSchemaResource,
+        *,
+        prompt_version: str,
+        prompt_digest: str,
+        response_schema_version: str,
+        response_schema_digest: str,
     ) -> None:
         unresolved = ModelIdentity(self._settings.ollama_model, _unresolved_digest(self._settings.ollama_model))
-        settings_digest, cache_key = _cache_identity(
+        settings_digest, cache_key = _cache_identity_components(
             model=unresolved,
-            prompt=prompt,
-            schema=response_schema,
+            prompt_version=prompt_version,
+            prompt_digest=prompt_digest,
+            response_schema_version=response_schema_version,
+            response_schema_digest=response_schema_digest,
             bundle=request.evidence_bundle,
+            replay_player_public_id=request.replay_player_public_id,
         )
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.public_id == request.replay_public_id))
@@ -664,10 +880,10 @@ class OllamaAnalysisService:
                 provider="ollama",
                 model_name=self._settings.ollama_model,
                 model_digest=unresolved.digest,
-                prompt_version=prompt.version,
-                prompt_digest=prompt.digest,
-                response_schema_version=response_schema.version,
-                response_schema_digest=response_schema.digest,
+                prompt_version=prompt_version,
+                prompt_digest=prompt_digest,
+                response_schema_version=response_schema_version,
+                response_schema_digest=response_schema_digest,
                 settings_digest=settings_digest,
                 input_digest=request.evidence_bundle.digest,
                 cache_key=cache_key,
@@ -738,6 +954,7 @@ class OllamaAnalysisService:
                     response_schema,
                     settings_digest,
                     cache_key,
+                    current_run=run,
                 )
                 run.model_name = model.name
                 run.model_digest = model.digest
@@ -772,6 +989,7 @@ class OllamaAnalysisService:
                 request.evidence_bundle,
                 citations,
             )
+            session.flush()
             self._after_graph_insert(session)
             now = self._clock()
             run.model_name = model.name
@@ -789,6 +1007,7 @@ class OllamaAnalysisService:
             run.diagnostics_json = {
                 "attempts": attempts,
                 "cache_schema": _CACHE_SCHEMA,
+                "citations": _citation_contract(citations),
                 "code": "ok",
                 "endpoint_policy": _ENDPOINT_POLICY,
                 "model_identity_status": "resolved",
@@ -835,16 +1054,76 @@ class OllamaAnalysisService:
         prompt: PromptResource,
         response_schema: ResponseSchemaResource,
         bundle: EvidenceBundle,
+        replay_player_public_id: str | None,
         raw: bytes,
         attempts: list[dict[str, object]],
-    ) -> None:
-        stored = self._store.store_bytes(raw)
+    ) -> str | None:
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            with self._digest_guard(digest):
+                return self._record_terminal_raw_locked(
+                    run_id=run_id,
+                    status=status,
+                    code=code,
+                    model=model,
+                    prompt=prompt,
+                    response_schema=response_schema,
+                    bundle=bundle,
+                    replay_player_public_id=replay_player_public_id,
+                    raw=raw,
+                    attempts=attempts,
+                )
+        except (ContentCollisionError, ContentStorageError):
+            settings_digest, cache_key = _cache_identity(
+                model=model,
+                prompt=prompt,
+                schema=response_schema,
+                bundle=bundle,
+                replay_player_public_id=replay_player_public_id,
+            )
+            self._record_status(
+                run_id,
+                status="failed",
+                code="raw_asset_collision",
+                model=model,
+                settings_digest=settings_digest,
+                cache_key=cache_key,
+            )
+            return "raw_asset_collision"
+
+    def _record_terminal_raw_locked(
+        self,
+        *,
+        run_id: str,
+        status: Literal["failed", "invalid", "unavailable"],
+        code: str,
+        model: ModelIdentity,
+        prompt: PromptResource,
+        response_schema: ResponseSchemaResource,
+        bundle: EvidenceBundle,
+        replay_player_public_id: str | None,
+        raw: bytes,
+        attempts: list[dict[str, object]],
+    ) -> str | None:
         settings_digest, cache_key = _cache_identity(
             model=model,
             prompt=prompt,
             schema=response_schema,
             bundle=bundle,
+            replay_player_public_id=replay_player_public_id,
         )
+        try:
+            stored = self._store.store_bytes(raw)
+        except (ContentCollisionError, ContentStorageError):
+            self._record_status(
+                run_id,
+                status="failed",
+                code="raw_asset_collision",
+                model=model,
+                settings_digest=settings_digest,
+                cache_key=cache_key,
+            )
+            return "raw_asset_collision"
         session = self._session_factory()
         try:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -852,6 +1131,7 @@ class OllamaAnalysisService:
             if run is None:
                 raise ValueError("analysis run is unavailable for terminal diagnostics")
             asset = self._managed_asset(session, stored)
+            self._after_terminal_asset(session)
             run.model_name = model.name
             run.model_digest = model.digest
             run.settings_digest = settings_digest
@@ -868,11 +1148,50 @@ class OllamaAnalysisService:
             run.error_json = {"code": code}
             run.completed_at = self._clock()
             session.commit()
-        except Exception:
+            return None
+        except Exception:  # noqa: BLE001 -- terminal persistence failures are sanitized and reconciled.
             session.rollback()
-            raise
+            self._cleanup_unregistered_content(stored)
+            self._record_status(
+                run_id,
+                status="failed",
+                code="terminal_persistence_failed",
+                model=model,
+                settings_digest=settings_digest,
+                cache_key=cache_key,
+            )
+            return "terminal_persistence_failed"
         finally:
             session.close()
+
+    def _after_terminal_asset(self, session: Session) -> None:
+        """Test seam after terminal asset registration and before commit."""
+        del session
+
+    @contextmanager
+    def _digest_guard(self, digest: str) -> Iterator[None]:
+        if type(digest) is not str or not _SHA256.fullmatch(digest):
+            raise ContentStorageError("analysis response digest is invalid")
+        lock_path = self._store.root.parent / ".llm-response-locks" / f"{digest}.lock"
+        with _exclusive_file_lock(lock_path):
+            yield
+
+    def _cleanup_unregistered_content(self, stored: StoredContent) -> None:
+        if not stored.created:
+            return
+        try:
+            relative = stored.path.relative_to(self._store.root)
+        except ValueError:
+            return
+        if relative.as_posix() != f"{stored.sha256[:2]}/{stored.sha256}":
+            return
+        try:
+            with self._session_factory() as session:
+                registered = session.scalar(select(ManagedAsset.id).where(ManagedAsset.sha256 == stored.sha256))
+            if registered is None:
+                stored.path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 -- rollback cleanup must never replace the typed analysis outcome.
+            return
 
     def _revalidate_success(
         self,
@@ -884,9 +1203,13 @@ class OllamaAnalysisService:
         response_schema: ResponseSchemaResource,
         settings_digest: str,
         cache_key: str,
+        *,
+        current_run: AnalysisRun,
     ) -> ValidatedResponse:
         if (
             run.provider != "ollama"
+            or run.replay_id != current_run.replay_id
+            or run.replay_player_id != current_run.replay_player_id
             or run.model_name != model.name
             or run.model_digest != model.digest
             or run.prompt_version != prompt.version
@@ -899,6 +1222,8 @@ class OllamaAnalysisService:
             or run.status != "succeeded"
             or run.raw_response_asset_id is None
             or not isinstance(run.validated_response_json, dict)
+            or run.error_json is not None
+            or run.completed_at is None
         ):
             raise ValueError("analysis cache identity mismatch")
         asset = session.get(ManagedAsset, run.raw_response_asset_id)
@@ -919,6 +1244,44 @@ class OllamaAnalysisService:
         validated = validate_response(raw, request.evidence_bundle)
         if validated.document.as_plain() != run.validated_response_json:
             raise ValueError("analysis cache validated response mismatch")
+        replay = session.get(Replay, run.replay_id)
+        if replay is None:
+            raise ValueError("analysis cache replay is absent")
+        citations = self._authorized_citations(session, replay, request.evidence_bundle)
+        diagnostics = run.diagnostics_json
+        if not isinstance(diagnostics, dict) or set(diagnostics) != {
+            "attempts",
+            "cache_schema",
+            "citations",
+            "code",
+            "endpoint_policy",
+            "model_identity_status",
+        }:
+            raise ValueError("analysis cache success diagnostics mismatch")
+        attempts = diagnostics["attempts"]
+        if not isinstance(attempts, list) or len(attempts) not in (1, 2):
+            raise ValueError("analysis cache attempt diagnostics mismatch")
+        for index, attempt in enumerate(attempts, start=1):
+            if (
+                not isinstance(attempt, dict)
+                or set(attempt) != {"attempt", "byte_count", "code"}
+                or attempt["attempt"] != index
+                or type(attempt["byte_count"]) is not int
+                or attempt["byte_count"] < 0
+                or type(attempt["code"]) is not str
+                or not attempt["code"]
+            ):
+                raise ValueError("analysis cache attempt diagnostics mismatch")
+        if (
+            cast(dict[str, object], attempts[-1])["code"] != "ok"
+            or cast(dict[str, object], attempts[-1])["byte_count"] != len(raw)
+            or diagnostics["cache_schema"] != _CACHE_SCHEMA
+            or diagnostics["citations"] != _citation_contract(citations)
+            or diagnostics["code"] != "ok"
+            or diagnostics["endpoint_policy"] != _ENDPOINT_POLICY
+            or diagnostics["model_identity_status"] != "resolved"
+        ):
+            raise ValueError("analysis cache success diagnostics mismatch")
         self._revalidate_graph(session, run, request.evidence_bundle, model, validated)
         return validated
 
@@ -947,6 +1310,8 @@ class OllamaAnalysisService:
             if evidence is None:
                 raise ValueError("analysis cache inferred evidence is absent")
             rows_by_source[evidence.source_key] = (row, evidence)
+        if len(rows_by_source) != len(rows):
+            raise ValueError("analysis cache inferred evidence identity collides")
         quality_by_id = self._quality_by_evidence(bundle)
         for claim in claims:
             claim_id = cast(str, claim["claim_id"])
@@ -961,6 +1326,8 @@ class OllamaAnalysisService:
             if (
                 evidence.tier != "inferred"
                 or evidence.source_kind != "llm"
+                or evidence.parser_run_id is not None
+                or evidence.telemetry_run_id is not None
                 or evidence.replay_id != run.replay_id
                 or evidence.schema_version != 1
                 or evidence.public_id != _uuid(f"evidence:{source_key}")
@@ -970,6 +1337,8 @@ class OllamaAnalysisService:
                 or row.replay_player_id != run.replay_player_id
                 or row.strategy_label != claim["strategy_label"]
                 or row.phase != claim["phase"]
+                or row.taxonomy_version is not None
+                or row.rule_version is not None
                 or row.model_version != model.digest
                 or row.frame_start != window["frame_start"]
                 or row.frame_end != window["frame_end"]

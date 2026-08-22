@@ -160,7 +160,7 @@ def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_pa
     """Compare every table, named index/check/FK, predicate, action, and trigger to a frozen oracle."""
     config = make_alembic_config(database_path)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0004_job_lifecycle"]
+    assert scripts.get_heads() == ["0005_llm_graph_immutability"]
 
     upgrade_database(database_path, "0001_replay_analyzer_v2")
     engine = create_database_engine(database_path)

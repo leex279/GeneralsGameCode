@@ -24,10 +24,22 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py",
     "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py",
     "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py",
+    "generals_replay_analyzer/db/migrations/versions/0005_llm_graph_immutability.py",
 }
 LLM_RESOURCES = {
     "generals_replay_analyzer/data/strategy-report-v1.txt",
     "generals_replay_analyzer/data/strategy-report-response-v1.schema.json",
+    "generals_replay_analyzer/data/strategy-taxonomy-v1.json",
+    "generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json",
+}
+DATA_RESOURCES = LLM_RESOURCES | {
+    "generals_replay_analyzer/data/zero_hour_1_04_message_types.json",
+    "generals_replay_analyzer/data/telemetry-v1.schema.json",
+    "generals_replay_analyzer/data/telemetry-v2.schema.json",
+    "generals_replay_analyzer/data/game-data-catalog-v1.schema.json",
+    "generals_replay_analyzer/data/map-asset-v1.schema.json",
+    "generals_replay_analyzer/data/map-asset-v2.schema.json",
+    "generals_replay_analyzer/data/zero-hour-combat-types-v1.json",
 }
 WEB_BOUNDARY_RESOURCES = {
     "generals_replay_analyzer/web/app.py",
@@ -91,6 +103,35 @@ def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_r
     assert not any(
         "*" in source or ".task" in source or "cache" in source or "secret" in source for source in force_include
     )
+    assert "src/generals_replay_analyzer/data/**" in configuration["tool"]["hatch"]["build"]["targets"]["wheel"][
+        "exclude"
+    ]
+    assert {
+        destination for destination in force_include.values() if destination.startswith("generals_replay_analyzer/data/")
+    } == DATA_RESOURCES
+
+
+def test_wheel_data_resource_allow_list_excludes_temporary_poison_files(tmp_path: Path) -> None:
+    """The wheel contains exactly pinned data resources even when source data is poisoned."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    data_directory = PROJECT_ROOT / "src" / "generals_replay_analyzer" / "data"
+    poisons = (data_directory / ".cache-secret", data_directory / "unexpected.json")
+    for poison in poisons:
+        poison.write_bytes(b"not-package-data")
+    try:
+        distribution_directory = tmp_path / "dist"
+        _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+        wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+        with zipfile.ZipFile(wheel) as archive:
+            packaged = {
+                name for name in archive.namelist() if name.startswith("generals_replay_analyzer/data/")
+            }
+            assert packaged == DATA_RESOURCES
+            assert not any("cache" in name.lower() or "secret" in name.lower() for name in archive.namelist())
+    finally:
+        for poison in poisons:
+            poison.unlink(missing_ok=True)
 
 
 def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path: Path) -> None:
@@ -180,7 +221,9 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
             raise AssertionError("missing packaged resource did not produce a controlled error")
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
-            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004_job_lifecycle",)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "0005_llm_graph_immutability",
+            )
             assert {
                 row[1]
                 for row in connection.execute("PRAGMA table_info(job_log_snapshots)").fetchall()

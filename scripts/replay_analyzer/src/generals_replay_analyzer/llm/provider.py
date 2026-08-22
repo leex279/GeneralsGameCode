@@ -15,6 +15,15 @@ JSONScalar: TypeAlias = None | bool | int | float | str
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_LOOPBACK_ENDPOINT = re.compile(r"http://(?:(?:127\.0\.0\.1)|(?:\[::1\])):([1-9][0-9]{0,4})")
+
+
+def is_literal_loopback_endpoint(endpoint: object) -> bool:
+    """Return whether an endpoint is the exact HTTP literal-loopback policy."""
+    if type(endpoint) is not str:
+        return False
+    match = _LOOPBACK_ENDPOINT.fullmatch(endpoint)
+    return match is not None and int(match.group(1)) <= 65535
 
 
 class ProviderError(RuntimeError):
@@ -54,6 +63,8 @@ class OllamaClientConfig:
     follow_redirects: bool = False
 
     def __post_init__(self) -> None:
+        if not is_literal_loopback_endpoint(self.endpoint):
+            raise ValueError("Ollama endpoint must be literal loopback HTTP with an explicit port")
         if self.trust_env or self.follow_redirects:
             raise ValueError("provider client policy forbids environment proxies and redirects")
 
