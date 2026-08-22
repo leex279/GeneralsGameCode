@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Event, Lock, get_ident
 from types import ModuleType
 from typing import Any, Self
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import Engine, event, select
@@ -37,6 +39,13 @@ from generals_replay_analyzer.importing.jobs import JobCoordinator, JobSpec, Job
 from generals_replay_analyzer.storage import ContentAddressedStore, StoredContent
 
 from .conftest import MutableClock
+
+_LOG_INTEGRITY_VERSION = "sha256-merkle-v1"
+_LOG_INTEGRITY_CHUNK_SIZE = 4_096
+_LOG_LEAF_DOMAIN = b"job-log-merkle-v1:leaf\x00"
+_LOG_PADDING_DOMAIN = b"job-log-merkle-v1:padding\x00"
+_LOG_NODE_DOMAIN = b"job-log-merkle-v1:node\x00"
+_LOG_ROOT_DOMAIN = b"job-log-merkle-v1:root\x00"
 
 
 def _job(session_factory: sessionmaker[Session], clock: MutableClock, stage: str = "parse", **values: object) -> str:
@@ -118,6 +127,125 @@ def _capture(call: Any) -> object:
         return call()
     except Exception as error:  # noqa: BLE001 - tests assert the public exception boundary, including raw leaks.
         return error
+
+
+def _advance_osc_state(state: tuple[bool, bool], data: bytes) -> tuple[bool, bool]:
+    """Derive the literal OSC checkpoint fixture state independently of the reader."""
+    in_osc, pending_escape = state
+    for value in data:
+        if in_osc:
+            if value == 0x07 or (pending_escape and value == ord("\\")):
+                in_osc = False
+                pending_escape = False
+            else:
+                pending_escape = value == 0x1B
+        elif pending_escape:
+            in_osc = value == ord("]")
+            pending_escape = False
+        elif value == 0x1B:
+            pending_escape = True
+    return in_osc, pending_escape
+
+
+def _authenticated_log_container(content: bytes) -> tuple[bytes, str]:
+    """Build the canonical externally specified fixture container with literal expected hashes."""
+    chunk_count = max(1, (len(content) + _LOG_INTEGRITY_CHUNK_SIZE - 1) // _LOG_INTEGRITY_CHUNK_SIZE)
+    capacity = 1 << (chunk_count - 1).bit_length()
+    nodes = [b""] * (2 * capacity - 1)
+    states: list[int] = []
+    state = (False, False)
+    for index in range(chunk_count):
+        start = index * _LOG_INTEGRITY_CHUNK_SIZE
+        chunk = content[start : start + _LOG_INTEGRITY_CHUNK_SIZE]
+        state_code = int(state[0]) | (int(state[1]) << 1)
+        states.append(state_code)
+        nodes[capacity - 1 + index] = hashlib.sha256(
+            _LOG_LEAF_DOMAIN
+            + index.to_bytes(8, "big")
+            + bytes((state_code,))
+            + len(chunk).to_bytes(4, "big")
+            + chunk
+        ).digest()
+        state = _advance_osc_state(state, chunk)
+    for index in range(chunk_count, capacity):
+        nodes[capacity - 1 + index] = hashlib.sha256(
+            _LOG_PADDING_DOMAIN + index.to_bytes(8, "big")
+        ).digest()
+    for index in range(capacity - 2, -1, -1):
+        nodes[index] = hashlib.sha256(
+            _LOG_NODE_DOMAIN + nodes[index * 2 + 1] + nodes[index * 2 + 2]
+        ).digest()
+    root = hashlib.sha256(
+        _LOG_ROOT_DOMAIN
+        + len(content).to_bytes(8, "big")
+        + _LOG_INTEGRITY_CHUNK_SIZE.to_bytes(4, "big")
+        + chunk_count.to_bytes(8, "big")
+        + nodes[0]
+    ).hexdigest()
+    footer = bytes(ord("0") + value for value in states) + b"".join(
+        node.hex().encode("ascii") for node in nodes
+    )
+    return content + footer, root
+
+
+def _register_authenticated_log(
+    session_factory: sessionmaker[Session],
+    clock: MutableClock,
+    tmp_path: Path,
+    job_public_id: str,
+    content: bytes,
+    *,
+    label: str = "supervisor",
+    sequence: int = 0,
+) -> tuple[str, StoredContent]:
+    container, root = _authenticated_log_container(content)
+    stored = ContentAddressedStore(tmp_path / "managed-logs").store_bytes(container)
+    log_public_id = str(uuid4())
+    with session_factory.begin() as session:
+        job = session.scalar(select(Job).where(Job.public_id == job_public_id))
+        assert job is not None
+        asset = ManagedAsset(
+            public_id=str(uuid4()),
+            sha256=stored.sha256,
+            kind="job_log_snapshot",
+            relative_path=stored.path.relative_to(tmp_path).as_posix(),
+            size_bytes=stored.size,
+            media_type="text/plain",
+            created_at=clock.current,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(
+            JobLogSnapshot(
+                public_id=log_public_id,
+                job_id=job.id,
+                attempt_count=job.attempt_count,
+                label=label,
+                sequence=sequence,
+                managed_asset_id=asset.id,
+                media_type="text/plain",
+                byte_count=len(content),
+                redaction_version="job-log-redaction-v1",
+                integrity_version=_LOG_INTEGRITY_VERSION,
+                integrity_root_sha256=root,
+                integrity_chunk_size=_LOG_INTEGRITY_CHUNK_SIZE,
+                created_at=clock.current,
+            )
+        )
+    return log_public_id, stored
+
+
+def _mutate_byte_and_restore_mtime(path: Path, offset: int) -> None:
+    before = path.stat()
+    with path.open("r+b") as stream:
+        stream.seek(offset)
+        original = stream.read(1)
+        assert original
+        stream.seek(offset)
+        stream.write(b"X" if original != b"X" else b"Y")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
 
 class _CoordinatedPath:
@@ -678,6 +806,129 @@ def test_events_and_logs_are_path_free_immutable_redacted_bounded_and_ownership_
         assert not Path(asset.relative_path).is_absolute()
 
 
+def test_authenticated_log_pages_survive_restart_and_reject_same_size_requested_chunk_tamper(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch returning mutated requested bytes under the immutable snapshot identity after restart."""
+    _job(session_factory, clock, idempotency_key="authenticated-requested-chunk")
+    worker = "00000000-0000-4000-8000-000000000901"
+    service = _service(session_factory, clock, tmp_path)
+    claim = _claim(service, worker)
+    payload = b"safe-line\n" * 2_000
+    reference = service.publish_log(worker, claim, "stdout", 0, payload)
+    with session_factory() as session:
+        snapshot = session.scalar(select(JobLogSnapshot).where(JobLogSnapshot.public_id == reference.public_id))
+        asset = session.get(ManagedAsset, snapshot.managed_asset_id if snapshot is not None else -1)
+        assert snapshot is not None and asset is not None
+        assert snapshot.integrity_version == _LOG_INTEGRITY_VERSION
+        assert snapshot.integrity_chunk_size == _LOG_INTEGRITY_CHUNK_SIZE
+        assert len(snapshot.integrity_root_sha256) == 64
+        assert snapshot.byte_count == len(payload)
+        assert asset.size_bytes > snapshot.byte_count
+        managed_path = tmp_path / asset.relative_path
+
+    offset = 5_000
+    limit = 200
+    restarted = _service(session_factory, clock, tmp_path)
+    exact = restarted.read_log(JobLogQueryDTO(claim.job_public_id, reference.public_id, offset, limit))
+    assert exact.state == "available"
+    assert exact.content == payload[offset : offset + limit].decode("utf-8")
+
+    _mutate_byte_and_restore_mtime(managed_path, offset + 20)
+    unavailable = _service(session_factory, clock, tmp_path).read_log(
+        JobLogQueryDTO(claim.job_public_id, reference.public_id, offset, limit)
+    )
+    assert unavailable.state == "unavailable"
+    assert unavailable.content == ""
+    assert unavailable.next_offset is None
+
+
+def test_unrelated_chunk_corruption_preserves_an_exact_good_page_and_rejects_the_bad_page(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Freeze lazy per-page integrity: unrelated damage cannot forge or poison exact returned bytes."""
+    _job(session_factory, clock, idempotency_key="authenticated-unrelated-chunk")
+    worker = "00000000-0000-4000-8000-000000000901"
+    service = _service(session_factory, clock, tmp_path)
+    claim = _claim(service, worker)
+    payload = b"safe-line\n" * 2_000
+    reference = service.publish_log(worker, claim, "stderr", 0, payload)
+    with session_factory() as session:
+        snapshot = session.scalar(select(JobLogSnapshot).where(JobLogSnapshot.public_id == reference.public_id))
+        asset = session.get(ManagedAsset, snapshot.managed_asset_id if snapshot is not None else -1)
+        assert snapshot is not None and asset is not None
+        managed_path = tmp_path / asset.relative_path
+    corrupt_offset = _LOG_INTEGRITY_CHUNK_SIZE * 2 + 100
+    _mutate_byte_and_restore_mtime(managed_path, corrupt_offset)
+
+    restarted = _service(session_factory, clock, tmp_path)
+    good = restarted.read_log(JobLogQueryDTO(claim.job_public_id, reference.public_id, 0, 200))
+    assert good.state == "available"
+    assert good.content == payload[:200].decode("utf-8")
+    bad = restarted.read_log(JobLogQueryDTO(claim.job_public_id, reference.public_id, corrupt_offset, 200))
+    assert bad.state == "unavailable"
+    assert bad.content == ""
+
+
+@pytest.mark.parametrize("forgery", ("checkpoint", "proof", "root"))
+def test_authenticated_log_rejects_forged_checkpoint_proof_or_persisted_root(
+    forgery: str,
+    session_factory: sessionmaker[Session],
+    clock: MutableClock,
+    tmp_path: Path,
+) -> None:
+    """Catch accepting attacker-selected redaction state or Merkle evidence for an otherwise valid page."""
+    _job(session_factory, clock, idempotency_key=f"authenticated-{forgery}")
+    worker = "00000000-0000-4000-8000-000000000901"
+    service = _service(session_factory, clock, tmp_path)
+    claim = _claim(service, worker)
+    payload = b"safe-line\n" * 2_000
+    reference = service.publish_log(worker, claim, "supervisor", 0, payload)
+    with session_factory.begin() as session:
+        snapshot = session.scalar(select(JobLogSnapshot).where(JobLogSnapshot.public_id == reference.public_id))
+        asset = session.get(ManagedAsset, snapshot.managed_asset_id if snapshot is not None else -1)
+        job = session.scalar(select(Job).where(Job.public_id == claim.job_public_id))
+        assert snapshot is not None and asset is not None and job is not None
+        managed_path = tmp_path / asset.relative_path
+        if forgery == "root":
+            forged_id = str(uuid4())
+            session.add(
+                JobLogSnapshot(
+                    public_id=forged_id,
+                    job_id=job.id,
+                    attempt_count=snapshot.attempt_count,
+                    label=snapshot.label,
+                    sequence=1,
+                    managed_asset_id=asset.id,
+                    media_type=snapshot.media_type,
+                    byte_count=snapshot.byte_count,
+                    redaction_version=snapshot.redaction_version,
+                    integrity_version=snapshot.integrity_version,
+                    integrity_root_sha256="0" * 64,
+                    integrity_chunk_size=snapshot.integrity_chunk_size,
+                    created_at=clock.current,
+                )
+            )
+            log_public_id = forged_id
+        else:
+            log_public_id = reference.public_id
+            chunk_count = max(1, (snapshot.byte_count + snapshot.integrity_chunk_size - 1) // snapshot.integrity_chunk_size)
+            capacity = 1 << (chunk_count - 1).bit_length()
+            if forgery == "checkpoint":
+                tamper_offset = snapshot.byte_count
+            else:
+                nodes_start = snapshot.byte_count + chunk_count
+                first_leaf_sibling_index = capacity
+                tamper_offset = nodes_start + first_leaf_sibling_index * 64
+            _mutate_byte_and_restore_mtime(managed_path, tamper_offset)
+
+    page = _service(session_factory, clock, tmp_path).read_log(
+        JobLogQueryDTO(claim.job_public_id, log_public_id, 0, 200)
+    )
+    assert page.state == "unavailable"
+    assert page.content == ""
+
+
 def test_public_errors_and_event_reasons_are_closed_and_private_handler_codes_stay_private(
     session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
 ) -> None:
@@ -862,7 +1113,8 @@ def test_log_registration_uses_real_cas_path_validates_existing_asset_and_sequen
     conflict_id = _job(session_factory, clock, idempotency_key="log-role-conflict")
     conflict_claim = first.claim_next(worker, 30)
     assert conflict_claim is not None and conflict_claim.job_public_id == conflict_id
-    stored = ContentAddressedStore(tmp_path / "managed-logs").store_bytes(b"wrong role")
+    wrong_role_container, _root = _authenticated_log_container(b"wrong role")
+    stored = ContentAddressedStore(tmp_path / "managed-logs").store_bytes(wrong_role_container)
     with session_factory.begin() as session:
         session.add(
             ManagedAsset(
@@ -918,7 +1170,8 @@ def test_failed_log_publisher_cannot_delete_a_racing_publishers_registered_blob(
 
     assert isinstance(winner, contracts.JobLogReferenceDTO)
     assert isinstance(loser, contracts.JobLifecycleError)
-    stored = delegate.verify(hashlib.sha256(payload).hexdigest())
+    expected_container, _root = _authenticated_log_container(payload)
+    stored = delegate.verify(hashlib.sha256(expected_container).hexdigest())
     assert stored.path.is_file()
     with session_factory() as session:
         snapshot = session.scalar(select(JobLogSnapshot).where(JobLogSnapshot.public_id == winner.public_id))
@@ -1057,37 +1310,13 @@ def test_log_pagination_consumes_complete_utf8_and_redacts_patterns_across_chunk
     )
     crossing("😀".encode())
     raw.extend(b"safe-end\n")
-    store = ContentAddressedStore(tmp_path / "managed-logs")
-    stored = store.store_bytes(bytes(raw))
-    log_public_id = "00000000-0000-4000-8000-000000000996"
-    with session_factory.begin() as session:
-        job = session.scalar(select(Job).where(Job.public_id == job_id))
-        assert job is not None
-        asset = ManagedAsset(
-            public_id="00000000-0000-4000-8000-000000000995",
-            sha256=stored.sha256,
-            kind="job_log_snapshot",
-            relative_path=stored.path.relative_to(tmp_path).as_posix(),
-            size_bytes=stored.size,
-            media_type="text/plain",
-            created_at=clock.current,
-        )
-        session.add(asset)
-        session.flush()
-        session.add(
-            JobLogSnapshot(
-                public_id=log_public_id,
-                job_id=job.id,
-                attempt_count=0,
-                label="supervisor",
-                sequence=0,
-                managed_asset_id=asset.id,
-                media_type="text/plain",
-                byte_count=stored.size,
-                redaction_version="job-log-redaction-v1",
-                created_at=clock.current,
-            )
-        )
+    log_public_id, _stored = _register_authenticated_log(
+        session_factory,
+        clock,
+        tmp_path,
+        job_id,
+        bytes(raw),
+    )
     service = _service(session_factory, clock, tmp_path)
     chunks: list[str] = []
     offset: int | None = 0
@@ -1098,7 +1327,7 @@ def test_log_pagination_consumes_complete_utf8_and_redacts_patterns_across_chunk
         assert chunk.state == "available"
         assert len(chunk.content.encode("utf-8")) <= 13
         chunks.append(chunk.content)
-        consumed_to = stored.size if chunk.next_offset is None else chunk.next_offset
+        consumed_to = len(raw) if chunk.next_offset is None else chunk.next_offset
         bytes(raw[previous:consumed_to]).decode("utf-8", errors="strict")
         assert consumed_to > previous
         previous = consumed_to
@@ -1165,36 +1394,14 @@ def test_read_redaction_bounds_configured_secrets_and_unbounded_sensitive_lines(
     raw_parts.append(safe_lines[-1])
     raw = ("\n".join(raw_parts) + "\n").encode()
     store = ContentAddressedStore(tmp_path / "managed-logs")
-    stored = store.store_bytes(raw)
-    log_public_id = "00000000-0000-4000-8000-000000000994"
-    with session_factory.begin() as session:
-        job = session.scalar(select(Job).where(Job.public_id == job_id))
-        assert job is not None
-        asset = ManagedAsset(
-            public_id="00000000-0000-4000-8000-000000000993",
-            sha256=stored.sha256,
-            kind="job_log_snapshot",
-            relative_path=stored.path.relative_to(tmp_path).as_posix(),
-            size_bytes=stored.size,
-            media_type="text/plain",
-            created_at=clock.current,
-        )
-        session.add(asset)
-        session.flush()
-        session.add(
-            JobLogSnapshot(
-                public_id=log_public_id,
-                job_id=job.id,
-                attempt_count=0,
-                label="stderr",
-                sequence=0,
-                managed_asset_id=asset.id,
-                media_type="text/plain",
-                byte_count=stored.size,
-                redaction_version="job-log-redaction-v1",
-                created_at=clock.current,
-            )
-        )
+    log_public_id, _stored = _register_authenticated_log(
+        session_factory,
+        clock,
+        tmp_path,
+        job_id,
+        raw,
+        label="stderr",
+    )
     service = JobLifecycleService(
         session_factory,
         registered_stages=("parse",),
@@ -1234,43 +1441,57 @@ def test_read_redaction_bounds_configured_secrets_and_unbounded_sensitive_lines(
     assert "\x1b" not in reconstructed
 
 
+def test_authenticated_osc_checkpoints_survive_restart_cache_pressure_and_concurrent_random_pages(
+    session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path
+) -> None:
+    """Catch direct-offset multiline OSC leakage after restart, eviction pressure, or concurrent reads."""
+    job_id = _job(session_factory, clock, idempotency_key="durable-osc-checkpoints")
+    safe_after = b"safe-after-one\nsafe-after-two\n"
+    osc_body = (b"PRIVATE-OSC-PAYLOAD-" + b"x" * 79 + b"\n") * 400
+    raw = b"safe-before\n\x1b]0;" + osc_body + b"\x07" + safe_after
+    log_public_id, _stored = _register_authenticated_log(
+        session_factory,
+        clock,
+        tmp_path,
+        job_id,
+        raw,
+        label="stderr",
+    )
+    osc_start = raw.index(b"PRIVATE-OSC-PAYLOAD")
+    offsets = tuple(osc_start + 32 + ((index * 1_021) % 2_052) * 4 for index in range(2_052))
+    assert max(offsets) + 4 < raw.index(b"\x07", osc_start)
+    service = _service(session_factory, clock, tmp_path)
+
+    def read_hidden(offset: int) -> contracts.JobLogChunkDTO:
+        return service.read_log(JobLogQueryDTO(job_id, log_public_id, offset, 4))
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        pages = tuple(executor.map(read_hidden, offsets))
+    assert all(page.state == "available" and page.content == "" for page in pages)
+
+    direct_offset = osc_start + len(osc_body) // 2
+    restarted = _service(session_factory, clock, tmp_path)
+    direct = restarted.read_log(JobLogQueryDTO(job_id, log_public_id, direct_offset, 65_536))
+    assert direct.state == "available"
+    assert direct.content == safe_after.decode("utf-8")
+    assert "PRIVATE-OSC-PAYLOAD" not in direct.content
+    assert "x" * 32 not in direct.content
+    assert "\x1b" not in direct.content
+
+
 def test_far_offset_log_read_has_constant_bounded_file_io(
     session_factory: sessionmaker[Session], clock: MutableClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catch full-object hashing or traceback-state rescans from byte zero for every range request."""
     job_id = _job(session_factory, clock, idempotency_key="far-offset-budget")
     raw = b"safe-line\n" * 20_000
-    store = ContentAddressedStore(tmp_path / "managed-logs")
-    stored = store.store_bytes(raw)
-    log_public_id = "00000000-0000-4000-8000-000000000992"
-    with session_factory.begin() as session:
-        job = session.scalar(select(Job).where(Job.public_id == job_id))
-        assert job is not None
-        asset = ManagedAsset(
-            public_id="00000000-0000-4000-8000-000000000991",
-            sha256=stored.sha256,
-            kind="job_log_snapshot",
-            relative_path=stored.path.relative_to(tmp_path).as_posix(),
-            size_bytes=stored.size,
-            media_type="text/plain",
-            created_at=clock.current,
-        )
-        session.add(asset)
-        session.flush()
-        session.add(
-            JobLogSnapshot(
-                public_id=log_public_id,
-                job_id=job.id,
-                attempt_count=0,
-                label="supervisor",
-                sequence=0,
-                managed_asset_id=asset.id,
-                media_type="text/plain",
-                byte_count=stored.size,
-                redaction_version="job-log-redaction-v1",
-                created_at=clock.current,
-            )
-        )
+    log_public_id, stored = _register_authenticated_log(
+        session_factory,
+        clock,
+        tmp_path,
+        job_id,
+        raw,
+    )
     real_open = Path.open
     bytes_read = [0]
 

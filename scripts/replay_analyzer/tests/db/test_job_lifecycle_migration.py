@@ -123,6 +123,37 @@ def test_0004_is_the_only_head_and_matches_application_metadata(database_path: P
         engine.dispose()
 
 
+def test_log_snapshot_schema_persists_a_closed_authenticated_paging_descriptor(
+    database_path: Path,
+) -> None:
+    """Catch a snapshot schema that cannot authenticate bounded random log reads after restart."""
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"]: column for column in inspector.get_columns("job_log_snapshots")}
+        assert {
+            "byte_count",
+            "integrity_version",
+            "integrity_root_sha256",
+            "integrity_chunk_size",
+        } <= columns.keys()
+        assert columns["integrity_version"]["nullable"] is False
+        assert columns["integrity_root_sha256"]["nullable"] is False
+        assert columns["integrity_chunk_size"]["nullable"] is False
+        checks = {
+            constraint["name"]: str(constraint["sqltext"])
+            for constraint in inspector.get_check_constraints("job_log_snapshots")
+        }
+        assert "ck_job_log_snapshots_integrity_version_closed" in checks
+        assert "ck_job_log_snapshots_integrity_root_sha256_lowercase_sha256" in checks
+        assert "ck_job_log_snapshots_integrity_chunk_size_fixed" in checks
+        assert "sha256-merkle-v1" in checks["ck_job_log_snapshots_integrity_version_closed"]
+        assert "4096" in checks["ck_job_log_snapshots_integrity_chunk_size_fixed"]
+    finally:
+        engine.dispose()
+
+
 def test_upgrade_preserves_legacy_jobs_edges_and_recovers_insecure_running_rows(database_path: Path) -> None:
     """Catch loss of accepted Task 3 data or fabrication of an unverifiable legacy lease capability."""
     upgrade_database(database_path, "0003_feature_partial_quality")
@@ -296,11 +327,12 @@ def test_new_checks_and_immutable_children_reject_invalid_or_mutated_rows(databa
                 connection.execute(
                     text(
                         "INSERT INTO job_log_snapshots (public_id, job_id, attempt_count, label, sequence, "
-                        "managed_asset_id, media_type, byte_count, redaction_version, created_at) VALUES "
+                        "managed_asset_id, media_type, byte_count, redaction_version, integrity_version, "
+                        "integrity_root_sha256, integrity_chunk_size, created_at) VALUES "
                         "('00000000-0000-4000-8000-000000000206', :job, 0, 'stdout', 0, :asset, 'text/plain', 1, "
-                        "'v1', CURRENT_TIMESTAMP)"
+                        "'v1', 'sha256-merkle-v1', :root, 4096, CURRENT_TIMESTAMP)"
                     ),
-                    {"job": job_id, "asset": asset_id},
+                    {"job": job_id, "asset": asset_id, "root": "b" * 64},
                 ).lastrowid
             )
             for table, row_id in (("job_events", event_id), ("job_log_snapshots", log_id)):

@@ -7,7 +7,7 @@ import hashlib
 import re
 import secrets
 import stat
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -59,6 +59,16 @@ from .job_contracts import (
 _MAX_LOG_READ = 65_536
 _BASE_LOG_REDACTION_OVERLAP = 4_096
 _MAX_REDACTION_VALUE_BYTES = 16_384
+# TheSuperHackers @fix Leex 22/08/2026 Authenticate bounded log pages and durable OSC checkpoints after restart. (#TBD)
+_LOG_INTEGRITY_VERSION = "sha256-merkle-v1"
+_LOG_INTEGRITY_CHUNK_SIZE = 4_096
+_LOG_HASH_HEX_SIZE = 64
+_LOG_MAX_TREE_DEPTH = 63
+_LOG_LEAF_DOMAIN = b"job-log-merkle-v1:leaf\x00"
+_LOG_PADDING_DOMAIN = b"job-log-merkle-v1:padding\x00"
+_LOG_NODE_DOMAIN = b"job-log-merkle-v1:node\x00"
+_LOG_ROOT_DOMAIN = b"job-log-merkle-v1:root\x00"
+_LOWER_HEX_BYTES = frozenset(b"0123456789abcdef")
 _ANSI_PATTERN = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))")
 _URL_CREDENTIALS = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _COMMAND_CREDENTIALS = re.compile(
@@ -125,6 +135,80 @@ def _validate_seconds(value: int) -> timedelta:
     return timedelta(seconds=value)
 
 
+def _advance_osc_state(state: tuple[bool, bool], data: bytes) -> tuple[bool, bool]:
+    """Advance the closed OSC parser used by publication checkpoints and page reads."""
+    in_osc, pending_escape = state
+    for value in data:
+        if in_osc:
+            if value == 0x07 or (pending_escape and value == ord("\\")):
+                in_osc = False
+                pending_escape = False
+            else:
+                pending_escape = value == 0x1B
+        elif pending_escape:
+            in_osc = value == ord("]")
+            pending_escape = False
+        elif value == 0x1B:
+            pending_escape = True
+    return in_osc, pending_escape
+
+
+def _log_integrity_shape(public_size: int) -> tuple[int, int, int, int] | None:
+    """Return the canonical bounded tree shape without allocating from persisted metadata."""
+    if type(public_size) is not int or public_size < 0 or public_size >= 1 << 64:
+        return None
+    chunk_count = max(1, (public_size + _LOG_INTEGRITY_CHUNK_SIZE - 1) // _LOG_INTEGRITY_CHUNK_SIZE)
+    capacity = 1 << (chunk_count - 1).bit_length()
+    if capacity.bit_length() - 1 > _LOG_MAX_TREE_DEPTH:
+        return None
+    node_count = 2 * capacity - 1
+    container_size = public_size + chunk_count + node_count * _LOG_HASH_HEX_SIZE
+    return chunk_count, capacity, node_count, container_size
+
+
+def _authenticated_log_container(content: bytes) -> tuple[bytes, str]:
+    """Package public log bytes with canonical OSC checkpoints and a complete Merkle tree."""
+    shape = _log_integrity_shape(len(content))
+    if shape is None:  # pragma: no cover - an in-memory bytes value cannot reach the descriptor bound.
+        raise ValueError("log content exceeds the integrity descriptor bound")
+    chunk_count, capacity, _node_count, _container_size = shape
+    nodes = [b""] * (2 * capacity - 1)
+    checkpoints: list[int] = []
+    state = (False, False)
+    for index in range(chunk_count):
+        start = index * _LOG_INTEGRITY_CHUNK_SIZE
+        chunk = content[start : start + _LOG_INTEGRITY_CHUNK_SIZE]
+        state_code = int(state[0]) | (int(state[1]) << 1)
+        checkpoints.append(state_code)
+        nodes[capacity - 1 + index] = hashlib.sha256(
+            _LOG_LEAF_DOMAIN
+            + index.to_bytes(8, "big")
+            + bytes((state_code,))
+            + len(chunk).to_bytes(4, "big")
+            + chunk
+        ).digest()
+        state = _advance_osc_state(state, chunk)
+    for index in range(chunk_count, capacity):
+        nodes[capacity - 1 + index] = hashlib.sha256(
+            _LOG_PADDING_DOMAIN + index.to_bytes(8, "big")
+        ).digest()
+    for index in range(capacity - 2, -1, -1):
+        nodes[index] = hashlib.sha256(
+            _LOG_NODE_DOMAIN + nodes[index * 2 + 1] + nodes[index * 2 + 2]
+        ).digest()
+    root = hashlib.sha256(
+        _LOG_ROOT_DOMAIN
+        + len(content).to_bytes(8, "big")
+        + _LOG_INTEGRITY_CHUNK_SIZE.to_bytes(4, "big")
+        + chunk_count.to_bytes(8, "big")
+        + nodes[0]
+    ).hexdigest()
+    footer = bytes(ord("0") + value for value in checkpoints) + b"".join(
+        node.hex().encode("ascii") for node in nodes
+    )
+    return content + footer, root
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Centralize every capability-owned job transition in one durable service. (#TBD)
 class JobLifecycleService:
     """Implement worker control and revisioned job operations over short SQLite transactions."""
@@ -182,7 +266,6 @@ class JobLifecycleService:
             maximum_redaction_bytes + 4,
         )
         self._allow_legacy_worker_identifiers = _allow_legacy_worker_identifiers
-        self._log_read_states: OrderedDict[tuple[str, int], tuple[bool, bool]] = OrderedDict()
 
     def registered_stages(self) -> tuple[str, ...]:
         return self._stages
@@ -1037,7 +1120,8 @@ class JobLifecycleService:
             with self._session_factory() as session:
                 self._owned(session, worker_public_id, claim, self.now())
             redacted = self._redact(raw_output.decode("utf-8", errors="replace")).encode("utf-8")
-            stored = self._log_store.store_bytes(redacted)
+            container, integrity_root = _authenticated_log_container(redacted)
+            stored = self._log_store.store_bytes(container)
             stored_path = stored.path.resolve(strict=False)
             expected_path = (self._log_store.root / stored.sha256[:2] / stored.sha256).resolve(strict=False)
             if stored_path != expected_path:
@@ -1090,8 +1174,11 @@ class JobLifecycleService:
                     sequence=sequence,
                     managed_asset_id=asset.id,
                     media_type="text/plain",
-                    byte_count=stored.size,
+                    byte_count=len(redacted),
                     redaction_version="job-log-redaction-v1",
+                    integrity_version=_LOG_INTEGRITY_VERSION,
+                    integrity_root_sha256=integrity_root,
+                    integrity_chunk_size=_LOG_INTEGRITY_CHUNK_SIZE,
                     created_at=now,
                 )
                 session.add(snapshot)
@@ -1137,6 +1224,18 @@ class JobLifecycleService:
             if asset is None:
                 return JobLogChunkDTO("unavailable", "", None)
             digest = asset.sha256
+            asset_kind = asset.kind
+            asset_relative_path = asset.relative_path
+            asset_size = asset.size_bytes
+            asset_media_type = asset.media_type
+            public_size = snapshot.byte_count
+            snapshot_media_type = snapshot.media_type
+            redaction_version = snapshot.redaction_version
+            integrity_version = snapshot.integrity_version
+            integrity_root = snapshot.integrity_root_sha256
+            integrity_chunk_size = snapshot.integrity_chunk_size
+        if len(digest) != 64 or any(value not in "0123456789abcdef" for value in digest):
+            return JobLogChunkDTO("unavailable", "", None)
         stored_path = (self._log_store.root / digest[:2] / digest).resolve(strict=False)
         try:
             stored_info = stored_path.lstat()
@@ -1146,78 +1245,175 @@ class JobLifecycleService:
             expected_path = stored_path.relative_to(self._log_data_root).as_posix() if self._log_data_root else ""
         except ValueError:
             return JobLogChunkDTO("unavailable", "", None)
+        shape = _log_integrity_shape(public_size)
         if (
             not stat.S_ISREG(stored_info.st_mode)
             or stored_path.is_symlink()
-            or asset.kind != "job_log_snapshot"
-            or asset.relative_path != expected_path
-            or asset.media_type != "text/plain"
-            or asset.size_bytes != stored_info.st_size
-            or snapshot.byte_count != stored_info.st_size
+            or asset_kind != "job_log_snapshot"
+            or asset_relative_path != expected_path
+            or asset_media_type != "text/plain"
+            or snapshot_media_type != "text/plain"
+            or redaction_version != "job-log-redaction-v1"
+            or integrity_version != _LOG_INTEGRITY_VERSION
+            or integrity_chunk_size != _LOG_INTEGRITY_CHUNK_SIZE
+            or len(integrity_root) != 64
+            or any(value not in "0123456789abcdef" for value in integrity_root)
+            or shape is None
+            or asset_size != stored_info.st_size
+            or shape[3] != stored_info.st_size
         ):
             return JobLogChunkDTO("unavailable", "", None)
-        if query.offset >= stored_info.st_size:
+        if query.offset >= public_size:
             return JobLogChunkDTO("rotated", "", None)
         limit = min(query.limit, _MAX_LOG_READ)
-        state_key = (digest, query.offset)
-        state_known = query.offset == 0 or state_key in self._log_read_states
-        stream_state = self._log_read_states.get(state_key, (False, False))
+        candidate_end = min(public_size, query.offset + max(4, limit))
+        requested_context_start = max(0, query.offset - self._log_redaction_overlap)
+        requested_context_end = min(
+            public_size,
+            candidate_end + self._log_redaction_overlap + 3,
+        )
         try:
-            end = self._complete_utf8_end(stored_path, query.offset, limit, stored_info.st_size)
+            window, window_start, stream_state = self._authenticated_log_window(
+                stored_path,
+                public_size=public_size,
+                integrity_root=integrity_root,
+                offset=query.offset,
+                window_start=requested_context_start,
+                window_end=requested_context_end,
+            )
+            candidate = window[
+                query.offset - window_start : candidate_end - window_start
+            ]
+            decoder = codecs.getincrementaldecoder("utf-8")("strict")
+            decoder.decode(candidate, final=candidate_end == public_size)
+            pending, _state = decoder.getstate()
+            end = candidate_end - len(pending)
             if end <= query.offset:
                 return JobLogChunkDTO("unavailable", "", None)
-            content, next_state = self._redacted_log_range(
-                stored_path,
-                query.offset,
-                end,
-                stored_info.st_size,
+            context_start = requested_context_start
+            while (
+                context_start < query.offset
+                and window[context_start - window_start] & 0xC0 == 0x80
+            ):
+                context_start += 1
+            context_end = min(public_size, end + self._log_redaction_overlap + 3)
+            data = window[context_start - window_start : context_end - window_start]
+            content = self._redacted_log_range(
+                data,
+                context_start=context_start,
+                offset=query.offset,
+                end=end,
+                size=public_size,
                 stream_state=stream_state,
             )
-        except (OSError, UnicodeDecodeError):
+        except (OSError, OverflowError, UnicodeDecodeError, ValueError):
             return JobLogChunkDTO("unavailable", "", None)
         content = self._bounded_utf8(content, limit)
-        if state_known and end < stored_info.st_size:
-            self._remember_log_read_state(digest, end, next_state)
-        return JobLogChunkDTO("available", content, end if end < stored_info.st_size else None)
-
-    def _remember_log_read_state(self, digest: str, offset: int, state: tuple[bool, bool]) -> None:
-        key = (digest, offset)
-        self._log_read_states[key] = state
-        self._log_read_states.move_to_end(key)
-        while len(self._log_read_states) > 2_048:
-            self._log_read_states.popitem(last=False)
+        return JobLogChunkDTO("available", content, end if end < public_size else None)
 
     @staticmethod
-    def _complete_utf8_end(path: Path, offset: int, limit: int, size: int) -> int:
+    def _authenticated_log_window(
+        path: Path,
+        *,
+        public_size: int,
+        integrity_root: str,
+        offset: int,
+        window_start: int,
+        window_end: int,
+    ) -> tuple[bytes, int, tuple[bool, bool]]:
+        """Read only a bounded content window and its independently rooted authentication paths."""
+        shape = _log_integrity_shape(public_size)
+        if shape is None or not (0 <= window_start <= offset < window_end <= public_size):
+            raise ValueError("invalid authenticated log window")
+        chunk_count, capacity, _node_count, _container_size = shape
+        first_chunk = window_start // _LOG_INTEGRITY_CHUNK_SIZE
+        last_chunk = (window_end - 1) // _LOG_INTEGRITY_CHUNK_SIZE
+        nodes_start = public_size + chunk_count
+        node_cache: dict[int, bytes] = {}
+        chunks: dict[int, bytes] = {}
+        checkpoints: dict[int, int] = {}
+
         with path.open("rb") as source:
-            source.seek(offset)
-            data = source.read(min(size - offset, max(4, limit)))
-        decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        decoder.decode(data, final=offset + len(data) == size)
-        pending, _state = decoder.getstate()
-        return offset + len(data) - len(pending)
+
+            def read_exact(position: int, length: int) -> bytes:
+                source.seek(position)
+                value = source.read(length)
+                if len(value) != length:
+                    raise ValueError("truncated authenticated log container")
+                return value
+
+            def read_node(index: int) -> bytes:
+                cached = node_cache.get(index)
+                if cached is not None:
+                    return cached
+                encoded = read_exact(nodes_start + index * _LOG_HASH_HEX_SIZE, _LOG_HASH_HEX_SIZE)
+                if any(value not in _LOWER_HEX_BYTES for value in encoded):
+                    raise ValueError("noncanonical authenticated log proof")
+                decoded = bytes.fromhex(encoded.decode("ascii"))
+                node_cache[index] = decoded
+                return decoded
+
+            tree_root = read_node(0)
+            descriptor_root = hashlib.sha256(
+                _LOG_ROOT_DOMAIN
+                + public_size.to_bytes(8, "big")
+                + _LOG_INTEGRITY_CHUNK_SIZE.to_bytes(4, "big")
+                + chunk_count.to_bytes(8, "big")
+                + tree_root
+            ).hexdigest()
+            if not secrets.compare_digest(descriptor_root, integrity_root):
+                raise ValueError("authenticated log root mismatch")
+
+            for chunk_index in range(first_chunk, last_chunk + 1):
+                chunk_start = chunk_index * _LOG_INTEGRITY_CHUNK_SIZE
+                chunk_length = min(_LOG_INTEGRITY_CHUNK_SIZE, public_size - chunk_start)
+                chunk = read_exact(chunk_start, chunk_length)
+                encoded_checkpoint = read_exact(public_size + chunk_index, 1)
+                if encoded_checkpoint[0] < ord("0") or encoded_checkpoint[0] > ord("3"):
+                    raise ValueError("invalid authenticated log checkpoint")
+                checkpoint = encoded_checkpoint[0] - ord("0")
+                chunks[chunk_index] = chunk
+                checkpoints[chunk_index] = checkpoint
+                computed = hashlib.sha256(
+                    _LOG_LEAF_DOMAIN
+                    + chunk_index.to_bytes(8, "big")
+                    + bytes((checkpoint,))
+                    + chunk_length.to_bytes(4, "big")
+                    + chunk
+                ).digest()
+                node_index = capacity - 1 + chunk_index
+                while node_index > 0:
+                    if node_index % 2:
+                        computed = hashlib.sha256(
+                            _LOG_NODE_DOMAIN + computed + read_node(node_index + 1)
+                        ).digest()
+                    else:
+                        computed = hashlib.sha256(
+                            _LOG_NODE_DOMAIN + read_node(node_index - 1) + computed
+                        ).digest()
+                    node_index = (node_index - 1) // 2
+                if not secrets.compare_digest(computed, tree_root):
+                    raise ValueError("authenticated log page mismatch")
+
+        authenticated_start = first_chunk * _LOG_INTEGRITY_CHUNK_SIZE
+        authenticated = b"".join(chunks[index] for index in range(first_chunk, last_chunk + 1))
+        offset_chunk = offset // _LOG_INTEGRITY_CHUNK_SIZE
+        checkpoint = checkpoints[offset_chunk]
+        state = (bool(checkpoint & 1), bool(checkpoint & 2))
+        chunk_start = offset_chunk * _LOG_INTEGRITY_CHUNK_SIZE
+        state = _advance_osc_state(state, chunks[offset_chunk][: offset - chunk_start])
+        return authenticated, authenticated_start, state
 
     def _redacted_log_range(
         self,
-        path: Path,
+        data: bytes,
+        *,
+        context_start: int,
         offset: int,
         end: int,
         size: int,
-        *,
         stream_state: tuple[bool, bool],
-    ) -> tuple[str, tuple[bool, bool]]:
-        context_start = max(0, offset - self._log_redaction_overlap)
-        with path.open("rb") as source:
-            source.seek(context_start)
-            while context_start < offset:
-                leading = source.read(1)
-                if not leading or leading[0] & 0xC0 != 0x80:
-                    if leading:
-                        source.seek(-1, 1)
-                    break
-                context_start += 1
-            context_limit = min(size, end + self._log_redaction_overlap + 3)
-            data = source.read(context_limit - context_start)
+    ) -> str:
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         text = decoder.decode(data, final=context_start + len(data) == size)
         pending, _state = decoder.getstate()
@@ -1256,7 +1452,7 @@ class JobLifecycleService:
             raw_position = character_end
             if raw_position >= end:
                 break
-        return "".join(output), (in_osc, pending_escape)
+        return "".join(output)
 
     def _redaction_mask(
         self,

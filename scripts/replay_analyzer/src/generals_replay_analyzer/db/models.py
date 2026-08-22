@@ -1063,6 +1063,9 @@ class JobLogSnapshot(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base
         CheckConstraint("media_type = 'text/plain'", name="media_type_text"),
         CheckConstraint("byte_count >= 0", name="byte_count_nonnegative"),
         CheckConstraint("length(trim(redaction_version)) > 0", name="redaction_nonempty"),
+        CheckConstraint("integrity_version = 'sha256-merkle-v1'", name="integrity_version_closed"),
+        lowercase_sha256_check("integrity_root_sha256"),
+        CheckConstraint("integrity_chunk_size = 4096", name="integrity_chunk_size_fixed"),
         UniqueConstraint(
             "job_id", "attempt_count", "label", "sequence", name="uq_job_log_snapshots_stream_sequence"
         ),
@@ -1077,6 +1080,10 @@ class JobLogSnapshot(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base
     media_type: Mapped[str] = mapped_column(String(32), nullable=False)
     byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
     redaction_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    # TheSuperHackers @feature Leex 22/08/2026 Persist a closed root descriptor for bounded authenticated log pages. (#TBD)
+    integrity_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    integrity_root_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    integrity_chunk_size: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 def _abort_trigger(name: str, timing: str, table: str, when: str, message: str) -> str:
