@@ -8,7 +8,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Integer, Table, inspect, text
+from sqlalchemy import Column, Integer, MetaData, Table, inspect, text
 
 from generals_replay_analyzer.db import (
     Base,
@@ -157,13 +157,22 @@ def _expected_schema() -> dict[str, Any]:
     return json.loads(EXPECTED_SCHEMA_PATH.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
+def _task2_baseline_metadata() -> MetaData:
+    """Return the accepted 0001 ORM contract without tables owned by later revisions."""
+    metadata = MetaData(naming_convention=Base.metadata.naming_convention)
+    for table in Base.metadata.sorted_tables:
+        if table.name != "player_identity_operations":
+            table.to_metadata(metadata)
+    return metadata
+
+
 def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_path: Path) -> None:
     """Compare every table, named index/check/FK, predicate, action, and trigger to a frozen oracle."""
     config = make_alembic_config(database_path)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0001_replay_analyzer_v2"]
+    assert scripts.get_heads() == ["0002_player_identity_audit"]
 
-    upgrade_database(database_path)
+    upgrade_database(database_path, "0001_replay_analyzer_v2")
     engine = create_database_engine(database_path)
     try:
         inspector = inspect(engine)
@@ -178,7 +187,7 @@ def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_pa
             assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
             assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
             context = MigrationContext.configure(connection, opts={"compare_type": True})
-            assert compare_metadata(context, Base.metadata) == []
+            assert compare_metadata(context, _task2_baseline_metadata()) == []
 
         for table in APPLICATION_TABLES:
             indexed_leading_columns = {
@@ -224,7 +233,7 @@ def test_baseline_does_not_create_tables_owned_by_future_revisions(database_path
     """Catch a live-metadata baseline that preempts a later Alembic revision."""
     future_table = Table("future_revision_table", Base.metadata, Column("id", Integer, primary_key=True))
     try:
-        upgrade_database(database_path)
+        upgrade_database(database_path, "0001_replay_analyzer_v2")
         engine = create_database_engine(database_path)
         try:
             assert "future_revision_table" not in inspect(engine).get_table_names()
@@ -252,7 +261,7 @@ def test_baseline_is_independent_of_existing_live_table_and_trigger_changes(
         ],
     )
     try:
-        upgrade_database(database_path)
+        upgrade_database(database_path, "0001_replay_analyzer_v2")
         engine = create_database_engine(database_path)
         try:
             inspector = inspect(engine)

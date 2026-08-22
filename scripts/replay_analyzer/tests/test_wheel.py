@@ -18,6 +18,7 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/env.py",
     "generals_replay_analyzer/db/migrations/script.py.mako",
     "generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py",
+    "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py",
 }
 
 
@@ -56,7 +57,10 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
         assert "migration-wheel-environment" in str(generals_replay_analyzer.__file__)
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
-            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0001_replay_analyzer_v2",)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0002_player_identity_audit",)
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'player_identity_operations'"
+            ).fetchone() == ("player_identity_operations",)
             first = connection.execute(
                 "SELECT type, name, COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
             ).fetchall()

@@ -36,6 +36,7 @@ exclude = ["src/generals_replay_analyzer/db/migrations/**"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.0,<7",
     "mypy",
     "pytest",
     "pytest-cov",

@@ -71,7 +71,7 @@ def test_schema_reopens_and_foreign_keys_reject_invalid_writes(database_path: Pa
         with second_engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0001_replay_analyzer_v2"
+                == "0002_player_identity_audit"
             )
     finally:
         second_engine.dispose()

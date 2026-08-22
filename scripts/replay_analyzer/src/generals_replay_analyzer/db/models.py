@@ -277,6 +277,32 @@ class PlayerAlias(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
     external_subject: Mapped[str | None] = mapped_column(Text)
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Preserve every canonical identity change as an immutable audit operation. (#TBD)
+class PlayerIdentityOperation(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
+    __tablename__ = "player_identity_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_kind IN ('auto_link','merge_players','split_alias','attach_external_alias','inverse')",
+            name="operation_kind_valid",
+        ),
+        CheckConstraint("length(trim(actor)) > 0", name="actor_nonempty"),
+        CheckConstraint("length(trim(reason)) > 0", name="reason_nonempty"),
+        Index("ix_player_identity_operations_created_kind", "created_at", "operation_kind"),
+        Index("ix_player_identity_operations_inverse_of", "inverse_of_operation_id"),
+    )
+
+    operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    inverse_of_operation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("player_identity_operations.id", ondelete="RESTRICT"), nullable=True
+    )
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    before_json: Mapped[JSON] = mapped_column(CanonicalJSON, nullable=False)
+    after_json: Mapped[JSON] = mapped_column(CanonicalJSON, nullable=False)
+    inverse_payload_json: Mapped[JSON] = mapped_column(CanonicalJSON, nullable=False)
+    affected_revisions_json: Mapped[JSON] = mapped_column(CanonicalJSON, nullable=False)
+
+
 class ReplayPlayer(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
     __tablename__ = "replay_players"
     __table_args__ = (
