@@ -1,0 +1,1 @@
+"""Pure spatial analytics tests."""
