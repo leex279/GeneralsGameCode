@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,9 @@ from generals_replay_analyzer.db.models import (
     Feature,
     FeatureEvidence,
     FeatureSet,
+    ManagedAsset,
+    Map,
+    MapResource,
     ParserRun,
     Replay,
     ReplayCommand,
@@ -75,6 +79,7 @@ def _seed_replay(
     replay_player_public_id: str = "00000000-0000-4000-8000-000000000302",
     parser_run_id: str = "00000000-0000-4000-8000-000000000303",
     telemetry_run_id: str = "00000000-0000-4000-8000-000000000304",
+    finalize: bool = True,
 ) -> tuple[str, str, tuple[str, ...]]:
     now = datetime(2026, 8, 22, tzinfo=UTC)
     player_index = 0
@@ -246,21 +251,488 @@ def _seed_replay(
         )
         evidence_ids.append(orphan_public_id)
         session.commit()
-        parser.status = "succeeded"
-        parser.completion_status = "complete"
-        parser.result_sha256 = "b" * 64
-        parser.completed_at = now
-        telemetry.status = "succeeded"
-        telemetry.final_frame = 120
-        telemetry.command_count = 0
-        telemetry.trace_sha256 = "c" * 64
-        telemetry.completed_at = now
-        session.commit()
+        if finalize:
+            parser.status = "succeeded"
+            parser.completion_status = "complete"
+            parser.result_sha256 = "b" * 64
+            parser.completed_at = now
+            telemetry.status = "succeeded"
+            telemetry.final_frame = 120
+            telemetry.command_count = 0
+            telemetry.trace_sha256 = "c" * 64
+            telemetry.completed_at = now
+            session.commit()
     return replay_public_id, replay_player_public_id, tuple(evidence_ids)
 
 
 def _request(replay: str, player: str, *extractors: str, settings: object = ()) -> ExtractFeaturesRequest:
     return ExtractFeaturesRequest(replay, player, tuple(extractors), settings)  # type: ignore[arg-type]
+
+
+def _attach_spatial_projection(
+    factory: sessionmaker[Session], replay_public_id: str, telemetry_run_id: str, *, defect: str | None = None
+) -> tuple[int, int]:
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+    content_sha256 = "d" * 64
+    manifest_sha256 = "e" * 64
+    catalog_sha256 = "f" * 64
+    projection = {
+        "amphibious_passable": [True, True],
+        "content_sha256": content_sha256,
+        "engine_data_identity": "fixture-engine",
+        "ground_passable": [True, False],
+        "map_identity": "maps/fixture.map",
+        "pathing": {
+            "bounds": {
+                "maximum_exclusive": {"x": 20.0, "y": 10.0},
+                "minimum_inclusive": {"x": 0.0, "y": 0.0},
+            },
+            "cell_size": {"x": 10.0, "y": 10.0},
+            "dimension_source": "fixture grid",
+            "height": 1,
+            "index_origin": {"x": 0, "y": 0},
+            "sample_point": "cell_center",
+            "storage_order": "row_major_y_then_x_x_fastest",
+            "width": 2,
+        },
+        "schema_version": 2,
+        "world_bounds": {
+            "maximum": {"x": 20.0, "y": 10.0, "z": 5.0},
+            "maximum_inclusive": True,
+            "minimum": {"x": 0.0, "y": 0.0, "z": -5.0},
+            "minimum_inclusive": True,
+        },
+        "zone_ids": [1, 2],
+    }
+    if defect == "grid":
+        projection["ground_passable"] = [True]
+    elif defect == "numeric_string":
+        cast(dict[str, object], projection["pathing"])["width"] = "2"
+    start_payload = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "category_source": "GameSlot::getStartPos + TerrainLogic::getWaypointByName",
+        "name": "Start Zero",
+        "position": {"x": 5.0, "y": 5.0, "z": 0.0},
+        "slot_indices": [0],
+        "waypoint_id": 10,
+    }
+    static_payload = {
+        "bounds_policy": "pathfinder_xy_closed",
+        "categories": [
+            {"name": "supply_source", "source": "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)"}
+        ],
+        "creation_source": "map_loaded",
+        "object_id": 77,
+        "orientation": 0.0,
+        "position": {"x": 15.0, "y": 5.0, "z": 0.0},
+        "snapshot_scope": "post_map_initialization",
+        "template_name": "SupplyDock",
+    }
+    if defect == "resource_numeric_string":
+        static_payload["orientation"] = "0.0"
+    elif defect == "negative_zero":
+        static_payload["orientation"] = -0.0
+    with factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == replay_public_id))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == telemetry_run_id))
+        assert replay is not None and telemetry is not None
+        manifest_asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000401",
+            sha256=manifest_sha256,
+            kind="telemetry_map_asset",
+            relative_path="fixtures/map/manifest.json",
+            size_bytes=1,
+            created_at=now,
+        )
+        catalog_asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000402",
+            sha256=catalog_sha256,
+            kind="telemetry_catalog",
+            relative_path="fixtures/catalog.json",
+            size_bytes=1,
+            created_at=now,
+        )
+        session.add_all((manifest_asset, catalog_asset))
+        session.flush()
+        map_row = Map(
+            public_id="00000000-0000-4000-8000-000000000403",
+            content_sha256=content_sha256,
+            manifest_asset_id=manifest_asset.id,
+            schema_version=2,
+            engine_data_identity="fixture-engine",
+            map_identity="maps/fixture.map",
+            exporter_version="zero-hour-replay-map-export-v2",
+            min_x=0.0,
+            min_y=0.0,
+            min_z=-5.0,
+            max_x=20.0,
+            max_y=10.0,
+            max_z=5.0,
+            pathing_width=2,
+            pathing_height=1,
+            pathing_cell_size=10.0,
+            terrain_width=2,
+            terrain_height=1,
+            terrain_cell_size=10.0,
+            metadata_json={}
+            if defect == "missing_projection"
+            else {"validated_spatial_projection": projection},
+            created_at=now,
+        )
+        session.add(map_row)
+        session.flush()
+        # Deliberately insert reverse semantic order; context order must be canonical.
+        session.add_all(
+            (
+                MapResource(
+                    map_id=map_row.id,
+                    stable_key="static:77",
+                    resource_kind="static_object",
+                    source_object_id=77,
+                    template_name="SupplyDock",
+                    owner_player_index=None,
+                    amount=None,
+                    x=15.0,
+                    y=5.0,
+                    z=0.0,
+                    payload_json=static_payload,
+                ),
+                MapResource(
+                    map_id=map_row.id,
+                    stable_key="start:0",
+                    resource_kind="start_position",
+                    source_object_id=None,
+                    template_name="Start Zero",
+                    owner_player_index=0,
+                    amount=None,
+                    x=5.0,
+                    y=5.0,
+                    z=0.0,
+                    payload_json=start_payload,
+                ),
+            )
+        )
+        replay.map_id = map_row.id
+        if defect == "telemetry_map":
+            wrong_map = Map(
+                public_id="00000000-0000-4000-8000-000000000406",
+                content_sha256="8" * 64,
+                manifest_asset_id=manifest_asset.id,
+                schema_version=2,
+                engine_data_identity="fixture-engine",
+                map_identity="maps/wrong.map",
+                exporter_version="zero-hour-replay-map-export-v2",
+                min_x=0.0,
+                min_y=0.0,
+                min_z=-5.0,
+                max_x=20.0,
+                max_y=10.0,
+                max_z=5.0,
+                pathing_width=2,
+                pathing_height=1,
+                pathing_cell_size=10.0,
+                terrain_width=2,
+                terrain_height=1,
+                terrain_cell_size=10.0,
+                metadata_json={},
+                created_at=now,
+            )
+            session.add(wrong_map)
+            session.flush()
+            telemetry.map_id = wrong_map.id
+        else:
+            telemetry.map_id = map_row.id
+        if defect == "manifest_asset":
+            wrong = ManagedAsset(
+                public_id="00000000-0000-4000-8000-000000000405",
+                sha256="9" * 64,
+                kind="telemetry_map_asset",
+                relative_path="fixtures/wrong-manifest.json",
+                size_bytes=1,
+                created_at=now,
+            )
+            session.add(wrong)
+            session.flush()
+            telemetry.map_asset_id = wrong.id
+        else:
+            telemetry.map_asset_id = manifest_asset.id
+        if defect == "catalog_asset":
+            wrong_catalog = ManagedAsset(
+                public_id="00000000-0000-4000-8000-000000000407",
+                sha256="7" * 64,
+                kind="telemetry_catalog",
+                relative_path="fixtures/wrong-catalog.json",
+                size_bytes=1,
+                created_at=now,
+            )
+            session.add(wrong_catalog)
+            session.flush()
+            telemetry.catalog_asset_id = wrong_catalog.id
+        else:
+            telemetry.catalog_asset_id = catalog_asset.id
+        telemetry.engine_build = "wrong-engine" if defect == "engine_identity" else "fixture-engine"
+        manifest_payload = {
+            "engine_build": "fixture-engine",
+            "replay_version": "1.04",
+            "map_identity": "maps/fixture.map",
+            "initial_seed": 4,
+            "exporter_settings": {
+                "audio_enabled": False,
+                "movement_sample_frames": 15,
+                "private_locator": "C:\\private\\telemetry-run",
+            },
+            "game_data_catalog": {
+                "type": "game_data_catalog",
+                "path": f"game-data-catalog-v1-{catalog_sha256}.json",
+                "sha256": catalog_sha256,
+                "engine_data_identity": "fixture-engine",
+            },
+            "map_asset": {
+                "type": "map_asset",
+                "schema_version": 2,
+                "path": f"map-assets-v2/{content_sha256}/manifest.json",
+                "sha256": manifest_sha256,
+                "content_sha256": content_sha256,
+                "engine_data_identity": "fixture-engine",
+                "map_identity": "maps/fixture.map",
+            },
+        }
+        evidence = EvidenceItem(
+            public_id="00000000-0000-4000-8000-000000000404",
+            replay_id=replay.id,
+            telemetry_run_id=telemetry.id,
+            tier="observed",
+            source_kind="telemetry",
+            source_key=f"telemetry:{telemetry_run_id}:sequence:10",
+            schema_version=2,
+            created_at=now,
+        )
+        session.add(evidence)
+        session.flush()
+        session.add(
+            TelemetryEvent(
+                telemetry_run_id=telemetry.id,
+                sequence=10,
+                frame=0,
+                logic_time_seconds=0.0,
+                schema_version=2,
+                event_type="manifest",
+                payload_json=manifest_payload,
+                raw_record_json={"event_type": "manifest", "payload": manifest_payload},
+                evidence_item_id=evidence.id,
+            )
+        )
+        if defect == "null_identity_graph":
+            telemetry.map_id = None
+            telemetry.map_asset_id = None
+            telemetry.catalog_asset_id = None
+        if defect in ("resource", "resource_kind"):
+            static_resource = session.scalar(
+                select(MapResource).where(MapResource.map_id == map_row.id, MapResource.stable_key == "static:77")
+            )
+            assert static_resource is not None
+            if defect == "resource":
+                static_resource.x = 14.0
+            else:
+                static_resource.resource_kind = "unvalidated_resource"
+        telemetry.status = "succeeded"
+        telemetry.final_frame = 120
+        telemetry.command_count = 0
+        telemetry.trace_sha256 = "c" * 64
+        telemetry.completed_at = now
+        return map_row.id, manifest_asset.id
+
+
+def _spatial_manifest_facts(
+    factory: sessionmaker[Session], replay: str, player: str
+) -> tuple[dict[str, object], FeatureContext]:
+    context = FeatureExtractionService(factory)._build_context(_request(replay, player, "build"))
+    manifests = [item for item in context.observed if item.event_type == "manifest"]
+    assert len(manifests) == 1
+    return cast(dict[str, object], thaw_canonical(manifests[0].facts)), context
+
+
+def test_context_enriches_only_manifest_with_canonical_persisted_spatial_projection(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(feature_factory, replay, "00000000-0000-4000-8000-000000000304")
+
+    facts, context = _spatial_manifest_facts(feature_factory, replay, player)
+
+    projection = cast(dict[str, object], facts["validated_spatial_projection"])
+    assert projection["content_sha256"] == "d" * 64
+    assert projection["ground_passable"] == [True, False]
+    assert projection["amphibious_passable"] == [True, True]
+    assert projection["zone_ids"] == [1, 2]
+    assert projection["start_positions"] == [
+        {
+            "bounds_policy": "pathfinder_xy_closed",
+            "category_source": "GameSlot::getStartPos + TerrainLogic::getWaypointByName",
+            "name": "Start Zero",
+            "position": {"x": 5.0, "y": 5.0, "z": 0.0},
+            "slot_indices": [0],
+            "waypoint_id": 10,
+        }
+    ]
+    assert projection["static_objects"] == [
+        {
+            "bounds_policy": "pathfinder_xy_closed",
+            "categories": [
+                {"name": "supply_source", "source": "ThingTemplate::isKindOf(KINDOF_SUPPLY_SOURCE)"}
+            ],
+            "creation_source": "map_loaded",
+            "object_id": 77,
+            "orientation": 0.0,
+            "position": {"x": 15.0, "y": 5.0, "z": 0.0},
+            "snapshot_scope": "post_map_initialization",
+            "template_name": "SupplyDock",
+        }
+    ]
+    assert "path" not in projection and "loader" not in projection
+    manifest = next(item for item in context.observed if item.event_type == "manifest")
+    assert manifest.ref.public_id == "00000000-0000-4000-8000-000000000404"
+    with feature_factory() as session:
+        stored = session.scalar(select(TelemetryEvent).where(TelemetryEvent.event_type == "manifest"))
+        assert stored is not None and "validated_spatial_projection" not in stored.payload_json
+
+
+def test_manifest_context_is_exact_path_free_and_source_locator_independent(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(feature_factory, replay, "00000000-0000-4000-8000-000000000304")
+    service = FeatureExtractionService(feature_factory)
+    facts, context = _spatial_manifest_facts(feature_factory, replay, player)
+    assert set(facts) == {
+        "audio_enabled",
+        "engine_build",
+        "game_data_catalog",
+        "initial_seed",
+        "map_asset",
+        "map_identity",
+        "movement_sample_frames",
+        "order_coverage",
+        "replay_version",
+        "validated_spatial_projection",
+    }
+    assert set(cast(dict[str, object], facts["game_data_catalog"])) == {
+        "engine_data_identity",
+        "sha256",
+        "type",
+    }
+    assert set(cast(dict[str, object], facts["map_asset"])) == {
+        "content_sha256",
+        "engine_data_identity",
+        "map_identity",
+        "schema_version",
+        "sha256",
+        "type",
+    }
+
+    with feature_factory() as session:
+        stored = session.scalar(select(TelemetryEvent).where(TelemetryEvent.event_type == "manifest"))
+        assert stored is not None
+        alternate_payload = deepcopy(stored.payload_json)
+    cast(dict[str, object], alternate_payload["game_data_catalog"])["path"] = "private/catalog/source.json"
+    cast(dict[str, object], alternate_payload["map_asset"])["path"] = "private/map/source.json"
+    cast(dict[str, object], alternate_payload["exporter_settings"])["private_locator"] = "D:\\other\\run"
+    alternate_event = TelemetryEvent(event_type="manifest", payload_json=alternate_payload)
+    alternate_facts = service._event_facts(alternate_event, {}, {}, None)
+    alternate_facts["validated_spatial_projection"] = facts["validated_spatial_projection"]
+    alternate_observed = tuple(
+        replace(item, facts=alternate_facts) if item.event_type == "manifest" else item for item in context.observed
+    )
+    assert input_digest(replace(context, observed=alternate_observed)) == input_digest(context)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["telemetry_map", "manifest_asset", "catalog_asset", "engine_identity"],
+)
+def test_context_rejects_mismatched_successful_telemetry_spatial_identity(
+    feature_factory: sessionmaker[Session], defect: str
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(
+        feature_factory,
+        replay,
+        "00000000-0000-4000-8000-000000000304",
+        defect=defect,
+    )
+
+    with pytest.raises(FeatureExtractionError, match="spatial identity mismatch"):
+        FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["grid", "resource", "resource_kind", "numeric_string", "resource_numeric_string", "negative_zero"],
+)
+def test_context_rejects_malformed_persisted_spatial_projection(
+    feature_factory: sessionmaker[Session], defect: str
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(
+        feature_factory,
+        replay,
+        "00000000-0000-4000-8000-000000000304",
+        defect=defect,
+    )
+
+    with pytest.raises(FeatureExtractionError, match="malformed validated spatial projection"):
+        FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+
+
+def test_context_rejects_v2_manifest_when_selected_run_has_null_spatial_identity_graph(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(
+        feature_factory,
+        replay,
+        "00000000-0000-4000-8000-000000000304",
+        defect="null_identity_graph",
+    )
+    with pytest.raises(FeatureExtractionError, match="spatial identity mismatch"):
+        FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+
+
+def test_context_leaves_missing_validated_spatial_projection_absent(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(
+        feature_factory,
+        replay,
+        "00000000-0000-4000-8000-000000000304",
+        defect="missing_projection",
+    )
+    context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+    manifest = next(item for item in context.observed if item.event_type == "manifest")
+    assert "validated_spatial_projection" not in cast(dict[str, object], thaw_canonical(manifest.facts))
+
+
+def test_spatial_projection_semantic_change_changes_context_digest_without_mutating_manifest(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory, finalize=False)
+    _attach_spatial_projection(feature_factory, replay, "00000000-0000-4000-8000-000000000304")
+    _, before = _spatial_manifest_facts(feature_factory, replay, player)
+    changed_observed = []
+    for observation in before.observed:
+        if observation.event_type != "manifest":
+            changed_observed.append(observation)
+            continue
+        facts = cast(dict[str, object], thaw_canonical(observation.facts))
+        projection = cast(dict[str, object], facts["validated_spatial_projection"])
+        projection["ground_passable"] = [False, False]
+        changed_observed.append(replace(observation, facts=facts))
+    after = replace(before, observed=tuple(changed_observed))
+    assert input_digest(before) != input_digest(after)
+    with feature_factory() as session:
+        stored = session.scalar(select(TelemetryEvent).where(TelemetryEvent.event_type == "manifest"))
+        assert stored is not None and "validated_spatial_projection" not in stored.payload_json
 
 
 def test_service_reuses_immutable_success_and_persists_direct_same_replay_links(

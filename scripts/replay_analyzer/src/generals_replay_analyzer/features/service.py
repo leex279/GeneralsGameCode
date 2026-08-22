@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from typing import Protocol, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import select
+from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,6 +21,8 @@ from generals_replay_analyzer.db.models import (
     FeatureEvidence,
     FeatureSet,
     ManagedAsset,
+    Map,
+    MapResource,
     ParserRun,
     Replay,
     ReplayCommand,
@@ -47,6 +51,7 @@ from generals_replay_analyzer.features.evidence import (
 )
 from generals_replay_analyzer.features.production import ProductionExtractor
 from generals_replay_analyzer.features.registry import BASE_REGISTRY, FeatureRegistry
+from generals_replay_analyzer.telemetry.map_asset import GridSpec, StartPosition, StaticObjectFeature, WorldBounds
 
 
 class RegisteredExtractor(Protocol):
@@ -105,6 +110,26 @@ def _mapping(value: object) -> dict[str, object]:
 
 def _schema_label(source_kind: str, schema_version: int) -> str:
     return f"{source_kind}-v{schema_version}"
+
+
+def _require_strict_canonical_tree(value: object) -> None:
+    if value is None or type(value) in (bool, int, str):
+        return
+    if type(value) is float:
+        if not math.isfinite(value) or (value == 0.0 and math.copysign(1.0, value) < 0):
+            raise ValueError("canonical floats must be finite and may not be negative zero")
+        return
+    if type(value) is list:
+        for item in value:
+            _require_strict_canonical_tree(item)
+        return
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise ValueError("canonical mapping keys must be built-in strings")
+        for item in value.values():
+            _require_strict_canonical_tree(item)
+        return
+    raise ValueError("persisted spatial projection must contain exact JSON values")
 
 
 # TheSuperHackers @feature Leex 22/08/2026 Make one transactional service authoritative for feature cache persistence. (#TBD)
@@ -284,6 +309,7 @@ class FeatureExtractionService:
                 parser_run_id=None,
                 telemetry_run_id=telemetry.id,
             )
+        spatial_projection = self._validated_spatial_projection(session, replay, telemetry, event_rows)
         evidence_by_sequence = {event.sequence: evidence.public_id for event, evidence in event_rows}
         entities = {
             item.object_id: (
@@ -298,6 +324,8 @@ class FeatureExtractionService:
         observations = []
         for event, evidence in event_rows:
             facts = self._event_facts(event, players, entities, replay_player)
+            if event.event_type == "manifest" and spatial_projection is not None:
+                facts["validated_spatial_projection"] = spatial_projection
             if replay_player is not None and not self._belongs_to_player(event.event_type, facts, replay_player.public_id):
                 continue
             observations.append(
@@ -315,6 +343,180 @@ class FeatureExtractionService:
                 )
             )
         return tuple(observations)
+
+    # TheSuperHackers @fix Leex 22/08/2026 Authorize spatial facts through one exact persisted telemetry identity graph. (#TBD)
+    def _validated_spatial_projection(
+        self,
+        session: Session,
+        replay: Replay,
+        telemetry: TelemetryRun,
+        event_rows: tuple[Row[tuple[TelemetryEvent, EvidenceItem]], ...],
+    ) -> dict[str, object] | None:
+        manifest_events = [event for event, _ in event_rows if event.event_type == "manifest"]
+        has_map_identity = any(
+            value is not None
+            for value in (telemetry.map_id, telemetry.map_asset_id, telemetry.catalog_asset_id)
+        )
+        if not has_map_identity:
+            if any(
+                event.schema_version == 2
+                and (
+                    _mapping(event.payload_json).get("map_asset") is not None
+                    or _mapping(event.payload_json).get("game_data_catalog") is not None
+                )
+                for event in manifest_events
+            ):
+                raise FeatureExtractionError("validated spatial identity mismatch")
+            return None
+        if (
+            telemetry.map_id is None
+            or telemetry.map_asset_id is None
+            or telemetry.catalog_asset_id is None
+            or replay.map_id != telemetry.map_id
+        ):
+            raise FeatureExtractionError("validated spatial identity mismatch")
+        map_row = session.get(Map, telemetry.map_id)
+        manifest_asset = session.get(ManagedAsset, telemetry.map_asset_id)
+        catalog_asset = session.get(ManagedAsset, telemetry.catalog_asset_id)
+        if (
+            map_row is None
+            or manifest_asset is None
+            or catalog_asset is None
+            or map_row.manifest_asset_id != telemetry.map_asset_id
+            or manifest_asset.kind != "telemetry_map_asset"
+            or catalog_asset.kind != "telemetry_catalog"
+            or len(manifest_events) != 1
+        ):
+            raise FeatureExtractionError("validated spatial identity mismatch")
+        manifest = _mapping(manifest_events[0].payload_json)
+        map_reference = _mapping(manifest.get("map_asset"))
+        catalog_reference = _mapping(manifest.get("game_data_catalog"))
+        if (
+            manifest.get("engine_build") != telemetry.engine_build
+            or manifest.get("map_identity") != map_row.map_identity
+            or map_reference.get("type") != "map_asset"
+            or map_reference.get("schema_version") != map_row.schema_version
+            or map_reference.get("content_sha256") != map_row.content_sha256
+            or map_reference.get("engine_data_identity") != map_row.engine_data_identity
+            or map_reference.get("map_identity") != map_row.map_identity
+            or map_reference.get("sha256") != manifest_asset.sha256
+            or catalog_reference.get("type") != "game_data_catalog"
+            or catalog_reference.get("sha256") != catalog_asset.sha256
+            or catalog_reference.get("engine_data_identity") != map_row.engine_data_identity
+            or telemetry.engine_build != map_row.engine_data_identity
+        ):
+            raise FeatureExtractionError("validated spatial identity mismatch")
+        metadata = _mapping(map_row.metadata_json)
+        raw_projection = metadata.get("validated_spatial_projection")
+        if raw_projection is None:
+            return None
+        try:
+            return self._materialize_spatial_projection(session, map_row, raw_projection)
+        except (TypeError, ValueError):
+            raise FeatureExtractionError("malformed validated spatial projection") from None
+
+    def _materialize_spatial_projection(
+        self, session: Session, map_row: Map, raw_projection: object
+    ) -> dict[str, object]:
+        if type(raw_projection) is not dict:
+            raise ValueError("projection must be an exact mapping")
+        _require_strict_canonical_tree(raw_projection)
+        projection = cast(dict[str, object], raw_projection)
+        required = {
+            "amphibious_passable",
+            "content_sha256",
+            "engine_data_identity",
+            "ground_passable",
+            "map_identity",
+            "pathing",
+            "schema_version",
+            "world_bounds",
+            "zone_ids",
+        }
+        if set(projection) != required:
+            raise ValueError("projection keys differ from the closed schema")
+        pathing = GridSpec.model_validate(projection["pathing"], strict=True)
+        world_bounds = WorldBounds.model_validate(projection["world_bounds"], strict=True)
+        count = pathing.width * pathing.height
+        ground = projection["ground_passable"]
+        amphibious = projection["amphibious_passable"]
+        zones = projection["zone_ids"]
+        if (
+            projection["schema_version"] != map_row.schema_version
+            or projection["content_sha256"] != map_row.content_sha256
+            or projection["map_identity"] != map_row.map_identity
+            or projection["engine_data_identity"] != map_row.engine_data_identity
+            or pathing.width != map_row.pathing_width
+            or pathing.height != map_row.pathing_height
+            or pathing.cell_size.x != map_row.pathing_cell_size
+            or world_bounds.minimum.x != map_row.min_x
+            or world_bounds.minimum.y != map_row.min_y
+            or world_bounds.minimum.z != map_row.min_z
+            or world_bounds.maximum.x != map_row.max_x
+            or world_bounds.maximum.y != map_row.max_y
+            or world_bounds.maximum.z != map_row.max_z
+            or type(ground) is not list
+            or type(amphibious) is not list
+            or type(zones) is not list
+            or len(ground) != count
+            or len(amphibious) != count
+            or len(zones) != count
+            or any(type(value) is not bool for value in (*ground, *amphibious))
+            or any(type(value) is not int for value in zones)
+            or any(left and not right for left, right in zip(ground, amphibious, strict=True))
+        ):
+            raise ValueError("projection values disagree with persisted map identity")
+        starts: dict[tuple[int, str], dict[str, object]] = {}
+        static_objects: list[dict[str, object]] = []
+        resources = session.scalars(
+            select(MapResource).where(MapResource.map_id == map_row.id).order_by(MapResource.stable_key)
+        )
+        for resource in resources:
+            if resource.resource_kind == "start_position":
+                _require_strict_canonical_tree(resource.payload_json)
+                start = StartPosition.model_validate(resource.payload_json, strict=True)
+                payload = start.model_dump(mode="json")
+                if (
+                    resource.stable_key != f"start:{resource.owner_player_index}"
+                    or resource.source_object_id is not None
+                    or resource.owner_player_index not in start.slot_indices
+                    or resource.template_name != start.name
+                    or (resource.x, resource.y, resource.z) != (start.position.x, start.position.y, start.position.z)
+                ):
+                    raise ValueError("start-position row disagrees with its observed payload")
+                key = (start.waypoint_id, start.name)
+                if key in starts and starts[key] != payload:
+                    raise ValueError("start-position rows disagree")
+                starts[key] = payload
+            elif resource.resource_kind == "static_object":
+                _require_strict_canonical_tree(resource.payload_json)
+                static_object = StaticObjectFeature.model_validate(resource.payload_json, strict=True)
+                payload = static_object.model_dump(mode="json")
+                if (
+                    resource.stable_key != f"static:{static_object.object_id}"
+                    or resource.source_object_id != static_object.object_id
+                    or resource.owner_player_index is not None
+                    or resource.template_name != static_object.template_name
+                    or (resource.x, resource.y, resource.z)
+                    != (static_object.position.x, static_object.position.y, static_object.position.z)
+                ):
+                    raise ValueError("static-object row disagrees with its observed payload")
+                static_objects.append(payload)
+            else:
+                raise ValueError("unsupported map resource kind")
+        return {
+            "schema_version": map_row.schema_version,
+            "content_sha256": map_row.content_sha256,
+            "map_identity": map_row.map_identity,
+            "engine_data_identity": map_row.engine_data_identity,
+            "pathing": pathing.model_dump(mode="json"),
+            "world_bounds": world_bounds.model_dump(mode="json"),
+            "ground_passable": list(ground),
+            "amphibious_passable": list(amphibious),
+            "zone_ids": list(zones),
+            "start_positions": [starts[key] for key in sorted(starts)],
+            "static_objects": sorted(static_objects, key=lambda item: cast(int, item["object_id"])),
+        }
 
     def _validate_observed_evidence(
         self,
@@ -389,7 +591,37 @@ class FeatureExtractionService:
             facts["replay_player_public_id"] = players.get(owner) if type(owner) is int else None
         elif event_type == "manifest":
             exporter_settings = _mapping(facts.get("exporter_settings"))
-            facts["order_coverage"] = exporter_settings.get("order_coverage")
+            catalog_value = facts.get("game_data_catalog")
+            map_value = facts.get("map_asset")
+            catalog_reference = _mapping(catalog_value)
+            map_reference = _mapping(map_value)
+            # TheSuperHackers @fix Leex 22/08/2026 Project manifest evidence onto an exact path-free semantic contract. (#TBD)
+            facts = {
+                "engine_build": facts.get("engine_build"),
+                "replay_version": facts.get("replay_version"),
+                "map_identity": facts.get("map_identity"),
+                "initial_seed": facts.get("initial_seed"),
+                "audio_enabled": exporter_settings.get("audio_enabled"),
+                "movement_sample_frames": exporter_settings.get("movement_sample_frames"),
+                "order_coverage": exporter_settings.get("order_coverage"),
+                "game_data_catalog": None
+                if catalog_value is None
+                else {
+                    "type": catalog_reference.get("type"),
+                    "sha256": catalog_reference.get("sha256"),
+                    "engine_data_identity": catalog_reference.get("engine_data_identity"),
+                },
+                "map_asset": None
+                if map_value is None
+                else {
+                    "type": map_reference.get("type"),
+                    "schema_version": map_reference.get("schema_version"),
+                    "sha256": map_reference.get("sha256"),
+                    "content_sha256": map_reference.get("content_sha256"),
+                    "engine_data_identity": map_reference.get("engine_data_identity"),
+                    "map_identity": map_reference.get("map_identity"),
+                },
+            }
         elif event_type == "complete" and replay_player is not None:
             facts["replay_player_public_id"] = replay_player.public_id
             balances = cast(list[object], facts.get("final_cash_balances") or [])

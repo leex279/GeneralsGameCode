@@ -38,6 +38,7 @@ class Plugin:
     plugin_name: str
     plugin_version: str
     registry_schema: str
+    owned_namespaces: tuple[str, ...]
     definitions: tuple[FeatureDefinition, ...]
 
 
@@ -54,28 +55,49 @@ def test_base_registry_is_exact_closed_and_immutable() -> None:
 
 
 def test_plugin_composition_is_pure_and_supports_later_spatial_fanout() -> None:
-    plugin = Plugin("spatial", "v1", "feature-registry-v1", (_spatial_definition(),))
+    definitions = (
+        FeatureDefinition(
+            "army_route.observed_reachable_distance",
+            "real",
+            "engine_world_unit",
+            ("player",),
+            "inclusive",
+            "observed",
+            "army_route",
+        ),
+        FeatureDefinition(
+            "engagement.observed_cluster_count",
+            "integer",
+            "count",
+            ("player",),
+            "inclusive",
+            "observed",
+            "engagement",
+        ),
+    )
+    plugin = Plugin("spatial", "v1", "feature-registry-v1", ("army_route", "engagement"), definitions)
     composed = BASE_REGISTRY.with_plugin(plugin)
     assert BASE_REGISTRY.names() == EXPECTED_NAMES
-    assert composed.names() == tuple(sorted(EXPECTED_NAMES + ("spatial.hotspot_count",)))
-    assert composed.definition("spatial.hotspot_count").owner_namespace == "spatial"
+    assert composed.names() == tuple(sorted(EXPECTED_NAMES + tuple(definition.name for definition in definitions)))
+    assert composed.definition("army_route.observed_reachable_distance").unit == "engine_world_unit"
 
 
 @pytest.mark.parametrize(
     "plugin, message",
     [
-        (Plugin("spatial", "v1", "wrong", (_spatial_definition(),)), "schema"),
+        (Plugin("spatial", "v1", "wrong", ("spatial",), (_spatial_definition(),)), "schema"),
         (
             Plugin(
                 "build",
                 "v1",
                 "feature-registry-v1",
+                ("build",),
                 (FeatureDefinition("build.completed_count", "integer", "count", ("player",), "inclusive", "observed", "build"),),
             ),
             "duplicate",
         ),
         (
-            Plugin("other", "v1", "feature-registry-v1", (_spatial_definition(),)),
+            Plugin("spatial", "v1", "feature-registry-v1", ("other",), (_spatial_definition(),)),
             "namespace",
         ),
         (
@@ -83,6 +105,7 @@ def test_plugin_composition_is_pure_and_supports_later_spatial_fanout() -> None:
                 "spatial",
                 "v1",
                 "feature-registry-v1",
+                ("spatial",),
                 (_spatial_definition("spatial.z"), _spatial_definition("spatial.a")),
             ),
             "sorted",
@@ -118,6 +141,22 @@ def test_registry_rejects_unsorted_or_wrong_schema_and_plugin_metadata() -> None
     with pytest.raises(ValueError, match="schema"):
         type(BASE_REGISTRY)("wrong", BASE_REGISTRY.definitions)
     with pytest.raises(ValueError, match="plugin name"):
-        BASE_REGISTRY.with_plugin(Plugin("", "v1", "feature-registry-v1", ()))
+        BASE_REGISTRY.with_plugin(Plugin("", "v1", "feature-registry-v1", (), ()))
     with pytest.raises(ValueError, match="plugin version"):
-        BASE_REGISTRY.with_plugin(Plugin("spatial", "", "feature-registry-v1", ()))
+        BASE_REGISTRY.with_plugin(Plugin("spatial", "", "feature-registry-v1", (), ()))
+
+
+@pytest.mark.parametrize(
+    "owned_namespaces",
+    [
+        ("engagement", "army_route"),
+        ("army_route", "army_route"),
+        ("ArmyRoute",),
+        ("army.route",),
+    ],
+)
+def test_plugin_rejects_noncanonical_owned_namespace_sets(owned_namespaces: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="owned namespaces"):
+        BASE_REGISTRY.with_plugin(
+            Plugin("spatial", "v1", "feature-registry-v1", owned_namespaces, (_spatial_definition(),))
+        )

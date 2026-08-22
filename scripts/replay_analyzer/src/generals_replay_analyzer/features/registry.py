@@ -16,6 +16,7 @@ _UNITS = {
     "credits",
     "credits_per_minute",
     "damage",
+    "engine_world_unit",
     "frames",
     "json",
     "none",
@@ -26,6 +27,7 @@ _UNITS = {
 _VALUE_TYPES = {"integer", "real", "text", "boolean", "json"}
 _SCOPES = {"replay", "player", "team", "entity"}
 _NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class FeaturePlugin(Protocol):
     plugin_name: str
     plugin_version: str
     registry_schema: str
+    owned_namespaces: tuple[str, ...]
     definitions: tuple[FeatureDefinition, ...]
 
 
@@ -86,6 +89,7 @@ class FeatureRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(definition.name for definition in self.definitions)
 
+    # TheSuperHackers @fix Leex 22/08/2026 Bind multi-namespace plugins to one explicit closed ownership set. (#TBD)
     def with_plugin(self, plugin: FeaturePlugin) -> FeatureRegistry:
         if plugin.registry_schema != self.schema_version:
             raise ValueError("plugin registry schema mismatch")
@@ -93,6 +97,13 @@ class FeatureRegistry:
             raise ValueError("plugin name must be stable")
         if type(plugin.plugin_version) is not str or not plugin.plugin_version.strip():
             raise ValueError("plugin version must be stable")
+        owned_namespaces = plugin.owned_namespaces
+        if (
+            type(owned_namespaces) is not tuple
+            or owned_namespaces != tuple(sorted(set(owned_namespaces)))
+            or any(type(namespace) is not str or not _NAMESPACE_PATTERN.fullmatch(namespace) for namespace in owned_namespaces)
+        ):
+            raise ValueError("plugin owned namespaces must be sorted unique lower-case names")
         plugin_names = tuple(definition.name for definition in plugin.definitions)
         if plugin_names != tuple(sorted(plugin_names)):
             raise ValueError("plugin definitions must be sorted")
@@ -102,7 +113,8 @@ class FeatureRegistry:
         for definition in plugin.definitions:
             if definition.name in existing:
                 raise ValueError("duplicate feature name")
-            if definition.owner_namespace != plugin.plugin_name:
+            prefix = definition.name.split(".", 1)[0]
+            if prefix not in owned_namespaces or definition.owner_namespace not in owned_namespaces:
                 raise ValueError("illegal plugin namespace ownership")
         return FeatureRegistry(self.schema_version, tuple(sorted(self.definitions + plugin.definitions, key=lambda item: item.name)))
 

@@ -667,6 +667,37 @@ def test_v2_import_uses_validated_map_and_stable_raw_event_evidence(
             f"telemetry:{run_id}:sequence:{sequence}" for sequence in range(6)
         }
         assert map_row is not None and map_row.content_sha256 == events[0].payload_json["map_asset"]["content_sha256"]
+        projection = map_row.metadata_json["validated_spatial_projection"]
+        assert projection == {
+            "amphibious_passable": [True, True, False, False],
+            "content_sha256": map_row.content_sha256,
+            "engine_data_identity": ENGINE_IDENTITY,
+            "ground_passable": [True, False, False, False],
+            "map_identity": "maps/test.map",
+            "pathing": {
+                "bounds": {
+                    "maximum_exclusive": {"x": 1_000_000.0, "y": 1_000_000.0},
+                    "minimum_inclusive": {"x": -1_000_000.0, "y": -1_000_000.0},
+                },
+                "cell_size": {"x": 1_000_000.0, "y": 1_000_000.0},
+                "dimension_source": "synthetic contract fixture",
+                "height": 2,
+                "index_origin": {"x": -1, "y": -1},
+                "sample_point": "cell_center",
+                "storage_order": "row_major_y_then_x_x_fastest",
+                "width": 2,
+            },
+            "schema_version": 2,
+            "world_bounds": {
+                "maximum": {"x": 1_000_000.0, "y": 1_000_000.0, "z": 10_000.0},
+                "maximum_inclusive": True,
+                "minimum": {"x": -1_000_000.0, "y": -1_000_000.0, "z": -10_000.0},
+                "minimum_inclusive": True,
+            },
+            "zone_ids": [1, 2, 3, 4],
+        }
+        assert "start_positions" not in projection and "static_objects" not in projection
+        assert "path" not in projection and "loader" not in projection
         assert [row.stable_key for row in resources] == ["start:0", "static:77"]
         assert resources[1].x == 4.0 and resources[1].payload_json["template_name"] == "SupplyDock"
         assert session.scalar(select(func.count(MapRegion.id))) == 0

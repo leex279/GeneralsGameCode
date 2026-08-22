@@ -137,6 +137,18 @@ def normalize_map_asset(asset: MapAsset) -> NormalizedMap:
         "pathing": asset.pathing.model_dump(mode="json"),
         "terrain": asset.terrain.model_dump(mode="json"),
         "bounds": asset.bounds.model_dump(mode="json"),
+        # TheSuperHackers @fix Leex 22/08/2026 Retain the validated path grids for path-free downstream evidence. (#TBD)
+        "validated_spatial_projection": {
+            "schema_version": asset.schema_version,
+            "content_sha256": asset.content_sha256,
+            "map_identity": asset.map_identity,
+            "engine_data_identity": asset.engine_data_identity,
+            "pathing": asset.pathing.model_dump(mode="json"),
+            "world_bounds": asset.bounds.model_dump(mode="json"),
+            "ground_passable": list(asset.ground_passable),
+            "amphibious_passable": list(asset.amphibious_passable),
+            "zone_ids": list(asset.zone_ids),
+        },
         "feature_counts": {
             "start_positions": len(asset.start_positions),
             "waypoints": len(asset.waypoints),
