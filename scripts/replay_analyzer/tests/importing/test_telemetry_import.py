@@ -1770,6 +1770,7 @@ def test_dependency_stage_collision_is_rejected_before_any_importer_call() -> No
         "component_version",
         "public_id",
         "public_id_type",
+        "public_id_subclass",
         "succeeded_error_evidence",
         "failed_output_evidence",
         "duplicate_public_id",
@@ -1797,6 +1798,12 @@ def test_handler_rejects_malformed_dependency_identity_and_terminal_shape_before
         dependencies = (replace(parse, job_public_id="not-a-uuid"),)
     elif malformation == "public_id_type":
         dependencies = (replace(parse, job_public_id=cast(Any, 1)),)
+    elif malformation == "public_id_subclass":
+        class HostileString(str):
+            def replace(self, *_args: object, **_kwargs: object) -> str:
+                raise AttributeError("hostile replace")
+
+        dependencies = (replace(parse, job_public_id=HostileString(PARSE_JOB_PUBLIC_ID)),)
     elif malformation == "succeeded_error_evidence":
         dependencies = (replace(parse, error_code="unexpected_error"),)
     elif malformation == "failed_output_evidence":
