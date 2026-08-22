@@ -8,6 +8,7 @@ import random
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -71,6 +72,8 @@ from .conftest import MutableClock
 
 NOW = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 ENGINE_IDENTITY = "zero-hour-test-exe-00000000-ini-00000000"
+PARSE_JOB_PUBLIC_ID = "00000000-0000-0000-0000-000000000101"
+TELEMETRY_JOB_PUBLIC_ID = "00000000-0000-0000-0000-000000000102"
 
 
 def _parse_dependency_output(replay_sha256: str = "a" * 64) -> dict[str, object]:
@@ -807,6 +810,11 @@ def test_selected_parser_mapping_rejects_unknown_or_nonmatching_run(
     with session_factory() as session:
         run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
         assert run is not None and run.status == "failed"
+        assert set(
+            session.scalars(
+                select(ReplayQualityIssue.issue_code).where(ReplayQualityIssue.telemetry_run_id == run.id)
+            )
+        ) == {"invalid_trace"}
         for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent):
             assert session.scalar(select(func.count()).select_from(model)) == 0
 
@@ -1011,6 +1019,50 @@ def test_final_success_transaction_reverifies_replay_and_every_managed_descripto
         assert run is not None and run.status == "failed"
         for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent):
             assert session.scalar(select(func.count()).select_from(model)) == 0
+
+
+def test_final_reverify_allows_exact_same_kind_asset_reuse_but_rejects_descriptor_mismatch(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    """Catch content-addressed map-member dedup being mistaken for a duplicate logical descriptor."""
+    managed = settings.data_root / "managed-artifacts" / "shared-map-member.bin"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    managed.write_bytes(b"same validated compressed member bytes")
+    sha256 = hashlib.sha256(managed.read_bytes()).hexdigest()
+    public_id = "00000000-0000-0000-0000-000000000321"
+    with session_factory.begin() as session:
+        session.add(
+            ManagedAsset(
+                public_id=public_id,
+                sha256=sha256,
+                kind="telemetry_map_asset",
+                relative_path=managed.relative_to(settings.data_root).as_posix(),
+                size_bytes=managed.stat().st_size,
+                media_type=None,
+            )
+        )
+    descriptors = tuple(
+        ManagedTelemetryArtifact(
+            public_id,
+            "telemetry_map_asset",
+            f"map-assets-v2/{'a' * 64}/{name}",
+            sha256,
+            managed.stat().st_size,
+        )
+        for name in ("pathing-amphibious.u8.zlib", "pathing-ground.u8.zlib")
+    )
+    importer = _importer(session_factory, settings)
+
+    with session_factory() as session:
+        verified = importer._reverify_artifacts(session, descriptors)
+        assert [item.asset_id for item in verified] == [verified[0].asset_id, verified[0].asset_id]
+        for mismatched in (
+            replace(descriptors[1], kind="telemetry_catalog"),
+            replace(descriptors[1], sha256="0" * 64),
+            replace(descriptors[1], size_bytes=descriptors[1].size_bytes + 1),
+        ):
+            with pytest.raises(ValueError, match="registration changed"):
+                importer._reverify_artifacts(session, (descriptors[0], mismatched))
 
 
 def test_forced_family_constraint_failure_rolls_back_raw_and_projection_graph(
@@ -1470,7 +1522,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
     parser = ParserStub()
     telemetry = TelemetryStub()
     handler = ObservationImportHandler(parser, telemetry)  # type: ignore[arg-type]
-    parse_dependency = StageDependencyOutput("parse-job", "parse", "1", _parse_dependency_output())
+    parse_dependency = StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output())
     parser_only = StageExecutionContext(
         "import-job",
         "import_observations:1:key",
@@ -1498,7 +1550,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "size_bytes": 123,
     }
     telemetry_dependency = StageDependencyOutput(
-        "telemetry-job",
+        TELEMETRY_JOB_PUBLIC_ID,
         "telemetry",
         "1",
         {
@@ -1561,7 +1613,14 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "import_observations",
         "1",
         {},
-        (StageDependencyOutput("parse-job", "parse", "1", dict(_parse_dependency_output(), parser_version=1)),),
+        (
+            StageDependencyOutput(
+                PARSE_JOB_PUBLIC_ID,
+                "parse",
+                "1",
+                dict(_parse_dependency_output(), parser_version=1),
+            ),
+        ),
     )
     with pytest.raises(StageFailure, match="parser dependency evidence is invalid"):
         handler(invalid_parse)
@@ -1576,7 +1635,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         (
             parse_dependency,
             StageDependencyOutput(
-                "telemetry-job",
+                TELEMETRY_JOB_PUBLIC_ID,
                 "telemetry",
                 "1",
                 {"artifacts": ({"asset_public_id": "missing-fields"},)},
@@ -1677,8 +1736,8 @@ def test_succeeded_telemetry_dependency_contract_damage_is_typed_and_nonretryabl
         "1",
         {},
         (
-            StageDependencyOutput("parse-job", "parse", "1", _parse_dependency_output()),
-            StageDependencyOutput("telemetry-job", "telemetry", "1", output),
+            StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output()),
+            StageDependencyOutput(TELEMETRY_JOB_PUBLIC_ID, "telemetry", "1", output),
         ),
     )
 
@@ -1695,10 +1754,75 @@ def test_dependency_stage_collision_is_rejected_before_any_importer_call() -> No
             raise AssertionError("dependency collision must fail first")
 
     handler = ObservationImportHandler(ImporterStub(), ImporterStub())  # type: ignore[arg-type]
-    parse = StageDependencyOutput("parse-job", "parse", "1", _parse_dependency_output())
+    parse = StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output())
     context = StageExecutionContext(
         "import-job", "key", "replay", "a" * 64, "import_observations", "1", {}, (parse, replace(parse, job_public_id="other"))
     )
+    with pytest.raises(StageFailure) as failure:
+        handler(context)
+    assert failure.value.code == "dependency_contract_invalid" and failure.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "concrete_type",
+        "component_version",
+        "public_id",
+        "succeeded_error_evidence",
+        "failed_output_evidence",
+        "duplicate_public_id",
+    ],
+)
+def test_handler_rejects_malformed_dependency_identity_and_terminal_shape_before_import(
+    malformation: str,
+) -> None:
+    """Catch malformed public dependency snapshots escaping as retryable generic worker failures."""
+
+    class ImporterStub:
+        def import_replay(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("malformed dependency must fail before observation persistence")
+
+        def record_failed_dependency(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("malformed dependency must fail before failed-shell persistence")
+
+    parse = StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output())
+    dependencies: tuple[object, ...] = (parse,)
+    if malformation == "concrete_type":
+        dependencies = (object(),)
+    elif malformation == "component_version":
+        dependencies = (replace(parse, component_version="2"),)
+    elif malformation == "public_id":
+        dependencies = (replace(parse, job_public_id="not-a-uuid"),)
+    elif malformation == "succeeded_error_evidence":
+        dependencies = (replace(parse, error_code="unexpected_error"),)
+    elif malformation == "failed_output_evidence":
+        dependencies = (
+            replace(
+                parse,
+                status="failed",
+                error_code="parser_failed",
+                error_message="parser dependency failed",
+                error_details={},
+            ),
+        )
+    else:
+        dependencies = (
+            parse,
+            StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "telemetry", "1", {}),
+        )
+    handler = ObservationImportHandler(ImporterStub(), ImporterStub())  # type: ignore[arg-type]
+    context = StageExecutionContext(
+        "import-job",
+        "import_observations:1:key",
+        "replay-public-id",
+        "a" * 64,
+        "import_observations",
+        "1",
+        {},
+        cast(Any, dependencies),
+    )
+
     with pytest.raises(StageFailure) as failure:
         handler(context)
     assert failure.value.code == "dependency_contract_invalid" and failure.value.retryable is False
@@ -1791,7 +1915,7 @@ def test_typed_telemetry_failure_envelope_rejects_contract_malformations(malform
     else:
         attempt["diagnostics"] = ({"code": "copy_failed"},)
     dependency = StageDependencyOutput(
-        "telemetry-job",
+        TELEMETRY_JOB_PUBLIC_ID,
         "telemetry",
         "1",
         None,
@@ -1842,7 +1966,7 @@ def test_consumer_rejects_every_path_form_in_typed_failure_envelope(path_text: s
         },
     }
     dependency = StageDependencyOutput(
-        "telemetry-job",
+        TELEMETRY_JOB_PUBLIC_ID,
         "telemetry",
         "1",
         None,
@@ -2527,6 +2651,134 @@ def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
         ) == {"parser_failure"}
 
 
+@pytest.mark.parametrize("family", ["production_economy", "combat"])
+def test_handler_failed_parser_and_succeeded_telemetry_imports_with_null_player_links(
+    family: str,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    clock: MutableClock,
+) -> None:
+    """Catch a failed parser shell being injected as authority for independently valid dependency evidence."""
+    replay_sha256 = _replay(session_factory, settings, f"failed-parser-valid-telemetry-{family}")
+    root = settings.data_root / "runs" / f"failed-parser-valid-telemetry-{family}"
+    root.mkdir(parents=True)
+    if family == "production_economy":
+        run_id = "823e4567-e89b-12d3-a456-426614174000"
+        trace = _valid_economy_trace(root, "trace.ndjson")
+    else:
+        run_id = "a23e4567-e89b-12d3-a456-426614174000"
+        trace = _valid_combat_trace(root).rename(root / "trace.ndjson")
+    bundle = load_validated_telemetry_bundle(trace)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    handler = ObservationImportHandler(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=parse_replay,
+            parser_version="test-parser-1",
+            schema_version=1,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(80_000),
+        ),
+        TelemetryObservationImporter(
+            session_factory,
+            settings.data_root,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(81_000),
+        ),
+    )
+    parse_dependency = StageDependencyOutput(
+        PARSE_JOB_PUBLIC_ID,
+        "parse",
+        "1",
+        None,
+        status="failed",
+        error_code="parser_failed",
+        error_message="parser rejected mixed-evidence fixture",
+        error_details={"exception_type": "ValueError"},
+    )
+    telemetry_dependency = StageDependencyOutput(
+        TELEMETRY_JOB_PUBLIC_ID,
+        "telemetry",
+        "1",
+        {
+            "run_id": attempt.run_id,
+            "runner_status": attempt.runner_status,
+            "replay_quality": attempt.replay_quality,
+            "strategy_analysis_scope": attempt.strategy_analysis_scope,
+            "exit_code": attempt.process_exit_code,
+            "engine_build": attempt.engine_build,
+            "engine_executable_sha256": attempt.engine_executable_sha256,
+            "diagnostics": attempt.diagnostics,
+            "artifacts": tuple(
+                {
+                    "asset_public_id": artifact.asset_public_id,
+                    "kind": artifact.kind,
+                    "logical_path": artifact.logical_path,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
+                }
+                for artifact in attempt.artifacts
+            ),
+        },
+    )
+    context = StageExecutionContext(
+        "00000000-0000-0000-0000-000000000103",
+        "import_observations:1:mixed-evidence",
+        "00000000-0000-0000-0000-000000000104",
+        replay_sha256,
+        "import_observations",
+        "1",
+        {
+            "branch_recipe": {
+                "parse": {"parser_version": "test-parser-1"},
+            }
+        },
+        (parse_dependency, telemetry_dependency),
+    )
+
+    result = handler(context)
+
+    assert result == {
+        "idempotency_key": "import_observations:1:mixed-evidence",
+        "parser_run_id": cast(str, result["parser_run_id"]),
+        "parser_command_count": 0,
+        "telemetry_run_id": run_id,
+        "telemetry_event_count": len(bundle.records),
+    }
+    with session_factory() as session:
+        parser_run = session.scalar(select(ParserRun))
+        telemetry_run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        replay = session.scalar(select(Replay))
+        assert parser_run is not None and parser_run.status == "failed"
+        assert telemetry_run is not None and telemetry_run.status == "succeeded"
+        assert telemetry_run.settings_json["parser_run_id"] is None
+        expected_lifecycle = "engine_verified" if family == "production_economy" else "desynced"
+        assert replay is not None and replay.lifecycle_state == expected_lifecycle
+        assert session.scalar(
+            select(func.count(TelemetryEvent.id)).where(TelemetryEvent.telemetry_run_id == telemetry_run.id)
+        ) == len(bundle.records)
+        production = list(
+            session.scalars(
+                select(ProductionEvent).where(ProductionEvent.telemetry_run_id == telemetry_run.id)
+            )
+        )
+        economy = list(
+            session.scalars(select(EconomyEvent).where(EconomyEvent.telemetry_run_id == telemetry_run.id))
+        )
+        combat = list(
+            session.scalars(select(CombatEvent).where(CombatEvent.telemetry_run_id == telemetry_run.id))
+        )
+        assert bool(production) is (family == "production_economy")
+        assert bool(economy) is (family == "production_economy")
+        assert bool(combat) is (family == "combat")
+        assert all(event.replay_player_id is None for event in (*production, *economy))
+        assert all(
+            event.attacker_replay_player_id is None and event.victim_replay_player_id is None
+            for event in combat
+        )
+
+
 def test_parser_failure_handler_replay_after_lease_expiry_reuses_exact_attempt(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
@@ -2775,8 +3027,12 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
     )
     assert len(contexts) == 2 and contexts[0].idempotency_key == contexts[1].idempotency_key == first_key
 
-    with pytest.raises(ValueError, match="collides with another immutable attempt"):
-        handler(replace(contexts[-1], idempotency_key=f"{first_key}:changed"))
+    def assert_nonretryable_collision(context: StageExecutionContext) -> None:
+        with pytest.raises(StageFailure) as failure:
+            handler(context)
+        assert failure.value.code == "telemetry_import_collision" and failure.value.retryable is False
+
+    assert_nonretryable_collision(replace(contexts[-1], idempotency_key=f"{first_key}:changed"))
     telemetry_dependency = next(item for item in contexts[-1].dependencies if item.stage == "telemetry")
     changed_message_dependency = replace(
         telemetry_dependency,
@@ -2789,8 +3045,7 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
             for item in contexts[-1].dependencies
         ),
     )
-    with pytest.raises(ValueError, match="collides with another immutable attempt"):
-        handler(changed_message_context)
+    assert_nonretryable_collision(changed_message_context)
     assert telemetry_dependency.error_details is not None
     changed_details = dict(telemetry_dependency.error_details)
     diagnostics = changed_details["diagnostics"]
@@ -2804,8 +3059,7 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
             for item in contexts[-1].dependencies
         ),
     )
-    with pytest.raises(ValueError, match="collides with another immutable attempt"):
-        handler(changed_context)
+    assert_nonretryable_collision(changed_context)
 
     with session_factory.begin() as session:
         issue = session.scalar(
@@ -2813,8 +3067,7 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
         )
         assert issue is not None
         issue.details_json = {"runner_status": "tampered"}
-    with pytest.raises(ValueError, match="collides with another immutable attempt"):
-        handler(contexts[-1])
+    assert_nonretryable_collision(contexts[-1])
 
     with session_factory() as session:
         import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))

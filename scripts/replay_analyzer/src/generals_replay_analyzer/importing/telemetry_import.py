@@ -112,6 +112,19 @@ class TelemetryImportResult:
     cache_hit: bool
 
 
+# TheSuperHackers @bugfix Leex 22/08/2026 Keep immutable attempt collisions typed through the worker boundary. (#TBD)
+class _TelemetryAttemptCollisionError(ValueError):
+    """An immutable telemetry run UUID was reused for different attempt evidence."""
+
+
+class _ClassifiedValidationError(ValueError):
+    """Validation failure with an exact persisted quality-issue classification."""
+
+    def __init__(self, issue_code: str, message: str) -> None:
+        super().__init__(message)
+        self.issue_code = issue_code
+
+
 @dataclass(frozen=True)
 class _VerifiedArtifact:
     descriptor: ManagedTelemetryArtifact
@@ -282,7 +295,9 @@ class TelemetryObservationImporter:
             ):
                 # TheSuperHackers @bugfix Leex 22/08/2026 Reuse one exact childless failed telemetry attempt after lease replay. (#TBD)
                 return TelemetryImportResult(run_id, "failed", 0, True)
-            raise ValueError("telemetry run UUID collides with another immutable attempt")
+            raise _TelemetryAttemptCollisionError(
+                "telemetry run UUID collides with another immutable attempt"
+            )
         replay_id, verified = self._create_attempt(sha256, attempt, now, idempotency_key)
         if attempt.upstream_failure_code is not None:
             issue_code = attempt.upstream_quality_issue_code or "invalid_trace"
@@ -487,12 +502,12 @@ class TelemetryObservationImporter:
         descriptors: tuple[ManagedTelemetryArtifact, ...],
     ) -> tuple[_VerifiedArtifact, ...]:
         verified: list[_VerifiedArtifact] = []
-        seen_assets: set[int] = set()
         for descriptor in sorted(descriptors, key=lambda item: (item.logical_path.casefold(), item.kind, item.sha256)):
+            # TheSuperHackers @bugfix Leex 22/08/2026 Permit exact same-role content reuse across distinct map members. (#TBD)
             _safe_logical_path(descriptor.logical_path)
             asset = session.scalar(select(ManagedAsset).where(ManagedAsset.public_id == descriptor.asset_public_id))
-            if asset is None or asset.id in seen_assets:
-                raise ValueError("telemetry managed descriptor registration is missing or duplicated")
+            if asset is None:
+                raise ValueError("telemetry managed descriptor registration is missing")
             if (
                 asset.kind != descriptor.kind
                 or asset.sha256 != descriptor.sha256
@@ -516,7 +531,6 @@ class TelemetryObservationImporter:
             sha256, size = _file_sha256(resolved)
             if sha256 != descriptor.sha256 or size != descriptor.size_bytes:
                 raise ValueError("telemetry managed descriptor bytes changed")
-            seen_assets.add(asset.id)
             verified.append(_VerifiedArtifact(descriptor, asset.id, path, asset.kind, asset.sha256, asset.size_bytes))
         return tuple(verified)
 
@@ -903,7 +917,10 @@ class TelemetryObservationImporter:
             )
         )
         if selected is None:
-            raise ValueError("selected parser run is unavailable for telemetry player mapping")
+            raise _ClassifiedValidationError(
+                "invalid_trace",
+                "selected parser run is unavailable for telemetry player mapping",
+            )
         rows = list(
             session.scalars(
                 select(ReplayPlayer).where(ReplayPlayer.parser_run_id == selected.id).order_by(ReplayPlayer.slot_index)
@@ -911,15 +928,24 @@ class TelemetryObservationImporter:
         )
         by_slot = {row.slot_index: row for row in rows}
         if len(by_slot) != len(rows):
-            raise ValueError("selected parser run has ambiguous replay slot evidence")
+            raise _ClassifiedValidationError(
+                "invalid_trace",
+                "selected parser run has ambiguous replay slot evidence",
+            )
         player_snapshots = [payload for payload in payloads if payload.get("slots") is not None]
         if not player_snapshots:
             return {}
         if len(player_snapshots) != 1:
-            raise ValueError("telemetry player initialization evidence is ambiguous")
+            raise _ClassifiedValidationError(
+                "invalid_trace",
+                "telemetry player initialization evidence is ambiguous",
+            )
         slots = player_snapshots[0].get("slots")
         if not isinstance(slots, list):
-            raise TypeError("telemetry player initialization slots are invalid")
+            raise _ClassifiedValidationError(
+                "invalid_trace",
+                "telemetry player initialization slots are invalid",
+            )
         resolved: dict[int, ReplayPlayer] = {}
         resolved_slots: set[int] = set()
         for raw_slot in slots:
@@ -928,9 +954,15 @@ class TelemetryObservationImporter:
             slot_index = raw_slot.get("slot_index")
             player_index = raw_slot.get("player_index")
             if type(slot_index) is not int or type(player_index) is not int or slot_index not in by_slot:
-                raise ValueError("resolved telemetry player slot has no selected parser observation")
+                raise _ClassifiedValidationError(
+                    "invalid_trace",
+                    "resolved telemetry player slot has no selected parser observation",
+                )
             if slot_index in resolved_slots or player_index in resolved:
-                raise ValueError("telemetry player initialization mapping is ambiguous")
+                raise _ClassifiedValidationError(
+                    "invalid_trace",
+                    "telemetry player initialization mapping is ambiguous",
+                )
             resolved_slots.add(slot_index)
             resolved[player_index] = by_slot[slot_index]
         return resolved
@@ -1211,10 +1243,12 @@ class TelemetryObservationImporter:
 
     @staticmethod
     def _validation_issue(error: Exception) -> str:
+        if isinstance(error, _ClassifiedValidationError):
+            return error.issue_code
         message = str(error).lower()
         if "catalog" in message:
             return "invalid_catalog"
-        if "map" in message:
+        if re.search(r"\bmap(?:[_ -](?:asset|member|manifest))?\b", message):
             return "invalid_map_asset"
         if "schema_version" in message or "unsupported major" in message:
             return "version_mismatch"
@@ -1327,14 +1361,7 @@ class ObservationImportHandler:
                 "observation import dependencies are not frozen",
                 retryable=False,
             )
-        stages = [dependency.stage for dependency in context.dependencies]
-        if len(stages) != len(set(stages)) or any(stage not in {"parse", "telemetry"} for stage in stages):
-            raise StageFailure(
-                "dependency_contract_invalid",
-                "observation import dependency stages are invalid or duplicated",
-                retryable=False,
-            )
-        dependencies = {dependency.stage: dependency for dependency in context.dependencies}
+        dependencies = _validated_dependencies(context.dependencies)
         parse_dependency = dependencies.get("parse")
         if parse_dependency is None:
             raise StageFailure("parser_dependency_missing", "parser dependency output is missing", retryable=False)
@@ -1365,12 +1392,12 @@ class ObservationImportHandler:
         telemetry_dependency = dependencies.get("telemetry")
         if telemetry_dependency is not None and telemetry_dependency.status == "succeeded":
             attempt = _attempt_from_dependency(_succeeded_dependency_output(telemetry_dependency))
-            attempt = replace(attempt, parser_run_id=parser_result.run_id)
-            telemetry_result = self._telemetry_importer.import_replay(
-                context.replay_sha256,
+            attempt = replace(
                 attempt,
-                idempotency_key=context.idempotency_key,
+                # TheSuperHackers @bugfix Leex 22/08/2026 Never treat a failed parser shell as player-mapping authority. (#TBD)
+                parser_run_id=parser_result.run_id if parser_result.status == "succeeded" else None,
             )
+            telemetry_result = self._import_telemetry(context, attempt)
             if telemetry_result.status != "succeeded":
                 raise StageFailure("telemetry_import_failed", "telemetry observations failed validation", retryable=False)
         elif (
@@ -1384,11 +1411,7 @@ class ObservationImportHandler:
                 attempt,
                 parser_run_id=parser_result.run_id if parser_result.status == "succeeded" else None,
             )
-            telemetry_result = self._telemetry_importer.import_replay(
-                context.replay_sha256,
-                attempt,
-                idempotency_key=context.idempotency_key,
-            )
+            telemetry_result = self._import_telemetry(context, attempt)
             if telemetry_result.status != "failed":
                 raise StageFailure(
                     "telemetry_dependency_invalid",
@@ -1402,6 +1425,87 @@ class ObservationImportHandler:
             "telemetry_run_id": telemetry_result.run_id if telemetry_result else None,
             "telemetry_event_count": telemetry_result.event_count if telemetry_result else 0,
         }
+
+    def _import_telemetry(
+        self,
+        context: StageExecutionContext,
+        attempt: TelemetryAttempt,
+    ) -> TelemetryImportResult:
+        try:
+            return self._telemetry_importer.import_replay(
+                context.replay_sha256,
+                attempt,
+                idempotency_key=context.idempotency_key,
+            )
+        except _TelemetryAttemptCollisionError as error:
+            raise StageFailure(
+                "telemetry_import_collision",
+                "telemetry run identity collides with immutable attempt evidence",
+                retryable=False,
+            ) from error
+
+
+def _validated_dependencies(
+    raw_dependencies: tuple[StageDependencyOutput, ...],
+) -> dict[str, StageDependencyOutput]:
+    # TheSuperHackers @bugfix Leex 22/08/2026 Reject damaged public dependency snapshots before persistence. (#TBD)
+    expected_versions = {"parse": "1", "telemetry": "1"}
+    dependencies: dict[str, StageDependencyOutput] = {}
+    public_ids: set[str] = set()
+    for dependency in raw_dependencies:
+        if type(dependency) is not StageDependencyOutput:
+            raise StageFailure(
+                "dependency_contract_invalid",
+                "observation dependency snapshot type is invalid",
+                retryable=False,
+            )
+        expected_version = expected_versions.get(dependency.stage)
+        try:
+            public_id = _require_run_id(dependency.job_public_id)
+        except (TypeError, ValueError) as error:
+            raise StageFailure(
+                "dependency_contract_invalid",
+                "observation dependency public identity is invalid",
+                retryable=False,
+            ) from error
+        if (
+            expected_version is None
+            or dependency.component_version != expected_version
+            or dependency.stage in dependencies
+            or public_id in public_ids
+        ):
+            raise StageFailure(
+                "dependency_contract_invalid",
+                "observation dependency identity is invalid or duplicated",
+                retryable=False,
+            )
+        if dependency.status == "succeeded":
+            valid_terminal_shape = (
+                isinstance(dependency.output, Mapping)
+                and dependency.error_code is None
+                and dependency.error_message is None
+                and dependency.error_details is None
+            )
+        elif dependency.status == "failed":
+            valid_terminal_shape = (
+                dependency.output is None
+                and isinstance(dependency.error_code, str)
+                and bool(dependency.error_code)
+                and isinstance(dependency.error_message, str)
+                and bool(dependency.error_message)
+                and isinstance(dependency.error_details, Mapping)
+            )
+        else:
+            valid_terminal_shape = False
+        if not valid_terminal_shape:
+            raise StageFailure(
+                "dependency_contract_invalid",
+                "observation dependency terminal evidence is invalid",
+                retryable=False,
+            )
+        dependencies[dependency.stage] = dependency
+        public_ids.add(public_id)
+    return dependencies
 
 
 def _succeeded_dependency_output(
