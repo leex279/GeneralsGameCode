@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -65,6 +65,45 @@ def bootstrap_seed(input_digest: str) -> str:
     return hashlib.sha256((input_digest + ":longitudinal-bootstrap-v1").encode("utf-8")).hexdigest()
 
 
+def scipy_bootstrap_interval(
+    samples: tuple[np.ndarray, ...],
+    statistic: Callable[..., float],
+    *,
+    statistic_name: str,
+    algorithm_version: str,
+    input_digest: str,
+    bootstrap_resamples: int,
+    confidence_level: float,
+    paired: bool = False,
+) -> tuple[list[float], dict[str, object]]:
+    """Use the single product-owned seeded SciPy resampling contract."""
+    if any(len(sample) < 2 for sample in samples):
+        raise ValueError("insufficient_resample_observations")
+    seed_hex = bootstrap_seed(input_digest)
+    generator = np.random.Generator(np.random.PCG64(int(seed_hex[:32], 16)))
+    interval = stats.bootstrap(
+        samples,
+        statistic,
+        vectorized=False,
+        paired=paired,
+        confidence_level=confidence_level,
+        n_resamples=bootstrap_resamples,
+        method="percentile",
+        rng=generator,
+    ).confidence_interval
+    return [float(interval.low), float(interval.high)], {
+        "algorithm_version": algorithm_version,
+        "numpy_version": np.__version__,
+        "scipy_version": scipy.__version__,
+        "bit_generator": "PCG64",
+        "seed_hex": seed_hex,
+        "resample_count": bootstrap_resamples,
+        "confidence_level": confidence_level,
+        "statistic": statistic_name,
+        "interval_method": "scipy-bootstrap-percentile-v1",
+    }
+
+
 def _ordered(observations: tuple[LongitudinalObservation, ...]) -> tuple[LongitudinalObservation, ...]:
     ordered = tuple(sorted(observations, key=lambda item: (item.member_key, item.evidence_public_id)))
     identities = tuple((item.member_key, item.evidence_public_id) for item in ordered)
@@ -101,16 +140,15 @@ def summarize_continuous(
     values = np.asarray([float(cast(int | float, item.raw_value)) for item in usable], dtype=np.float64)
     if not bool(np.all(np.isfinite(values))):
         raise ValueError("continuous observations must be finite")
-    seed_hex = bootstrap_seed(input_digest)
-    generator = np.random.Generator(np.random.PCG64(int(seed_hex[:32], 16)))
-    interval = stats.bootstrap(
+    median_interval, bootstrap_metadata = scipy_bootstrap_interval(
         (values,),
-        np.median,
+        lambda sample: float(np.median(sample)),
+        statistic_name="median",
+        algorithm_version=algorithm_version,
+        input_digest=input_digest,
+        bootstrap_resamples=bootstrap_resamples,
         confidence_level=confidence_level,
-        n_resamples=bootstrap_resamples,
-        method="percentile",
-        rng=generator,
-    ).confidence_interval
+    )
     percentile_25, percentile_75 = np.percentile(values, (25, 75), method="linear")
     percentile_10, percentile_90 = np.percentile(values, (10, 90), method="linear")
     quality, reason = _result_quality(ordered)
@@ -119,15 +157,8 @@ def summarize_continuous(
         "iqr": float(percentile_75 - percentile_25),
         "percentile_10": float(percentile_10),
         "percentile_90": float(percentile_90),
-        "median_confidence_interval": [float(interval.low), float(interval.high)],
-        "algorithm_version": algorithm_version,
-        "numpy_version": np.__version__,
-        "scipy_version": scipy.__version__,
-        "bit_generator": "PCG64",
-        "seed_hex": seed_hex,
-        "resample_count": bootstrap_resamples,
-        "confidence_level": confidence_level,
-        "statistic": "median",
+        "median_confidence_interval": median_interval,
+        **bootstrap_metadata,
         "ordered_member_evidence_ids": [item.evidence_public_id for item in usable],
         "interval_method": "scipy-bootstrap-percentile-v1",
         "quantile_method": "numpy-linear-v1",

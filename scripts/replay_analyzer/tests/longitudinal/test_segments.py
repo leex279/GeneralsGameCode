@@ -5,7 +5,10 @@ from dataclasses import replace
 import pytest
 
 from generals_replay_analyzer.longitudinal.segments import (
+    LongitudinalDefinitionDTO,
     LongitudinalInput,
+    LongitudinalRequest,
+    LongitudinalResultDTO,
     LongitudinalSettings,
     QualityPolicy,
     SegmentKey,
@@ -26,6 +29,16 @@ def _input(**changes: object) -> LongitudinalInput:
             bootstrap_resamples=100,
             confidence_level=0.95,
             enabled_metrics=("economy.cash_change_total",),
+        ),
+        metric_names=("economy.cash_change_total",),
+        definitions=(
+            LongitudinalDefinitionDTO(
+                public_name="economy.cash_change_total",
+                result_kind="metric",
+                definition_version="economy.cash-change-total-v1",
+                source_feature_names=("economy.cash_change_total",),
+                algorithm_kind="continuous_summary",
+            ),
         ),
         members=(),
     )
@@ -139,3 +152,70 @@ def test_cache_identity_changes_for_semantics_not_member_input_order() -> None:
     assert longitudinal_input_digest(one) != longitudinal_input_digest(
         replace(one, settings=replace(one.settings, bootstrap_resamples=101))
     )
+
+
+def test_request_names_must_exactly_equal_enabled_definition_sets() -> None:
+    settings = LongitudinalSettings(
+        minimum_sample_size=2,
+        bootstrap_resamples=10,
+        confidence_level=0.95,
+        enabled_metrics=("economy.cash_change_total", "economy.tracked_income_total"),
+    )
+    with pytest.raises(ValueError, match="enabled definition sets"):
+        LongitudinalRequest(
+            player_public_id="11111111-1111-1111-1111-111111111111",
+            segment=SegmentKey(),
+            metric_names=("economy.cash_change_total",),
+            pattern_names=(),
+            settings=settings,
+        )
+
+
+def test_public_result_freezes_nested_statistics_and_validates_public_identity() -> None:
+    statistics = {"nested": {"value": 1}}
+    result = LongitudinalResultDTO(
+        public_id="11111111-1111-1111-1111-111111111111",
+        result_name="metric",
+        result_kind="metric",
+        sample_count=1,
+        missing_count=0,
+        quality="complete",
+        reason=None,
+        statistics=statistics,
+        members=(),
+        evidence_public_id="22222222-2222-2222-2222-222222222222",
+    )
+    statistics["nested"]["value"] = 2
+    assert result.statistics["nested"]["value"] == 1  # type: ignore[index]
+    with pytest.raises(ValueError, match="canonical UUID"):
+        replace(result, public_id="not-public")
+
+
+def test_input_identity_requires_explicit_requested_definitions_and_exclusions() -> None:
+    definition = LongitudinalDefinitionDTO(
+        public_name="economy.cash_change_total",
+        result_kind="metric",
+        definition_version="economy.cash-change-total-v1",
+        source_feature_names=("economy.cash_change_total",),
+        algorithm_kind="continuous_summary",
+    )
+    value = LongitudinalInput(
+        player_public_id="11111111-1111-1111-1111-111111111111",
+        identity_revision=3,
+        identity_cache_token="a" * 64,
+        segment=SegmentKey(),
+        settings=LongitudinalSettings(
+            minimum_sample_size=2,
+            bootstrap_resamples=10,
+            confidence_level=0.95,
+            enabled_metrics=("economy.cash_change_total",),
+        ),
+        metric_names=("economy.cash_change_total",),
+        pattern_names=(),
+        definitions=(definition,),
+        members=(),
+        exclusions=(),
+    )
+    digest = longitudinal_input_digest(value)
+    assert definition.definition_version in canonical_longitudinal_input(value)
+    assert digest != longitudinal_input_digest(replace(value, definitions=(replace(definition, definition_version="v2"),)))

@@ -8,14 +8,13 @@ from typing import cast
 from uuid import UUID
 
 import numpy as np
-import scipy  # type: ignore[import-untyped]
-from scipy import stats
+from scipy import stats  # type: ignore[import-untyped]
 
 from generals_replay_analyzer.features.context import canonical_json
 from generals_replay_analyzer.features.registry import BASE_REGISTRY, FeatureRegistry
 from generals_replay_analyzer.longitudinal.statistics import (
     LongitudinalObservation,
-    bootstrap_seed,
+    scipy_bootstrap_interval,
     summarize_categorical,
     summarize_continuous,
 )
@@ -258,26 +257,15 @@ def _bootstrap_difference(
     bootstrap_resamples: int,
     confidence_level: float,
 ) -> tuple[list[float], dict[str, object]]:
-    seed_hex = bootstrap_seed(input_digest)
-    generator = np.random.Generator(np.random.PCG64(int(seed_hex[:32], 16)))
-    differences = np.empty(bootstrap_resamples, dtype=np.float64)
-    for index in range(bootstrap_resamples):
-        focal_sample = generator.choice(focal_values, len(focal_values), replace=True)
-        reference_sample = generator.choice(reference_values, len(reference_values), replace=True)
-        differences[index] = np.median(focal_sample) - np.median(reference_sample)
-    alpha = (1.0 - confidence_level) / 2.0
-    interval = np.quantile(differences, (alpha, 1.0 - alpha), method="linear")
-    return [float(interval[0]), float(interval[1])], {
-        "algorithm_version": "median-difference-bootstrap-v1",
-        "numpy_version": np.__version__,
-        "scipy_version": scipy.__version__,
-        "bit_generator": "PCG64",
-        "seed_hex": seed_hex,
-        "resample_count": bootstrap_resamples,
-        "confidence_level": confidence_level,
-        "statistic": "median_difference",
-        "interval_method": "numpy-percentile-linear-v1",
-    }
+    return scipy_bootstrap_interval(
+        (focal_values, reference_values),
+        lambda focal, reference: float(np.median(focal) - np.median(reference)),
+        statistic_name="median_difference",
+        algorithm_version="median-difference-bootstrap-v1",
+        input_digest=input_digest,
+        bootstrap_resamples=bootstrap_resamples,
+        confidence_level=confidence_level,
+    )
 
 
 def _comparison(
@@ -292,10 +280,20 @@ def _comparison(
 ) -> PatternResult:
     focal_usable = _usable_numeric(focal)
     reference_usable = _usable_numeric(reference)
+    focal_missing = len(focal) - len(focal_usable)
+    reference_missing = len(reference) - len(reference_usable)
     if {item.member_key for item in focal_usable} & {item.member_key for item in reference_usable}:
         return _unavailable("cohorts_not_disjoint", len(focal_usable), len(reference_usable))
+    counts = {
+        "focal_usable_count": len(focal_usable),
+        "focal_missing_count": focal_missing,
+        "reference_usable_count": len(reference_usable),
+        "reference_missing_count": reference_missing,
+    }
     if len(focal_usable) < minimum_sample_size or len(reference_usable) < minimum_sample_size:
-        return _unavailable("minimum_sample_not_met", len(focal_usable), len(reference_usable))
+        return PatternResult(len(focal_usable), focal_missing, "unavailable", "minimum_sample_not_met", counts)
+    if len(focal_usable) < 2 or len(reference_usable) < 2:
+        return PatternResult(len(focal_usable), focal_missing, "unavailable", "insufficient_resample_observations", counts)
     focal_values = np.asarray([float(cast(int | float, item.raw_value)) for item in focal_usable])
     reference_values = np.asarray([float(cast(int | float, item.raw_value)) for item in reference_usable])
     interval, metadata = _bootstrap_difference(
@@ -310,7 +308,7 @@ def _comparison(
     quality, reason = _quality(focal_usable + reference_usable)
     return PatternResult(
         len(focal_usable),
-        len(reference_usable),
+        focal_missing,
         quality,
         reason,
         {
@@ -321,6 +319,7 @@ def _comparison(
             "difference_interval": interval,
             "focal_evidence_ids": [item.evidence_public_id for item in focal_usable],
             "reference_evidence_ids": [item.evidence_public_id for item in reference_usable],
+            **counts,
             **metadata,
         },
     )
@@ -369,18 +368,20 @@ def trend(
     times = np.asarray([float(time) for time, _ in usable])
     values = np.asarray([float(cast(int | float, item.raw_value)) for _, item in usable])
     slope = float(stats.theilslopes(values, times).slope)
-    seed_hex = bootstrap_seed(input_digest)
-    generator = np.random.Generator(np.random.PCG64(int(seed_hex[:32], 16)))
-    slopes: list[float] = []
-    for _ in range(bootstrap_resamples):
-        indices = generator.choice(len(usable), len(usable), replace=True)
-        if len(set(times[indices])) < 2:
-            continue
-        slopes.append(float(stats.theilslopes(values[indices], times[indices]).slope))
-    if len(slopes) < 2:
-        return _unavailable("insufficient_resample_observations", len(usable), len(observations) - len(usable))
-    alpha = (1.0 - confidence_level) / 2.0
-    interval = np.quantile(np.asarray(slopes), (alpha, 1.0 - alpha), method="linear")
+    interval, metadata = scipy_bootstrap_interval(
+        (times, values),
+        lambda sampled_times, sampled_values: (
+            0.0
+            if len({float(item) for item in sampled_times}) < 2
+            else float(stats.theilslopes(sampled_values, sampled_times).slope)
+        ),
+        statistic_name="theil_sen_slope",
+        algorithm_version="theil-sen-bootstrap-v1",
+        input_digest=input_digest,
+        bootstrap_resamples=bootstrap_resamples,
+        confidence_level=confidence_level,
+        paired=True,
+    )
     quality, reason = _quality(tuple(item for _, item in usable))
     return PatternResult(
         len(usable),
@@ -390,16 +391,9 @@ def trend(
         {
             "trend_kind": "robust_chronological_slope",
             "slope_per_utc_unit": slope,
-            "slope_interval": [float(interval[0]), float(interval[1])],
-            "algorithm_version": "theil-sen-bootstrap-v1",
-            "seed_hex": seed_hex,
-            "bit_generator": "PCG64",
-            "numpy_version": np.__version__,
-            "scipy_version": scipy.__version__,
-            "resample_count": bootstrap_resamples,
-            "confidence_level": confidence_level,
+            "slope_interval": interval,
+            **metadata,
             "ordered_member_evidence_ids": [item.evidence_public_id for _, item in usable],
-            "interval_method": "numpy-percentile-linear-v1",
         },
     )
 
@@ -416,7 +410,7 @@ def change_point_candidate(
     if len(observations) != len(replay_start_times):
         raise ValueError("each observation requires one persisted replay start time")
     ordered = tuple(item for _, item in sorted(zip(replay_start_times, observations, strict=True), key=lambda pair: (pair[0], pair[1].member_key)))
-    usable = _usable_numeric(ordered)
+    usable = tuple(item for item in ordered if type(item.raw_value) in (int, float) and item.quality != "unavailable")
     if len(usable) < minimum_sample_size * 2:
         return _unavailable("minimum_sample_not_met", len(usable), len(ordered) - len(usable))
     candidates: list[tuple[float, int, str]] = []

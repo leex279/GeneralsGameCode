@@ -263,3 +263,60 @@ def test_pattern_provenance_boundaries_reject_noncanonical_map_and_unsupported_s
     assert unknown_feature.reason == "unsupported_metric_definition"
     assert unknown_source.reason == "unsupported_metric_definition"
     assert unknown_spatial.reason == "unsupported_metric_definition"
+
+
+def test_comparison_requires_two_usable_per_cohort_and_reports_each_missing_count() -> None:
+    result = personal_baseline_difference(
+        (_observation("f1", 10.0), _observation("fm", None, quality="unavailable", reason="missing")),
+        (_observation("b1", 2.0), _observation("bm", None, quality="unavailable", reason="missing")),
+        input_digest="8" * 64,
+        minimum_sample_size=1,
+        bootstrap_resamples=20,
+        confidence_level=0.9,
+    )
+    assert result.reason == "insufficient_resample_observations"
+    assert result.statistics["focal_usable_count"] == 1
+    assert result.statistics["focal_missing_count"] == 1
+    assert result.statistics["reference_usable_count"] == 1
+    assert result.statistics["reference_missing_count"] == 1
+
+
+def test_trend_and_comparison_use_central_scipy_bootstrap_metadata() -> None:
+    observations = tuple(_observation(str(index), float(index)) for index in range(4))
+    trend_result = trend(
+        observations,
+        (100, 200, 300, 400),
+        input_digest="9" * 64,
+        minimum_sample_size=2,
+        bootstrap_resamples=30,
+        confidence_level=0.9,
+    )
+    comparison = personal_baseline_difference(
+        observations[:2],
+        observations[2:],
+        input_digest="7" * 64,
+        minimum_sample_size=2,
+        bootstrap_resamples=30,
+        confidence_level=0.9,
+    )
+    assert trend_result.statistics["interval_method"] == "scipy-bootstrap-percentile-v1"
+    assert trend_result.statistics["statistic"] == "theil_sen_slope"
+    assert comparison.statistics["interval_method"] == "scipy-bootstrap-percentile-v1"
+    assert comparison.statistics["statistic"] == "median_difference"
+
+
+def test_change_point_preserves_chronology_instead_of_resorting_member_keys() -> None:
+    observations = tuple(
+        _observation(key, value)
+        for key, value in zip(("z", "y", "x", "c", "b", "a"), (1.0, 1.0, 1.0, 10.0, 10.0, 10.0), strict=True)
+    )
+    result = change_point_candidate(
+        observations,
+        (100, 200, 300, 400, 500, 600),
+        input_digest="6" * 64,
+        minimum_sample_size=3,
+        bootstrap_resamples=30,
+        confidence_level=0.9,
+    )
+    assert result.statistics["split_before_member_key"] == "c"
+    assert result.statistics["pre_evidence_ids"] == ["evidence-z", "evidence-y", "evidence-x"]
