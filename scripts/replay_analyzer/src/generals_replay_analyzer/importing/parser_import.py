@@ -84,13 +84,29 @@ def _argument_json(index: int, argument: ReplayArgument) -> dict[str, object]:
     }
 
 
+def _ordered_commands(parsed: ParsedReplay) -> tuple[ParsedCommand, ...]:
+    """Canonicalize parser collection presentation without changing byte-stream identity."""
+    return tuple(
+        sorted(
+            parsed.commands,
+            key=lambda command: (
+                command.start_offset,
+                command.end_offset,
+                command.frame,
+                command.player_index,
+                command.message_type,
+            ),
+        )
+    )
+
+
 def _validate_commands(parsed: ParsedReplay) -> None:
     if parsed.completion_status not in {"complete", "truncated"}:
         raise ValueError("unsupported parser completion status")
     if parsed.command_stream_offset < parsed.setup.end_offset or parsed.end_offset < parsed.command_stream_offset:
         raise ValueError("parser stream boundaries are invalid")
     prior_end = parsed.command_stream_offset
-    for command in parsed.commands:
+    for command in _ordered_commands(parsed):
         if command.frame < 0 or command.player_index < 0 or command.message_type < 0:
             raise ValueError("parser command numeric identity is negative")
         if command.start_offset < prior_end or command.end_offset <= command.start_offset:
@@ -119,7 +135,7 @@ def _result_projection(parsed: ParsedReplay) -> dict[str, object]:
                 "end_offset": command.end_offset,
                 "arguments": [_argument_json(argument_index, argument) for argument_index, argument in enumerate(command.arguments)],
             }
-            for index, command in enumerate(parsed.commands)
+            for index, command in enumerate(_ordered_commands(parsed))
         ],
     }
 
@@ -490,6 +506,7 @@ class ParserObservationImporter:
             run = session.scalar(select(ParserRun).where(ParserRun.run_id == run_id))
             if replay is None or run is None or run.status != "running":
                 raise ValueError("parser attempt identity changed")
+            self._reverify_managed_replay(session, replay, run.input_sha256)
             replay.replay_name = parsed.header.replay_name
             replay.version_string = parsed.header.version_string
             replay.version_number = parsed.header.version_number
@@ -502,7 +519,10 @@ class ParserObservationImporter:
             replay.map_name = parsed.header.map
             replay.seed = parsed.header.seed
             replay.starting_cash = parsed.header.starting_cash
-            replay.header_json = cast(dict[str, Any], projection["header"])
+            replay.header_json = {
+                "header": cast(dict[str, Any], projection["header"]),
+                "setup": cast(dict[str, Any], projection["setup"]),
+            }
             run.result_sha256 = result_sha256
             run.completion_status = parsed.completion_status
             run.command_stream_offset = parsed.command_stream_offset
@@ -534,7 +554,7 @@ class ParserObservationImporter:
                 )
             session.flush()
 
-            for command_index, command in enumerate(parsed.commands):
+            for command_index, command in enumerate(_ordered_commands(parsed)):
                 evidence = EvidenceItem(
                     public_id=str(self._uuid_factory()),
                     replay_id=replay.id,
@@ -559,6 +579,23 @@ class ParserObservationImporter:
             replay.updated_at = now
             run.status = "succeeded"
             session.flush()
+
+    def _reverify_managed_replay(self, session: Session, replay: Replay, sha256: str) -> None:
+        if replay.sha256 != sha256 or replay.managed_asset_id is None:
+            raise ValueError("managed replay identity changed before parser commit")
+        asset = session.get(ManagedAsset, replay.managed_asset_id)
+        if asset is None or asset.kind != "replay" or asset.sha256 != sha256:
+            raise ValueError("managed replay registration changed before parser commit")
+        path = self._data_root / Path(*asset.relative_path.split("/"))
+        try:
+            resolved = path.resolve(strict=True)
+            size = resolved.stat().st_size
+        except OSError as error:
+            raise ValueError("managed replay disappeared before parser commit") from error
+        if resolved != path or self._data_root not in resolved.parents:
+            raise ValueError("managed replay path changed before parser commit")
+        if size != asset.size_bytes or _hash_file(resolved) != sha256:
+            raise ValueError("managed replay bytes changed before parser commit")
 
     @staticmethod
     def _command_row(

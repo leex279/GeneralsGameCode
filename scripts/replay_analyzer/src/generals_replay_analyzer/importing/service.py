@@ -1013,23 +1013,54 @@ class ImportService:
                     ),
                 ) from error
             # TheSuperHackers @bugfix Leex 22/08/2026 Retain each verified artifact before a later bundle copy can fail. (#TBD)
-            with self._session_factory.begin() as session:
-                asset = self._register_asset(session, stored, descriptor.kind)
-                manifest.append(
-                    {
+            try:
+                with self._session_factory.begin() as session:
+                    asset = self._register_asset(session, stored, descriptor.kind)
+                    registered = {
                         "asset_public_id": asset.public_id,
                         "kind": descriptor.kind,
                         "logical_path": descriptor.logical_path,
                         "sha256": stored.sha256,
                         "size_bytes": stored.size,
                     }
-                )
-        output = _telemetry_attempt_facts(
-            artifact,
-            replay_input.path,
-            tuple(paths),
-            tuple(manifest),
-        )
+                manifest.append(registered)
+            except Exception as error:
+                raise StageFailure(
+                    "artifact_registration_failed",
+                    "telemetry artifact registration failed",
+                    retryable=False,
+                    details=_telemetry_failure_details(
+                        artifact,
+                        replay_input.path,
+                        failure_code="artifact_registration_failed",
+                        failure_message="telemetry artifact registration failed",
+                        quality_issue_code="asset_invalid",
+                        descriptors=tuple(paths),
+                        manifest=tuple(manifest),
+                    ),
+                ) from error
+        try:
+            output = _telemetry_attempt_facts(
+                artifact,
+                replay_input.path,
+                tuple(paths),
+                tuple(manifest),
+            )
+        except Exception as error:
+            raise StageFailure(
+                "invalid_telemetry_metadata",
+                "telemetry metadata validation failed",
+                retryable=False,
+                details=_telemetry_failure_details(
+                    artifact,
+                    replay_input.path,
+                    failure_code="invalid_telemetry_metadata",
+                    failure_message="telemetry metadata validation failed",
+                    quality_issue_code="asset_invalid",
+                    descriptors=tuple(paths),
+                    manifest=tuple(manifest),
+                ),
+            ) from error
         if artifact.runner_status != "success":
             retryable = artifact.runner_status in {"timeout", "launch_failure", "interrupted"}
             raise StageFailure("exporter_failure", "telemetry acquisition did not succeed", retryable, output)
@@ -1038,6 +1069,8 @@ class ImportService:
     def _register_asset(self, session: Session, stored: StoredContent, kind: str) -> ManagedAsset:
         asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
         if asset is not None:
+            if asset.kind != kind or asset.size_bytes != stored.size:
+                raise ValueError("managed content is already registered for another telemetry role")
             return asset
         relative_path = stored.path.relative_to(self._settings.data_root).as_posix()
         try:
@@ -1056,6 +1089,8 @@ class ImportService:
             asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
             if asset is None:
                 raise
+            if asset.kind != kind or asset.size_bytes != stored.size:
+                raise ValueError("managed content is already registered for another telemetry role")
         return asset
 
     def _source_path_for_replay(self, sha256: str, mode: str) -> Path | None:
@@ -1249,11 +1284,15 @@ _PRIVATE_FAILURE_KEYS = frozenset(
 
 
 def _sanitize_failure_text(value: str) -> str:
-    redacted = re.sub(r"(?i)(?:[a-z]:[\\/]|\\\\).*$", "[redacted-path]", value)
-    if redacted == value and (value.startswith("/") or " /" in value):
-        prefix, _separator, _tail = value.partition(" /")
-        return "[redacted-path]" if not prefix else f"{prefix} [redacted-path]"
-    return redacted
+    return re.sub(
+        r"(?i)(?:file:(?:/{2,3}|\\{2})[^\s\"']*|(?:[a-z]:[\\/]|\\\\(?:[?.]\\)?|/)[^\s\"']*)",
+        "[redacted-path]",
+        value,
+    )
+
+
+def _contains_pathlike_text(value: str) -> bool:
+    return _sanitize_failure_text(value) != value
 
 
 def _sanitize_failure_json(value: Any) -> Any:
@@ -1473,6 +1512,8 @@ def _redacted_artifact_message(
     replay_path: Path,
     artifact: TelemetryArtifact,
     descriptors: Iterable[_ArtifactDescriptor],
+    *,
+    reject_residual_path: bool = True,
 ) -> str:
     replacements: dict[str, str] = {}
 
@@ -1495,6 +1536,8 @@ def _redacted_artifact_message(
     ):
         if source_text:
             redacted = re.sub(re.escape(source_text), replacement, redacted, flags=re.IGNORECASE)
+    if reject_residual_path and _contains_pathlike_text(redacted):
+        raise ValueError("telemetry metadata contains unregistered path provenance")
     return _sanitize_failure_text(redacted)
 
 
@@ -1517,6 +1560,8 @@ def _telemetry_attempt_facts(
     replay_path: Path,
     descriptors: tuple[_ArtifactDescriptor, ...],
     manifest: tuple[Mapping[str, Any], ...],
+    *,
+    reject_residual_paths: bool = True,
 ) -> dict[str, Any]:
     """Return only validated scalar facts and already registered managed descriptors."""
     facts: dict[str, Any] = {"artifacts": _sorted_artifact_manifest(manifest)}
@@ -1530,7 +1575,13 @@ def _telemetry_attempt_facts(
     ):
         safe = _safe_metadata_text(value)
         if safe is not None:
-            facts[name] = _redacted_artifact_message(safe, replay_path, artifact, descriptors)
+            facts[name] = _redacted_artifact_message(
+                safe,
+                replay_path,
+                artifact,
+                descriptors,
+                reject_residual_path=reject_residual_paths,
+            )
     if artifact.exit_code is None or (
         isinstance(artifact.exit_code, int)
         and not isinstance(artifact.exit_code, bool)
@@ -1547,6 +1598,7 @@ def _telemetry_attempt_facts(
                 replay_path,
                 artifact,
                 descriptors,
+                reject_residual_path=reject_residual_paths,
             )
     if artifact.engine_executable_sha256 is None:
         facts["engine_executable_sha256"] = None
@@ -1570,12 +1622,14 @@ def _telemetry_attempt_facts(
                         replay_path,
                         artifact,
                         descriptors,
+                        reject_residual_path=reject_residual_paths,
                     ),
                     "message": _redacted_artifact_message(
                         message,
                         replay_path,
                         artifact,
                         descriptors,
+                        reject_residual_path=reject_residual_paths,
                     ),
                 }
             )
@@ -1607,6 +1661,7 @@ def _telemetry_failure_details(
                     replay_path,
                     descriptors,
                     manifest,
+                    reject_residual_paths=False,
                 ),
             }
         }

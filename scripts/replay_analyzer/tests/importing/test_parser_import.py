@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 import shutil
 from dataclasses import replace
@@ -25,7 +26,9 @@ from generals_replay_analyzer.db.models import (
     ReplayQualityIssue,
 )
 from generals_replay_analyzer.db.models import ReplayCommand as StoredReplayCommand
+from generals_replay_analyzer.importing import parser_import as parser_import_module
 from generals_replay_analyzer.importing.parser_import import ParserObservationImporter
+from generals_replay_analyzer.importing.stages import canonical_json
 from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.storage import ContentAddressedStore
 
@@ -292,3 +295,83 @@ def test_seeded_hundred_command_projection_is_sorted_canonical_and_rolls_back_ba
         failed_run = session.scalar(select(ParserRun).where(ParserRun.run_id == failed.run_id))
         assert failed_run is not None and failed_run.status == "failed"
         assert session.scalar(select(func.count(EvidenceItem.id)).where(EvidenceItem.parser_run_id == failed_run.id)) == 0
+
+
+def test_parser_setup_projection_is_closed_and_preserves_every_exact_setup_field(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
+) -> None:
+    """Catch setup facts being hashed but discarded from the accepted Replay projection."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    parsed = parse_replay(managed_path)
+
+    result = _importer(session_factory, settings).import_replay(replay_sha256)
+
+    with session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert replay is not None
+        assert replay.header_json == {
+            "header": parsed.header.to_dict(),
+            "setup": {
+                "difficulty": parsed.setup.difficulty,
+                "original_game_mode": parsed.setup.original_game_mode,
+                "rank_points": parsed.setup.rank_points,
+                "max_fps": parsed.setup.max_fps,
+                "start_offset": parsed.setup.start_offset,
+                "end_offset": parsed.setup.end_offset,
+            },
+        }
+        assert canonical_json(replay.header_json) == canonical_json(
+            {"setup": parsed.setup.to_dict(), "header": parsed.header.to_dict()}
+        )
+        assert session.scalar(select(ParserRun).where(ParserRun.run_id == result.run_id)) is not None
+
+
+def test_parser_command_input_permutation_persists_one_canonical_source_order(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
+) -> None:
+    """Catch parser tuple presentation order entering immutable command indexes or result bytes."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    base = parse_replay(managed_path)
+    source = base.commands[:100]
+    randomizer = random.Random(0xC011A7E)
+    permuted = list(source)
+    randomizer.shuffle(permuted)
+    projected = replace(base, commands=tuple(permuted), end_offset=source[-1].end_offset)
+
+    result = _importer(session_factory, settings, parser=lambda _path: projected).import_replay(replay_sha256)
+
+    assert result.status == "succeeded" and result.command_count == 100
+    with session_factory() as session:
+        run = session.scalar(select(ParserRun).where(ParserRun.run_id == result.run_id))
+        rows = list(
+            session.scalars(
+                select(StoredReplayCommand)
+                .where(StoredReplayCommand.parser_run_id == run.id)
+                .order_by(StoredReplayCommand.command_index)
+            )
+        )
+        assert [row.start_offset for row in rows] == [command.start_offset for command in source]
+        expected_projection = parser_import_module._result_projection(
+            replace(projected, commands=source)
+        )
+        assert run.result_sha256 == hashlib.sha256(canonical_json(expected_projection).encode()).hexdigest()
+
+
+def test_parser_reverifies_managed_replay_inside_final_transaction(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
+) -> None:
+    """Catch a managed replay swap after parsing but before parser child insertion."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    parsed = parse_replay(managed_path)
+
+    def tampering_parser(_path: Path):  # type: ignore[no-untyped-def]
+        managed_path.write_bytes(managed_path.read_bytes() + b"tampered")
+        return parsed
+
+    result = _importer(session_factory, settings, parser=tampering_parser).import_replay(replay_sha256)
+
+    assert result.status == "failed" and result.command_count == 0
+    with session_factory() as session:
+        run = session.scalar(select(ParserRun).where(ParserRun.run_id == result.run_id))
+        assert run is not None and run.status == "failed"
+        assert session.scalar(select(func.count(EvidenceItem.id)).where(EvidenceItem.parser_run_id == run.id)) == 0
