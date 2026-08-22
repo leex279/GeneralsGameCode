@@ -1460,6 +1460,12 @@ def _validated_dependencies(
                 retryable=False,
             )
         expected_version = expected_versions.get(dependency.stage)
+        if not isinstance(dependency.job_public_id, str):
+            raise StageFailure(
+                "dependency_contract_invalid",
+                "observation dependency public identity is invalid",
+                retryable=False,
+            )
         try:
             public_id = _require_run_id(dependency.job_public_id)
         except (TypeError, ValueError) as error:
