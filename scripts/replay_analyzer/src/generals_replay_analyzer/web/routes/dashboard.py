@@ -23,4 +23,10 @@ def dashboard(request: Request, port: Annotated[WebApplicationPort, Depends(appl
             code="not_acceptable",
             detail="This route provides only text/html",
         )
-    return template_response(request, "dashboard.html", dashboard_shell(port.dashboard()))
+    snapshot = port.dashboard()
+    return template_response(
+        request,
+        "dashboard.html",
+        dashboard_shell(snapshot),
+        context={"dashboard": snapshot},
+    )

@@ -1,17 +1,91 @@
 {% extends "base.html" %}
 {% import "components/badges.html" as badges %}
 {% import "components/pipeline.html" as pipeline_components %}
-{% import "components/empty_state.html" as states %}
 {% block content %}
-  <h1>Replay dashboard</h1>
-  {{ badges.availability_badge(shell.availability) }}
-  {{ badges.terminal_quality_badge(shell.terminal_quality) }}
-  {{ pipeline_components.pipeline_summary(shell.pipeline) }}
-  {% if shell.availability.state == "unavailable" %}
-    {{ states.empty_state("Analysis data unavailable", shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied", "No completed report is shown until an accepted analytics adapter supplies immutable data.") }}
-  {% elif shell.availability.state == "partial" %}
-    <p class="availability-detail">Analysis is partially available. Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}. No completed report is implied.</p>
-  {% else %}
-    <p class="availability-detail">Analysis data is available from the accepted adapter.</p>
-  {% endif %}
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">Operations / Overview</span>
+      <h1>Replay dashboard</h1>
+      <p>Trace replay evidence from ingestion through analysis without leaving the local machine.</p>
+    </div>
+    <a class="button button-primary" href="/imports/dialog">Import replay</a>
+  </header>
+
+  <nav class="command-strip" aria-label="Dashboard shortcuts">
+    <a href="/replays"><span class="command-index">01</span><span><strong>Open replay library</strong><small>Filter matches and inspect evidence</small></span></a>
+    <a href="/jobs"><span class="command-index">02</span><span><strong>Inspect analysis jobs</strong><small>Progress, cancellation, and logs</small></span></a>
+    <a href="/players"><span class="command-index">03</span><span><strong>Review player identity</strong><small>Resolved names and match history</small></span></a>
+  </nav>
+
+  <div class="dashboard-layout">
+    <section class="workspace-panel" aria-labelledby="workspace-title">
+      <div class="section-heading">
+        <div><span class="eyebrow">Replay evidence</span><h2 id="workspace-title">Analysis workspace</h2></div>
+        {{ badges.availability_badge(shell.availability) }}
+      </div>
+      {% if shell.availability.state != "unavailable" and dashboard.recent_replays %}
+        <section class="dashboard-section" aria-labelledby="recent-matches-title">
+          <div class="section-heading compact-heading"><div><span class="eyebrow">Latest evidence</span><h3 id="recent-matches-title">Recent matches</h3></div></div>
+          <div class="table-scroll">
+            <table class="dashboard-table">
+              <caption>Recent replay analysis supplied by the application adapter</caption>
+              <thead><tr><th scope="col">Replay</th><th scope="col">Players</th><th scope="col">Result</th><th scope="col">Map</th><th scope="col">Analysis</th><th scope="col">Evidence</th><th scope="col">Observed</th><th scope="col">Action</th></tr></thead>
+              <tbody>{% for replay in dashboard.recent_replays %}<tr>
+                <td>{{ replay.label }}</td>
+                <td>{{ replay.players|join(" vs ") }}</td>
+                <td>{{ replay.result or "unavailable" }}</td>
+                <td>{{ replay.map_name or "unavailable" }}</td>
+                <td>{{ replay.analysis_state }}</td>
+                <td>{{ replay.evidence_tier or "unavailable" }}</td>
+                <td>{{ replay.observed_at or "unavailable" }}</td>
+                <td><a href="/replays?search={{ replay.replay_public_id }}">Inspect replay</a></td>
+              </tr>{% endfor %}</tbody>
+            </table>
+          </div>
+        </section>
+      {% endif %}
+      {% if shell.availability.state != "unavailable" and dashboard.trends %}
+        <section class="dashboard-section" aria-labelledby="dashboard-trends-title">
+          <div class="section-heading compact-heading"><div><span class="eyebrow">Signals</span><h3 id="dashboard-trends-title">Activity &amp; quality trends</h3></div></div>
+          <dl class="trend-ledger">{% for trend in dashboard.trends %}<div><dt>{{ trend.label }}</dt><dd><strong>{{ trend.summary }}</strong><span>{{ trend.period_label }} / {{ trend.sample_count }} samples / {{ trend.availability.state }}</span>{% if trend.filter_analysis_status %}<a href="/replays?analysis_status={{ trend.filter_analysis_status }}">Inspect matching replays</a>{% else %}<a href="/replays">Open replay library</a>{% endif %}</dd></div>{% endfor %}</dl>
+        </section>
+      {% endif %}
+      {% if shell.availability.state != "unavailable" and dashboard.notable_evidence %}
+        <section class="dashboard-section" aria-labelledby="notable-evidence-title">
+          <div class="section-heading compact-heading"><div><span class="eyebrow">Review queue</span><h3 id="notable-evidence-title">Notable evidence</h3></div></div>
+          <ul class="notice-list">{% for notice in dashboard.notable_evidence %}<li><strong>{{ notice.title }}</strong><span>{{ notice.summary }}</span><code>{{ notice.code }}</code>{% if notice.replay_public_id %}<a href="/replays?search={{ notice.replay_public_id }}">Inspect replay evidence</a>{% else %}<a href="/replays">Open replay library</a>{% endif %}</li>{% endfor %}</ul>
+        </section>
+      {% endif %}
+      {% if shell.availability.state == "unavailable" %}
+        <div class="empty-workspace">
+          <span class="empty-glyph" aria-hidden="true">∅</span>
+          <div>
+            <h3>No replay evidence in this library yet</h3>
+            <p>Import a replay to begin. Until the production analytics adapter is connected, this screen stays deliberately empty.</p>
+            <p class="reason-line">Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}</p>
+          </div>
+        </div>
+      {% elif shell.availability.state == "partial" %}
+        <p class="availability-detail">Analysis is partially available. Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}. No completed report is implied.</p>
+      {% else %}
+        <p class="availability-detail">Analysis data is available from the accepted adapter.</p>
+        {% if not dashboard.recent_replays and not dashboard.trends and not dashboard.notable_evidence %}
+        <p class="availability-detail">No recent evidence has been supplied for this workspace.</p>
+        {% endif %}
+      {% endif %}
+    </section>
+
+    <aside class="operations-rail" aria-labelledby="operations-title">
+      <div class="section-heading"><div><span class="eyebrow">System</span><h2 id="operations-title">Operations</h2></div></div>
+      <dl class="status-ledger">
+        <div><dt>Availability</dt><dd>{{ shell.availability.state }}</dd></div>
+        <div><dt>Terminal quality</dt><dd>{% if shell.terminal_quality %}{{ shell.terminal_quality.lifecycle }}{% else %}unavailable{% endif %}</dd></div>
+        <div><dt>Execution mode</dt><dd>local only</dd></div>
+      </dl>
+      <div class="operations-detail">
+        {{ badges.terminal_quality_badge(shell.terminal_quality) }}
+        {{ pipeline_components.pipeline_summary(shell.pipeline) }}
+      </div>
+    </aside>
+  </div>
 {% endblock %}

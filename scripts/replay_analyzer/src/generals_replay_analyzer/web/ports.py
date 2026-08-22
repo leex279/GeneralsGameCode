@@ -315,9 +315,61 @@ class TimestampedWebDTO(WebDTO):
         return value
 
 
+class DashboardReplayDTO(WebDTO):
+    """One adapter-supplied recent replay; never a template-derived match claim."""
+
+    replay_public_id: PublicId
+    report_public_id: PublicId | None = None
+    label: str = Field(min_length=1, max_length=256)
+    players: tuple[str, ...] = Field(min_length=1, max_length=16)
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+    map_name: str | None = Field(default=None, min_length=1, max_length=256)
+    analysis_state: str = Field(min_length=1, max_length=64)
+    evidence_tier: Literal["observed", "derived", "inferred"] | None = None
+    observed_at: AwareDatetime | None = None
+
+    @field_validator("players")
+    @classmethod
+    def _validate_player_labels(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not value.strip() or len(value) > 256 for value in values):
+            raise ValueError("dashboard player labels must be nonempty and bounded")
+        return values
+
+    @field_validator("observed_at")
+    @classmethod
+    def _require_utc_observed_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("dashboard observed time must use UTC")
+        return value
+
+
+class DashboardTrendDTO(WebDTO):
+    """Text-first trend summary supplied by the accepted application adapter."""
+
+    label: str = Field(min_length=1, max_length=128)
+    period_label: str = Field(min_length=1, max_length=128)
+    sample_count: int = Field(ge=0)
+    summary: str = Field(min_length=1, max_length=512)
+    availability: AvailabilityDTO
+    filter_analysis_status: Literal["partial", "desynced", "failed"] | None = None
+
+
+class DashboardNoticeDTO(WebDTO):
+    """Deterministic review-queue entry with no template-side qualification."""
+
+    code: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=128)
+    summary: str = Field(min_length=1, max_length=512)
+    replay_public_id: PublicId | None = None
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Keep command-center rows adapter-supplied and path-free. (#0)
 class DashboardDTO(TimestampedWebDTO):
     availability: AvailabilityDTO
     pipeline_states: tuple[PipelineStateDTO, ...] = ()
+    recent_replays: tuple[DashboardReplayDTO, ...] = Field(default=(), max_length=8)
+    trends: tuple[DashboardTrendDTO, ...] = Field(default=(), max_length=2)
+    notable_evidence: tuple[DashboardNoticeDTO, ...] = Field(default=(), max_length=8)
 
 
 class IdentityLandingDTO(TimestampedWebDTO):
@@ -351,6 +403,7 @@ class ReplayLibraryQueryDTO(WebDTO):
 
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
+    sort: Literal["observed_desc", "observed_asc", "replay_asc", "status_asc"] = "observed_desc"
     search: str | None = Field(default=None, max_length=256)
     player_public_id: PublicId | None = None
     faction: str | None = Field(default=None, min_length=1, max_length=64)
@@ -399,6 +452,7 @@ class ReplayLibraryQueryDTO(WebDTO):
 
 class ReplayLibraryItemDTO(WebDTO):
     replay_public_id: PublicId
+    report_public_id: PublicId | None = None
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     display_filename: str | None = Field(default=None, min_length=1, max_length=256)
     players: tuple[ReplayPlayerDisplayDTO, ...]

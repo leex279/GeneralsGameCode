@@ -1,31 +1,81 @@
 {% extends "base.html" %}
+{% macro advanced_fields(query, suffix) -%}
+  <label for="replay-player{% if suffix %}-{{ suffix }}{% endif %}">Player public ID <input id="replay-player{% if suffix %}-{{ suffix }}{% endif %}" name="player_public_id" value="{{ query.player_public_id or '' }}"></label>
+  <label for="replay-matchup{% if suffix %}-{{ suffix }}{% endif %}">Matchup <input id="replay-matchup{% if suffix %}-{{ suffix }}{% endif %}" name="matchup" value="{{ query.matchup or '' }}"></label>
+  <label for="replay-patch{% if suffix %}-{{ suffix }}{% endif %}">Patch <input id="replay-patch{% if suffix %}-{{ suffix }}{% endif %}" name="patch" value="{{ query.patch or '' }}"></label>
+  <label for="replay-strategy{% if suffix %}-{{ suffix }}{% endif %}">Strategy <input id="replay-strategy{% if suffix %}-{{ suffix }}{% endif %}" name="strategy_id" value="{{ query.strategy_id or '' }}"></label>
+  <label for="replay-lifecycle{% if suffix %}-{{ suffix }}{% endif %}">Lifecycle <input id="replay-lifecycle{% if suffix %}-{{ suffix }}{% endif %}" name="lifecycle_state" value="{{ query.lifecycle_state or '' }}"></label>
+  <label for="replay-source{% if suffix %}-{{ suffix }}{% endif %}">Source kind <input id="replay-source{% if suffix %}-{{ suffix }}{% endif %}" name="source_kind" value="{{ query.source_kind or '' }}"></label>
+  <label for="replay-from{% if suffix %}-{{ suffix }}{% endif %}">Observed from UTC <input type="datetime-local" id="replay-from{% if suffix %}-{{ suffix }}{% endif %}" name="date_from_utc" value="{{ query.date_from_utc or '' }}"></label>
+  <label for="replay-to{% if suffix %}-{{ suffix }}{% endif %}">Observed to UTC <input type="datetime-local" id="replay-to{% if suffix %}-{{ suffix }}{% endif %}" name="date_to_utc" value="{{ query.date_to_utc or '' }}"></label>
+  <label for="replay-page-size{% if suffix %}-{{ suffix }}{% endif %}">Rows per page <select id="replay-page-size{% if suffix %}-{{ suffix }}{% endif %}" name="page_size">{% for size in (25, 50, 100) %}<option value="{{ size }}"{% if query.page_size == size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></label>
+{%- endmacro %}
 {% block content %}
-  <h1>Replay library</h1>
-  <p><a class="button" href="/imports/dialog">Import replay</a></p>
-  <form action="/replays" method="get" aria-label="Replay library filters">
-    <label for="replay-search">Search <input id="replay-search" name="search" value="{{ library.page.query.search or '' }}"></label>
-    <label for="replay-player">Player public ID <input id="replay-player" name="player_public_id" value="{{ library.page.query.player_public_id or '' }}"></label>
-    <label for="replay-faction">Faction <input id="replay-faction" name="faction" value="{{ library.page.query.faction or '' }}"></label>
-    <label for="replay-matchup">Matchup <input id="replay-matchup" name="matchup" value="{{ library.page.query.matchup or '' }}"></label>
-    <label for="replay-map">Map public ID <input id="replay-map" name="map_public_id" value="{{ library.page.query.map_public_id or '' }}"></label>
-    <label for="replay-result">Result <input id="replay-result" name="result" value="{{ library.page.query.result or '' }}"></label>
-    <label for="replay-patch">Patch <input id="replay-patch" name="patch" value="{{ library.page.query.patch or '' }}"></label>
-    <label for="replay-strategy">Strategy <input id="replay-strategy" name="strategy_id" value="{{ library.page.query.strategy_id or '' }}"></label>
-    <label for="replay-analysis-status">Analysis status <select id="replay-analysis-status" name="analysis_status"><option value="">Any analysis status</option>{% for status in ('discovered', 'parsed', 'engine_verified', 'partial', 'desynced', 'unsupported', 'failed') %}<option value="{{ status }}"{% if library.page.query.analysis_status == status %} selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
-    <label for="replay-tier">Evidence tier <input id="replay-tier" name="evidence_tier" value="{{ library.page.query.evidence_tier or '' }}"></label>
-    <label for="replay-lifecycle">Lifecycle <input id="replay-lifecycle" name="lifecycle_state" value="{{ library.page.query.lifecycle_state or '' }}"></label>
-    <label for="replay-source">Source kind <input id="replay-source" name="source_kind" value="{{ library.page.query.source_kind or '' }}"></label>
-    <label for="replay-from">Observed from UTC <input id="replay-from" name="date_from_utc" value="{{ library.page.query.date_from_utc or '' }}"></label>
-    <label for="replay-to">Observed to UTC <input id="replay-to" name="date_to_utc" value="{{ library.page.query.date_to_utc or '' }}"></label>
-    <input type="hidden" name="page" value="{{ library.page.query.page }}">
-    <input type="hidden" name="page_size" value="{{ library.page.query.page_size }}">
-    <button type="submit">Apply filters</button>
-  </form>
-  <p><a href="{{ library.canonical_url }}">Canonical library URL</a></p>
-  <nav aria-label="Replay library pagination">
-    <p>Page {{ library.page.page }} of {{ library.total_pages }}</p>
-    {% if library.previous_url %}<a href="{{ library.previous_url }}">Previous page</a>{% endif %}
-    {% if library.next_url %}<a href="{{ library.next_url }}">Next page</a>{% endif %}
-  </nav>
-  {% include "replays/_table.html" %}
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">Evidence / Library</span>
+      <h1>Replay library</h1>
+      <p>Search, filter, and inspect every replay without flattening analysis state into a single score.</p>
+    </div>
+    <a class="button button-primary" href="/imports/dialog">Import replay</a>
+  </header>
+
+  <div class="library-workspace">
+    <section class="library-panel" aria-labelledby="library-filter-heading">
+      <div class="library-toolbar-shell">
+        <div class="library-toolbar">
+          <div><span class="eyebrow">Query</span><h2 id="library-filter-heading">Find replay evidence</h2></div>
+          <div class="result-count"><strong>{{ library.page.total_items }}</strong><span>records</span></div>
+        </div>
+        <form class="library-filters" action="/replays" method="get" autocomplete="off" aria-label="Replay library filters">
+          <div class="filter-grid filter-grid-primary">
+            <label for="replay-search">Search <input type="search" id="replay-search" name="search" value="{{ library.page.query.search or '' }}" placeholder="Filename or player…"></label>
+            <label for="replay-result">Result <input id="replay-result" name="result" value="{{ library.page.query.result or '' }}"></label>
+            <label for="replay-faction">Faction <input id="replay-faction" name="faction" value="{{ library.page.query.faction or '' }}"></label>
+            <label for="replay-map">Map public ID <input id="replay-map" name="map_public_id" value="{{ library.page.query.map_public_id or '' }}"></label>
+            <label for="replay-tier">Evidence tier <select id="replay-tier" name="evidence_tier"><option value="">Any evidence tier</option>{% for tier in ('observed', 'derived', 'inferred') %}<option value="{{ tier }}"{% if library.page.query.evidence_tier == tier %} selected{% endif %}>{{ tier }}</option>{% endfor %}</select></label>
+            <label for="replay-analysis-status">Analysis status <select id="replay-analysis-status" name="analysis_status"><option value="">Any analysis status</option>{% for status in ('discovered', 'parsed', 'engine_verified', 'partial', 'desynced', 'unsupported', 'failed') %}<option value="{{ status }}"{% if library.page.query.analysis_status == status %} selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+            <label for="replay-sort">Sort <select id="replay-sort" name="sort"><option value="observed_desc"{% if library.page.query.sort == 'observed_desc' %} selected{% endif %}>Newest observed</option><option value="observed_asc"{% if library.page.query.sort == 'observed_asc' %} selected{% endif %}>Oldest observed</option><option value="replay_asc"{% if library.page.query.sort == 'replay_asc' %} selected{% endif %}>Replay name A–Z</option><option value="status_asc"{% if library.page.query.sort == 'status_asc' %} selected{% endif %}>Analysis status</option></select></label>
+            <button class="button button-primary" type="submit">Apply filters</button>
+          </div>
+          <details class="advanced-filters-fallback">
+            <summary>All filters</summary>
+            <div class="filter-grid">{{ advanced_fields(library.page.query, "") }}</div>
+            <button class="button button-primary" type="submit">Apply all filters</button>
+          </details>
+          <input type="hidden" name="page" value="1">
+        </form>
+        <button class="all-filters-trigger" type="button" data-all-filters-open aria-haspopup="dialog" aria-controls="all-filters">All filters</button>
+        <dialog id="all-filters" class="filter-dialog" aria-labelledby="all-filters-title">
+          <form action="/replays" method="get" autocomplete="off">
+            <div class="dialog-heading"><div><span class="eyebrow">Replay query</span><h2 id="all-filters-title">All filters</h2></div><button type="button" data-all-filters-close>Close</button></div>
+            <input type="hidden" name="search" value="{{ library.page.query.search or '' }}">
+            <input type="hidden" name="result" value="{{ library.page.query.result or '' }}">
+            <input type="hidden" name="faction" value="{{ library.page.query.faction or '' }}">
+            <input type="hidden" name="map_public_id" value="{{ library.page.query.map_public_id or '' }}">
+            <input type="hidden" name="evidence_tier" value="{{ library.page.query.evidence_tier or '' }}">
+            <input type="hidden" name="analysis_status" value="{{ library.page.query.analysis_status or '' }}">
+            <input type="hidden" name="sort" value="{{ library.page.query.sort }}">
+            <input type="hidden" name="page" value="1">
+            <div class="filter-grid filter-dialog-grid">{{ advanced_fields(library.page.query, "dialog") }}</div>
+            <div class="filter-dialog-actions"><button class="button button-primary" type="submit">Apply all filters</button><a href="{{ library.clear_url }}">Clear filters</a></div>
+          </form>
+        </dialog>
+        <div class="active-filter-row">
+          <strong>{{ library.active_filters|length }} active filters</strong>
+          {% for chip in library.active_filters %}<a class="filter-chip" href="{{ chip.remove_url }}" aria-label="Remove {{ chip.label }} filter">{{ chip.label }}: {{ chip.value }} <span aria-hidden="true">×</span></a>{% endfor %}
+          {% if library.active_filters %}<a class="clear-filters" href="{{ library.clear_url }}">Clear filters</a>{% endif %}
+        </div>
+        <div class="library-meta">
+          <a href="{{ library.canonical_url }}">Canonical library URL</a>
+          <nav aria-label="Replay library pagination">
+            {% if library.previous_url %}<a href="{{ library.previous_url }}">Previous page</a>{% endif %}
+            <span>Page {{ library.page.page }} of {{ library.total_pages }}</span>
+            {% if library.next_url %}<a href="{{ library.next_url }}">Next page</a>{% endif %}
+          </nav>
+        </div>
+      </div>
+    </section>
+    {% include "replays/_table.html" %}
+  </div>
 {% endblock %}

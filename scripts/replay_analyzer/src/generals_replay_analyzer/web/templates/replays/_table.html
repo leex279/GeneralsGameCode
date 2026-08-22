@@ -1,27 +1,34 @@
-<p>Availability: {{ library.page.availability.state }}. Reason: {{ library.page.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
-<table>
-  <caption>Replay library results</caption>
-  <thead><tr><th scope="col">Replay</th><th scope="col">Players</th><th scope="col">Lifecycle and state</th><th scope="col">Provenance</th></tr></thead>
-  <tbody>
-  {% if library.page.availability.state == 'unavailable' %}
-    <tr><td colspan="4">No replay library snapshot is available.</td></tr>
-  {% else %}
-  {% for replay in library.page.items %}
-    <tr data-replay-public-id="{{ replay.replay_public_id }}">
-      <td>{{ replay.display_filename or replay.replay_public_id }}</td>
-      <td>{% for player in replay.players %}<span>{{ player.display_name }} (slot {{ player.slot }}, {{ player.faction or 'faction unavailable' }}, {{ player.result or 'result unavailable' }})</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
-      <td>
-        <p>Lifecycle: {{ replay.lifecycle_state }}</p>
-        <p>Pipeline: {% if replay.pipeline %}{{ replay.pipeline.stage }} / {{ replay.pipeline.state }}{% else %}unavailable{% endif %}</p>
-        <p>Availability: {{ replay.availability.state }}. Reason: {{ replay.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
-        <p>Terminal quality: {{ replay.terminal_quality.lifecycle if replay.terminal_quality else 'unavailable' }}</p>
-        <p>Evidence tier: {{ replay.provenance.evidence_tier or 'unavailable' }}</p>
-      </td>
-      <td><details><summary>Provenance disclosure</summary><p>Source public ID: {{ replay.provenance.source_public_id or 'unavailable' }}</p><p>Source kind: {{ replay.provenance.source_kind or 'unavailable' }}</p>{% if replay.provenance.strata_match_token %}<p>Strata match token: {{ replay.provenance.strata_match_token }}</p>{% endif %}{% if replay.provenance.strata_user_token %}<p>Strata user token: {{ replay.provenance.strata_user_token }}</p>{% endif %}</details></td>
-    </tr>
-  {% else %}
-    <tr><td colspan="4">{% if library.page.availability.state == 'unavailable' %}No replay library snapshot is available.{% else %}No replay results match the current filters.{% endif %}</td></tr>
-  {% endfor %}
-  {% endif %}
-  </tbody>
-</table>
+<section class="results-panel" aria-labelledby="replay-results-heading">
+  <div class="section-heading compact-heading">
+    <div><span class="eyebrow">Results</span><h2 id="replay-results-heading">Replay evidence index</h2></div>
+    <p>Availability: {{ library.page.availability.state }}. Reason: {{ library.page.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
+  </div>
+  <p id="replay-table-scroll-instruction" class="scroll-instruction">Scroll horizontally to inspect all replay evidence columns.</p>
+  <div class="table-scroll" tabindex="0" aria-describedby="replay-table-scroll-instruction">
+    <table class="replay-table">
+      <caption>Replay library results</caption>
+      <thead><tr><th scope="col" aria-sort="{% if library.page.query.sort == 'replay_asc' %}ascending{% else %}none{% endif %}">Replay</th><th scope="col">Players</th><th scope="col">Result</th><th scope="col">Faction</th><th scope="col">Map</th><th scope="col">Evidence</th><th scope="col" aria-sort="{% if library.page.query.sort == 'status_asc' %}ascending{% else %}none{% endif %}">Status</th><th scope="col" aria-sort="{% if library.page.query.sort == 'observed_desc' %}descending{% elif library.page.query.sort == 'observed_asc' %}ascending{% else %}none{% endif %}">Observed</th><th scope="col">More</th></tr></thead>
+      <tbody>
+      {% if library.page.availability.state == 'unavailable' %}
+        <tr class="empty-result-row"><td data-label="Replay">No replay library snapshot is available.</td><td data-label="Players">—</td><td data-label="Result">—</td><td data-label="Faction">—</td><td data-label="Map">—</td><td data-label="Evidence">—</td><td data-label="Status">unavailable</td><td data-label="Observed">—</td><td data-label="More"><span class="review-unavailable" aria-disabled="true">Review unavailable</span><br><a href="{{ library.clear_url }}">Clear filters</a></td></tr>
+      {% else %}
+      {% for replay in library.page.items %}
+        <tr data-replay-public-id="{{ replay.replay_public_id }}">
+          <td data-label="Replay"><strong>{{ replay.display_filename or replay.replay_public_id }}</strong>{% if replay.patch %}<small>Patch {{ replay.patch }}</small>{% endif %}</td>
+          <td data-label="Players">{% for player in replay.players %}<span class="player-line"><b>{{ player.display_name }}</b><small>Slot {{ player.slot }}</small></span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td data-label="Result">{{ replay.result or 'unavailable' }}</td>
+          <td data-label="Faction">{% for player in replay.players %}<span>{{ player.faction or 'unavailable' }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td data-label="Map">{{ replay.map_display_name or replay.map_public_id or 'unavailable' }}</td>
+          <td data-label="Evidence">Evidence tier: {{ replay.provenance.evidence_tier or 'unavailable' }}</td>
+          <td data-label="Status"><div class="status-compact"><span>Lifecycle: {{ replay.lifecycle_state }}</span><span>Pipeline: {% if replay.pipeline %}{{ replay.pipeline.stage }} / {{ replay.pipeline.state }}{% else %}unavailable{% endif %}</span></div></td>
+          <td data-label="Observed">{{ replay.observed_at_utc or 'unavailable' }}</td>
+          <td data-label="More"><div class="row-actions"><a href="/replays?search={{ replay.replay_public_id }}">Inspect</a><details><summary>Provenance disclosure</summary><p>Availability: {{ replay.availability.state }}. Reason: {{ replay.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p><p>Terminal quality: {{ replay.terminal_quality.lifecycle if replay.terminal_quality else 'unavailable' }}</p><p>Source public ID: {{ replay.provenance.source_public_id or 'unavailable' }}</p><p>Source kind: {{ replay.provenance.source_kind or 'unavailable' }}</p>{% if replay.provenance.strata_match_token %}<p>Strata match token: {{ replay.provenance.strata_match_token }}</p>{% endif %}{% if replay.provenance.strata_user_token %}<p>Strata user token: {{ replay.provenance.strata_user_token }}</p>{% endif %}</details></div></td>
+        </tr>
+      {% else %}
+        <tr class="empty-result-row"><td data-label="Replay">No replay results match the current filters.</td><td data-label="Players">—</td><td data-label="Result">—</td><td data-label="Faction">—</td><td data-label="Map">—</td><td data-label="Evidence">—</td><td data-label="Status">No matching records</td><td data-label="Observed">—</td><td data-label="More"><a href="{{ library.clear_url }}">Clear filters</a></td></tr>
+      {% endfor %}
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+</section>

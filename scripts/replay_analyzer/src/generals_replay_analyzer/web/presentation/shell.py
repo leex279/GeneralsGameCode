@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import datetime
 from typing import Literal, Self
 from urllib.parse import urlencode
 
@@ -146,6 +147,16 @@ def identity_shell(snapshot: IdentityLandingDTO) -> ShellContextDTO:
     )
 
 
+class ReplayFilterChipDTO(BaseModel):
+    """One deterministic removable replay-library filter."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str
+    value: str
+    remove_url: str
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Keep replay pagination and canonical filters as a frozen presentation boundary. (#0)
 class ReplayLibraryViewModel(BaseModel):
     """Immutable library display state with its canonical query URL."""
@@ -157,11 +168,14 @@ class ReplayLibraryViewModel(BaseModel):
     previous_url: str | None
     next_url: str | None
     total_pages: int
+    active_filters: tuple[ReplayFilterChipDTO, ...]
+    clear_url: str
 
 
 _QUERY_ORDER = (
     "page",
     "page_size",
+    "sort",
     "search",
     "player_public_id",
     "faction",
@@ -182,7 +196,48 @@ _QUERY_ORDER = (
 # TheSuperHackers @feature Leex 22/08/2026 Preserve replay filters in one deterministic public URL. (#0)
 def replay_library_url(query: ReplayLibraryQueryDTO) -> str:
     values = query.model_dump(mode="json", exclude_none=True)
-    return "/replays?" + urlencode([(name, values[name]) for name in _QUERY_ORDER if name in values])
+    return "/replays?" + urlencode(
+        [
+            (name, values[name])
+            for name in _QUERY_ORDER
+            if name in values and not (name == "sort" and values[name] == "observed_desc")
+        ]
+    )
+
+
+_FILTER_LABELS = (
+    ("search", "Search"),
+    ("player_public_id", "Player"),
+    ("faction", "Faction"),
+    ("matchup", "Matchup"),
+    ("map_public_id", "Map"),
+    ("result", "Result"),
+    ("patch", "Patch"),
+    ("strategy_id", "Strategy"),
+    ("analysis_status", "Analysis"),
+    ("evidence_tier", "Evidence"),
+    ("lifecycle_state", "Lifecycle"),
+    ("source_kind", "Source"),
+    ("date_from_utc", "Observed from"),
+    ("date_to_utc", "Observed to"),
+)
+
+
+def _active_filter_chips(query: ReplayLibraryQueryDTO) -> tuple[ReplayFilterChipDTO, ...]:
+    chips: list[ReplayFilterChipDTO] = []
+    for field, label in _FILTER_LABELS:
+        value = getattr(query, field)
+        if value is None:
+            continue
+        replacement: object = None
+        chips.append(
+            ReplayFilterChipDTO(
+                label=label,
+                value=value.isoformat().replace("+00:00", "Z") if isinstance(value, datetime) else str(value),
+                remove_url=replay_library_url(query.model_copy(update={field: replacement, "page": 1})),
+            )
+        )
+    return tuple(chips)
 
 
 # TheSuperHackers @feature Leex 22/08/2026 Map library snapshots without deriving quality from pipeline state. (#0)
@@ -198,6 +253,8 @@ def replay_library_view(page: ReplayLibraryPageDTO) -> ReplayLibraryViewModel:
         previous_url=previous_url,
         next_url=next_url,
         total_pages=total_pages,
+        active_filters=_active_filter_chips(page.query),
+        clear_url=replay_library_url(ReplayLibraryQueryDTO(page_size=page.page_size)),
     )
 
 

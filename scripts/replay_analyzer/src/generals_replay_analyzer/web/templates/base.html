@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-mode="{% if shell.availability.state == 'unavailable' %}unavailable{% else %}production{% endif %}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#151815">
     <title>{{ shell.page_title }}</title>
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/js/app.js" defer></script>
@@ -10,14 +11,41 @@
   <body>
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
-      <a class="brand" href="/">Generals Replay Analyzer</a>
-      <button class="command-trigger" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">Open navigation</button>
-      <nav aria-label="Primary navigation">
-        <ul class="primary-navigation">
-          {% for item in shell.navigation if item.availability == "available" %}
-          <li><a href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
-          {% endfor %}
-        </ul>
+      <div class="mode-banner" data-mode="{% if shell.availability.state == 'unavailable' %}unavailable{% else %}production{% endif %}">
+        <span class="mode-label">Local workspace</span>
+        {% if shell.availability.state == "unavailable" %}
+        <strong>No analytics adapter</strong>
+        <span>Interface preview only; no replay evidence is being claimed.</span>
+        {% else %}
+        <strong>Production evidence</strong>
+        <span>Views are backed by the local immutable analytics store.</span>
+        {% endif %}
+      </div>
+      <div class="utility-row">
+        <a class="brand" href="/">
+          <span class="brand-mark" aria-hidden="true">GRA</span>
+          <span><strong>Generals Replay Analyzer</strong><small>Evidence command center</small></span>
+        </a>
+        <div class="utility-actions">
+          {% if shell.pipeline %}
+          <a class="global-pipeline" href="/jobs">Pipeline {{ shell.pipeline.stage }} / {{ shell.pipeline.state }}</a>
+          {% else %}
+          <span class="global-pipeline" aria-disabled="true">Pipeline unavailable</span>
+          {% endif %}
+          <span class="local-only">Local only</span>
+          <button class="command-trigger" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">
+            <span>Navigate</span>
+          </button>
+        </div>
+      </div>
+      <div class="primary-row">
+        <nav aria-label="Primary navigation">
+          <ul class="primary-navigation">
+            {% for item in shell.navigation if item.availability == "available" %}
+            <li><a href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
+            {% endfor %}
+          </ul>
+        </nav>
         <details class="upcoming-navigation">
           <summary>Upcoming areas</summary>
           <ul>
@@ -26,23 +54,28 @@
             {% endfor %}
           </ul>
         </details>
-      </nav>
+      </div>
     </header>
     <div id="app-feedback" class="visually-hidden" aria-live="polite"></div>
     <main id="main-content" tabindex="-1">
       {% block content %}{% endblock %}
     </main>
-    <footer>Local-only replay evidence viewer.</footer>
+    <footer>
+      <span>Generals Replay Analyzer</span>
+      <span>Local-only replay evidence viewer.</span>
+    </footer>
     <dialog id="command-palette" aria-labelledby="command-palette-title">
-      <h2 id="command-palette-title">Navigate</h2>
-      <ul>
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Command palette</span><h2 id="command-palette-title">Navigate</h2></div>
+        <button type="button" data-command-palette-close>Close</button>
+      </div>
+      <ul class="command-list">
         <li><a href="/">Dashboard</a></li>
         <li><a href="/players">Players</a></li>
         <li><a href="/replays">Library</a></li>
         <li><a href="/jobs">Jobs</a></li>
         <li><span aria-disabled="true">Import: opaque_ingress_handoff_pending</span></li>
       </ul>
-      <button type="button" data-command-palette-close>Close</button>
     </dialog>
   </body>
 </html>
