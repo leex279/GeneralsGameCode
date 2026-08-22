@@ -34,7 +34,11 @@ def _unavailable(reason: str, sample_count: int = 0, missing_count: int = 0) -> 
 
 
 def _ordered(observations: tuple[LongitudinalObservation, ...]) -> tuple[LongitudinalObservation, ...]:
-    return tuple(sorted(observations, key=lambda item: (item.member_key, item.evidence_public_id)))
+    ordered = tuple(sorted(observations, key=lambda item: (item.member_key, item.evidence_public_id)))
+    identities = tuple((item.member_key, item.evidence_public_id) for item in ordered)
+    if len(identities) != len(set(identities)):
+        raise ValueError("duplicate logical observation")
+    return ordered
 
 
 def _usable_numeric(observations: tuple[LongitudinalObservation, ...]) -> tuple[LongitudinalObservation, ...]:
@@ -117,13 +121,24 @@ def timing_band(
     confidence_level: float,
     source_unit: str,
     source_scope: str,
-    frame_start: int,
-    frame_end: int,
+    member_windows: tuple[tuple[int, int], ...],
 ) -> PatternResult:
     try:
         definition = BASE_REGISTRY.definition(feature_name)
     except KeyError:
         return _unavailable("unsupported_metric_definition")
+    if len(member_windows) != len(observations):
+        raise ValueError("each timing observation requires one exact member window")
+    exact_windows = tuple(sorted(set(member_windows)))
+    if len(exact_windows) > 1:
+        return PatternResult(
+            0,
+            len(observations),
+            "unavailable",
+            "inconsistent_member_windows",
+            {"member_windows": [list(window) for window in exact_windows]},
+        )
+    frame_start, frame_end = exact_windows[0] if exact_windows else (0, 0)
     if (
         definition.unit != "frames"
         or source_unit != definition.unit
@@ -367,20 +382,26 @@ def trend(
         return _unavailable("insufficient_distinct_time_points", len(usable), len(observations) - len(usable))
     times = np.asarray([float(time) for time, _ in usable])
     values = np.asarray([float(cast(int | float, item.raw_value)) for _, item in usable])
-    slope = float(stats.theilslopes(values, times).slope)
+    pairwise_slopes = np.asarray(
+        [
+            (values[right] - values[left]) / (times[right] - times[left])
+            for left in range(len(usable))
+            for right in range(left + 1, len(usable))
+            if times[right] != times[left]
+        ],
+        dtype=np.float64,
+    )
+    if len(pairwise_slopes) < 2:
+        return _unavailable("insufficient_resample_observations", len(usable), len(observations) - len(usable))
+    slope = float(np.median(pairwise_slopes))
     interval, metadata = scipy_bootstrap_interval(
-        (times, values),
-        lambda sampled_times, sampled_values: (
-            0.0
-            if len({float(item) for item in sampled_times}) < 2
-            else float(stats.theilslopes(sampled_values, sampled_times).slope)
-        ),
-        statistic_name="theil_sen_slope",
+        (pairwise_slopes,),
+        lambda sampled_slopes: float(np.median(sampled_slopes)),
+        statistic_name="theil_sen_pairwise_slope_median",
         algorithm_version="theil-sen-bootstrap-v1",
         input_digest=input_digest,
         bootstrap_resamples=bootstrap_resamples,
         confidence_level=confidence_level,
-        paired=True,
     )
     quality, reason = _quality(tuple(item for _, item in usable))
     return PatternResult(

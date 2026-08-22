@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from generals_replay_analyzer.longitudinal.patterns import (
     change_point_candidate,
     consistency,
@@ -53,8 +55,7 @@ def test_timing_band_retains_frames_and_rejects_wrong_definition_contract() -> N
         confidence_level=0.95,
         source_unit="frames",
         source_scope="player",
-        frame_start=0,
-        frame_end=900,
+        member_windows=((0, 900), (0, 900), (0, 900)),
     )
     assert supported.statistics["unit"] == "frames"
     assert supported.statistics["median"] == 60.0
@@ -67,10 +68,25 @@ def test_timing_band_retains_frames_and_rejects_wrong_definition_contract() -> N
         confidence_level=0.95,
         source_unit="seconds",
         source_scope="player",
-        frame_start=0,
-        frame_end=900,
+        member_windows=((0, 900), (0, 900), (0, 900)),
     )
     assert unsupported.reason == "unsupported_metric_definition"
+
+
+def test_timing_band_rejects_nonidentical_member_windows() -> None:
+    result = timing_band(
+        "build.first_completed_frame",
+        (_observation("a", 30), _observation("b", 60)),
+        input_digest="c" * 64,
+        minimum_sample_size=2,
+        bootstrap_resamples=100,
+        confidence_level=0.95,
+        source_unit="frames",
+        source_scope="player",
+        member_windows=((0, 900), (0, 901)),
+    )
+    assert result.reason == "inconsistent_member_windows"
+    assert result.statistics["member_windows"] == [[0, 900], [0, 901]]
 
 
 def test_personal_baseline_and_opponent_comparisons_require_disjoint_supported_cohorts() -> None:
@@ -300,7 +316,7 @@ def test_trend_and_comparison_use_central_scipy_bootstrap_metadata() -> None:
         confidence_level=0.9,
     )
     assert trend_result.statistics["interval_method"] == "scipy-bootstrap-percentile-v1"
-    assert trend_result.statistics["statistic"] == "theil_sen_slope"
+    assert trend_result.statistics["statistic"] == "theil_sen_pairwise_slope_median"
     assert comparison.statistics["interval_method"] == "scipy-bootstrap-percentile-v1"
     assert comparison.statistics["statistic"] == "median_difference"
 
@@ -320,3 +336,31 @@ def test_change_point_preserves_chronology_instead_of_resorting_member_keys() ->
     )
     assert result.statistics["split_before_member_key"] == "c"
     assert result.statistics["pre_evidence_ids"] == ["evidence-z", "evidence-y", "evidence-x"]
+
+
+def test_trend_bootstrap_never_fabricates_zero_for_single_rare_timestamp() -> None:
+    observations = tuple(
+        _observation(str(index), 1.0 if index < 99 else 101.0) for index in range(100)
+    )
+    result = trend(
+        observations,
+        (100,) * 99 + (200,),
+        input_digest="5" * 64,
+        minimum_sample_size=2,
+        bootstrap_resamples=100,
+        confidence_level=0.9,
+    )
+    assert result.quality == "complete"
+    assert result.statistics["slope_interval"] == [1.0, 1.0]
+    assert result.statistics["statistic"] == "theil_sen_pairwise_slope_median"
+
+
+def test_pure_patterns_reject_duplicate_logical_observations() -> None:
+    duplicate = _observation("same", ["ChinaPowerPlant", "ChinaBarracks", "ChinaSupplyCenter"])
+    with pytest.raises(ValueError, match="duplicate logical observation"):
+        recurring_opening(
+            (duplicate, duplicate),
+            prefix_length=3,
+            minimum_sample_size=2,
+            confidence_level=0.9,
+        )

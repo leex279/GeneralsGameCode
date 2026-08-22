@@ -248,6 +248,15 @@ class LongitudinalSettings:
             (self.consistency_algorithm_version, "consistency_algorithm_version"),
         ):
             _stable_string(value, label)
+        supported_versions = {
+            "bootstrap_algorithm_version": "median-bootstrap-v1",
+            "trend_algorithm_version": "theil-sen-bootstrap-v1",
+            "change_point_algorithm_version": "median-difference-bootstrap-v1",
+            "consistency_algorithm_version": "iqr-over-median-v1",
+        }
+        for field_name, supported in supported_versions.items():
+            if getattr(self, field_name) != supported:
+                raise ValueError(f"unsupported {field_name}")
         _sorted_unique_strings(self.enabled_metrics, "enabled_metrics")
         _sorted_unique_strings(self.enabled_patterns, "enabled_patterns")
 
@@ -346,6 +355,23 @@ class LongitudinalExclusionDTO:
         _stable_string(self.reason, "exclusion reason")
         if type(self.chronology_key) is not tuple or len(self.chronology_key) != 3:
             raise ValueError("chronology_key must be explicit")
+        start_time, replay_sha256, replay_player_public_id = self.chronology_key
+        if start_time is not None and type(start_time) is not int:
+            raise ValueError("chronology start time must be an integer or null")
+        _digest(replay_sha256, "chronology replay_sha256")
+        _public_id(replay_player_public_id, "chronology replay_player_public_id")
+        if replay_player_public_id != self.replay_player_public_id:
+            raise ValueError("chronology replay player must match the exclusion")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> Self:
+        chronology = _tuple_from_json(value.get("chronology_key"), "chronology_key")
+        return cls(
+            replay_public_id=cast(str, value.get("replay_public_id")),
+            replay_player_public_id=cast(str, value.get("replay_player_public_id")),
+            reason=cast(str, value.get("reason")),
+            chronology_key=cast(tuple[int | None, str, str], chronology),
+        )
 
 
 @dataclass(frozen=True)
@@ -607,8 +633,50 @@ class LongitudinalRunReceipt:
     input_digest: str
     cache_key: str
     status: RunStatus
+    exclusions: tuple[LongitudinalExclusionDTO, ...]
     results: tuple[LongitudinalResultDTO, ...]
     error: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        _public_id(self.run_id, "run_id")
+        _public_id(self.player_public_id, "player_public_id")
+        if type(self.identity_revision) is not int or self.identity_revision < 0:
+            raise ValueError("identity_revision must be nonnegative")
+        _digest(self.input_digest, "input_digest")
+        _digest(self.cache_key, "cache_key")
+        if self.status not in ("succeeded", "failed"):
+            raise ValueError("unsupported run status")
+        exclusions = tuple(
+            sorted(self.exclusions, key=lambda item: (item.chronology_key, item.reason, item.replay_public_id))
+        )
+        exclusion_identities = tuple(
+            (item.replay_player_public_id, item.reason, item.chronology_key) for item in exclusions
+        )
+        if len(exclusion_identities) != len(set(exclusion_identities)):
+            raise ValueError("duplicate exclusion")
+        results = tuple(sorted(self.results, key=lambda item: (item.result_kind, item.result_name, item.public_id)))
+        result_identities = tuple((item.result_kind, item.result_name) for item in results)
+        if len(result_identities) != len(set(result_identities)):
+            raise ValueError("duplicate result")
+        if self.status == "succeeded":
+            if self.error is not None:
+                raise ValueError("succeeded receipt may not contain an error")
+            expected = tuple(
+                sorted(
+                    (("metric", name) for name in self.settings.enabled_metrics),
+                )
+                + sorted(("pattern", name) for name in self.settings.enabled_patterns)
+            )
+            if result_identities != expected:
+                raise ValueError("succeeded receipt results must exactly cover enabled definitions")
+        else:
+            if self.error is None:
+                raise ValueError("failed receipt requires an error")
+            if self.results:
+                raise ValueError("failed receipt may not contain results")
+            object.__setattr__(self, "error", public_mapping(self.error))
+        object.__setattr__(self, "exclusions", exclusions)
+        object.__setattr__(self, "results", results)
 
 
 @dataclass(frozen=True)

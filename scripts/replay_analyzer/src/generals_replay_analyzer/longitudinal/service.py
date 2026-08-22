@@ -324,7 +324,7 @@ class LongitudinalAnalysisService:
                 issue_rows = session.scalars(
                     select(ReplayQualityIssue).where(ReplayQualityIssue.replay_id == replay.id)
                 ).all()
-                issues = tuple(sorted(issue.issue_code for issue in issue_rows if issue.resolved_at is None))
+                issues = tuple(sorted({issue.issue_code for issue in issue_rows if issue.resolved_at is None}))
                 if not request.segment.quality_policy.includes(
                     lifecycle_state=replay.lifecycle_state,
                     active_issue_codes=issues,
@@ -496,27 +496,30 @@ class LongitudinalAnalysisService:
         input_digest: str,
     ) -> tuple[_EvaluatedResult, ...]:
         results: list[_EvaluatedResult] = []
+        relation_requested = bool(request.segment.opponent_player_public_id or request.segment.opponent_faction)
+        relation_available = any(
+            item.dto.opponent_player_public_id or item.dto.opponent_faction for item in selected
+        )
+        if relation_requested and not relation_available:
+            return tuple(
+                _EvaluatedResult(
+                    name,
+                    kind,
+                    0,
+                    len(anchors),
+                    "unavailable",
+                    "unsupported_team_opponent_relation",
+                    {"focal_cohort_count": 0, "reference_cohort_count": 0, "controls_exact": False},
+                    (),
+                    0,
+                    0,
+                )
+                for kind, names in (("metric", request.metric_names), ("pattern", request.pattern_names))
+                for name in names
+            )
         focal = tuple(item for item in selected if self._dto_matches_segment(request, item.dto))
         for name in request.metric_names:
             members = tuple(item for item in focal if item.dto.feature_name == name)
-            if (request.segment.opponent_player_public_id or request.segment.opponent_faction) and not any(
-                item.dto.opponent_player_public_id or item.dto.opponent_faction for item in selected
-            ):
-                results.append(
-                    _EvaluatedResult(
-                        name,
-                        "metric",
-                        0,
-                        len(anchors),
-                        "unavailable",
-                        "unsupported_team_opponent_relation",
-                        {"focal_cohort_count": 0, "reference_cohort_count": 0, "controls_exact": False},
-                        (),
-                        0,
-                        0,
-                    )
-                )
-                continue
             try:
                 definition = self._registry.definition(name)
             except KeyError:
@@ -550,20 +553,7 @@ class LongitudinalAnalysisService:
             _version, algorithm, source_name = pattern_definition
             members = tuple(item for item in focal if item.dto.feature_name == source_name)
             observations = tuple(_member_observation(member) for member in members)
-            if not focal and (request.segment.opponent_player_public_id or request.segment.opponent_faction):
-                pattern_result = opponent_associated_difference(
-                    (),
-                    (),
-                    opponent_player_public_id=request.segment.opponent_player_public_id,
-                    controls_exact=True,
-                    input_digest=input_digest,
-                    minimum_sample_size=request.settings.minimum_sample_size,
-                    bootstrap_resamples=request.settings.bootstrap_resamples,
-                    confidence_level=request.settings.confidence_level,
-                )
-                if request.segment.opponent_faction is not None and request.segment.opponent_player_public_id is None:
-                    pattern_result = type(pattern_result)(0, len(anchors), "unavailable", "unsupported_team_opponent_relation", {})
-            elif algorithm == "recurring_opening":
+            if algorithm == "recurring_opening":
                 result = recurring_opening(
                     observations,
                     prefix_length=3,
@@ -582,8 +572,7 @@ class LongitudinalAnalysisService:
                     confidence_level=request.settings.confidence_level,
                     source_unit="frames" if first is None else cast(str, first.unit),
                     source_scope="player" if first is None else first.feature_scope_type,
-                    frame_start=0 if first is None else first.frame_start,
-                    frame_end=0 if first is None else first.frame_end,
+                    member_windows=tuple((item.dto.frame_start, item.dto.frame_end) for item in members),
                 )
             elif algorithm == "transition_preference":
                 pattern_result = transition_preference(
@@ -864,6 +853,13 @@ class LongitudinalAnalysisService:
             if not isinstance(settings_value, Mapping):
                 raise LongitudinalAnalysisError("cache_winner_invalid")
             settings = LongitudinalSettings.from_mapping(settings_value)
+            exclusion_values = stored_settings.get("exclusions")
+            if not isinstance(exclusion_values, list):
+                raise LongitudinalAnalysisError("cache_winner_invalid")
+            exclusions = tuple(
+                LongitudinalExclusionDTO.from_mapping(cast(Mapping[str, object], item))
+                for item in exclusion_values
+            )
             segment_value = _canonical_mapping(run.segment_key_json)
             segment = SegmentKey.from_mapping(segment_value)
             result_rows = session.scalars(
@@ -911,5 +907,6 @@ class LongitudinalAnalysisService:
                 input_digest=run.input_digest,
                 cache_key=run.cache_key,
                 status="succeeded",
+                exclusions=exclusions,
                 results=tuple(result_dtos),
             )

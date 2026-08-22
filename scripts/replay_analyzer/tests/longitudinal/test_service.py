@@ -65,6 +65,24 @@ def _service(
     )
 
 
+def _all_pattern_names() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            (
+                "change_point.economy_cash_change_total",
+                "consistency.economy_cash_change_total",
+                "map_position_habits",
+                "opponent_associated.economy_cash_change_total",
+                "personal_baseline.economy_cash_change_total",
+                "recurring_opening",
+                "timing_band.build_first_completed",
+                "transition_preferences",
+                "trend.economy_cash_change_total",
+            )
+        )
+    )
+
+
 def test_service_persists_exact_public_member_graph_and_returns_idempotent_receipt(
     longitudinal_factory: sessionmaker[Session], seed_corpus: object
 ) -> None:
@@ -217,6 +235,49 @@ def test_explicit_quality_issue_opt_in_is_retained_and_downgrades_member_quality
     assert receipt.results[0].members[0].active_issue_codes == ("crc_mismatch",)
 
 
+def test_repeated_active_issue_code_is_deduplicated_only_for_policy_projection(
+    longitudinal_factory: sessionmaker[Session], seed_corpus: object
+) -> None:
+    player_public_id = seed_corpus()  # type: ignore[operator]
+    with longitudinal_factory() as session:
+        replay = session.scalars(select(Replay).order_by(Replay.id)).first()
+        assert replay is not None
+        session.add_all(
+            (
+                ReplayQualityIssue(
+                    public_id="00000000-0000-4000-8000-000000009510",
+                    replay_id=replay.id,
+                    stage="parser",
+                    issue_code="crc_mismatch",
+                    severity="error",
+                    details_json={"source": "parser"},
+                ),
+                ReplayQualityIssue(
+                    public_id="00000000-0000-4000-8000-000000009511",
+                    replay_id=replay.id,
+                    stage="telemetry",
+                    issue_code="crc_mismatch",
+                    severity="error",
+                    details_json={"source": "telemetry"},
+                ),
+            )
+        )
+        session.commit()
+    request = replace(
+        _request(player_public_id),
+        segment=SegmentKey(
+            quality_policy=QualityPolicy(
+                quality_floor="partial",
+                allowed_lifecycle_states=("engine_verified",),
+                include_issue_codes=("crc_mismatch",),
+            )
+        ),
+    )
+    member = _service(longitudinal_factory).analyze(request).results[0].members[0]
+    assert member.active_issue_codes == ("crc_mismatch",)
+    assert tuple(issue.stage for issue in member.quality_issues) == ("parser", "telemetry")
+
+
 def test_unsupported_opponent_and_strategy_provenance_persist_typed_unavailable_results(
     longitudinal_factory: sessionmaker[Session], seed_corpus: object
 ) -> None:
@@ -243,6 +304,30 @@ def test_unsupported_opponent_and_strategy_provenance_persist_typed_unavailable_
     strategy = service.analyze(strategy_request)
     assert strategy.results[0].quality == "unavailable"
     assert strategy.results[0].reason == "minimum_sample_not_met"
+
+
+def test_unsupported_opponent_relation_gate_is_identical_for_every_dispatch_path(
+    longitudinal_factory: sessionmaker[Session], seed_corpus: object
+) -> None:
+    player_public_id = seed_corpus(include_build_sequences=True)  # type: ignore[operator]
+    patterns = _all_pattern_names()
+    request = LongitudinalRequest(
+        player_public_id=player_public_id,
+        segment=SegmentKey(opponent_player_public_id="00000000-0000-4000-8000-000000009999"),
+        metric_names=("economy.cash_change_total",),
+        pattern_names=patterns,
+        settings=LongitudinalSettings(
+            minimum_sample_size=2,
+            bootstrap_resamples=30,
+            confidence_level=0.9,
+            enabled_metrics=("economy.cash_change_total",),
+            enabled_patterns=patterns,
+        ),
+    )
+    receipt = _service(longitudinal_factory).analyze(request)
+    assert len(receipt.results) == 1 + len(patterns)
+    assert {result.reason for result in receipt.results} == {"unsupported_team_opponent_relation"}
+    assert all(result.quality == "unavailable" and result.members == () for result in receipt.results)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +397,48 @@ def test_service_binds_minimum_to_analyzer_settings(
     )
     with pytest.raises(LongitudinalAnalysisError, match="minimum_sample_size_mismatch"):
         service.analyze(_request(player_public_id))
+
+
+def test_result_and_persisted_cache_metadata_match_supported_algorithm_versions_exactly(
+    longitudinal_factory: sessionmaker[Session], seed_corpus: object
+) -> None:
+    player_public_id = seed_corpus((1.0, 2.0, 3.0, 10.0, 11.0, 12.0))  # type: ignore[operator]
+    service = _service(longitudinal_factory)
+    metric_receipt = service.analyze(_request(player_public_id))
+    assert metric_receipt.results[0].statistics["algorithm_version"] == "median-bootstrap-v1"
+    patterns = (
+        "change_point.economy_cash_change_total",
+        "consistency.economy_cash_change_total",
+        "trend.economy_cash_change_total",
+    )
+    request = LongitudinalRequest(
+        player_public_id=player_public_id,
+        segment=SegmentKey(subject_faction="China"),
+        metric_names=(),
+        pattern_names=patterns,
+        settings=LongitudinalSettings(
+            minimum_sample_size=2,
+            bootstrap_resamples=30,
+            confidence_level=0.9,
+            enabled_patterns=patterns,
+        ),
+    )
+    receipt = service.analyze(request)
+    versions = {result.result_name: result.statistics["algorithm_version"] for result in receipt.results}
+    assert versions == {
+        "change_point.economy_cash_change_total": "median-difference-bootstrap-v1",
+        "consistency.economy_cash_change_total": "iqr-over-median-v1",
+        "trend.economy_cash_change_total": "theil-sen-bootstrap-v1",
+    }
+    with longitudinal_factory() as session:
+        run = session.scalar(select(LongitudinalRun).where(LongitudinalRun.cache_key == receipt.cache_key))
+        assert run is not None
+        stored = run.settings_json["settings"]
+        assert stored["bootstrap_algorithm_version"] == "median-bootstrap-v1"
+        assert stored["trend_algorithm_version"] == "theil-sen-bootstrap-v1"
+        assert stored["change_point_algorithm_version"] == "median-difference-bootstrap-v1"
+        assert stored["consistency_algorithm_version"] == "iqr-over-median-v1"
+    assert service.analyze(request) == receipt
 
 
 def test_every_explicit_pattern_gets_one_persisted_result_instead_of_aborting(
@@ -522,6 +649,8 @@ def test_missing_chronology_is_persisted_in_exclusion_ledger_and_cache_context(
 
     monkeypatch.setattr(service, "_select", select_with_missing_time)
     receipt = service.analyze(request)
+    assert tuple(exclusion.reason for exclusion in receipt.exclusions) == ("missing_replay_start_time",)
+    assert service._load_receipt(receipt.cache_key) == receipt
     with longitudinal_factory() as session:
         run = session.scalar(select(LongitudinalRun).where(LongitudinalRun.cache_key == receipt.cache_key))
         assert run is not None
