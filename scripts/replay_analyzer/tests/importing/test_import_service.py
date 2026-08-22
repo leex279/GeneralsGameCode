@@ -22,6 +22,7 @@ from generals_replay_analyzer.db import create_database_engine, create_session_f
 from generals_replay_analyzer.db.models import (
     Job,
     JobDependency,
+    JobStageResult,
     ManagedAsset,
     ParserRun,
     Player,
@@ -99,6 +100,37 @@ def _successful_parser(path: Path) -> SimpleNamespace:
 def _rows(factory: sessionmaker[Session], model: type[object]) -> list[object]:
     with factory() as session:
         return list(session.scalars(select(model).order_by(model.id)))  # type: ignore[attr-defined]
+
+
+def test_external_executor_resolves_private_input_and_persists_result_before_settlement(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch an executor that returns raw job payloads or reports success before durable result publication."""
+    service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    submission = service.submit(ImportRequest(replay_file))
+    worker = "00000000-0000-4000-8000-000000000951"
+    control = service.worker_control_port()
+    executor = service.stage_executor_port()
+    claim = control.claim_next(worker, 30)
+    assert claim is not None and claim.job_public_id == submission.discovery_job.public_id
+
+    outcome = executor.execute(claim.job_public_id, claim.execution_public_id)
+    assert outcome.status == "succeeded" and outcome.result_public_id is not None
+    assert not hasattr(outcome, "input_json")
+    with session_factory() as session:
+        job = session.scalar(select(Job).where(Job.public_id == claim.job_public_id))
+        result = session.scalar(select(JobStageResult).where(JobStageResult.public_id == outcome.result_public_id))
+        assert job is not None and job.status == "running" and job.attempt_count == 1
+        assert result is not None and result.job_id == job.id
+    control.settle_success(worker, claim, outcome.result_public_id)
+    with session_factory() as session:
+        job = session.scalar(select(Job).where(Job.public_id == claim.job_public_id))
+        assert job is not None and job.status == "succeeded" and job.attempt_count == 1
 
 
 def test_single_file_creates_provenance_lowercase_replay_and_expected_dag(

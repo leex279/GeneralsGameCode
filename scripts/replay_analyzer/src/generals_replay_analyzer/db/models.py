@@ -26,6 +26,7 @@ from generals_replay_analyzer.db.types import CanonicalJSON, lowercase_sha256_ch
 
 JSON = dict[str, Any] | list[Any]
 RUN_STATUSES = "'pending','running','succeeded','failed'"
+JOB_STATUSES = "'pending','running','succeeded','failed','cancelled'"
 QUALITY_VALUES = "'available','unavailable','partial'"
 
 
@@ -914,18 +915,58 @@ class Report(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
 class Job(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
     __tablename__ = "jobs"
     __table_args__ = (
-        CheckConstraint(f"status IN ({RUN_STATUSES})", name="status_valid"),
+        CheckConstraint(f"status IN ({JOB_STATUSES})", name="status_valid"),
         CheckConstraint("priority >= 0", name="priority_nonnegative"),
-        CheckConstraint("attempt_count >= 0 AND max_attempts >= 0", name="attempts_nonnegative"),
-        CheckConstraint("attempt_count <= max_attempts", name="attempt_count_within_maximum"),
+        CheckConstraint(
+            "max_attempts >= 1 AND attempt_count >= 0 AND attempt_count <= max_attempts", name="attempts_valid"
+        ),
+        CheckConstraint("revision >= 0", name="revision_nonnegative"),
         CheckConstraint("retryable IN (0, 1)", name="retryable_boolean"),
         CheckConstraint(
-            "(status = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
-            "(status != 'running' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            "(status IN ('succeeded','failed','cancelled') AND completed_at IS NOT NULL) OR "
+            "(status IN ('pending','running') AND completed_at IS NULL)",
+            name="terminal_state_valid",
+        ),
+        CheckConstraint("status NOT IN ('succeeded','cancelled') OR retryable = 0", name="terminal_retry_valid"),
+        lowercase_sha256_check("lease_token_sha256"),
+        CheckConstraint(
+            "lease_execution_public_id IS NULL OR (length(lease_execution_public_id) = 36 "
+            "AND lease_execution_public_id = lower(lease_execution_public_id) "
+            "AND substr(lease_execution_public_id, 9, 1) = '-' "
+            "AND substr(lease_execution_public_id, 14, 1) = '-' "
+            "AND substr(lease_execution_public_id, 19, 1) = '-' "
+            "AND substr(lease_execution_public_id, 24, 1) = '-' "
+            "AND length(replace(lease_execution_public_id, '-', '')) = 32 "
+            "AND replace(lease_execution_public_id, '-', '') NOT GLOB '*[^0-9a-f]*')",
+            name="lease_execution_uuid",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND lease_owner IS NOT NULL AND length(trim(lease_owner)) > 0 "
+            "AND lease_expires_at IS NOT NULL AND lease_token_sha256 IS NOT NULL "
+            "AND lease_execution_public_id IS NOT NULL AND last_heartbeat_at IS NOT NULL) OR "
+            "(status != 'running' AND lease_owner IS NULL AND lease_expires_at IS NULL "
+            "AND lease_token_sha256 IS NULL AND lease_execution_public_id IS NULL AND last_heartbeat_at IS NULL)",
             name="lease_state_valid",
         ),
-        Index("ix_jobs_status_available_priority", "status", "available_at", "priority"),
-        Index("ix_jobs_status_lease_expires", "status", "lease_expires_at"),
+        CheckConstraint(
+            "(cancel_requested_at IS NULL AND cancel_requested_by IS NULL AND cancel_reason_code IS NULL) OR "
+            "(cancel_requested_at IS NOT NULL AND cancel_requested_by IS NOT NULL "
+            "AND length(trim(cancel_requested_by)) > 0 AND cancel_reason_code IS NOT NULL "
+            "AND length(trim(cancel_reason_code)) > 0 AND status IN ('running','failed','cancelled'))",
+            name="cancellation_facts_all_or_none",
+        ),
+        CheckConstraint(
+            "(progress_completed IS NULL AND progress_total IS NULL AND progress_unit IS NULL "
+            "AND progress_updated_at IS NULL) OR (progress_completed IS NOT NULL AND progress_total IS NOT NULL "
+            "AND progress_unit IS NOT NULL AND progress_updated_at IS NOT NULL AND progress_completed >= 0 "
+            "AND progress_total > 0 AND progress_completed <= progress_total "
+            "AND length(trim(progress_unit)) BETWEEN 1 AND 64)",
+            name="progress_all_or_none",
+        ),
+        Index("ix_jobs_claim", "status", "stage", "available_at", "priority"),
+        Index("ix_jobs_recovery", "status", "lease_expires_at"),
+        Index("ix_jobs_cancellation", "status", "cancel_requested_at"),
+        Index("ix_jobs_ui_listing", "replay_id", "status", "created_at"),
     )
 
     replay_id: Mapped[int | None] = _fk("replays.id", "SET NULL", nullable=True)
@@ -947,6 +988,18 @@ class Job(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     error_details_json: Mapped[JSON | None] = mapped_column(CanonicalJSON)
     retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token_sha256: Mapped[str | None] = mapped_column(String(64))
+    lease_execution_public_id: Mapped[str | None] = mapped_column(String(36))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_by: Mapped[str | None] = mapped_column(String(255))
+    cancel_reason_code: Mapped[str | None] = mapped_column(String(128))
+    progress_completed: Mapped[int | None] = mapped_column(Integer)
+    progress_total: Mapped[int | None] = mapped_column(Integer)
+    progress_unit: Mapped[str | None] = mapped_column(String(64))
+    progress_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class JobDependency(Base):
@@ -959,6 +1012,71 @@ class JobDependency(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True, index=True)
     depends_on_job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Retain crash-safe stage output before lifecycle settlement. (#0)
+class JobStageResult(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
+    __tablename__ = "job_stage_results"
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_job_stage_results_job_id"),
+        UniqueConstraint("job_id", "idempotency_key", name="uq_job_stage_results_job_identity"),
+        Index("ix_job_stage_results_job_identity", "job_id", "idempotency_key", unique=True),
+    )
+
+    job_id: Mapped[int] = _fk("jobs.id", "RESTRICT")
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    component_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    output_json: Mapped[JSON] = mapped_column(CanonicalJSON, nullable=False)
+
+
+class JobEvent(IntegerPrimaryKeyMixin, PublicIdMixin, Base):
+    __tablename__ = "job_events"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="revision_nonnegative"),
+        CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
+        CheckConstraint(
+            "event_kind IN ('claimed','progress','cancel_requested','cancelled','succeeded','failed',"
+            "'retry_requested','lease_expired','worker_shutdown','dependency_failed','dependency_cancelled','result_reused')",
+            name="kind_valid",
+        ),
+        CheckConstraint(f"state IN ({JOB_STATUSES})", name="state_valid"),
+        UniqueConstraint("job_id", "revision", name="uq_job_events_job_revision"),
+        Index("ix_job_events_job_revision", "job_id", "revision"),
+    )
+
+    job_id: Mapped[int] = _fk("jobs.id", "RESTRICT")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(128))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class JobLogSnapshot(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
+    __tablename__ = "job_log_snapshots"
+    __table_args__ = (
+        CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
+        CheckConstraint("label IN ('stdout','stderr','supervisor')", name="label_valid"),
+        CheckConstraint("sequence >= 0", name="sequence_nonnegative"),
+        CheckConstraint("media_type = 'text/plain'", name="media_type_text"),
+        CheckConstraint("byte_count >= 0", name="byte_count_nonnegative"),
+        CheckConstraint("length(trim(redaction_version)) > 0", name="redaction_nonempty"),
+        UniqueConstraint(
+            "job_id", "attempt_count", "label", "sequence", name="uq_job_log_snapshots_stream_sequence"
+        ),
+        Index("ix_job_log_snapshots_stream", "job_id", "attempt_count", "label", "sequence"),
+    )
+
+    job_id: Mapped[int] = _fk("jobs.id", "RESTRICT")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    managed_asset_id: Mapped[int] = _fk("managed_assets.id", "RESTRICT")
+    media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    redaction_version: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 def _abort_trigger(name: str, timing: str, table: str, when: str, message: str) -> str:
@@ -1100,6 +1218,18 @@ def immutability_triggers() -> list[tuple[str, str]]:
             ),
         ]
     )
+    for table in ("job_stage_results", "job_events", "job_log_snapshots"):
+        for timing in ("UPDATE", "DELETE"):
+            name = f"trg_{table}_no_{timing.lower()}"
+            triggers.append(
+                (
+                    name,
+                    (
+                        f"CREATE TRIGGER {name} BEFORE {timing} ON {table} "
+                        f"BEGIN SELECT RAISE(ABORT, '{table} rows are immutable'); END"
+                    ),
+                )
+            )
     return triggers
 
 

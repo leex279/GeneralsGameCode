@@ -22,6 +22,7 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py",
     "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py",
     "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py",
+    "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py",
 }
 WEB_BOUNDARY_RESOURCES = {
     "generals_replay_analyzer/web/app.py",
@@ -130,6 +131,8 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     with zipfile.ZipFile(wheel) as archive:
         assert MIGRATION_RESOURCES <= set(archive.namelist())
         assert WEB_BOUNDARY_RESOURCES <= set(archive.namelist())
+        for resource in MIGRATION_RESOURCES:
+            assert archive.read(resource) == _source_resource(resource).read_bytes()
 
     environment_directory = tmp_path / "migration-wheel-environment"
     _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
@@ -144,10 +147,13 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
 
         import generals_replay_analyzer
         from generals_replay_analyzer.db import downgrade_database, upgrade_database
+        from generals_replay_analyzer.importing.job_contracts import JobState, WorkerLeaseDTO
         from generals_replay_analyzer.web.resources import PackagedResourceError, package_resource
 
         database = Path(os.environ["TEST_DATABASE_PATH"])
         assert "migration-wheel-environment" in str(generals_replay_analyzer.__file__)
+        assert tuple(state.value for state in JobState) == ("pending", "running", "succeeded", "failed", "cancelled")
+        assert WorkerLeaseDTO.__module__ == "generals_replay_analyzer.importing.job_contracts"
         assert package_resource("db/migrations/env.py").is_file()
         try:
             package_resource("web/templates/not-created-by-task-1.html")
@@ -157,7 +163,7 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
             raise AssertionError("missing packaged resource did not produce a controlled error")
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
-            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003_feature_partial_quality",)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004_job_lifecycle",)
             assert connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'player_identity_operations'"
             ).fetchone() == ("player_identity_operations",)

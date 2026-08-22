@@ -256,9 +256,9 @@ def test_status_feature_lease_and_job_edge_checks(migrated_engine: object) -> No
         job_one = connection.execute(
             text(
                 "INSERT INTO jobs (public_id, replay_id, stage, component_version, idempotency_key, status, priority, "
-                "attempt_count, max_attempts, available_at, input_json, retryable) VALUES "
+                "attempt_count, max_attempts, available_at, created_at, revision, input_json, retryable) VALUES "
                 "('00000000-0000-4000-8000-000000000006', :replay, 'parse', '1', 'job:1', 'pending', 0, 0, 3, "
-                "CURRENT_TIMESTAMP, '{}', 1)"
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, '{}', 1)"
             ),
             {"replay": replay_id},
         )
@@ -358,15 +358,17 @@ def test_uniqueness_and_lifecycle_quality_separation(migrated_engine: object) ->
         connection.execute(
             text(
                 "INSERT INTO jobs (public_id, stage, component_version, idempotency_key, status, priority, attempt_count, "
-                "max_attempts, available_at, input_json, retryable) VALUES "
-                "('00000000-0000-4000-8000-000000000009', 'report', '1', 'same', 'pending', 0, 0, 3, CURRENT_TIMESTAMP, '{}', 1)"
+                "max_attempts, available_at, created_at, revision, input_json, retryable) VALUES "
+                "('00000000-0000-4000-8000-000000000009', 'report', '1', 'same', 'pending', 0, 0, 3, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, '{}', 1)"
             )
         )
         _assert_integrity_error(
             connection,
             "INSERT INTO jobs (public_id, stage, component_version, idempotency_key, status, priority, attempt_count, "
-            "max_attempts, available_at, input_json, retryable) VALUES "
-            "('00000000-0000-4000-8000-000000000010', 'report', '1', 'same', 'pending', 0, 0, 3, CURRENT_TIMESTAMP, '{}', 1)",
+            "max_attempts, available_at, created_at, revision, input_json, retryable) VALUES "
+            "('00000000-0000-4000-8000-000000000010', 'report', '1', 'same', 'pending', 0, 0, 3, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, '{}', 1)",
             {},
         )
 

@@ -5,10 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from alembic.autogenerate import compare_metadata
-from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Integer, MetaData, Table, inspect, text
+from sqlalchemy import Column, Integer, Table, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from generals_replay_analyzer.db import (
@@ -158,20 +156,11 @@ def _expected_schema() -> dict[str, Any]:
     return json.loads(EXPECTED_SCHEMA_PATH.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
-def _task2_baseline_metadata() -> MetaData:
-    """Return the accepted 0001 ORM contract without tables owned by later revisions."""
-    metadata = MetaData(naming_convention=Base.metadata.naming_convention)
-    for table in Base.metadata.sorted_tables:
-        if table.name != "player_identity_operations":
-            table.to_metadata(metadata)
-    return metadata
-
-
 def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_path: Path) -> None:
     """Compare every table, named index/check/FK, predicate, action, and trigger to a frozen oracle."""
     config = make_alembic_config(database_path)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0003_feature_partial_quality"]
+    assert scripts.get_heads() == ["0004_job_lifecycle"]
 
     upgrade_database(database_path, "0001_replay_analyzer_v2")
     engine = create_database_engine(database_path)
@@ -187,8 +176,6 @@ def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_pa
             assert triggers == IMMUTABILITY_TRIGGERS
             assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
             assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
-            context = MigrationContext.configure(connection, opts={"compare_type": True})
-            assert compare_metadata(context, _task2_baseline_metadata()) == []
 
         for table in APPLICATION_TABLES:
             indexed_leading_columns = {

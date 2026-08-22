@@ -24,6 +24,8 @@ from ..db.models import Job, JobDependency, ManagedAsset, Replay, Source
 from ..parser import ParsedReplay
 from ..provenance import SourceProvenance, extract_source_provenance
 from ..storage import ContentAddressedStore, ContentStorageError, StoredContent
+from .job_contracts import StageExecutionOutcomeDTO, StageExecutorPort, WorkerControlPort
+from .job_lifecycle import JobLifecycleService
 from .jobs import ClaimedJob, JobCoordinator, JobSnapshot, JobSpec, JobStateError, StageFailure
 from .stages import (
     ANALYZE_LLM,
@@ -199,6 +201,45 @@ class StageHandlerRegistration:
     terminal_dependency_policy: TerminalDependencyPolicy = TerminalDependencyPolicy()
 
 
+class ImportStageExecutor(StageExecutorPort):
+    """Execute one exact owned attempt without exposing its private job input or dependency output."""
+
+    def __init__(self, service: ImportService, lifecycle: JobLifecycleService) -> None:
+        self._service = service
+        self._lifecycle = lifecycle
+
+    def execute(self, job_public_id: str, execution_public_id: str) -> StageExecutionOutcomeDTO:
+        self._lifecycle.assert_execution(job_public_id, execution_public_id)
+        claimed = self._service._jobs.snapshot(job_public_id)
+        handler = self._service._handlers.get(claimed.stage)
+        if handler is None:
+            return StageExecutionOutcomeDTO(
+                "failed", None, "unregistered_stage", "job stage is not registered by this executor", False
+            )
+        try:
+            output = _canonical_output(handler(claimed))
+        except StageFailure as failure:
+            return StageExecutionOutcomeDTO(
+                "retryable_failure" if failure.retryable else "failed",
+                None,
+                failure.code,
+                _sanitize_failure_text(failure.message),
+                failure.retryable,
+            )
+        except Exception as error:  # noqa: BLE001 - executor outcomes must retain an unexpected failure safely.
+            return StageExecutionOutcomeDTO(
+                "retryable_failure",
+                None,
+                "stage_failed",
+                _sanitize_failure_text(f"{claimed.stage} failed: {type(error).__name__}"),
+                True,
+            )
+        result_public_id = self._lifecycle.persist_stage_result_for_execution(
+            job_public_id, execution_public_id, output
+        )
+        return StageExecutionOutcomeDTO("succeeded", result_public_id, None, None, False)
+
+
 @dataclass(frozen=True)
 class _ReplayInput:
     path: Path
@@ -248,6 +289,7 @@ class ImportService:
         self._telemetry_acquirer = telemetry_acquirer
         self._parser_version = parser_version
         self._telemetry_acquirer_version = telemetry_acquirer_version
+        self._clock = clock
         self._jobs = JobCoordinator(session_factory, clock=clock)
         handlers: dict[str, Callable[[ClaimedJob], Mapping[str, Any]]] = {
             DISCOVER: self._discover,
@@ -294,6 +336,23 @@ class ImportService:
             terminal_failure_stages
         )
         self._handlers: Mapping[str, Callable[[ClaimedJob], Mapping[str, Any]]] = MappingProxyType(handlers)
+
+    def worker_control_port(self) -> WorkerControlPort:
+        """Return the versioned lifecycle boundary used by an external worker."""
+        return JobLifecycleService(
+            self._session_factory,
+            registered_stages=self._handlers,
+            terminal_failure_stages=self._terminal_failure_stages,
+            clock=self._clock,
+            log_store=self._artifact_store,
+            log_relative_root="job-logs",
+            redaction_values=(str(self._settings.data_root), str(self._settings.database_path)),
+        )
+
+    def stage_executor_port(self) -> StageExecutorPort:
+        """Return the executor that resolves private inputs and dependencies inside Analytics."""
+        lifecycle = cast(JobLifecycleService, self.worker_control_port())
+        return ImportStageExecutor(self, lifecycle)
 
     def submit(self, request: ImportRequest) -> ImportSubmissionDTO:
         path = _absolute_without_following(request.path)

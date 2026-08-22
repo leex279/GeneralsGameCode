@@ -174,7 +174,7 @@ def test_migration_head_adds_the_immutable_identity_ledger(identity_database_pat
         assert "player_identity_operations" in inspector.get_table_names()
         with engine.connect() as connection:
             assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "0003_feature_partial_quality"
+                "0004_job_lifecycle"
             )
             objects = {
                 (row.type, row.name)

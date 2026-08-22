@@ -47,6 +47,7 @@ exclude = [
 "src/generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py" = "generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py"
 "src/generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py" = "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py"
 "src/generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py" = "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py"
+"src/generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py" = "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py"
 "src/generals_replay_analyzer/web/templates/base.html" = "generals_replay_analyzer/web/templates/base.html"
 "src/generals_replay_analyzer/web/templates/dashboard.html" = "generals_replay_analyzer/web/templates/dashboard.html"
 "src/generals_replay_analyzer/web/templates/identity/landing.html" = "generals_replay_analyzer/web/templates/identity/landing.html"
