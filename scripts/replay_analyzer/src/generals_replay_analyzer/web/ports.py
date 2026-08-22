@@ -11,6 +11,8 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.functional_validators import AfterValidator
 
+from generals_replay_analyzer.ingress_contract import validate_replay_relative_name, validate_root_public_id
+
 
 def _lowercase_uuid(value: str) -> str:
     parsed = UUID(value)
@@ -29,10 +31,6 @@ _SECRET_MARKERS = ("api_key", "apikey", "credential", "password", "private_key",
 _LOCAL_FILE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _MAX_PERCENT_DECODE_PASSES = 3
-_WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('"<>|?*')
-_RESERVED_WINDOWS_DEVICE_BASENAMES = frozenset(
-    {"con", "prn", "aux", "nul", *(f"com{index}" for index in range(1, 10)), *(f"lpt{index}" for index in range(1, 10))}
-)
 DiagnosticCandidate = tuple[Literal["uri", "locator", "traversal"], int, int]
 
 
@@ -455,32 +453,15 @@ class RootImportCommandDTO(WebDTO):
     root_public_id: PublicId
     relative_path: str = Field(min_length=1, max_length=1024)
 
+    @field_validator("root_public_id")
+    @classmethod
+    def _require_ingress_root_public_id(cls, value: str) -> str:
+        return validate_root_public_id(value)
+
     @field_validator("relative_path")
     @classmethod
     def _require_safe_relative_posix_name(cls, value: str) -> str:
-        if (
-            value.startswith(("/", "\\"))
-            or value.endswith(("/", "\\"))
-            or "\\" in value
-            or ":" in value
-            or any(character in _WINDOWS_INVALID_COMPONENT_CHARACTERS for character in value)
-            # A closed contract rejects percent escapes before component validation, including nested encodings.
-            or "%" in value
-            or len(value) >= 2
-            and value[1] == ":"
-            or any(ord(character) < 32 or ord(character) == 127 for character in value)
-        ):
-            raise ValueError("relative_path must be a normalized POSIX relative name")
-        components = value.split("/")
-        if any(component in {"", ".", ".."} or component.endswith((".", " ")) for component in components):
-            raise ValueError("relative_path must be a normalized POSIX relative name")
-        if any(component.split(".", 1)[0].casefold() in _RESERVED_WINDOWS_DEVICE_BASENAMES for component in components):
-            raise ValueError("relative_path must be a normalized POSIX relative name")
-        filename = components[-1]
-        suffixes = filename.split(".")[1:]
-        stem = filename[: -len(".rep")] if filename.endswith(".rep") else ""
-        if len(suffixes) != 1 or suffixes[0] != "rep" or not stem:
-            raise ValueError("relative_path must end in one lower-case .rep suffix")
+        validate_replay_relative_name(value)
         return value
 
 
@@ -491,6 +472,149 @@ class ImportSubmissionDTO(WebDTO):
     pipeline: PipelineStateDTO | None = None
     availability: AvailabilityDTO
     problem_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+JobState = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+
+
+class JobProgressDTO(WebDTO):
+    completed: int = Field(ge=0)
+    total: int = Field(ge=1)
+    unit: str = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _bounded_progress(self) -> Self:
+        if self.completed > self.total:
+            raise ValueError("completed progress cannot exceed total")
+        return self
+
+
+class JobErrorSummaryDTO(WebDTO):
+    code: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=512)
+    retryable: bool
+
+
+class JobLogReferenceDTO(WebDTO):
+    log_public_id: PublicId
+    label: Literal["stdout", "stderr", "supervisor"]
+    byte_count: int = Field(ge=0)
+    created_at_utc: AwareDatetime
+
+    @field_validator("created_at_utc")
+    @classmethod
+    def _require_utc_created_at(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("created_at_utc must use UTC")
+        return value
+
+
+class JobSummaryDTO(WebDTO):
+    job_public_id: PublicId
+    replay_public_id: PublicId | None = None
+    stage: str = Field(min_length=1, max_length=64)
+    component_version: str = Field(min_length=1, max_length=255)
+    state: JobState
+    revision: int = Field(ge=0)
+    attempt_count: int = Field(ge=0)
+    max_attempts: int = Field(ge=1)
+    retryable: bool
+    cancel_requested: bool
+    created_at_utc: AwareDatetime
+    started_at_utc: AwareDatetime | None = None
+    completed_at_utc: AwareDatetime | None = None
+    progress: JobProgressDTO | None = None
+    error: JobErrorSummaryDTO | None = None
+
+    @field_validator("created_at_utc", "started_at_utc", "completed_at_utc")
+    @classmethod
+    def _require_utc_job_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("job timestamps must use UTC")
+        return value
+
+    @model_validator(mode="after")
+    def _bounded_attempts(self) -> Self:
+        if self.attempt_count > self.max_attempts:
+            raise ValueError("attempt_count cannot exceed max_attempts")
+        return self
+
+
+class JobDetailDTO(WebDTO):
+    summary: JobSummaryDTO
+    dependency_job_public_ids: tuple[PublicId, ...] = ()
+    logs: tuple[JobLogReferenceDTO, ...] = ()
+    availability: AvailabilityDTO
+
+
+class JobQueryDTO(WebDTO):
+    states: tuple[JobState, ...] = ()
+    replay_public_id: PublicId | None = None
+    stage: str | None = Field(default=None, min_length=1, max_length=64)
+    limit: int = Field(default=50, ge=1, le=200)
+    after_job_public_id: PublicId | None = None
+
+
+class WatchFolderStatusDTO(WebDTO):
+    root_public_id: PublicId
+    label: str = Field(min_length=1, max_length=256)
+    state: Literal["idle", "scanning", "degraded", "disabled"]
+    last_scan_at_utc: AwareDatetime | None = None
+    reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("last_scan_at_utc")
+    @classmethod
+    def _require_utc_scan_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("last_scan_at_utc must use UTC")
+        return value
+
+
+class JobPageDTO(WebDTO):
+    query: JobQueryDTO
+    items: tuple[JobSummaryDTO, ...]
+    next_job_public_id: PublicId | None = None
+    watched_folders: tuple[WatchFolderStatusDTO, ...] = ()
+    poll_after_seconds: int | None = Field(default=None, ge=1, le=300)
+    availability: AvailabilityDTO
+
+
+class RetryJobCommandDTO(WebDTO):
+    job_public_id: PublicId
+    expected_revision: int = Field(ge=0)
+
+
+class CancelJobCommandDTO(WebDTO):
+    job_public_id: PublicId
+    expected_revision: int = Field(ge=0)
+
+
+class JobMutationDTO(WebDTO):
+    detail: JobDetailDTO
+    result_code: Literal["retried", "cancelled", "cancel_requested"]
+
+
+class JobLogQueryDTO(WebDTO):
+    job_public_id: PublicId
+    log_public_id: PublicId
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=65_536, ge=4, le=65_536)
+
+
+class JobLogChunkDTO(BaseModel):
+    """Pre-redacted bounded text; markup-like output must remain renderable as escaped log content."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    state: Literal["available", "rotated", "unavailable"]
+    text: str = Field(max_length=65_536)
+    next_offset: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _bounded_utf8(self) -> Self:
+        if len(self.text.encode("utf-8")) > 65_536:
+            raise ValueError("job log chunk exceeds the public byte bound")
+        return self
 
 
 # TheSuperHackers @feature Leex 22/08/2026 Keep web routes isolated from ORM and mutable analytics state. (#0)
@@ -509,3 +633,14 @@ class WebApplicationPort(Protocol):
     def submit_upload(self, command: UploadImportCommandDTO) -> ImportSubmissionDTO: ...
 
     def submit_root_selection(self, command: RootImportCommandDTO) -> ImportSubmissionDTO: ...
+
+    # TheSuperHackers @feature Leex 22/08/2026 Expose durable job operations without persistence or worker capabilities. (#TBD)
+    def list_jobs(self, query: JobQueryDTO) -> JobPageDTO: ...
+
+    def get_job(self, job_public_id: str) -> JobDetailDTO: ...
+
+    def retry_job(self, command: RetryJobCommandDTO) -> JobMutationDTO: ...
+
+    def cancel_job(self, command: CancelJobCommandDTO) -> JobMutationDTO: ...
+
+    def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO: ...

@@ -60,6 +60,9 @@ def _parser() -> argparse.ArgumentParser:
     web = subcommands.add_parser("web", help="serve the local replay library")
     web.add_argument("--host", default="127.0.0.1", help="literal loopback bind (default: 127.0.0.1)")
     web.add_argument("--port", type=int, default=8765, help="loopback TCP port (default: 8765)")
+    worker = subcommands.add_parser("worker", help="run the external replay-analysis worker")
+    worker.add_argument("--poll-seconds", type=int, default=1, help="interruptible idle poll interval (default: 1)")
+    worker.add_argument("--lease-seconds", type=int, default=120, help="durable job lease duration (default: 120)")
     return parser
 
 
@@ -271,13 +274,13 @@ def _web_application() -> Any:
     from .config import AnalyzerSettings
     from .web.app import create_app
     from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
-    from .web.dependencies import UnavailablePortFactory
+    from .web.dependencies import AnalyticsPortFactory
 
     settings = AnalyzerSettings.model_validate({})
     readiness = BootstrapReadinessState()
     return create_app(
         settings,
-        port_factory=UnavailablePortFactory(readiness),
+        port_factory=AnalyticsPortFactory(settings, readiness),
         bootstrapper=create_production_bootstrapper(readiness),
     )
 
@@ -303,6 +306,47 @@ def _run_web(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _worker_application(poll_seconds: int, lease_seconds: int) -> tuple[Any, Any]:
+    """Import worker and database dependencies only for the explicit external command."""
+    from .worker import compose_worker_runtime
+
+    return compose_worker_runtime(poll_seconds, lease_seconds)
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Launch durable analysis outside Uvicorn without taking migration ownership. (#TBD)
+def _run_worker(arguments: argparse.Namespace) -> int:
+    from .web.bootstrap import IncompatibleSchemaError
+    from .worker import OwnedChildSettlementError, validate_worker_options
+
+    poll_seconds, lease_seconds = validate_worker_options(arguments.poll_seconds, arguments.lease_seconds)
+    try:
+        runtime, engine = _worker_application(poll_seconds, lease_seconds)
+    except IncompatibleSchemaError:
+        print(
+            "replay-analyzer: error: [incompatible_worker_schema] worker schema identity is incompatible",
+            file=sys.stderr,
+        )
+        return 2
+    logging.getLogger(__name__).info(
+        "Starting external replay-analysis worker poll_seconds=%d lease_seconds=%d",
+        poll_seconds,
+        lease_seconds,
+    )
+    try:
+        try:
+            runtime.run_forever()
+        except OwnedChildSettlementError:
+            print(
+                "replay-analyzer: error: [owned_child_settlement_failed] owned execution tree did not settle",
+                file=sys.stderr,
+            )
+            return 2
+    finally:
+        runtime.shutdown()
+        engine.dispose()
+    return 0
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Expose deterministic observed replay inspection without LLM or network calls. (#TBD)
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the inspection CLI and return a deterministic process status for replay failures."""
@@ -322,6 +366,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_web(arguments)
         except ValueError as error:
             print(f"replay-analyzer: error: [invalid_web_bind] {error}", file=sys.stderr)
+            return 2
+    if arguments.command == "worker":
+        try:
+            return _run_worker(arguments)
+        except ValueError as error:
+            print(f"replay-analyzer: error: [invalid_worker_options] {error}", file=sys.stderr)
             return 2
     try:
         parsed = parse_replay(arguments.file)

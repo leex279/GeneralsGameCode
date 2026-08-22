@@ -79,7 +79,25 @@ WEB_LIBRARY_SOURCE_RESOURCES = {
     "generals_replay_analyzer/web/viewmodels/replays.py",
 }
 WEB_LIBRARY_RESOURCES = WEB_LIBRARY_TEMPLATE_RESOURCES | WEB_LIBRARY_SOURCE_RESOURCES
-WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = WEB_SHELL_RESOURCES | WEB_LIBRARY_TEMPLATE_RESOURCES
+WEB_JOB_TEMPLATE_RESOURCES = {
+    "generals_replay_analyzer/web/templates/jobs/index.html",
+    "generals_replay_analyzer/web/templates/jobs/_rows.html",
+    "generals_replay_analyzer/web/templates/jobs/detail.html",
+    "generals_replay_analyzer/web/templates/jobs/_log.html",
+}
+WEB_JOB_SOURCE_RESOURCES = {
+    "generals_replay_analyzer/worker.py",
+    "generals_replay_analyzer/watching/__init__.py",
+    "generals_replay_analyzer/watching/service.py",
+    "generals_replay_analyzer/watching/adapters.py",
+    "generals_replay_analyzer/watching/status.py",
+    "generals_replay_analyzer/web/adapters/__init__.py",
+    "generals_replay_analyzer/web/adapters/analytics.py",
+    "generals_replay_analyzer/web/routes/jobs.py",
+    "generals_replay_analyzer/web/viewmodels/jobs.py",
+}
+WEB_JOB_RESOURCES = WEB_JOB_TEMPLATE_RESOURCES | WEB_JOB_SOURCE_RESOURCES
+WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = WEB_SHELL_RESOURCES | WEB_LIBRARY_TEMPLATE_RESOURCES | WEB_JOB_TEMPLATE_RESOURCES
 
 
 def _source_resource(resource_name: str) -> Path:
@@ -273,8 +291,8 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
     _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
     wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        assert WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES <= set(archive.namelist())
-        for resource_name in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES:
+        assert WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES | WEB_JOB_RESOURCES <= set(archive.namelist())
+        for resource_name in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES | WEB_JOB_RESOURCES:
             assert archive.read(resource_name) == _source_resource(resource_name).read_bytes()
 
     environment_directory = tmp_path / "shell-wheel-environment"
@@ -296,10 +314,16 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
             DashboardDTO,
             IdentityLandingDTO,
             ImportSubmissionDTO,
+            JobPageDTO,
             ReadinessDTO,
             ReplayLibraryPageDTO,
         )
         from generals_replay_analyzer.web.resources import package_resource
+        from generals_replay_analyzer.watching import WatchScheduler
+        from generals_replay_analyzer.worker import WorkerRuntime
+
+        assert WorkerRuntime.__module__ == "generals_replay_analyzer.worker"
+        assert WatchScheduler.__module__ == "generals_replay_analyzer.watching.service"
 
         class Port:
             def readiness(self):
@@ -318,6 +342,8 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
                 return ImportSubmissionDTO(submission_public_id="123e4567-e89b-42d3-a456-426614174020", availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)), problem_code="opaque_ingress_handoff_pending")
             def submit_root_selection(self, command):
                 return ImportSubmissionDTO(submission_public_id="123e4567-e89b-42d3-a456-426614174021", availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)), problem_code="dependency_unavailable")
+            def list_jobs(self, query):
+                return JobPageDTO(query=query, items=(), availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
         class Factory:
             def __enter__(self): return Port()
             def __exit__(self, *args): return None
@@ -344,6 +370,10 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
             dialog = client.get("/imports/dialog", headers={"host": "localhost", "accept": "text/html"})
             assert dialog.status_code == 200
             assert "Import replay" in dialog.text
+            jobs = client.get("/jobs", headers={"host": "localhost", "accept": "text/html"})
+            assert jobs.status_code == 200
+            assert "Analysis jobs" in jobs.text
+            assert "wheel_fixture" in jobs.text
             stylesheet = client.get("/static/css/app.css", headers={"host": "localhost"})
             assert stylesheet.status_code == 200
             assert stylesheet.headers["content-security-policy"]
@@ -354,7 +384,7 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
     environment["WHEEL_WEB_RESOURCE_HASHES"] = json.dumps(
         {
             resource: hashlib.sha256(_source_resource(resource).read_bytes()).hexdigest()
-            for resource in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES
+            for resource in WEB_SHELL_RESOURCES | WEB_LIBRARY_RESOURCES | WEB_JOB_RESOURCES
         },
         separators=(",", ":"),
         sort_keys=True,

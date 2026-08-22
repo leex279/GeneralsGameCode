@@ -1,0 +1,4 @@
+<section aria-labelledby="job-log-heading"><h2 id="job-log-heading">Job log</h2>
+{% if chunk.state == 'available' %}<pre>{{ chunk.text }}</pre>{% else %}<p>Log unavailable: {{ chunk.state }}.</p>{% endif %}
+{% if chunk.next_offset is not none %}<p>This view is truncated to a bounded chunk; the log continues.</p><a href="?offset={{ chunk.next_offset }}">Read next log chunk</a>{% endif %}
+</section>

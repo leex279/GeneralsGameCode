@@ -169,6 +169,12 @@ def test_root_import_maps_only_a_public_root_id_and_safe_relative_name_to_the_po
     assert port.root_commands == [RootImportCommandDTO(root_public_id=ROOT_ID, relative_path="league/week-1/match.rep")]
 
 
+def test_root_import_accepts_safe_dotted_replay_stems() -> None:
+    command = RootImportCommandDTO(root_public_id=ROOT_ID, relative_path="league.2026/round.v2.rep")
+
+    assert command.relative_path == "league.2026/round.v2.rep"
+
+
 @pytest.mark.parametrize(
     "form_items",
     [
@@ -365,8 +371,27 @@ def test_exact_rendered_token_is_consumed_once_under_concurrent_native_posts() -
     ],
 )
 def test_root_import_rejects_adversarial_relative_path_matrix(relative_path: str) -> None:
-    with pytest.raises(ValueError, match="normalized POSIX|lower-case .rep"):
+    with pytest.raises(ValueError, match="normalized POSIX|lower-case .rep|replay_relative_name_invalid"):
         RootImportCommandDTO(root_public_id=ROOT_ID, relative_path=relative_path)
+
+
+@pytest.mark.parametrize("relative_path", ["clock$.rep", "cafe\u0301.rep", "match\u200d.rep"])
+def test_root_import_delegates_portable_unicode_and_device_name_contract(relative_path: str) -> None:
+    with pytest.raises(ValueError, match="replay_relative_name_invalid"):
+        RootImportCommandDTO(root_public_id=ROOT_ID, relative_path=relative_path)
+
+
+@pytest.mark.parametrize(
+    "root_public_id",
+    [
+        "123e4567-e89b-12d3-a456-426614174010",
+        "123E4567-E89B-42D3-A456-426614174010",
+        "{123e4567-e89b-42d3-a456-426614174010}",
+    ],
+)
+def test_root_import_requires_neutral_canonical_uuid4_root_id(root_public_id: str) -> None:
+    with pytest.raises(ValueError, match="root_public_id_invalid|lowercase hyphenated UUID"):
+        RootImportCommandDTO(root_public_id=root_public_id, relative_path="safe.rep")
 
 
 def test_malformed_native_csrf_cookie_is_forbidden_without_opening_a_port_scope() -> None:

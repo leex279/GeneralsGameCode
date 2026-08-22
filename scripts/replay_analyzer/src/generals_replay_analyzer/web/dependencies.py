@@ -2,29 +2,43 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Protocol
+from types import TracebackType
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, Self, cast
 
 from fastapi import Depends, Request
 
 from generals_replay_analyzer.web.errors import PublicProblem
 from generals_replay_analyzer.web.ports import (
     AvailabilityDTO,
+    CancelJobCommandDTO,
     DashboardDTO,
     DiagnosticDTO,
     IdentityLandingDTO,
     ImportRootDTO,
     ImportSubmissionDTO,
+    JobDetailDTO,
+    JobLogChunkDTO,
+    JobLogQueryDTO,
+    JobMutationDTO,
+    JobPageDTO,
+    JobQueryDTO,
     ReadinessDTO,
     ReplayLibraryPageDTO,
     ReplayLibraryQueryDTO,
+    RetryJobCommandDTO,
     RootImportCommandDTO,
     UploadImportCommandDTO,
     WebApplicationPort,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from generals_replay_analyzer.config import AnalyzerSettings
 
 
 class WebApplicationPortFactory(Protocol):
@@ -105,6 +119,27 @@ class UnavailableWebApplicationPort:
             problem_code="dependency_unavailable",
         )
 
+    def list_jobs(self, query: JobQueryDTO) -> JobPageDTO:
+        from generals_replay_analyzer.web.ports import AvailabilityDTO
+
+        return JobPageDTO(
+            query=query,
+            items=(),
+            availability=AvailabilityDTO(state="unavailable", reason_codes=("job_adapter_pending",)),
+        )
+
+    def get_job(self, _job_public_id: str) -> JobDetailDTO:
+        raise PublicProblem(status=503, code="job_adapter_pending", detail="Job operations are unavailable")
+
+    def retry_job(self, _command: RetryJobCommandDTO) -> JobMutationDTO:
+        raise PublicProblem(status=503, code="job_adapter_pending", detail="Job operations are unavailable")
+
+    def cancel_job(self, _command: CancelJobCommandDTO) -> JobMutationDTO:
+        raise PublicProblem(status=503, code="job_adapter_pending", detail="Job operations are unavailable")
+
+    def read_job_log(self, _query: JobLogQueryDTO) -> JobLogChunkDTO:
+        raise PublicProblem(status=503, code="job_adapter_pending", detail="Job operations are unavailable")
+
 
 class UnavailablePortFactory:
     """Create one immutable null adapter for each request scope."""
@@ -115,6 +150,130 @@ class UnavailablePortFactory:
     @contextmanager
     def __call__(self) -> Iterator[WebApplicationPort]:
         yield UnavailableWebApplicationPort(self._readiness)
+
+
+class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
+    """Combine existing honest placeholders with accepted durable Jobs operations."""
+
+    def __init__(self, readiness: ReadinessState, jobs: object) -> None:
+        super().__init__(readiness)
+        self._jobs = jobs
+
+    def list_jobs(self, query: JobQueryDTO) -> JobPageDTO:
+        return self._jobs.list_jobs(query)  # type: ignore[attr-defined,no-any-return]
+
+    def get_job(self, job_public_id: str) -> JobDetailDTO:
+        return self._jobs.get_job(job_public_id)  # type: ignore[attr-defined,no-any-return]
+
+    def retry_job(self, command: RetryJobCommandDTO) -> JobMutationDTO:
+        return self._jobs.retry_job(command)  # type: ignore[attr-defined,no-any-return]
+
+    def cancel_job(self, command: CancelJobCommandDTO) -> JobMutationDTO:
+        return self._jobs.cancel_job(command)  # type: ignore[attr-defined,no-any-return]
+
+    def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO:
+        return self._jobs.read_job_log(query)  # type: ignore[attr-defined,no-any-return]
+
+
+# TheSuperHackers @fix Leex 22/08/2026 Own one atomic Analytics session through each complete Jobs response. (#TBD)
+class _RequestSessionLease:
+    """Hide lifecycle-local commit/close behind the owning Web request transaction."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _exception_type: type[BaseException] | None,
+        _exception: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def commit(self) -> None:
+        self._session.flush()
+
+    def rollback(self) -> None:
+        self._session.rollback()
+
+    def close(self) -> None:
+        return None
+
+
+class _RequestSessionFactory:
+    """Lazily lease one SQLAlchemy session to every operation in one request."""
+
+    def __init__(self, base_factory: Callable[[], Session]) -> None:
+        self._base_factory = base_factory
+        self._session: Session | None = None
+        self._lease: _RequestSessionLease | None = None
+
+    def __call__(self) -> _RequestSessionLease:
+        if self._session is None:
+            self._session = self._base_factory()
+            self._lease = _RequestSessionLease(self._session)
+        assert self._lease is not None
+        return self._lease
+
+    def commit(self) -> None:
+        if self._session is not None:
+            self._session.commit()
+
+    def rollback(self) -> None:
+        if self._session is not None:
+            self._session.rollback()
+
+    def close(self) -> None:
+        if self._session is not None:
+            self._session.close()
+
+
+class AnalyticsPortFactory:
+    """Open one short Analytics Jobs scope per request after web-owned bootstrap."""
+
+    def __init__(self, settings: AnalyzerSettings, readiness: ReadinessState) -> None:
+        self._settings = settings
+        self._readiness = readiness
+
+    @contextmanager
+    def __call__(self) -> Iterator[WebApplicationPort]:
+        from generals_replay_analyzer.db import create_database_engine, create_session_factory
+        from generals_replay_analyzer.importing import JobLifecycleService
+        from generals_replay_analyzer.storage import ContentAddressedStore
+        from generals_replay_analyzer.watching import FileWatchStatusStore
+        from generals_replay_analyzer.web.adapters.analytics import AnalyticsJobsAdapter
+
+        engine = create_database_engine(self._settings.database_path)
+        request_sessions = _RequestSessionFactory(create_session_factory(engine))
+        try:
+            lifecycle = JobLifecycleService(
+                cast("sessionmaker[Session]", request_sessions),
+                registered_stages=(),
+                clock=lambda: datetime.now(UTC),
+                log_store=ContentAddressedStore(self._settings.cache_directory / "artifacts"),
+                log_data_root=self._settings.data_root,
+                redaction_values=(str(self._settings.data_root), str(self._settings.database_path)),
+            )
+            yield AnalyticsWebApplicationPort(
+                self._readiness,
+                AnalyticsJobsAdapter(
+                    lifecycle,
+                    watch_status_reader=FileWatchStatusStore(self._settings.data_root).read,
+                ),
+            )
+            request_sessions.commit()
+        except BaseException:
+            request_sessions.rollback()
+            raise
+        finally:
+            request_sessions.close()
+            engine.dispose()
 
 
 # TheSuperHackers @feature Leex 22/08/2026 Close every application scope at the request boundary. (#TBD)

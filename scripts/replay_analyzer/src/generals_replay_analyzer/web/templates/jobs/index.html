@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Analysis jobs</h1>
+  <form action="/jobs" method="get" aria-label="Analysis job filters">
+    <fieldset><legend>Job states</legend>{% for state in ('pending', 'running', 'succeeded', 'failed', 'cancelled') %}<label><input type="checkbox" name="state" value="{{ state }}"{% if state in jobs.page.query.states %} checked{% endif %}> {{ state }}</label>{% endfor %}</fieldset>
+    <label for="job-stage">Stage <input id="job-stage" name="stage" value="{{ jobs.page.query.stage or '' }}"></label>
+    <label for="job-replay">Replay public ID <input id="job-replay" name="replay_public_id" value="{{ jobs.page.query.replay_public_id or '' }}"></label>
+    <label for="job-limit">Results <input id="job-limit" name="limit" type="number" min="1" max="200" value="{{ jobs.page.query.limit }}"></label>
+    <button type="submit">Apply job filters</button>
+  </form>
+  {% if jobs.page.watched_folders %}<section aria-labelledby="watch-status"><h2 id="watch-status">Watched folders</h2>{% for root in jobs.page.watched_folders %}<p>{{ root.label }}: {{ root.state }}{% if root.reason_code %}. Reason: {{ root.reason_code }}{% endif %}</p>{% endfor %}</section>{% endif %}
+  {% include "jobs/_rows.html" %}
+{% endblock %}

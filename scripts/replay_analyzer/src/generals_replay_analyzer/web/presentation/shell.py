@@ -41,7 +41,7 @@ class PresentationDTO(BaseModel):
 
 def _presentation_strings(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return () if value in {"/", "/players", "/replays"} else (value,)
+        return () if value in {"/", "/players", "/replays", "/jobs"} else (value,)
     if isinstance(value, BaseModel):
         return tuple(text for field in type(value).model_fields for text in _presentation_strings(getattr(value, field)))
     if isinstance(value, tuple):
@@ -63,7 +63,7 @@ class ShellContextDTO(PresentationDTO):
     """Immutable values shared by every first-party shell page."""
 
     page_title: str
-    current_path: Literal["/", "/players", "/replays"]
+    current_path: Literal["/", "/players", "/replays", "/jobs"]
     navigation: tuple[NavigationItemDTO, ...]
     pipeline: PipelineStateDTO | None
     availability: AvailabilityDTO
@@ -71,12 +71,12 @@ class ShellContextDTO(PresentationDTO):
     correlation_id: str | None = None
 
 
-_UPCOMING_ITEMS = ("Compare", "Jobs", "Settings")
+_UPCOMING_ITEMS = ("Compare", "Settings")
 _HTML_MEDIA_RANGE_PRECEDENCE = {"*/*": 0, "text/*": 1, "text/html": 2}
 _QVALUE = re.compile(r"(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\Z")
 
 
-def _navigation(current_path: Literal["/", "/players", "/replays"]) -> tuple[NavigationItemDTO, ...]:
+def _navigation(current_path: Literal["/", "/players", "/replays", "/jobs"]) -> tuple[NavigationItemDTO, ...]:
     available = (
         NavigationItemDTO(
             label="Dashboard", href="/", active=current_path == "/", availability="available"
@@ -86,6 +86,9 @@ def _navigation(current_path: Literal["/", "/players", "/replays"]) -> tuple[Nav
         ),
         NavigationItemDTO(
             label="Library", href="/replays", active=current_path == "/replays", availability="available"
+        ),
+        NavigationItemDTO(
+            label="Jobs", href="/jobs", active=current_path == "/jobs", availability="available"
         ),
     )
     upcoming = tuple(
@@ -206,6 +209,17 @@ def replay_library_shell(availability: AvailabilityDTO) -> ShellContextDTO:
         navigation=_navigation("/replays"),
         pipeline=None,
         availability=availability,
+        terminal_quality=None,
+    )
+
+
+def jobs_shell(availability: AvailabilityDTO | None = None) -> ShellContextDTO:
+    return ShellContextDTO(
+        page_title="Analysis jobs | Generals Replay Analyzer",
+        current_path="/jobs",
+        navigation=_navigation("/jobs"),
+        pipeline=None,
+        availability=availability or AvailabilityDTO(state="available"),
         terminal_quality=None,
     )
 

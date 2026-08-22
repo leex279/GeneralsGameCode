@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Analysis job</h1>
+  {% if mutation %}<p role="status">Job action: {{ mutation.result_code }}.</p>{% endif %}
+  <section aria-labelledby="job-state-heading"><h2 id="job-state-heading">Job state</h2>
+    <p>Stage: {{ job.summary.stage }}</p><p>State: {{ job.summary.state }}{% if job.summary.cancel_requested %}. Cancel requested; the owned execution is settling before cancellation becomes final.{% endif %}</p>
+    <p>Progress: {% if job.summary.progress %}{{ job.summary.progress.completed }} / {{ job.summary.progress.total }} {{ job.summary.progress.unit }}{% else %}progress_unavailable{% endif %}</p>
+    <p>Attempts: {{ job.summary.attempt_count }} / {{ job.summary.max_attempts }}</p>
+    <p>Created: {{ job.summary.created_at_utc }}. Started: {{ job.summary.started_at_utc or 'unavailable' }}. Completed: {{ job.summary.completed_at_utc or 'unavailable' }}.</p>
+    {% if job.summary.error %}<p>Error {{ job.summary.error.code }}: {{ job.summary.error.message }}</p>{% endif %}
+  </section>
+  <section aria-labelledby="dependencies-heading"><h2 id="dependencies-heading">Dependency jobs</h2>{% for dependency in job.dependency_job_public_ids %}<a href="/jobs/{{ dependency }}">{{ dependency }}</a>{% else %}<p>No dependency jobs.</p>{% endfor %}</section>
+  <section aria-labelledby="job-actions-heading"><h2 id="job-actions-heading">Job actions</h2>
+    <form method="post" action="/jobs/{{ job.summary.job_public_id }}/retry" aria-label="Retry this analysis job"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="expected_revision" value="{{ job.summary.revision }}"><p>Retry creates a new eligible attempt; successful or cancelled work is not rewritten.</p><button type="submit"{% if not job.summary.retryable or job.summary.state != 'failed' %} disabled aria-disabled="true"{% endif %}>Retry job</button></form>
+    <form method="post" action="/jobs/{{ job.summary.job_public_id }}/cancel" aria-label="Cancel this analysis job"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="expected_revision" value="{{ job.summary.revision }}"><p>Cancel requests safe settlement of owned work; running work remains running until its child tree settles.</p><button type="submit"{% if job.summary.state not in ('pending', 'running') or job.summary.cancel_requested %} disabled aria-disabled="true"{% endif %}>Cancel job</button></form>
+  </section>
+  <section aria-labelledby="job-logs-heading"><h2 id="job-logs-heading">Job logs</h2>{% for log in job.logs %}<p><a href="/jobs/{{ job.summary.job_public_id }}/logs/{{ log.log_public_id }}">{{ log.label }} log</a> ({{ log.byte_count }} bytes)</p>{% else %}<p>No job logs are available.</p>{% endfor %}</section>
+{% endblock %}

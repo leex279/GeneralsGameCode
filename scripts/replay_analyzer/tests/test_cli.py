@@ -341,3 +341,90 @@ def test_import_service_uses_the_single_production_bootstrap_coordinator(
         assert prepared == [(tmp_path / "product").resolve()]
     finally:
         engine.dispose()
+
+
+def test_worker_command_uses_external_runtime_defaults_without_uvicorn_or_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+
+    class FakeRuntime:
+        def run_forever(self) -> None:
+            calls.append((-1, -1))
+
+        def shutdown(self) -> None:
+            calls.append((-3, -3))
+
+    class FakeEngine:
+        def dispose(self) -> None:
+            calls.append((-2, -2))
+
+    def compose(poll_seconds: int, lease_seconds: int) -> tuple[FakeRuntime, FakeEngine]:
+        calls.append((poll_seconds, lease_seconds))
+        return FakeRuntime(), FakeEngine()
+
+    monkeypatch.setattr(cli_module, "_worker_application", compose)
+    monkeypatch.setattr(cli_module, "_serve_web", lambda *_args: pytest.fail("worker started Uvicorn"))
+
+    assert main(["worker"]) == 0
+    assert calls == [(1, 120), (-1, -1), (-3, -3), (-2, -2)]
+
+
+def test_worker_command_validates_cross_field_bounds_before_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_worker_application",
+        lambda *_args: pytest.fail("invalid worker options reached composition"),
+        raising=False,
+    )
+
+    assert main(["worker", "--poll-seconds", "6", "--lease-seconds", "15"]) == 2
+    captured = capsys.readouterr()
+    assert "three poll intervals" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_worker_command_refuses_incompatible_schema_without_migrating_or_tracing_back(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    from generals_replay_analyzer.web.bootstrap import IncompatibleSchemaError
+
+    monkeypatch.setattr(
+        cli_module,
+        "_worker_application",
+        lambda *_args: (_ for _ in ()).throw(IncompatibleSchemaError("worker schema identity is incompatible")),
+    )
+
+    assert main(["worker"]) == 2
+    captured = capsys.readouterr()
+    assert "incompatible_worker_schema" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_worker_command_reports_unsettled_owned_child_without_private_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    from generals_replay_analyzer.worker import OwnedChildSettlementError
+
+    class Runtime:
+        def run_forever(self) -> None:
+            raise OwnedChildSettlementError("owned_child_settlement_failed")
+
+        def shutdown(self) -> None:
+            pass
+
+    class Engine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "_worker_application", lambda *_args: (Runtime(), Engine()))
+
+    assert main(["worker"]) == 2
+    captured = capsys.readouterr()
+    assert "owned_child_settlement_failed" in captured.err
+    assert "Traceback" not in captured.err

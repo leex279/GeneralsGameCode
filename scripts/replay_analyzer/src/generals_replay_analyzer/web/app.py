@@ -24,7 +24,7 @@ from generals_replay_analyzer.web.bootstrap import BootstrapSettings
 from generals_replay_analyzer.web.dependencies import WebApplicationPortFactory
 from generals_replay_analyzer.web.errors import CONTENT_SECURITY_POLICY, install_problem_handlers, problem_response
 from generals_replay_analyzer.web.resources import package_resource
-from generals_replay_analyzer.web.routes import dashboard, health, identity, imports, replays
+from generals_replay_analyzer.web.routes import dashboard, health, identity, imports, jobs, replays
 
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1"})
 _LOCAL_HOST = re.compile(r"^(?:localhost|127\.0\.0\.1)(?::([0-9]{1,5}))?$|^\[::1\](?::([0-9]{1,5}))?$")
@@ -226,6 +226,7 @@ def create_app(
     # TheSuperHackers @feature Leex 22/08/2026 Register replay-library routes through the existing request-scoped port seam. (#0)
     app.include_router(replays.router)
     app.include_router(imports.router)
+    app.include_router(jobs.router)
     # TheSuperHackers @feature Leex 22/08/2026 Serve only package-owned local shell assets. (#TBD)
     app.mount("/static", StaticFiles(directory=str(package_resource("web/static"))), name="static")
     app.add_middleware(
