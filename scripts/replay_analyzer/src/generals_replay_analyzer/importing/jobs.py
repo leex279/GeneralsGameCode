@@ -235,15 +235,17 @@ class JobCoordinator:
             for candidate in session.scalars(self._candidate_query(stages, now)):
                 dependencies = list(
                     session.execute(
-                        select(Job.stage, Job.status)
+                        select(Job.stage, Job.status, Job.retryable)
                         .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
                         .where(JobDependency.job_id == candidate.id)
                     )
                 )
                 allowed = tolerated_failures.get(candidate.stage, frozenset())
+                # TheSuperHackers @bugfix Leex 22/08/2026 Admit only settled nonretryable failures as terminal evidence. (#TBD)
                 if any(
-                    status != "succeeded" and not (status == "failed" and stage in allowed)
-                    for stage, status in dependencies
+                    status != "succeeded"
+                    and not (status == "failed" and not retryable and stage in allowed)
+                    for stage, status, retryable in dependencies
                 ):
                     continue
                 result = session.execute(
@@ -325,7 +327,12 @@ class JobCoordinator:
                     session.execute(
                         select(Job.public_id, Job.stage)
                         .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
-                        .where(JobDependency.job_id == row.id, Job.status == "failed")
+                        # TheSuperHackers @bugfix Leex 22/08/2026 Project only settled dependency failures. (#TBD)
+                        .where(
+                            JobDependency.job_id == row.id,
+                            Job.status == "failed",
+                            Job.retryable.is_(False),
+                        )
                         .order_by(Job.id)
                     )
                 )
@@ -382,7 +389,8 @@ class JobCoordinator:
                 row.available_at = self._retry_at(now, row.attempt_count)
             else:
                 row.status = "failed"
-                row.retryable = False if not failure.retryable else row.retryable
+                # TheSuperHackers @bugfix Leex 22/08/2026 Settle exhausted retryable work into a stable terminal state. (#TBD)
+                row.retryable = False
                 row.completed_at = now
             session.flush()
             return _snapshot(session, row)

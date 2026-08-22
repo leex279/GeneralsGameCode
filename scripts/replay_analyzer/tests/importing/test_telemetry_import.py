@@ -46,6 +46,7 @@ from generals_replay_analyzer.importing import (
     TelemetryArtifact,
     TerminalDependencyPolicy,
 )
+from generals_replay_analyzer.importing import telemetry_import as telemetry_import_module
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.map_import import normalize_map_asset
 from generals_replay_analyzer.importing.parser_import import ParserImportResult, ParserObservationImporter
@@ -58,7 +59,7 @@ from generals_replay_analyzer.importing.telemetry_import import (
     TelemetryObservationImporter,
 )
 from generals_replay_analyzer.parser import parse_replay
-from generals_replay_analyzer.storage import ContentAddressedStore
+from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 from generals_replay_analyzer.telemetry import load_validated_telemetry_bundle
 from generals_replay_analyzer.telemetry.map_asset import BridgeFeature, Position3, WaypointFeature
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
@@ -564,8 +565,25 @@ def test_invalid_managed_trace_fails_atomically_while_retaining_attempt_and_asse
     attempt = _attempt(session_factory, settings, trace, run_id)
     trace.write_bytes(trace.read_bytes() + b"corrupt")
 
-    result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
-    assert result.status == "failed" and result.event_count == 0
+    importer = _importer(session_factory, settings)
+    result = importer.import_replay(
+        replay_sha256,
+        attempt,
+        idempotency_key="import_observations:1:invalid-trace",
+    )
+    replayed = importer.import_replay(
+        replay_sha256,
+        attempt,
+        idempotency_key="import_observations:1:invalid-trace",
+    )
+    assert result.status == replayed.status == "failed" and result.event_count == replayed.event_count == 0
+    assert replayed.run_id == result.run_id and replayed.cache_hit is True
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        importer.import_replay(
+            replay_sha256,
+            attempt,
+            idempotency_key="import_observations:1:changed-key",
+        )
     with session_factory() as session:
         run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
         assert run is not None and run.status == "failed" and run.trace_asset_id is not None
@@ -603,6 +621,86 @@ def test_runner_failure_without_trace_retains_metadata_without_observations(
         assert session.scalar(select(func.count(TelemetryEvent.id)).where(TelemetryEvent.telemetry_run_id == run.id)) == 0
         issue = session.scalar(select(ReplayQualityIssue).where(ReplayQualityIssue.telemetry_run_id == run.id))
         assert issue is not None and issue.issue_code == "exporter_failure"
+
+
+def test_typed_failed_attempt_rejects_unregistered_retained_asset_before_run_shell(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    """Catch a tampered failure envelope persisting or linking an unregistered managed asset ID."""
+    replay_sha256 = _replay(session_factory, "8" * 64)
+    attempt = TelemetryAttempt(
+        run_id="683e4567-e89b-12d3-a456-426614174000",
+        runner_status="success",
+        replay_quality="complete",
+        strategy_analysis_scope="full",
+        process_exit_code=0,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="c" * 64,
+        diagnostics=(),
+        artifacts=(
+            ManagedTelemetryArtifact(
+                "693e4567-e89b-12d3-a456-426614174000",
+                "telemetry_stdout",
+                "stdout.log",
+                "d" * 64,
+                4,
+            ),
+        ),
+        upstream_failure_code="artifact_copy_failed",
+        upstream_quality_issue_code="invalid_trace",
+        upstream_failure_message="telemetry artifact copy failed",
+    )
+
+    with pytest.raises(ValueError, match="unregistered"):
+        _importer(session_factory, settings).import_replay(
+            replay_sha256,
+            attempt,
+            idempotency_key="import_observations:1:tampered-retained-asset",
+        )
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(TelemetryRun)) == 0
+
+
+@pytest.mark.parametrize("tamper", ["registration", "missing", "directory", "content"])
+def test_typed_failed_attempt_revalidates_every_retained_managed_asset(
+    tamper: str,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+) -> None:
+    """Catch a retained failure link surviving registration, path, or byte-identity tampering."""
+    replay_sha256 = _replay(session_factory, f"{9 + len(tamper):x}"[-1] * 64)
+    run_id = str(UUID(int=70_000 + len(tamper)))
+    trace = _write_v1_bundle(settings.data_root / "runs" / run_id, run_id)
+    attempt = replace(
+        _attempt(session_factory, settings, trace, run_id),
+        upstream_failure_code="artifact_copy_failed",
+        upstream_quality_issue_code="invalid_trace",
+        upstream_failure_message="telemetry artifact copy failed",
+    )
+    descriptor = next(item for item in attempt.artifacts if item.kind == "telemetry_trace")
+    with session_factory.begin() as session:
+        asset = session.scalar(select(ManagedAsset).where(ManagedAsset.public_id == descriptor.asset_public_id))
+        assert asset is not None
+        managed_path = settings.data_root / Path(*asset.relative_path.split("/"))
+        if tamper == "registration":
+            asset.kind = "telemetry_catalog"
+        elif tamper == "missing":
+            managed_path.unlink()
+        elif tamper == "directory":
+            directory = settings.data_root / "retained-directory"
+            directory.mkdir()
+            asset.relative_path = directory.relative_to(settings.data_root).as_posix()
+        else:
+            managed_path.write_bytes(managed_path.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError):
+        _importer(session_factory, settings).import_replay(
+            replay_sha256,
+            attempt,
+            idempotency_key=f"import_observations:1:retained-{tamper}",
+        )
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(TelemetryRun)) == 0
 
 
 def test_registered_descriptor_mismatch_retains_failed_shell_and_registered_asset(
@@ -803,19 +901,33 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
 
     class ParserStub:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str]] = []
+            self.calls: list[tuple[str, str, str | None]] = []
 
-        def import_replay(self, replay_sha256: str, *, parser_version: str) -> ParserImportResult:
-            self.calls.append((replay_sha256, parser_version))
+        def import_replay(
+            self,
+            replay_sha256: str,
+            *,
+            parser_version: str,
+            idempotency_key: str | None = None,
+        ) -> ParserImportResult:
+            self.calls.append((replay_sha256, parser_version, idempotency_key))
             return ParserImportResult("parser-run", "succeeded", "complete", 9, False)
 
     class TelemetryStub:
         def __init__(self) -> None:
             self.attempts: list[TelemetryAttempt] = []
+            self.idempotency_keys: list[str | None] = []
 
-        def import_replay(self, replay_sha256: str, attempt: TelemetryAttempt) -> TelemetryImportResult:
+        def import_replay(
+            self,
+            replay_sha256: str,
+            attempt: TelemetryAttempt,
+            *,
+            idempotency_key: str | None = None,
+        ) -> TelemetryImportResult:
             assert replay_sha256 == "a" * 64
             self.attempts.append(attempt)
+            self.idempotency_keys.append(idempotency_key)
             return TelemetryImportResult(attempt.run_id, "succeeded", 7, False)
 
     parser = ParserStub()
@@ -896,6 +1008,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
             ),
         )
     ]
+    assert telemetry.idempotency_keys == ["import_observations:1:key"]
 
     missing_parse = StageExecutionContext(
         "import-job", "key", "replay-public-id", "a" * 64, "import_observations", "1", {}, ()
@@ -934,6 +1047,112 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
     )
     with pytest.raises(StageFailure, match="telemetry artifact descriptor is incomplete"):
         handler(incomplete_telemetry)
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "extra_envelope_field",
+        "wrong_envelope_type",
+        "mismatched_failure_code",
+        "missing_attempt_field",
+        "empty_run_id",
+        "invalid_run_id",
+        "wrong_exit_type",
+        "wrong_engine_hash_type",
+        "extra_descriptor_field",
+        "unsorted_descriptors",
+        "mutable_diagnostics",
+        "mutable_artifacts",
+        "incomplete_diagnostic",
+    ],
+)
+def test_typed_telemetry_failure_envelope_rejects_contract_malformations(malformation: str) -> None:
+    """Catch Task 4 accepting an untyped, incomplete, or mutable Task 3 failure attempt."""
+    attempt: dict[str, object] = {
+        "artifacts": (),
+        "diagnostics": ({"code": "copy_failed", "message": "managed copy failed"},),
+        "engine_build": ENGINE_IDENTITY,
+        "engine_executable_sha256": "a" * 64,
+        "exit_code": 0,
+        "replay_quality": "complete",
+        "run_id": "e23e4567-e89b-12d3-a456-426614174000",
+        "runner_status": "success",
+        "strategy_analysis_scope": "full",
+    }
+    envelope: dict[str, object] = {
+        "attempt": attempt,
+        "failure_code": "artifact_copy_failed",
+        "failure_message": "telemetry artifact copy failed",
+        "quality_issue_code": "invalid_trace",
+        "type": "telemetry_artifact_failure",
+        "version": 1,
+    }
+    if malformation == "extra_envelope_field":
+        envelope["unexpected"] = True
+    elif malformation == "wrong_envelope_type":
+        envelope["type"] = "untyped"
+    elif malformation == "mismatched_failure_code":
+        envelope["failure_code"] = "invalid_telemetry_artifact"
+    elif malformation == "missing_attempt_field":
+        attempt.pop("run_id")
+    elif malformation == "empty_run_id":
+        attempt["run_id"] = ""
+    elif malformation == "invalid_run_id":
+        attempt["run_id"] = "not-a-uuid"
+    elif malformation == "wrong_exit_type":
+        attempt["exit_code"] = "0"
+    elif malformation == "wrong_engine_hash_type":
+        attempt["engine_executable_sha256"] = 7
+    elif malformation == "extra_descriptor_field":
+        attempt["artifacts"] = (
+            {
+                "asset_public_id": "f23e4567-e89b-12d3-a456-426614174000",
+                "kind": "telemetry_stdout",
+                "logical_path": "stdout.log",
+                "sha256": "b" * 64,
+                "size_bytes": 4,
+                "source_path": "C:/private/stdout.log",
+            },
+        )
+    elif malformation == "unsorted_descriptors":
+        attempt["artifacts"] = tuple(
+            {
+                "asset_public_id": public_id,
+                "kind": "telemetry_stdout",
+                "logical_path": logical_path,
+                "sha256": sha256,
+                "size_bytes": 4,
+            }
+            for public_id, logical_path, sha256 in (
+                ("f23e4567-e89b-12d3-a456-426614174000", "z.log", "b" * 64),
+                ("f33e4567-e89b-12d3-a456-426614174000", "a.log", "c" * 64),
+            )
+        )
+    elif malformation == "mutable_diagnostics":
+        attempt["diagnostics"] = [{"code": "copy_failed", "message": "managed copy failed"}]
+    elif malformation == "mutable_artifacts":
+        attempt["artifacts"] = []
+    else:
+        attempt["diagnostics"] = ({"code": "copy_failed"},)
+    dependency = StageDependencyOutput(
+        "telemetry-job",
+        "telemetry",
+        "1",
+        None,
+        status="failed",
+        error_code="artifact_copy_failed",
+        error_message="telemetry artifact copy failed",
+        error_details={"failure_envelope": envelope},
+    )
+    assert dependency.error_details is not None
+    with pytest.raises(StageFailure) as failure:
+        telemetry_import_module._attempt_from_failed_dependency(
+            dependency,
+            "artifact_copy_failed",
+            dependency.error_details,
+        )
+    assert failure.value.code == "telemetry_dependency_invalid"
 
 
 def test_real_dag_failed_telemetry_persists_attempt_assets_issues_and_zero_children(
@@ -1055,6 +1274,286 @@ def test_real_dag_failed_telemetry_persists_attempt_assets_issues_and_zero_child
             assert session.scalar(select(func.count()).select_from(model)) == 0
 
 
+def test_real_dag_artifact_validation_failure_retains_typed_attempt_and_zero_children(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch post-acquisition path validation discarding the canonical telemetry attempt."""
+    run_id = "b23e4567-e89b-12d3-a456-426614174000"
+    private_root = tmp_path / "private-invalid-bundle"
+    private_root.mkdir()
+    trace = private_root / "trace.ndjson"
+    trace.write_text('{"type":"fixture"}\n', encoding="utf-8")
+    outside = tmp_path / "private-outside.log"
+    outside.write_text("outside bundle", encoding="utf-8")
+    artifact = TelemetryArtifact(
+        run_id=run_id,
+        runner_status="success",
+        replay_quality="complete",
+        strategy_analysis_scope="full",
+        trace_path=trace,
+        catalog_path=None,
+        map_asset_paths=(),
+        outcome_path=None,
+        stdout_path=outside,
+        stderr_path=None,
+        exit_code=0,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="d" * 64,
+        diagnostics=(
+            AcquisitionDiagnostic(
+                "artifact_outside_bundle",
+                f"trace={trace} rejected={outside}",
+            ),
+        ),
+    )
+
+    class InvalidBundleAcquirer:
+        def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
+            assert replay.is_file() and len(replay_sha256) == 64
+            return artifact
+
+    handler = ObservationImportHandler(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=parse_replay,
+            parser_version="test-parser-1",
+            schema_version=1,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(41_000),
+        ),
+        TelemetryObservationImporter(
+            session_factory,
+            settings.data_root,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(42_000),
+        ),
+    )
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        parser=parse_replay,
+        telemetry_acquirer=InvalidBundleAcquirer(),
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="invalid-bundle-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                handler,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    completed = service.run_available("artifact-validation-worker", limit=10)
+    assert tuple(job.stage for job in completed)[-2:] == ("telemetry", "import_observations")
+    assert (completed[-2].status, completed[-1].status) == ("failed", "succeeded")
+
+    with session_factory() as session:
+        telemetry_job = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        telemetry_run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert telemetry_job is not None and telemetry_job.error_code == "invalid_telemetry_artifact"
+        envelope = telemetry_job.error_details_json["failure_envelope"]
+        assert envelope["type"] == "telemetry_artifact_failure"
+        assert envelope["version"] == 1
+        assert envelope["failure_code"] == "invalid_telemetry_artifact"
+        assert envelope["quality_issue_code"] == "invalid_trace"
+        attempt = envelope["attempt"]
+        assert attempt == {
+            "artifacts": [],
+            "diagnostics": [
+                {
+                    "code": "artifact_outside_bundle",
+                    "message": "trace=[artifact] rejected=[artifact]",
+                }
+            ],
+            "engine_build": ENGINE_IDENTITY,
+            "engine_executable_sha256": "d" * 64,
+            "exit_code": 0,
+            "replay_quality": "complete",
+            "run_id": run_id,
+            "runner_status": "success",
+            "strategy_analysis_scope": "full",
+        }
+        assert str(private_root) not in json.dumps(telemetry_job.error_details_json, sort_keys=True)
+        assert str(outside) not in json.dumps(telemetry_job.error_details_json, sort_keys=True)
+        assert telemetry_run is not None and telemetry_run.status == "failed"
+        assert telemetry_run.runner_status == "success"
+        assert telemetry_run.settings_json["artifact_manifest"] == []
+        assert telemetry_run.trace_asset_id is None
+        assert set(
+            session.scalars(
+                select(ReplayQualityIssue.issue_code).where(
+                    ReplayQualityIssue.telemetry_run_id == telemetry_run.id
+                )
+            )
+        ) == {"invalid_trace"}
+        assert session.scalar(
+            select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == telemetry_run.id)
+        ) == 0
+        for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+
+
+def test_real_dag_mid_copy_failure_links_only_completed_asset_and_zero_children(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch a later artifact copy failure discarding an earlier verified managed asset."""
+    run_id = "c23e4567-e89b-12d3-a456-426614174000"
+    private_root = tmp_path / "private-mid-copy-bundle"
+    private_root.mkdir()
+    trace = private_root / "trace.ndjson"
+    stdout = private_root / "stdout.log"
+    trace.write_text('{"type":"fixture"}\n', encoding="utf-8")
+    stdout.write_text("engine stdout", encoding="utf-8")
+    artifact = TelemetryArtifact(
+        run_id=run_id,
+        runner_status="success",
+        replay_quality="complete",
+        strategy_analysis_scope="full",
+        trace_path=trace,
+        catalog_path=None,
+        map_asset_paths=(),
+        outcome_path=None,
+        stdout_path=stdout,
+        stderr_path=None,
+        exit_code=0,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="e" * 64,
+        diagnostics=(AcquisitionDiagnostic("copy_fixture", f"bundle={private_root}"),),
+    )
+
+    class SuccessfulAcquirer:
+        def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
+            assert replay.is_file() and len(replay_sha256) == 64
+            return artifact
+
+    class FailEverySecondCopy:
+        def __init__(self, delegate: ContentAddressedStore) -> None:
+            self._delegate = delegate
+            self.calls = 0
+
+        def store_file(self, source: Path, *, expected_sha256: str | None = None) -> StoredContent:
+            self.calls += 1
+            if self.calls % 2 == 0:
+                raise ContentStorageError(f"copy failed for private source {source}")
+            return self._delegate.store_file(source, expected_sha256=expected_sha256)
+
+    failing_store = FailEverySecondCopy(artifact_store)
+    handler = ObservationImportHandler(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=parse_replay,
+            parser_version="test-parser-1",
+            schema_version=1,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(43_000),
+        ),
+        TelemetryObservationImporter(
+            session_factory,
+            settings.data_root,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(44_000),
+        ),
+    )
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        failing_store,  # type: ignore[arg-type]
+        parser=parse_replay,
+        telemetry_acquirer=SuccessfulAcquirer(),
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="mid-copy-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                handler,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    first = service.run_available("mid-copy-worker", limit=10)
+    assert first[-1].stage == "telemetry" and first[-1].status == "pending"
+    clock.advance(seconds=5)
+    second = service.run_available("mid-copy-worker", limit=10)
+    assert len(second) == 1 and second[0].status == "pending"
+    clock.advance(seconds=10)
+    exhausted = service.run_available("mid-copy-worker", limit=10)
+    assert tuple(job.stage for job in exhausted) == ("telemetry", "import_observations")
+    assert (exhausted[0].status, exhausted[0].retryable, exhausted[1].status) == (
+        "failed",
+        False,
+        "succeeded",
+    )
+
+    trace_sha256 = hashlib.sha256(trace.read_bytes()).hexdigest()
+    with session_factory() as session:
+        telemetry_job = session.scalar(select(Job).where(Job.stage == "telemetry"))
+        telemetry_run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert telemetry_job is not None and telemetry_job.error_code == "artifact_copy_failed"
+        envelope = telemetry_job.error_details_json["failure_envelope"]
+        assert envelope["failure_code"] == "artifact_copy_failed"
+        assert envelope["quality_issue_code"] == "invalid_trace"
+        retained = envelope["attempt"]["artifacts"]
+        assert retained == [
+            {
+                "asset_public_id": retained[0]["asset_public_id"],
+                "kind": "telemetry_trace",
+                "logical_path": "trace.ndjson",
+                "sha256": trace_sha256,
+                "size_bytes": trace.stat().st_size,
+            }
+        ]
+        persisted = json.dumps(telemetry_job.error_details_json, sort_keys=True)
+        assert str(private_root) not in persisted
+        retained_asset = session.scalar(
+            select(ManagedAsset).where(ManagedAsset.public_id == retained[0]["asset_public_id"])
+        )
+        assert retained_asset is not None and retained_asset.sha256 == trace_sha256
+        assert telemetry_run is not None and telemetry_run.status == "failed"
+        assert telemetry_run.trace_asset_id == retained_asset.id
+        assert telemetry_run.settings_json["artifact_manifest"] == retained
+        assert set(
+            session.scalars(
+                select(ReplayQualityIssue.issue_code).where(
+                    ReplayQualityIssue.telemetry_run_id == telemetry_run.id
+                )
+            )
+        ) == {"invalid_trace"}
+        assert session.scalar(
+            select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == telemetry_run.id)
+        ) == 0
+        for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+
+
 def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
@@ -1129,6 +1628,308 @@ def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
                 )
             )
         ) == {"parser_failure"}
+
+
+def test_parser_failure_handler_replay_after_lease_expiry_reuses_exact_attempt(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a crash after failed-parser persistence creating duplicate attempt history on lease replay."""
+    contexts: list[StageExecutionContext] = []
+
+    def failing_parser(_path: Path) -> object:
+        raise ValueError("parser rejected crash-window fixture")
+
+    handler = ObservationImportHandler(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=parse_replay,
+            parser_version="test-parser-1",
+            schema_version=1,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(51_000),
+        ),
+        TelemetryObservationImporter(
+            session_factory,
+            settings.data_root,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(52_000),
+        ),
+    )
+
+    def capture(context: StageExecutionContext) -> dict[str, object]:
+        contexts.append(context)
+        return dict(handler(context))
+
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        parser=failing_parser,  # type: ignore[arg-type]
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="unused-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                capture,
+                terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
+            ),
+        ),
+    )
+    original_succeed = service._jobs.succeed
+    crashed = False
+
+    def crash_before_settlement(
+        job_public_id: str,
+        worker_id: str,
+        output_json: dict[str, object],
+    ) -> object:
+        nonlocal crashed
+        snapshot = service._jobs.snapshot(job_public_id)
+        if snapshot.stage == "import_observations" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated crash before job settlement")
+        return original_succeed(job_public_id, worker_id, output_json)
+
+    monkeypatch.setattr(service._jobs, "succeed", crash_before_settlement)
+    service.submit(ImportRequest(replay_file))
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_available("crashing-observation-worker", limit=10)
+
+    with session_factory() as session:
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        parser_runs = list(session.scalars(select(ParserRun)))
+        assert import_job is not None and import_job.status == "running"
+        assert len(parser_runs) == 1 and parser_runs[0].status == "failed"
+        assert parser_runs[0].error_json["import_observations_idempotency_key"] == import_job.idempotency_key
+        first_run_id = parser_runs[0].run_id
+        first_key = import_job.idempotency_key
+
+    monkeypatch.setattr(service._jobs, "succeed", original_succeed)
+    clock.advance(seconds=301)
+    assert service.run_available("restarted-observation-worker", limit=10) == ()
+    clock.advance(seconds=5)
+    settled = service.run_available("restarted-observation-worker", limit=10)
+    assert len(settled) == 1
+    assert (settled[0].stage, settled[0].status, settled[0].attempt_count) == (
+        "import_observations",
+        "succeeded",
+        2,
+    )
+    assert len(contexts) == 2 and contexts[0].idempotency_key == contexts[1].idempotency_key == first_key
+
+    with session_factory() as session:
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        parser_runs = list(session.scalars(select(ParserRun).order_by(ParserRun.id)))
+        assert import_job is not None and import_job.output_json["parser_run_id"] == first_run_id
+        assert [run.run_id for run in parser_runs] == [first_run_id]
+
+    changed_key = replace(contexts[-1], idempotency_key=f"{first_key}:changed")
+    changed_key_result = handler(changed_key)
+    assert changed_key_result["parser_run_id"] != first_run_id
+    dependency = contexts[-1].dependencies[0]
+    changed_evidence = replace(
+        contexts[-1],
+        dependencies=(replace(dependency, error_message="changed parser evidence"),),
+    )
+    changed_evidence_result = handler(changed_evidence)
+    assert changed_evidence_result["parser_run_id"] not in {
+        first_run_id,
+        changed_key_result["parser_run_id"],
+    }
+    with session_factory() as session:
+        parser_runs = list(session.scalars(select(ParserRun).order_by(ParserRun.id)))
+        assert len(parser_runs) == 3
+        assert all(run.status == "failed" for run in parser_runs)
+        assert session.scalar(select(func.count()).select_from(ReplayCommand)) == 0
+        assert session.scalar(select(func.count()).select_from(ReplayPlayer)) == 0
+        assert session.scalar(select(func.count()).select_from(EvidenceItem).where(EvidenceItem.parser_run_id.is_not(None))) == 0
+
+
+def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attempt(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a crash after failed-telemetry persistence turning the same job replay into a UUID collision."""
+    run_id = "d23e4567-e89b-12d3-a456-426614174000"
+    contexts: list[StageExecutionContext] = []
+    artifact_root = tmp_path / "lease-replay-telemetry"
+    artifact_root.mkdir()
+    stdout = artifact_root / "stdout.log"
+    stdout.write_text("failed engine output", encoding="utf-8")
+    artifact = TelemetryArtifact(
+        run_id=run_id,
+        runner_status="invalid_trace",
+        replay_quality="failed",
+        strategy_analysis_scope="none",
+        trace_path=None,
+        catalog_path=None,
+        map_asset_paths=(),
+        outcome_path=None,
+        stdout_path=stdout,
+        stderr_path=None,
+        exit_code=7,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="f" * 64,
+        diagnostics=(AcquisitionDiagnostic("invalid_trace", "trace was rejected"),),
+    )
+
+    class FailedAcquirer:
+        def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
+            assert replay.is_file() and len(replay_sha256) == 64
+            return artifact
+
+    handler = ObservationImportHandler(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=parse_replay,
+            parser_version="test-parser-1",
+            schema_version=1,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(53_000),
+        ),
+        TelemetryObservationImporter(
+            session_factory,
+            settings.data_root,
+            clock=clock,
+            uuid_factory=DeterministicUUIDs(54_000),
+        ),
+    )
+
+    def capture(context: StageExecutionContext) -> dict[str, object]:
+        contexts.append(context)
+        return dict(handler(context))
+
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        parser=parse_replay,
+        telemetry_acquirer=FailedAcquirer(),
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="lease-replay-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                capture,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+    original_succeed = service._jobs.succeed
+    crashed = False
+
+    def crash_before_settlement(
+        job_public_id: str,
+        worker_id: str,
+        output_json: dict[str, object],
+    ) -> object:
+        nonlocal crashed
+        snapshot = service._jobs.snapshot(job_public_id)
+        if snapshot.stage == "import_observations" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated crash before job settlement")
+        return original_succeed(job_public_id, worker_id, output_json)
+
+    monkeypatch.setattr(service._jobs, "succeed", crash_before_settlement)
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run_available("crashing-observation-worker", limit=10)
+
+    with session_factory() as session:
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        telemetry_runs = list(session.scalars(select(TelemetryRun)))
+        assert import_job is not None and import_job.status == "running"
+        assert len(telemetry_runs) == 1 and telemetry_runs[0].status == "failed"
+        assert telemetry_runs[0].settings_json["import_observations_idempotency_key"] == import_job.idempotency_key
+        first_key = import_job.idempotency_key
+
+    monkeypatch.setattr(service._jobs, "succeed", original_succeed)
+    clock.advance(seconds=301)
+    assert service.run_available("restarted-observation-worker", limit=10) == ()
+    clock.advance(seconds=5)
+    settled = service.run_available("restarted-observation-worker", limit=10)
+    assert len(settled) == 1
+    assert (settled[0].stage, settled[0].status, settled[0].attempt_count) == (
+        "import_observations",
+        "succeeded",
+        2,
+    )
+    assert len(contexts) == 2 and contexts[0].idempotency_key == contexts[1].idempotency_key == first_key
+
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        handler(replace(contexts[-1], idempotency_key=f"{first_key}:changed"))
+    telemetry_dependency = next(item for item in contexts[-1].dependencies if item.stage == "telemetry")
+    changed_message_dependency = replace(
+        telemetry_dependency,
+        error_message="changed terminal failure evidence",
+    )
+    changed_message_context = replace(
+        contexts[-1],
+        dependencies=tuple(
+            changed_message_dependency if item.stage == "telemetry" else item
+            for item in contexts[-1].dependencies
+        ),
+    )
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        handler(changed_message_context)
+    assert telemetry_dependency.error_details is not None
+    changed_details = dict(telemetry_dependency.error_details)
+    diagnostics = changed_details["diagnostics"]
+    assert isinstance(diagnostics, tuple)
+    changed_details["diagnostics"] = (*diagnostics, {"code": "changed", "message": "changed evidence"})
+    changed_dependency = replace(telemetry_dependency, error_details=changed_details)
+    changed_context = replace(
+        contexts[-1],
+        dependencies=tuple(
+            changed_dependency if item.stage == "telemetry" else item
+            for item in contexts[-1].dependencies
+        ),
+    )
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        handler(changed_context)
+
+    with session_factory.begin() as session:
+        issue = session.scalar(
+            select(ReplayQualityIssue).where(ReplayQualityIssue.telemetry_run_id == telemetry_runs[0].id)
+        )
+        assert issue is not None
+        issue.details_json = {"runner_status": "tampered"}
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        handler(contexts[-1])
+
+    with session_factory() as session:
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        telemetry_runs = list(session.scalars(select(TelemetryRun)))
+        assert import_job is not None and import_job.output_json["telemetry_run_id"] == run_id
+        assert len(telemetry_runs) == 1 and telemetry_runs[0].run_id == run_id
+        telemetry_run_id = telemetry_runs[0].id
+        assert session.scalar(
+            select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == telemetry_run_id)
+        ) == 0
+        for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
 
 
 def test_seeded_map_feature_permutations_are_semantically_canonical_and_duplicates_fail(

@@ -160,6 +160,86 @@ def test_terminal_failure_policy_never_treats_nonterminal_dependencies_as_eviden
     }
 
 
+def test_retryable_dependency_settles_nonretryable_only_when_attempts_are_exhausted(
+    session_factory: sessionmaker[Session], clock: MutableClock
+) -> None:
+    """Catch exhausted retryable jobs remaining eligible for retry while supplying terminal evidence."""
+    jobs = _coordinator(session_factory, clock)
+    dependency = jobs.create_job(_spec("parse", max_attempts=2))
+    dependent = jobs.create_job(_spec("import"))
+    jobs.add_dependency(dependent.public_id, dependency.public_id)
+    policy = {"import": frozenset({"parse"})}
+
+    first_claim = jobs.claim("parser-worker", frozenset({"parse"}))
+    assert first_claim is not None
+    first_failure = jobs.fail(
+        dependency.public_id,
+        "parser-worker",
+        StageFailure("parser_unavailable", "retry fixture", retryable=True),
+    )
+    assert (first_failure.status, first_failure.retryable, first_failure.attempt_count) == (
+        "pending",
+        True,
+        1,
+    )
+    assert jobs.claim(
+        "observation-worker",
+        frozenset({"import"}),
+        terminal_failure_stages=policy,
+    ) is None
+
+    clock.advance(seconds=5)
+    second_claim = jobs.claim("parser-worker", frozenset({"parse"}))
+    assert second_claim is not None and second_claim.attempt_count == 2
+    exhausted = jobs.fail(
+        dependency.public_id,
+        "parser-worker",
+        StageFailure("parser_unavailable", "retry fixture", retryable=True),
+    )
+    assert (exhausted.status, exhausted.retryable, exhausted.attempt_count) == (
+        "failed",
+        False,
+        2,
+    )
+    terminal_claim = jobs.claim(
+        "observation-worker",
+        frozenset({"import"}),
+        terminal_failure_stages=policy,
+    )
+    assert terminal_claim is not None and terminal_claim.public_id == dependent.public_id
+
+
+def test_terminal_failure_policy_rejects_failed_dependency_still_marked_retryable(
+    session_factory: sessionmaker[Session], clock: MutableClock
+) -> None:
+    """Catch status-only terminal admission of inconsistent or legacy retryable failed rows."""
+    jobs = _coordinator(session_factory, clock)
+    dependency = jobs.create_job(_spec("parse", retryable=False))
+    dependent = jobs.create_job(_spec("import"))
+    strict_dependent = jobs.create_job(_spec("strict-import"))
+    jobs.add_dependency(dependent.public_id, dependency.public_id)
+    jobs.add_dependency(strict_dependent.public_id, dependency.public_id)
+    claimed = jobs.claim("parser-worker", frozenset({"parse"}))
+    assert claimed is not None
+    jobs.fail(
+        dependency.public_id,
+        "parser-worker",
+        StageFailure("parser_failed", "terminal fixture", retryable=False),
+    )
+    with session_factory.begin() as session:
+        row = session.scalar(select(Job).where(Job.public_id == dependency.public_id))
+        assert row is not None
+        row.retryable = True
+
+    assert jobs.claim(
+        "observation-worker",
+        frozenset({"import"}),
+        terminal_failure_stages={"import": frozenset({"parse"})},
+    ) is None
+    assert jobs.claim("strict-worker", frozenset({"strict-import"})) is None
+    assert jobs.snapshot(strict_dependent.public_id).status == "pending"
+
+
 def test_claim_is_exclusive_and_increments_attempt_exactly_once(
     session_factory: sessionmaker[Session], clock: MutableClock
 ) -> None:

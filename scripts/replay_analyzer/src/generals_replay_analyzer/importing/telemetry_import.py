@@ -37,6 +37,7 @@ from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
 from .parser_import import ParserObservationImporter
 from .service import FrozenJSONValue, StageDependencyOutput, StageExecutionContext
+from .stages import canonical_json
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _PRODUCTION_TYPES = {
@@ -51,6 +52,21 @@ _PRODUCTION_TYPES = {
 }
 _ECONOMY_TYPES = {"cash_changed", "supply_collected"}
 _COMBAT_TYPES = {"damage_applied", "healing_applied"}
+_FAILURE_ENVELOPE_TYPE = "telemetry_artifact_failure"
+_FAILURE_ENVELOPE_VERSION = 1
+_FAILURE_ISSUE_CODES = frozenset(
+    {"exporter_failure", "invalid_catalog", "invalid_map_asset", "invalid_trace", "missing_telemetry", "version_mismatch"}
+)
+_FAILURE_ARTIFACT_KINDS = frozenset(
+    {
+        "telemetry_catalog",
+        "telemetry_map_asset",
+        "telemetry_outcome",
+        "telemetry_stderr",
+        "telemetry_stdout",
+        "telemetry_trace",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,9 @@ class TelemetryAttempt:
     engine_executable_sha256: str | None
     diagnostics: tuple[Mapping[str, object], ...]
     artifacts: tuple[ManagedTelemetryArtifact, ...]
+    upstream_failure_code: str | None = None
+    upstream_quality_issue_code: str | None = None
+    upstream_failure_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +204,17 @@ def _artifact_manifest(artifacts: tuple[ManagedTelemetryArtifact, ...]) -> list[
     ]
 
 
+def _attempt_settings(attempt: TelemetryAttempt, idempotency_key: str | None) -> dict[str, object]:
+    return {
+        "replay_quality": attempt.replay_quality,
+        "artifact_manifest": _artifact_manifest(attempt.artifacts),
+        "upstream_failure_code": attempt.upstream_failure_code,
+        "upstream_quality_issue_code": attempt.upstream_quality_issue_code,
+        "upstream_failure_message": attempt.upstream_failure_message,
+        "import_observations_idempotency_key": idempotency_key,
+    }
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Normalize validated engine evidence without importing runner or reader internals. (#TBD)
 class TelemetryObservationImporter:
     """Validate managed bundle topology, then commit all observed telemetry rows at once."""
@@ -202,16 +232,45 @@ class TelemetryObservationImporter:
         self._clock = clock
         self._uuid_factory = uuid_factory
 
-    def import_replay(self, replay_sha256: str, attempt: TelemetryAttempt) -> TelemetryImportResult:
+    def import_replay(
+        self,
+        replay_sha256: str,
+        attempt: TelemetryAttempt,
+        *,
+        idempotency_key: str | None = None,
+    ) -> TelemetryImportResult:
         sha256 = _require_sha256(replay_sha256, "replay SHA-256")
         run_id = _require_run_id(attempt.run_id)
+        if idempotency_key is not None and not idempotency_key:
+            raise ValueError("import observation idempotency key must be nonempty")
         now = _utc(self._clock())
         cached = self._existing_run(run_id)
         if cached is not None:
-            if cached.status == "succeeded" and self._run_matches(cached, sha256, attempt):
+            if cached.status == "succeeded" and self._run_matches(
+                cached,
+                sha256,
+                attempt,
+                idempotency_key,
+            ):
                 return TelemetryImportResult(run_id, "succeeded", self._event_count(cached.id), True)
+            if (
+                cached.status == "failed"
+                and idempotency_key is not None
+                and self._failed_attempt_is_reusable(
+                    cached,
+                    sha256,
+                    attempt,
+                    idempotency_key,
+                )
+            ):
+                # TheSuperHackers @bugfix Leex 22/08/2026 Reuse one exact childless failed telemetry attempt after lease replay. (#TBD)
+                return TelemetryImportResult(run_id, "failed", 0, True)
             raise ValueError("telemetry run UUID collides with another immutable attempt")
-        replay_id, verified = self._create_attempt(sha256, attempt, now)
+        replay_id, verified = self._create_attempt(sha256, attempt, now, idempotency_key)
+        if attempt.upstream_failure_code is not None:
+            issue_code = attempt.upstream_quality_issue_code or "invalid_trace"
+            self._commit_failure(replay_id, run_id, attempt, issue_code, now, None)
+            return TelemetryImportResult(run_id, "failed", 0, False)
         if attempt.runner_status != "success":
             self._commit_failure(replay_id, run_id, attempt, "exporter_failure", now, None)
             return TelemetryImportResult(run_id, "failed", 0, False)
@@ -229,7 +288,13 @@ class TelemetryObservationImporter:
         with self._session_factory() as session:
             return session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
 
-    def _run_matches(self, run: TelemetryRun, replay_sha256: str, attempt: TelemetryAttempt) -> bool:
+    def _run_matches(
+        self,
+        run: TelemetryRun,
+        replay_sha256: str,
+        attempt: TelemetryAttempt,
+        idempotency_key: str | None,
+    ) -> bool:
         with self._session_factory() as session:
             replay = session.get(Replay, run.replay_id)
             settings = run.settings_json if isinstance(run.settings_json, dict) else {}
@@ -239,11 +304,111 @@ class TelemetryObservationImporter:
                 and run.runner_status == attempt.runner_status
                 and run.strategy_analysis_scope == attempt.strategy_analysis_scope
                 and run.process_exit_code == attempt.process_exit_code
+                and run.engine_build == (attempt.engine_build or "unavailable")
                 and run.engine_executable_sha256 == attempt.engine_executable_sha256
-                and settings.get("replay_quality") == attempt.replay_quality
-                and settings.get("artifact_manifest") == _artifact_manifest(attempt.artifacts)
+                and settings == _attempt_settings(attempt, idempotency_key)
                 and run.diagnostics_json == [dict(diagnostic) for diagnostic in attempt.diagnostics]
             )
+
+    def _failed_attempt_is_reusable(
+        self,
+        run: TelemetryRun,
+        replay_sha256: str,
+        attempt: TelemetryAttempt,
+        idempotency_key: str,
+    ) -> bool:
+        if (
+            run.status != "failed"
+            or run.schema_version != 0
+            or run.map_id is not None
+            or run.final_frame is not None
+            or run.command_count is not None
+            or run.completed_at is None
+        ):
+            return False
+        with self._session_factory() as session:
+            replay = session.get(Replay, run.replay_id)
+            settings = run.settings_json if isinstance(run.settings_json, dict) else {}
+            if not (
+                replay is not None
+                and replay.sha256 == replay_sha256
+                and run.runner_status == attempt.runner_status
+                and run.strategy_analysis_scope == attempt.strategy_analysis_scope
+                and run.process_exit_code == attempt.process_exit_code
+                and run.engine_build == (attempt.engine_build or "unavailable")
+                and run.engine_executable_sha256 == attempt.engine_executable_sha256
+                and settings == _attempt_settings(attempt, idempotency_key)
+            ):
+                return False
+            expected_diagnostics = [dict(diagnostic) for diagnostic in attempt.diagnostics]
+            stored_diagnostics = run.diagnostics_json
+            exception_type: str | None = None
+            if stored_diagnostics == expected_diagnostics:
+                issue_code = attempt.upstream_quality_issue_code or "exporter_failure"
+            elif (
+                isinstance(stored_diagnostics, list)
+                and stored_diagnostics[: len(expected_diagnostics)] == expected_diagnostics
+                and len(stored_diagnostics) == len(expected_diagnostics) + 1
+                and isinstance(stored_diagnostics[-1], dict)
+                and set(stored_diagnostics[-1]) == {"code", "exception_type"}
+                and isinstance(stored_diagnostics[-1].get("code"), str)
+                and stored_diagnostics[-1]["code"] in _FAILURE_ISSUE_CODES
+                and isinstance(stored_diagnostics[-1].get("exception_type"), str)
+                and stored_diagnostics[-1]["exception_type"]
+            ):
+                issue_code = cast(str, stored_diagnostics[-1]["code"])
+                exception_type = cast(str, stored_diagnostics[-1]["exception_type"])
+            else:
+                return False
+            child_count = sum(
+                int(session.scalar(statement) or 0)
+                for statement in (
+                    select(func.count()).select_from(TelemetryEvent).where(TelemetryEvent.telemetry_run_id == run.id),
+                    select(func.count()).select_from(Entity).where(Entity.telemetry_run_id == run.id),
+                    select(func.count()).select_from(EntitySample).where(EntitySample.telemetry_run_id == run.id),
+                    select(func.count()).select_from(ProductionEvent).where(ProductionEvent.telemetry_run_id == run.id),
+                    select(func.count()).select_from(EconomyEvent).where(EconomyEvent.telemetry_run_id == run.id),
+                    select(func.count()).select_from(CombatEvent).where(CombatEvent.telemetry_run_id == run.id),
+                    select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == run.id),
+                )
+            )
+            if child_count != 0:
+                return False
+            issues = list(
+                session.scalars(
+                    select(ReplayQualityIssue).where(ReplayQualityIssue.telemetry_run_id == run.id)
+                )
+            )
+            expected_issues = [
+                (
+                    issue_code,
+                    "error",
+                    {
+                        "runner_status": attempt.runner_status,
+                        "exception_type": exception_type,
+                    },
+                )
+            ]
+            if attempt.runner_status != "success" and issue_code != "exporter_failure":
+                expected_issues.append(
+                    (
+                        "exporter_failure",
+                        "error",
+                        {"runner_status": attempt.runner_status},
+                    )
+                )
+            actual_issues = [
+                (
+                    issue.issue_code,
+                    issue.severity,
+                    issue.details_json,
+                )
+                for issue in issues
+                if issue.stage == "import_observations" and issue.resolved_at is None
+            ]
+            return len(actual_issues) == len(issues) and sorted(
+                canonical_json(item) for item in actual_issues
+            ) == sorted(canonical_json(item) for item in expected_issues)
 
     def _event_count(self, telemetry_run_id: int) -> int:
         with self._session_factory() as session:
@@ -255,7 +420,11 @@ class TelemetryObservationImporter:
             )
 
     def _create_attempt(
-        self, replay_sha256: str, attempt: TelemetryAttempt, now: datetime
+        self,
+        replay_sha256: str,
+        attempt: TelemetryAttempt,
+        now: datetime,
+        idempotency_key: str | None,
     ) -> tuple[int, tuple[_VerifiedArtifact, ...]]:
         descriptors = tuple(sorted(attempt.artifacts, key=lambda item: (item.logical_path.casefold(), item.kind, item.sha256)))
         logical_keys = [artifact.logical_path.casefold() for artifact in descriptors]
@@ -283,6 +452,9 @@ class TelemetryObservationImporter:
                 verified.append(
                     _VerifiedArtifact(descriptor, asset.id, path, asset.kind, asset.sha256, asset.size_bytes)
                 )
+            if attempt.upstream_failure_code is not None:
+                # TheSuperHackers @bugfix Leex 22/08/2026 Link only registered, byte-verified retained failure assets. (#TBD)
+                self._validate_retained_failure_artifacts(tuple(verified), descriptors)
             trace = [artifact for artifact in verified if artifact.descriptor.kind == "telemetry_trace"]
             catalog = [artifact for artifact in verified if artifact.descriptor.kind == "telemetry_catalog"]
             manifests = [
@@ -301,10 +473,7 @@ class TelemetryObservationImporter:
                 schema_version=0,
                 engine_build=attempt.engine_build or "unavailable",
                 engine_executable_sha256=attempt.engine_executable_sha256,
-                settings_json={
-                    "replay_quality": attempt.replay_quality,
-                    "artifact_manifest": _artifact_manifest(attempt.artifacts),
-                },
+                settings_json=_attempt_settings(attempt, idempotency_key),
                 status="pending",
                 runner_status=attempt.runner_status,
                 strategy_analysis_scope=attempt.strategy_analysis_scope,
@@ -320,6 +489,37 @@ class TelemetryObservationImporter:
             session.flush()
             run.status = "running"
             return replay.id, tuple(verified)
+
+    def _validate_retained_failure_artifacts(
+        self,
+        verified: tuple[_VerifiedArtifact, ...],
+        descriptors: tuple[ManagedTelemetryArtifact, ...],
+    ) -> None:
+        if len(verified) != len(descriptors):
+            raise ValueError("telemetry retained managed asset is unregistered")
+        for artifact in verified:
+            if (
+                artifact.registered_kind != artifact.descriptor.kind
+                or artifact.registered_sha256 != artifact.descriptor.sha256
+                or artifact.registered_size_bytes != artifact.descriptor.size_bytes
+            ):
+                raise ValueError("telemetry retained asset descriptor disagrees with registration")
+            source = artifact.managed_path
+            try:
+                info = source.lstat()
+            except OSError as error:
+                raise ValueError("retained telemetry asset is unreadable") from error
+            if not stat.S_ISREG(info.st_mode) or source.is_symlink() or _is_reparse(info):
+                raise ValueError("retained telemetry asset is not an ordinary file")
+            resolved = source.resolve(strict=True)
+            if self._data_root not in resolved.parents:
+                raise ValueError("retained telemetry asset escapes the product data root")
+            actual_sha256, actual_size = _file_sha256(resolved)
+            if (actual_sha256, actual_size) != (
+                artifact.descriptor.sha256,
+                artifact.descriptor.size_bytes,
+            ):
+                raise ValueError("retained telemetry asset content identity is invalid")
 
     @staticmethod
     def _validate_registered_artifacts(
@@ -371,8 +571,8 @@ class TelemetryObservationImporter:
                 raise ValueError("telemetry engine build differs from the selected runner metadata")
             self._validate_bundle_topology(root, bundle, verified)
             map_projection = normalize_map_asset(bundle.map_asset) if bundle.map_asset is not None else None
-            records = tuple(cast(dict[str, Any], record.model_dump(mode="json")) for record in bundle.records)
-            payloads = tuple(cast(dict[str, Any], record.payload.model_dump(mode="json")) for record in bundle.records)
+            records = tuple(record.model_dump(mode="json") for record in bundle.records)
+            payloads = tuple(record.payload.model_dump(mode="json") for record in bundle.records)
             return _NormalizedTelemetry(bundle, map_projection, records, payloads)
 
     @staticmethod
@@ -839,6 +1039,7 @@ class ObservationImportHandler:
             parser_result = self._parser_importer.import_replay(
                 context.replay_sha256,
                 parser_version=parser_version,
+                idempotency_key=context.idempotency_key,
             )
             if parser_result.status != "succeeded":
                 raise StageFailure("parser_import_failed", "parser observations failed validation", retryable=False)
@@ -848,6 +1049,7 @@ class ObservationImportHandler:
             parser_result = self._parser_importer.record_failed_dependency(
                 context.replay_sha256,
                 parser_version=parser_version,
+                idempotency_key=context.idempotency_key,
                 error_code=code,
                 error_message=message,
                 error_details=details,
@@ -858,7 +1060,11 @@ class ObservationImportHandler:
         telemetry_dependency = dependencies.get("telemetry")
         if telemetry_dependency is not None and telemetry_dependency.status == "succeeded":
             attempt = _attempt_from_dependency(_succeeded_dependency_output(telemetry_dependency))
-            telemetry_result = self._telemetry_importer.import_replay(context.replay_sha256, attempt)
+            telemetry_result = self._telemetry_importer.import_replay(
+                context.replay_sha256,
+                attempt,
+                idempotency_key=context.idempotency_key,
+            )
             if telemetry_result.status != "succeeded":
                 raise StageFailure("telemetry_import_failed", "telemetry observations failed validation", retryable=False)
         elif (
@@ -866,9 +1072,13 @@ class ObservationImportHandler:
             and telemetry_dependency.status == "failed"
             and telemetry_dependency.error_code != "dependency_failed"
         ):
-            _code, _message, details = _failed_dependency_error(telemetry_dependency)
-            attempt = _attempt_from_dependency(details)
-            telemetry_result = self._telemetry_importer.import_replay(context.replay_sha256, attempt)
+            code, _message, details = _failed_dependency_error(telemetry_dependency)
+            attempt = _attempt_from_failed_dependency(telemetry_dependency, code, details)
+            telemetry_result = self._telemetry_importer.import_replay(
+                context.replay_sha256,
+                attempt,
+                idempotency_key=context.idempotency_key,
+            )
             if telemetry_result.status != "failed":
                 raise StageFailure(
                     "telemetry_dependency_invalid",
@@ -925,7 +1135,269 @@ def _failed_parser_version(context: StageExecutionContext) -> str:
     return parser_version
 
 
-def _attempt_from_dependency(output: Mapping[str, FrozenJSONValue]) -> TelemetryAttempt:
+def _failure_mapping(value: object, message: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise StageFailure("telemetry_dependency_invalid", message, retryable=False)
+    return cast(Mapping[str, object], value)
+
+
+def _typed_failure_attempt(
+    raw_attempt: Mapping[str, object],
+    *,
+    failure_code: str,
+    failure_message: str,
+    quality_issue_code: str,
+) -> TelemetryAttempt:
+    expected_attempt_keys = {
+        "artifacts",
+        "diagnostics",
+        "engine_build",
+        "engine_executable_sha256",
+        "exit_code",
+        "replay_quality",
+        "run_id",
+        "runner_status",
+        "strategy_analysis_scope",
+    }
+    if set(raw_attempt) != expected_attempt_keys:
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure attempt fields are incomplete",
+            retryable=False,
+        )
+    text_values: dict[str, str] = {}
+    for key in ("run_id", "runner_status", "replay_quality", "strategy_analysis_scope"):
+        value = raw_attempt.get(key)
+        if not isinstance(value, str) or not value or not value.isprintable():
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure attempt metadata is invalid",
+                retryable=False,
+            )
+        text_values[key] = value
+    try:
+        _require_run_id(text_values["run_id"])
+    except ValueError as error:
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure run ID is invalid",
+            retryable=False,
+        ) from error
+    raw_exit_code = raw_attempt.get("exit_code")
+    if raw_exit_code is not None and (
+        not isinstance(raw_exit_code, int)
+        or isinstance(raw_exit_code, bool)
+        or raw_exit_code < 0
+    ):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure exit code is invalid",
+            retryable=False,
+        )
+    raw_engine_build = raw_attempt.get("engine_build")
+    if raw_engine_build is not None and (
+        not isinstance(raw_engine_build, str)
+        or not raw_engine_build
+        or not raw_engine_build.isprintable()
+    ):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure engine build is invalid",
+            retryable=False,
+        )
+    raw_engine_hash = raw_attempt.get("engine_executable_sha256")
+    if raw_engine_hash is not None:
+        if not isinstance(raw_engine_hash, str):
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure engine hash is invalid",
+                retryable=False,
+            )
+        try:
+            _require_sha256(raw_engine_hash, "engine executable SHA-256")
+        except ValueError as error:
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure engine hash is invalid",
+                retryable=False,
+            ) from error
+
+    raw_artifacts = raw_attempt.get("artifacts")
+    if not isinstance(raw_artifacts, tuple):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure artifact manifest is invalid",
+            retryable=False,
+        )
+    artifacts: list[ManagedTelemetryArtifact] = []
+    logical_paths: set[str] = set()
+    for raw in raw_artifacts:
+        item = _failure_mapping(raw, "telemetry failure artifact descriptor is invalid")
+        if set(item) != {"asset_public_id", "kind", "logical_path", "sha256", "size_bytes"}:
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure artifact descriptor fields are invalid",
+                retryable=False,
+            )
+        public_id = item.get("asset_public_id")
+        kind = item.get("kind")
+        logical_path = item.get("logical_path")
+        sha256 = item.get("sha256")
+        size_bytes = item.get("size_bytes")
+        if (
+            not isinstance(public_id, str)
+            or not isinstance(kind, str)
+            or kind not in _FAILURE_ARTIFACT_KINDS
+            or not isinstance(logical_path, str)
+            or not isinstance(sha256, str)
+            or not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+        ):
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure artifact descriptor types are invalid",
+                retryable=False,
+            )
+        try:
+            _require_run_id(public_id)
+            _safe_logical_path(logical_path)
+            _require_sha256(sha256, "artifact SHA-256")
+        except ValueError as error:
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure artifact descriptor values are invalid",
+                retryable=False,
+            ) from error
+        logical_key = logical_path.casefold()
+        if logical_key in logical_paths:
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure artifact logical paths are duplicated",
+                retryable=False,
+            )
+        logical_paths.add(logical_key)
+        artifacts.append(ManagedTelemetryArtifact(public_id, kind, logical_path, sha256, size_bytes))
+    if artifacts != sorted(
+        artifacts,
+        key=lambda item: (item.logical_path.casefold(), item.kind, item.sha256),
+    ):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure artifact manifest is not canonical",
+            retryable=False,
+        )
+
+    raw_diagnostics = raw_attempt.get("diagnostics")
+    if not isinstance(raw_diagnostics, tuple):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure diagnostics are invalid",
+            retryable=False,
+        )
+    diagnostics: list[Mapping[str, object]] = []
+    for raw in raw_diagnostics:
+        diagnostic = _failure_mapping(raw, "telemetry failure diagnostic is invalid")
+        if set(diagnostic) != {"code", "message"} or not all(
+            isinstance(diagnostic.get(key), str)
+            and bool(diagnostic[key])
+            and cast(str, diagnostic[key]).isprintable()
+            for key in ("code", "message")
+        ):
+            raise StageFailure(
+                "telemetry_dependency_invalid",
+                "telemetry failure diagnostic is invalid",
+                retryable=False,
+            )
+        diagnostics.append(dict(diagnostic))
+    return TelemetryAttempt(
+        run_id=text_values["run_id"],
+        runner_status=text_values["runner_status"],
+        replay_quality=text_values["replay_quality"],
+        strategy_analysis_scope=text_values["strategy_analysis_scope"],
+        process_exit_code=raw_exit_code,
+        engine_build=raw_engine_build,
+        engine_executable_sha256=raw_engine_hash,
+        diagnostics=tuple(diagnostics),
+        artifacts=tuple(artifacts),
+        upstream_failure_code=failure_code,
+        upstream_quality_issue_code=quality_issue_code,
+        upstream_failure_message=failure_message,
+    )
+
+
+def _attempt_from_failed_dependency(
+    dependency: StageDependencyOutput,
+    failure_code: str,
+    details: Mapping[str, FrozenJSONValue],
+) -> TelemetryAttempt:
+    raw_envelope = details.get("failure_envelope")
+    if raw_envelope is None:
+        issue_code = "exporter_failure" if failure_code == "exporter_failure" else "invalid_trace"
+        return _attempt_from_dependency(
+            details,
+            upstream_failure_code=failure_code,
+            upstream_quality_issue_code=issue_code,
+            upstream_failure_message=dependency.error_message,
+        )
+    envelope = _failure_mapping(raw_envelope, "telemetry failure envelope is invalid")
+    expected_envelope_keys = {
+        "attempt",
+        "failure_code",
+        "failure_message",
+        "quality_issue_code",
+        "type",
+        "version",
+    }
+    if set(envelope) != expected_envelope_keys:
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure envelope fields are invalid",
+            retryable=False,
+        )
+    if envelope.get("type") != _FAILURE_ENVELOPE_TYPE or envelope.get("version") != _FAILURE_ENVELOPE_VERSION:
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure envelope type is invalid",
+            retryable=False,
+        )
+    envelope_failure_code = envelope.get("failure_code")
+    failure_message = envelope.get("failure_message")
+    quality_issue_code = envelope.get("quality_issue_code")
+    if (
+        envelope_failure_code != failure_code
+        or dependency.error_code != failure_code
+        or not isinstance(failure_message, str)
+        or not failure_message
+        or failure_message != dependency.error_message
+        or not failure_message.isprintable()
+        or not isinstance(quality_issue_code, str)
+        or quality_issue_code not in _FAILURE_ISSUE_CODES
+    ):
+        raise StageFailure(
+            "telemetry_dependency_invalid",
+            "telemetry failure envelope evidence is inconsistent",
+            retryable=False,
+        )
+    raw_attempt = _failure_mapping(
+        envelope.get("attempt"),
+        "telemetry failure attempt is invalid",
+    )
+    return _typed_failure_attempt(
+        raw_attempt,
+        failure_code=failure_code,
+        failure_message=failure_message,
+        quality_issue_code=quality_issue_code,
+    )
+
+
+def _attempt_from_dependency(
+    output: Mapping[str, FrozenJSONValue],
+    *,
+    upstream_failure_code: str | None = None,
+    upstream_quality_issue_code: str | None = None,
+    upstream_failure_message: str | None = None,
+) -> TelemetryAttempt:
     raw_artifacts = output.get("artifacts")
     if not isinstance(raw_artifacts, tuple):
         raise StageFailure("telemetry_dependency_invalid", "telemetry artifact manifest is invalid", retryable=False)
@@ -958,4 +1430,7 @@ def _attempt_from_dependency(output: Mapping[str, FrozenJSONValue]) -> Telemetry
         engine_executable_sha256=cast(str | None, output.get("engine_executable_sha256")),
         diagnostics=diagnostics,
         artifacts=tuple(artifacts),
+        upstream_failure_code=upstream_failure_code,
+        upstream_quality_issue_code=upstream_quality_issue_code,
+        upstream_failure_message=upstream_failure_message,
     )

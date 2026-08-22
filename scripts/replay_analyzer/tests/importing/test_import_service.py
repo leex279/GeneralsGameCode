@@ -351,6 +351,143 @@ def test_opted_in_terminal_parse_dependency_is_frozen_redacted_evidence(
         assert imported.input_json["selected_dependency_digest"] in imported.idempotency_key
 
 
+def test_exhausted_retryable_parse_materializes_stable_terminal_context_and_identity(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch exhausted parser failures retaining retry eligibility while downstream evidence executes."""
+    received: list[StageExecutionContext] = []
+
+    def unavailable_parser(_path: Path) -> SimpleNamespace:
+        raise OSError("parser dependency is temporarily unavailable")
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        received.append(context)
+        dependency = context.dependencies[0]
+        assert (dependency.stage, dependency.status, dependency.error_code) == (
+            "parse",
+            "failed",
+            "parser_failed",
+        )
+        return {"status": "terminal-evidence-imported"}
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=unavailable_parser,
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                import_observations,
+                terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
+            ),
+        ),
+    )
+    service.submit(ImportRequest(replay_file))
+    first = service.run_available("parser-worker", limit=10)
+    assert first[-1].stage == "parse"
+    assert (first[-1].status, first[-1].retryable, first[-1].attempt_count) == ("pending", True, 1)
+    assert received == []
+
+    clock.advance(seconds=5)
+    second = service.run_available("parser-worker", limit=10)
+    assert len(second) == 1 and second[0].stage == "parse"
+    assert (second[0].status, second[0].retryable, second[0].attempt_count) == ("pending", True, 2)
+    assert received == []
+
+    clock.advance(seconds=10)
+    exhausted = service.run_available("parser-worker", limit=10)
+    assert tuple(job.stage for job in exhausted) == ("parse", "import_observations")
+    assert (exhausted[0].status, exhausted[0].retryable, exhausted[0].attempt_count) == (
+        "failed",
+        False,
+        3,
+    )
+    assert len(received) == 1
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None and imported.status == "succeeded"
+        selected_digest = imported.input_json["selected_dependency_digest"]
+        assert isinstance(selected_digest, str) and imported.idempotency_key.endswith(selected_digest)
+        assert received[0].idempotency_key == imported.idempotency_key
+
+
+def test_retryable_failed_dependency_cannot_materialize_or_enter_direct_context(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch materialization and context checks accepting a failed row that remains retryable."""
+
+    def terminal_parser(_path: Path) -> SimpleNamespace:
+        raise StageFailure("parser_terminal", "terminal fixture", retryable=False)
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=terminal_parser,
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                lambda _context: {"status": "imported"},
+                terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
+            ),
+        ),
+    )
+    service.submit(ImportRequest(replay_file))
+    for _ in range(4):
+        completed = service.run_available("parser-worker", limit=1)
+        assert len(completed) == 1
+    with session_factory.begin() as session:
+        dependency = session.scalar(select(Job).where(Job.stage == "parse"))
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert dependency is not None and imported is not None
+        assert dependency.status == "failed"
+        dependency.retryable = True
+        provisional_key = imported.idempotency_key
+
+    service._materialize_ready_observation_jobs()
+    with session_factory() as session:
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert imported is not None
+        assert imported.idempotency_key == provisional_key
+        assert imported.input_json["dependency_identity_bound"] is False
+
+    with session_factory.begin() as session:
+        dependency = session.scalar(select(Job).where(Job.stage == "parse"))
+        assert dependency is not None
+        dependency.retryable = False
+    service._materialize_ready_observation_jobs()
+    claimed = service._jobs.claim(
+        "observation-worker",
+        service._handlers,
+        terminal_failure_stages=service._terminal_failure_stages,
+    )
+    assert claimed is not None and claimed.stage == "import_observations"
+    with session_factory.begin() as session:
+        dependency = session.scalar(select(Job).where(Job.stage == "parse"))
+        assert dependency is not None
+        dependency.retryable = True
+    with pytest.raises(StageFailure) as failure:
+        service._stage_execution_context(claimed)
+    assert failure.value.code == "dependency_unavailable"
+
+
 def test_opted_in_terminal_telemetry_dependency_keeps_mixed_success_failure_context(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
@@ -1532,7 +1669,18 @@ def test_artifact_port_inspects_supplied_alias_before_resolving_target(
 
 @pytest.mark.parametrize(
     "malformation",
-    ["invalid_uuid", "uppercase_uuid", "negative_exit", "uppercase_hash", "missing_trace", "missing_file", "directory"],
+    [
+        "invalid_uuid",
+        "uppercase_uuid",
+        "negative_exit",
+        "uppercase_hash",
+        "wrong_hash_type",
+        "wrong_path_type",
+        "mutable_map_paths",
+        "missing_trace",
+        "missing_file",
+        "directory",
+    ],
 )
 def test_artifact_port_rejects_each_malformed_public_field(
     malformation: str,
@@ -1553,6 +1701,12 @@ def test_artifact_port_rejects_each_malformed_public_field(
         artifact = replace(artifact, exit_code=-1)
     elif malformation == "uppercase_hash":
         artifact = replace(artifact, engine_executable_sha256="A" * 64)
+    elif malformation == "wrong_hash_type":
+        artifact = replace(artifact, engine_executable_sha256=cast(Any, 7))
+    elif malformation == "wrong_path_type":
+        artifact = replace(artifact, stdout_path=cast(Any, str(tmp_path / "private.log")))
+    elif malformation == "mutable_map_paths":
+        artifact = replace(artifact, map_asset_paths=cast(Any, []))
     elif malformation == "missing_trace":
         artifact = replace(artifact, trace_path=None)
     elif malformation == "missing_file":
@@ -1574,6 +1728,7 @@ def test_artifact_port_rejects_each_malformed_public_field(
     with session_factory() as session:
         job = session.scalar(select(Job).where(Job.stage == "telemetry"))
         assert job is not None and job.error_code == "invalid_telemetry_artifact"
+        assert job.error_details_json["failure_envelope"]["type"] == "telemetry_artifact_failure"
         assert session.scalar(select(func.count()).select_from(TelemetryEvent)) == 0
 
 

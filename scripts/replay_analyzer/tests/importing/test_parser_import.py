@@ -199,6 +199,53 @@ def test_truncated_parser_prefix_is_observed_but_invalid_attempt_is_atomic(
         ) == 0
 
 
+def test_failed_parser_attempt_reuses_only_the_same_final_job_key(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
+) -> None:
+    """Catch a local parser-import failure duplicating history after final-job lease recovery."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    parsed = parse_replay(managed_path)
+    invalid_command = replace(parsed.commands[0], end_offset=parsed.commands[0].start_offset)
+    invalid = replace(parsed, commands=(invalid_command,), completion_status="complete")
+    importer = _importer(session_factory, settings, parser=lambda _path: invalid, uuid_start=11_000)
+
+    first = importer.import_replay(
+        replay_sha256,
+        parser_version="fixture-parser-crash-window",
+        idempotency_key="import_observations:1:stable-key",
+    )
+    replayed = importer.import_replay(
+        replay_sha256,
+        parser_version="fixture-parser-crash-window",
+        idempotency_key="import_observations:1:stable-key",
+    )
+    changed_key = importer.import_replay(
+        replay_sha256,
+        parser_version="fixture-parser-crash-window",
+        idempotency_key="import_observations:1:changed-key",
+    )
+
+    assert first.status == replayed.status == changed_key.status == "failed"
+    assert replayed.run_id == first.run_id and replayed.cache_hit is True
+    assert changed_key.run_id != first.run_id and changed_key.cache_hit is False
+    with session_factory() as session:
+        runs = list(
+            session.scalars(
+                select(ParserRun)
+                .where(ParserRun.parser_version == "fixture-parser-crash-window")
+                .order_by(ParserRun.id)
+            )
+        )
+        assert [run.run_id for run in runs] == [first.run_id, changed_key.run_id]
+        assert [run.error_json["import_observations_idempotency_key"] for run in runs] == [
+            "import_observations:1:stable-key",
+            "import_observations:1:changed-key",
+        ]
+        assert session.scalar(
+            select(func.count(EvidenceItem.id)).where(EvidenceItem.parser_run_id.in_([run.id for run in runs]))
+        ) == 0
+
+
 def test_seeded_hundred_command_projection_is_sorted_canonical_and_rolls_back_bad_boundary(
     session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
 ) -> None:

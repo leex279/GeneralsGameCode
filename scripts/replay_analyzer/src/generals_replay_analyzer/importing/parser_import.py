@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..binary import Coord3D, ICoord2D, IRegion2D
@@ -149,11 +149,19 @@ class ParserObservationImporter:
         self._clock = clock
         self._uuid_factory = uuid_factory
 
-    def import_replay(self, replay_sha256: str, *, parser_version: str | None = None) -> ParserImportResult:
+    def import_replay(
+        self,
+        replay_sha256: str,
+        *,
+        parser_version: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> ParserImportResult:
         sha256 = _require_sha256(replay_sha256)
         version = parser_version or self._parser_version
         if not version:
             raise ValueError("parser version must be nonempty")
+        if idempotency_key is not None and not idempotency_key:
+            raise ValueError("import observation idempotency key must be nonempty")
         cached = self._successful_run(sha256, version)
         if cached is not None:
             return ParserImportResult(
@@ -163,6 +171,10 @@ class ParserObservationImporter:
                 self._command_count(cached.id),
                 True,
             )
+        if idempotency_key is not None:
+            failed_cached = self._failed_import_cache(sha256, version, idempotency_key)
+            if failed_cached is not None:
+                return failed_cached
         run_id = str(self._uuid_factory())
         now = _utc(self._clock())
         replay_id = self._create_attempt(sha256, version, run_id, now)
@@ -177,7 +189,7 @@ class ParserObservationImporter:
             code = "parser_unsupported" if isinstance(error, UnsupportedArgumentTypeError) else "parser_failure"
             if isinstance(error, ValueError) and "unsupported" in str(error).lower():
                 code = "parser_unsupported"
-            self._commit_failure(replay_id, run_id, error, code, now)
+            self._commit_failure(replay_id, run_id, error, code, now, idempotency_key)
             return ParserImportResult(run_id, "failed", "unsupported" if code == "parser_unsupported" else "failed", 0, False)
         return ParserImportResult(run_id, "succeeded", parsed.completion_status, len(parsed.commands), False)
 
@@ -187,16 +199,14 @@ class ParserObservationImporter:
         replay_sha256: str,
         *,
         parser_version: str,
+        idempotency_key: str,
         error_code: str,
         error_message: str,
         error_details: Mapping[str, object],
     ) -> ParserImportResult:
         sha256 = _require_sha256(replay_sha256)
-        if not parser_version or not error_code or not error_message:
+        if not parser_version or not idempotency_key or not error_code or not error_message:
             raise ValueError("failed parser dependency metadata is incomplete")
-        run_id = str(self._uuid_factory())
-        now = _utc(self._clock())
-        replay_id = self._create_attempt(sha256, parser_version, run_id, now)
         unsupported = "unsupported" in error_code
         issue_code = "parser_unsupported" if unsupported else "parser_failure"
         error_json = json.loads(
@@ -206,9 +216,22 @@ class ParserObservationImporter:
                     "code": error_code,
                     "message": error_message,
                     "details": dict(error_details),
+                    "import_observations_idempotency_key": idempotency_key,
                 }
             )
         )
+        cached = self._failed_dependency_cache(
+            sha256,
+            parser_version,
+            error_json,
+            issue_code,
+            error_code,
+        )
+        if cached is not None:
+            return cached
+        run_id = str(self._uuid_factory())
+        now = _utc(self._clock())
+        replay_id = self._create_attempt(sha256, parser_version, run_id, now)
         with self._session_factory.begin() as session:
             replay = session.get(Replay, replay_id)
             run = session.scalar(select(ParserRun).where(ParserRun.run_id == run_id))
@@ -239,6 +262,156 @@ class ParserObservationImporter:
             0,
             False,
         )
+
+    def _failed_dependency_cache(
+        self,
+        sha256: str,
+        parser_version: str,
+        error_json: object,
+        issue_code: str,
+        error_code: str,
+    ) -> ParserImportResult | None:
+        expected_completion = "unsupported" if issue_code == "parser_unsupported" else "failed"
+        expected_error = canonical_json(error_json)
+        with self._session_factory() as session:
+            runs = session.scalars(
+                select(ParserRun)
+                .join(Replay, Replay.id == ParserRun.replay_id)
+                .where(
+                    Replay.sha256 == sha256,
+                    ParserRun.parser_version == parser_version,
+                    ParserRun.schema_version == self._schema_version,
+                    ParserRun.input_sha256 == sha256,
+                    ParserRun.status == "failed",
+                )
+                .order_by(ParserRun.id)
+            )
+            for run in runs:
+                if (
+                    run.completion_status != expected_completion
+                    or run.result_sha256 is not None
+                    or run.command_stream_offset is not None
+                    or run.end_offset is not None
+                    or run.warnings_json != []
+                    or run.completed_at is None
+                    or canonical_json(run.error_json) != expected_error
+                ):
+                    continue
+                child_count = sum(
+                    int(session.scalar(statement) or 0)
+                    for statement in (
+                        select(func.count()).select_from(ReplayPlayer).where(ReplayPlayer.parser_run_id == run.id),
+                        select(func.count()).select_from(ReplayCommand).where(ReplayCommand.parser_run_id == run.id),
+                        select(func.count()).select_from(EvidenceItem).where(EvidenceItem.parser_run_id == run.id),
+                    )
+                )
+                if child_count != 0:
+                    continue
+                issues = list(
+                    session.scalars(
+                        select(ReplayQualityIssue).where(ReplayQualityIssue.parser_run_id == run.id)
+                    )
+                )
+                if len(issues) != 1:
+                    continue
+                issue = issues[0]
+                if (
+                    issue.stage != "import_observations"
+                    or issue.issue_code != issue_code
+                    or issue.severity != "error"
+                    or issue.details_json != {"error_code": error_code}
+                    or issue.resolved_at is not None
+                ):
+                    continue
+                # TheSuperHackers @bugfix Leex 22/08/2026 Reuse only the exact childless failed attempt for one final job key. (#TBD)
+                return ParserImportResult(
+                    run.run_id,
+                    "failed",
+                    expected_completion,
+                    0,
+                    True,
+                )
+        return None
+
+    def _failed_import_cache(
+        self,
+        sha256: str,
+        parser_version: str,
+        idempotency_key: str,
+    ) -> ParserImportResult | None:
+        with self._session_factory() as session:
+            runs = session.scalars(
+                select(ParserRun)
+                .join(Replay, Replay.id == ParserRun.replay_id)
+                .where(
+                    Replay.sha256 == sha256,
+                    ParserRun.parser_version == parser_version,
+                    ParserRun.schema_version == self._schema_version,
+                    ParserRun.input_sha256 == sha256,
+                    ParserRun.status == "failed",
+                )
+                .order_by(ParserRun.id)
+            )
+            for run in runs:
+                error_json = run.error_json
+                if not isinstance(error_json, dict) or set(error_json) != {
+                    "code",
+                    "import_observations_idempotency_key",
+                    "type",
+                }:
+                    continue
+                stable_code = error_json.get("code")
+                error_type = error_json.get("type")
+                if (
+                    error_json.get("import_observations_idempotency_key") != idempotency_key
+                    or not isinstance(stable_code, str)
+                    or not stable_code
+                    or not isinstance(error_type, str)
+                    or not error_type
+                    or run.completion_status not in {"failed", "unsupported"}
+                    or run.result_sha256 is not None
+                    or run.command_stream_offset is not None
+                    or run.end_offset is not None
+                    or run.warnings_json != []
+                    or run.completed_at is None
+                ):
+                    continue
+                child_count = sum(
+                    int(session.scalar(statement) or 0)
+                    for statement in (
+                        select(func.count()).select_from(ReplayPlayer).where(ReplayPlayer.parser_run_id == run.id),
+                        select(func.count()).select_from(ReplayCommand).where(ReplayCommand.parser_run_id == run.id),
+                        select(func.count()).select_from(EvidenceItem).where(EvidenceItem.parser_run_id == run.id),
+                    )
+                )
+                if child_count != 0:
+                    continue
+                issue_code = "parser_unsupported" if run.completion_status == "unsupported" else "parser_failure"
+                issues = list(
+                    session.scalars(
+                        select(ReplayQualityIssue).where(ReplayQualityIssue.parser_run_id == run.id)
+                    )
+                )
+                if len(issues) != 1:
+                    continue
+                issue = issues[0]
+                if (
+                    issue.stage != "import_observations"
+                    or issue.issue_code != issue_code
+                    or issue.severity != "error"
+                    or issue.details_json != {"error_code": stable_code}
+                    or issue.resolved_at is not None
+                ):
+                    continue
+                # TheSuperHackers @bugfix Leex 22/08/2026 Reuse a local failed parser shell only for its final job key. (#TBD)
+                return ParserImportResult(
+                    run.run_id,
+                    "failed",
+                    run.completion_status,
+                    0,
+                    True,
+                )
+        return None
 
     def _successful_run(self, sha256: str, parser_version: str) -> ParserRun | None:
         with self._session_factory() as session:
@@ -417,6 +590,7 @@ class ParserObservationImporter:
         error: Exception,
         issue_code: str,
         now: datetime,
+        idempotency_key: str | None,
     ) -> None:
         with self._session_factory.begin() as session:
             replay = session.get(Replay, replay_id)
@@ -426,7 +600,10 @@ class ParserObservationImporter:
             stable_code = error.code if isinstance(error, ReplayParseError) else issue_code
             run.status = "failed"
             run.completion_status = "unsupported" if issue_code == "parser_unsupported" else "failed"
-            run.error_json = {"type": type(error).__name__, "code": stable_code}
+            error_json: dict[str, object] = {"type": type(error).__name__, "code": stable_code}
+            if idempotency_key is not None:
+                error_json["import_observations_idempotency_key"] = idempotency_key
+            run.error_json = error_json
             run.completed_at = now
             self._add_issue(session, replay, run, issue_code, "error", {"error_code": stable_code}, now)
             if issue_code == "parser_unsupported":

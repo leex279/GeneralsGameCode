@@ -213,6 +213,10 @@ class _ArtifactDescriptor:
     logical_path: str
 
 
+_TELEMETRY_FAILURE_ENVELOPE_TYPE = "telemetry_artifact_failure"
+_TELEMETRY_FAILURE_ENVELOPE_VERSION = 1
+
+
 _ResultT = TypeVar("_ResultT")
 
 
@@ -375,7 +379,11 @@ class ImportService:
             tolerated_failures = self._terminal_failure_stages.get(claimed.stage, frozenset())
             if any(
                 dependency.status != "succeeded"
-                and not (dependency.status == "failed" and dependency.stage in tolerated_failures)
+                and not (
+                    dependency.status == "failed"
+                    and not dependency.retryable
+                    and dependency.stage in tolerated_failures
+                )
                 for dependency in dependencies
             ):
                 raise StageFailure(
@@ -795,7 +803,11 @@ class ImportService:
                 )
                 if not dependencies or any(
                     dependency.status != "succeeded"
-                    and not (dependency.status == "failed" and dependency.stage in tolerated_failures)
+                    and not (
+                        dependency.status == "failed"
+                        and not dependency.retryable
+                        and dependency.stage in tolerated_failures
+                    )
                     for dependency in dependencies
                 ):
                     continue
@@ -965,22 +977,43 @@ class ImportService:
             ) from error
         try:
             paths = _validated_artifact_paths(artifact)
-        except ValueError as error:
-            raise StageFailure("invalid_telemetry_artifact", str(error), retryable=False) from error
-
-        stored_artifacts: list[tuple[_ArtifactDescriptor, StoredContent]] = []
-        try:
-            for descriptor in paths:
-                stored_artifacts.append((descriptor, self._artifact_store.store_file(descriptor.path)))
-        except ContentStorageError as error:
+        except Exception as error:
             raise StageFailure(
-                "artifact_copy_failed",
-                _redacted_diagnostic_message(str(error), replay_input.path, paths),
-                retryable=True,
+                "invalid_telemetry_artifact",
+                "telemetry artifact validation failed",
+                retryable=False,
+                details=_telemetry_failure_details(
+                    artifact,
+                    replay_input.path,
+                    failure_code="invalid_telemetry_artifact",
+                    failure_message="telemetry artifact validation failed",
+                    quality_issue_code="invalid_trace",
+                    descriptors=(),
+                    manifest=(),
+                ),
             ) from error
+
         manifest: list[dict[str, Any]] = []
-        with self._session_factory.begin() as session:
-            for descriptor, stored in stored_artifacts:
+        for descriptor in paths:
+            try:
+                stored = self._artifact_store.store_file(descriptor.path)
+            except ContentStorageError as error:
+                raise StageFailure(
+                    "artifact_copy_failed",
+                    "telemetry artifact copy failed",
+                    retryable=True,
+                    details=_telemetry_failure_details(
+                        artifact,
+                        replay_input.path,
+                        failure_code="artifact_copy_failed",
+                        failure_message="telemetry artifact copy failed",
+                        quality_issue_code="invalid_trace",
+                        descriptors=tuple(paths),
+                        manifest=tuple(manifest),
+                    ),
+                ) from error
+            # TheSuperHackers @bugfix Leex 22/08/2026 Retain each verified artifact before a later bundle copy can fail. (#TBD)
+            with self._session_factory.begin() as session:
                 asset = self._register_asset(session, stored, descriptor.kind)
                 manifest.append(
                     {
@@ -991,34 +1024,12 @@ class ImportService:
                         "size_bytes": stored.size,
                     }
                 )
-        manifest.sort(
-            key=lambda item: (
-                cast(str, item["logical_path"]).casefold(),
-                cast(str, item["kind"]),
-                cast(str, item["sha256"]),
-            )
+        output = _telemetry_attempt_facts(
+            artifact,
+            replay_input.path,
+            tuple(paths),
+            tuple(manifest),
         )
-        output: dict[str, Any] = {
-            "run_id": artifact.run_id,
-            "runner_status": artifact.runner_status,
-            "replay_quality": artifact.replay_quality,
-            "strategy_analysis_scope": artifact.strategy_analysis_scope,
-            "exit_code": artifact.exit_code,
-            "engine_build": artifact.engine_build,
-            "engine_executable_sha256": artifact.engine_executable_sha256,
-            "diagnostics": [
-                {
-                    "code": diagnostic.code,
-                    "message": _redacted_diagnostic_message(
-                        diagnostic.message,
-                        replay_input.path,
-                        paths,
-                    ),
-                }
-                for diagnostic in artifact.diagnostics
-            ],
-            "artifacts": manifest,
-        }
         if artifact.runner_status != "success":
             retryable = artifact.runner_status in {"timeout", "launch_failure", "interrupted"}
             raise StageFailure("exporter_failure", "telemetry acquisition did not succeed", retryable, output)
@@ -1198,7 +1209,7 @@ def _dependency_output(row: Job) -> StageDependencyOutput:
             output=_freeze_mapping(output),
             status="succeeded",
         )
-    if row.status == "failed":
+    if row.status == "failed" and not row.retryable:
         code, message, details = _dependency_failure_evidence(row)
         return StageDependencyOutput(
             job_public_id=row.public_id,
@@ -1325,7 +1336,7 @@ def _dependency_identity(row: Job) -> dict[str, Any]:
             raise TypeError("succeeded dependency has invalid canonical output")
         identity["output"] = _semantic_identity_json(output)
         return identity
-    if row.status == "failed":
+    if row.status == "failed" and not row.retryable:
         code, message, details = _dependency_failure_evidence(row)
         identity["error"] = {
             "code": code,
@@ -1402,10 +1413,237 @@ def _validated_logical_path(logical_path: str, seen_casefolded: set[str]) -> str
     return logical_path
 
 
+def _safe_metadata_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value or "\x00" in value or not value.isprintable():
+        return None
+    return value
+
+
+def _safe_run_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return None
+    return value if str(parsed) == value else None
+
+
+def _safe_sha256(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, str)
+        and len(value) == 64
+        and value == value.lower()
+        and all(character in "0123456789abcdef" for character in value)
+    ):
+        return value
+    return None
+
+
+def _artifact_candidate_paths(artifact: TelemetryArtifact) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+
+    def append(value: object) -> None:
+        if isinstance(value, Path):
+            candidates.append(value)
+        elif isinstance(value, str) and value:
+            try:
+                candidates.append(Path(value))
+            except (TypeError, ValueError):
+                return
+
+    for path_value in (
+        artifact.trace_path,
+        artifact.catalog_path,
+        artifact.outcome_path,
+        artifact.stdout_path,
+        artifact.stderr_path,
+    ):
+        append(path_value)
+    if isinstance(artifact.map_asset_paths, (list, tuple)):
+        for value in artifact.map_asset_paths:
+            append(value)
+    return tuple(candidates)
+
+
+def _redacted_artifact_message(
+    message: str,
+    replay_path: Path,
+    artifact: TelemetryArtifact,
+    descriptors: Iterable[_ArtifactDescriptor],
+) -> str:
+    replacements: dict[str, str] = {}
+
+    def register(path: Path, replacement: str) -> None:
+        replacements.setdefault(str(path), replacement)
+        replacements.setdefault(path.as_posix(), replacement)
+
+    register(replay_path, "[replay]")
+    register(replay_path.parent, "[replay-root]")
+    for path in _artifact_candidate_paths(artifact):
+        register(path, "[artifact]")
+        register(path.parent, "[artifact-root]")
+    for descriptor in descriptors:
+        register(descriptor.path, "[artifact]")
+        register(descriptor.path.parent, "[artifact-root]")
+    redacted = message
+    for source_text, replacement in sorted(
+        replacements.items(),
+        key=lambda item: (-len(item[0]), item[0].casefold(), item[1]),
+    ):
+        if source_text:
+            redacted = re.sub(re.escape(source_text), replacement, redacted, flags=re.IGNORECASE)
+    return _sanitize_failure_text(redacted)
+
+
+def _sorted_artifact_manifest(
+    manifest: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    values = [dict(item) for item in manifest]
+    values.sort(
+        key=lambda item: (
+            cast(str, item["logical_path"]).casefold(),
+            cast(str, item["kind"]),
+            cast(str, item["sha256"]),
+        )
+    )
+    return values
+
+
+def _telemetry_attempt_facts(
+    artifact: TelemetryArtifact,
+    replay_path: Path,
+    descriptors: tuple[_ArtifactDescriptor, ...],
+    manifest: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    """Return only validated scalar facts and already registered managed descriptors."""
+    facts: dict[str, Any] = {"artifacts": _sorted_artifact_manifest(manifest)}
+    run_id = _safe_run_id(artifact.run_id)
+    if run_id is not None:
+        facts["run_id"] = run_id
+    for name, value in (
+        ("runner_status", artifact.runner_status),
+        ("replay_quality", artifact.replay_quality),
+        ("strategy_analysis_scope", artifact.strategy_analysis_scope),
+    ):
+        safe = _safe_metadata_text(value)
+        if safe is not None:
+            facts[name] = _redacted_artifact_message(safe, replay_path, artifact, descriptors)
+    if artifact.exit_code is None or (
+        isinstance(artifact.exit_code, int)
+        and not isinstance(artifact.exit_code, bool)
+        and artifact.exit_code >= 0
+    ):
+        facts["exit_code"] = artifact.exit_code
+    if artifact.engine_build is None:
+        facts["engine_build"] = None
+    else:
+        engine_build = _safe_metadata_text(artifact.engine_build)
+        if engine_build is not None:
+            facts["engine_build"] = _redacted_artifact_message(
+                engine_build,
+                replay_path,
+                artifact,
+                descriptors,
+            )
+    if artifact.engine_executable_sha256 is None:
+        facts["engine_executable_sha256"] = None
+    else:
+        engine_hash = _safe_sha256(artifact.engine_executable_sha256)
+        if engine_hash is not None:
+            facts["engine_executable_sha256"] = engine_hash
+    diagnostics: list[dict[str, str]] = []
+    if isinstance(artifact.diagnostics, tuple):
+        for diagnostic in artifact.diagnostics:
+            if not isinstance(diagnostic, AcquisitionDiagnostic):
+                continue
+            code = _safe_metadata_text(diagnostic.code)
+            message = _safe_metadata_text(diagnostic.message)
+            if code is None or message is None:
+                continue
+            diagnostics.append(
+                {
+                    "code": _redacted_artifact_message(
+                        code,
+                        replay_path,
+                        artifact,
+                        descriptors,
+                    ),
+                    "message": _redacted_artifact_message(
+                        message,
+                        replay_path,
+                        artifact,
+                        descriptors,
+                    ),
+                }
+            )
+    facts["diagnostics"] = diagnostics
+    return _canonical_output(facts)
+
+
+def _telemetry_failure_details(
+    artifact: TelemetryArtifact,
+    replay_path: Path,
+    *,
+    failure_code: str,
+    failure_message: str,
+    quality_issue_code: str,
+    descriptors: tuple[_ArtifactDescriptor, ...],
+    manifest: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    # TheSuperHackers @bugfix Leex 22/08/2026 Carry a typed path-free attempt across post-acquisition failures. (#TBD)
+    return _canonical_output(
+        {
+            "failure_envelope": {
+                "type": _TELEMETRY_FAILURE_ENVELOPE_TYPE,
+                "version": _TELEMETRY_FAILURE_ENVELOPE_VERSION,
+                "failure_code": failure_code,
+                "failure_message": failure_message,
+                "quality_issue_code": quality_issue_code,
+                "attempt": _telemetry_attempt_facts(
+                    artifact,
+                    replay_path,
+                    descriptors,
+                    manifest,
+                ),
+            }
+        }
+    )
+
+
 def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[_ArtifactDescriptor]:
+    if not isinstance(artifact.map_asset_paths, tuple) or any(
+        not isinstance(path, Path) for path in artifact.map_asset_paths
+    ):
+        raise ValueError("telemetry map artifact paths must be an immutable path tuple")
+    if not isinstance(artifact.diagnostics, tuple) or any(
+        not isinstance(diagnostic, AcquisitionDiagnostic)
+        for diagnostic in artifact.diagnostics
+    ):
+        raise ValueError("telemetry diagnostics must be an immutable typed tuple")
+    for path_value in (
+        artifact.trace_path,
+        artifact.catalog_path,
+        artifact.outcome_path,
+        artifact.stdout_path,
+        artifact.stderr_path,
+    ):
+        if path_value is not None and not isinstance(path_value, Path):
+            raise ValueError("telemetry artifact paths must be pathlib paths")
+    for metadata_value in (
+        artifact.runner_status,
+        artifact.replay_quality,
+        artifact.strategy_analysis_scope,
+    ):
+        if _safe_metadata_text(metadata_value) is None:
+            raise ValueError("telemetry status, quality, and scope must be safe nonempty text")
+    if artifact.engine_build is not None and _safe_metadata_text(artifact.engine_build) is None:
+        raise ValueError("telemetry engine build must be safe nonempty text")
     try:
         parsed_uuid = UUID(artifact.run_id)
-    except (ValueError, AttributeError) as error:
+    except (TypeError, ValueError, AttributeError) as error:
         raise ValueError("telemetry run_id must be a lowercase hyphenated UUID") from error
     if str(parsed_uuid) != artifact.run_id:
         raise ValueError("telemetry run_id must be a lowercase hyphenated UUID")
@@ -1415,7 +1653,8 @@ def _validated_artifact_paths(artifact: TelemetryArtifact) -> list[_ArtifactDesc
         raise ValueError("telemetry exit_code must be a nonnegative integer")
     engine_hash = artifact.engine_executable_sha256
     if engine_hash is not None and (
-        len(engine_hash) != 64
+        not isinstance(engine_hash, str)
+        or len(engine_hash) != 64
         or engine_hash != engine_hash.lower()
         or any(character not in "0123456789abcdef" for character in engine_hash)
     ):
