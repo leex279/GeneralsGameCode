@@ -26,7 +26,17 @@ from ..ingress_contract import ReplayIngressIdentity
 from ..parser import ParsedReplay
 from ..provenance import SourceProvenance, extract_source_provenance
 from ..storage import ContentAddressedStore, ContentStorageError, StoredContent
-from .job_contracts import StageExecutionOutcomeDTO, StageExecutorPort, WorkerControlPort
+from .job_contracts import (
+    DEFAULT_JOB_CLAIM_SELECTOR,
+    JobClaimSelectorDTO,
+    JobProgressDTO,
+    OwnedExecutionSettlementDTO,
+    StageExecutionOutcomeDTO,
+    StageExecutorPort,
+    WorkerCancellationDTO,
+    WorkerControlPort,
+    WorkerLeaseDTO,
+)
 from .job_lifecycle import JobLifecycleService
 from .jobs import ClaimedJob, JobCoordinator, JobSnapshot, JobSpec, JobStateError, StageFailure
 from .stages import (
@@ -267,6 +277,69 @@ class ImportStageExecutor(StageExecutorPort):
         return StageExecutionOutcomeDTO("succeeded", result_public_id, None, None, False)
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Materialize dependency-bound observation identities before external claims. (#TBD)
+class _MaterializingWorkerControlAdapter:
+    """Add the import materialization seam while delegating the accepted worker contract."""
+
+    def __init__(self, materialize: Callable[[], None], lifecycle: JobLifecycleService) -> None:
+        self._materialize = materialize
+        self._lifecycle = lifecycle
+
+    def claim_next(
+        self,
+        worker_public_id: str,
+        lease_seconds: int,
+        selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR,
+    ) -> WorkerLeaseDTO | None:
+        self._materialize()
+        return self._lifecycle.claim_next(worker_public_id, lease_seconds, selector)
+
+    def registered_stages(self) -> tuple[str, ...]:
+        return self._lifecycle.registered_stages()
+
+    def heartbeat(
+        self, worker_public_id: str, claim: WorkerLeaseDTO, lease_seconds: int
+    ) -> WorkerLeaseDTO:
+        return self._lifecycle.heartbeat(worker_public_id, claim, lease_seconds)
+
+    def cancellation(self, worker_public_id: str, claim: WorkerLeaseDTO) -> WorkerCancellationDTO:
+        return self._lifecycle.cancellation(worker_public_id, claim)
+
+    def report_progress(
+        self, worker_public_id: str, claim: WorkerLeaseDTO, progress: JobProgressDTO
+    ) -> None:
+        self._lifecycle.report_progress(worker_public_id, claim, progress)
+
+    def settle_success(
+        self, worker_public_id: str, claim: WorkerLeaseDTO, result_public_id: str
+    ) -> None:
+        self._lifecycle.settle_success(worker_public_id, claim, result_public_id)
+
+    def settle_failure(
+        self,
+        worker_public_id: str,
+        claim: WorkerLeaseDTO,
+        outcome: StageExecutionOutcomeDTO,
+    ) -> None:
+        self._lifecycle.settle_failure(worker_public_id, claim, outcome)
+
+    def settle_cancelled(
+        self,
+        worker_public_id: str,
+        claim: WorkerLeaseDTO,
+        settlement: OwnedExecutionSettlementDTO,
+    ) -> None:
+        self._lifecycle.settle_cancelled(worker_public_id, claim, settlement)
+
+    def release_after_shutdown(
+        self,
+        worker_public_id: str,
+        claim: WorkerLeaseDTO,
+        settlement: OwnedExecutionSettlementDTO,
+    ) -> None:
+        self._lifecycle.release_after_shutdown(worker_public_id, claim, settlement)
+
+
 @dataclass(frozen=True)
 class _ReplayInput:
     path: Path
@@ -378,6 +451,12 @@ class ImportService:
 
     def worker_control_port(self) -> WorkerControlPort:
         """Return the versioned lifecycle boundary used by an external worker."""
+        return _MaterializingWorkerControlAdapter(
+            self._materialize_ready_observation_jobs,
+            self._worker_lifecycle(),
+        )
+
+    def _worker_lifecycle(self) -> JobLifecycleService:
         return JobLifecycleService(
             self._session_factory,
             registered_stages=self._handlers,
@@ -390,8 +469,7 @@ class ImportService:
 
     def stage_executor_port(self) -> StageExecutorPort:
         """Return the executor that resolves private inputs and dependencies inside Analytics."""
-        lifecycle = cast(JobLifecycleService, self.worker_control_port())
-        return ImportStageExecutor(self, lifecycle)
+        return ImportStageExecutor(self, self._worker_lifecycle())
 
     def submit(self, request: ImportRequest) -> ImportSubmissionDTO:
         path = _absolute_without_following(request.path)
