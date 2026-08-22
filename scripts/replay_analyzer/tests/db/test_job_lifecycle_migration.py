@@ -167,6 +167,68 @@ def test_upgrade_preserves_legacy_jobs_edges_and_recovers_insecure_running_rows(
         engine.dispose()
 
 
+def test_upgrade_normalizes_every_legacy_state_allowed_by_0003_before_stricter_checks(
+    database_path: Path,
+) -> None:
+    """Catch a 0004 rebuild rejecting accepted 0003 rows or leaving exhausted pending work claimable."""
+    upgrade_database(database_path, "0003_feature_partial_quality")
+    engine = create_database_engine(database_path)
+    try:
+        with engine.begin() as connection:
+            fixtures = (
+                ("00000000-0000-4000-8000-000000000401", "pending", 0, 0, "2026-08-22 12:09:00", 1),
+                ("00000000-0000-4000-8000-000000000402", "succeeded", 1, 1, None, 1),
+                ("00000000-0000-4000-8000-000000000403", "failed", 1, 2, None, 0),
+                ("00000000-0000-4000-8000-000000000404", "pending", 2, 2, None, 1),
+                ("00000000-0000-4000-8000-000000000405", "running", 1, 3, "2026-08-22 12:09:00", 1),
+            )
+            for offset, (public_id, status, attempts, maximum, completed, retryable) in enumerate(fixtures):
+                running = status == "running"
+                connection.execute(
+                    text(
+                        "INSERT INTO jobs (public_id, stage, component_version, idempotency_key, status, priority, "
+                        "attempt_count, max_attempts, available_at, lease_owner, lease_expires_at, started_at, "
+                        "completed_at, input_json, retryable) VALUES (:public_id, 'parse', 'v1', :key, :status, 0, "
+                        ":attempts, :maximum, '2026-08-22 12:00:00', :owner, :expiry, '2026-08-22 12:01:00', "
+                        ":completed, '{}', :retryable)"
+                    ),
+                    {
+                        "public_id": public_id,
+                        "key": f"adversarial-{offset}",
+                        "status": status,
+                        "attempts": attempts,
+                        "maximum": maximum,
+                        "owner": "legacy-worker" if running else None,
+                        "expiry": "2026-08-22 12:10:00" if running else None,
+                        "completed": completed,
+                        "retryable": retryable,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT public_id, status, attempt_count, max_attempts, completed_at, retryable, error_code "
+                    "FROM jobs ORDER BY public_id"
+                )
+            ).all()
+            assert rows[0][1:] == ("pending", 0, 1, None, 1, None)
+            assert rows[1][1] == "succeeded" and rows[1][4] is not None and rows[1][5] == 0
+            assert rows[2][1] == "failed" and rows[2][4] is not None
+            assert rows[3][1:] == ("failed", 2, 2, rows[3][4], 0, "migration_exhausted_pending")
+            assert rows[3][4] is not None
+            assert rows[4][1] == "pending" and rows[4][4] is None
+            assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+            assert connection.execute(text("PRAGMA integrity_check")).scalar_one() == "ok"
+    finally:
+        engine.dispose()
+
+
 def test_new_checks_and_immutable_children_reject_invalid_or_mutated_rows(database_path: Path) -> None:
     """Catch broken lease/progress/cancellation invariants and mutable lifecycle evidence."""
     upgrade_database(database_path)
@@ -210,6 +272,42 @@ def test_new_checks_and_immutable_children_reject_invalid_or_mutated_rows(databa
                 )
             with pytest.raises(IntegrityError):
                 connection.execute(text("DELETE FROM job_stage_results WHERE id=:id"), {"id": result_id})
+            asset_id = int(
+                connection.execute(
+                    text(
+                        "INSERT INTO managed_assets (public_id, sha256, kind, relative_path, size_bytes, media_type, "
+                        "created_at) VALUES ('00000000-0000-4000-8000-000000000204', :sha, 'job_log_snapshot', "
+                        "'cache/logs/object', 1, 'text/plain', CURRENT_TIMESTAMP)"
+                    ),
+                    {"sha": "a" * 64},
+                ).lastrowid
+            )
+            event_id = int(
+                connection.execute(
+                    text(
+                        "INSERT INTO job_events (public_id, job_id, revision, event_kind, state, attempt_count, "
+                        "reason_code, occurred_at) VALUES ('00000000-0000-4000-8000-000000000205', :job, 0, "
+                        "'progress', 'pending', 0, NULL, CURRENT_TIMESTAMP)"
+                    ),
+                    {"job": job_id},
+                ).lastrowid
+            )
+            log_id = int(
+                connection.execute(
+                    text(
+                        "INSERT INTO job_log_snapshots (public_id, job_id, attempt_count, label, sequence, "
+                        "managed_asset_id, media_type, byte_count, redaction_version, created_at) VALUES "
+                        "('00000000-0000-4000-8000-000000000206', :job, 0, 'stdout', 0, :asset, 'text/plain', 1, "
+                        "'v1', CURRENT_TIMESTAMP)"
+                    ),
+                    {"job": job_id, "asset": asset_id},
+                ).lastrowid
+            )
+            for table, row_id in (("job_events", event_id), ("job_log_snapshots", log_id)):
+                with pytest.raises(IntegrityError):
+                    connection.execute(text(f"UPDATE {table} SET public_id=public_id WHERE id=:id"), {"id": row_id})
+                with pytest.raises(IntegrityError):
+                    connection.execute(text(f"DELETE FROM {table} WHERE id=:id"), {"id": row_id})
     finally:
         engine.dispose()
 

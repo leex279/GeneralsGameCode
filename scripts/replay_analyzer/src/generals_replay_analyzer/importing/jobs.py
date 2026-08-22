@@ -14,18 +14,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..db.models import Job, JobDependency, Replay
+from .job_contracts import JobLifecycleError
 
 
 class DependencyCycleError(ValueError):
     """A dependency edge would make the durable graph cyclic."""
 
 
-class JobStateError(ValueError):
-    """A requested transition is invalid for the durable job state."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
+JobStateError = JobLifecycleError
 
 
 @dataclass(frozen=True)
@@ -105,7 +101,7 @@ def _snapshot(session: Session, row: Job) -> JobSnapshot:
     )
 
 
-# TheSuperHackers @refactor Leex 22/08/2026 Keep Task 3 callers on the single secure lifecycle implementation. (#0)
+# TheSuperHackers @refactor Leex 22/08/2026 Keep Task 3 callers on the single secure lifecycle implementation. (#TBD)
 class JobCoordinator:
     """Retain the accepted Task 3 API while delegating all lifecycle transitions."""
 

@@ -201,6 +201,7 @@ class StageHandlerRegistration:
     terminal_dependency_policy: TerminalDependencyPolicy = TerminalDependencyPolicy()
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Execute private stage inputs behind the versioned worker boundary. (#TBD)
 class ImportStageExecutor(StageExecutorPort):
     """Execute one exact owned attempt without exposing its private job input or dependency output."""
 
@@ -345,7 +346,7 @@ class ImportService:
             terminal_failure_stages=self._terminal_failure_stages,
             clock=self._clock,
             log_store=self._artifact_store,
-            log_relative_root="job-logs",
+            log_data_root=self._settings.data_root,
             redaction_values=(str(self._settings.data_root), str(self._settings.database_path)),
         )
 

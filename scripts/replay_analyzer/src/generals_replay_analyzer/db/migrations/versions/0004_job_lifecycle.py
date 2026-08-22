@@ -257,7 +257,7 @@ def _create_children(connection: object) -> None:
         )
 
 
-# TheSuperHackers @feature Leex 22/08/2026 Add capability-owned leases and immutable lifecycle evidence. (#0)
+# TheSuperHackers @feature Leex 22/08/2026 Add capability-owned leases and immutable lifecycle evidence. (#TBD)
 def upgrade() -> None:
     connection = op.get_bind()
     edges = _drop_dependencies(connection)
@@ -268,17 +268,56 @@ def upgrade() -> None:
 	lease_execution_public_id, last_heartbeat_at, cancel_requested_at, cancel_requested_by, cancel_reason_code,
 	progress_completed, progress_total, progress_unit, progress_updated_at)
 SELECT replay_id, stage, component_version, idempotency_key,
-	CASE WHEN status = 'running' AND retryable = 1 AND attempt_count < max_attempts THEN 'pending'
-	     WHEN status = 'running' THEN 'failed' ELSE status END,
-	priority, attempt_count, max_attempts, available_at, NULL, NULL, started_at,
-	CASE WHEN status = 'running' AND NOT (retryable = 1 AND attempt_count < max_attempts)
-	     THEN COALESCE(completed_at, lease_expires_at, started_at, available_at) ELSE completed_at END,
+	CASE
+		WHEN status = 'running' AND retryable = 1
+		     AND attempt_count < CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END THEN 'pending'
+		WHEN status = 'running' THEN 'failed'
+		WHEN status = 'pending'
+		     AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END THEN 'failed'
+		ELSE status
+	END,
+	priority, attempt_count, CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END,
+	available_at, NULL, NULL, started_at,
+	CASE
+		WHEN status IN ('succeeded', 'failed') THEN COALESCE(completed_at, started_at, available_at)
+		WHEN status = 'running' AND NOT (
+			retryable = 1 AND attempt_count < CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		) THEN COALESCE(completed_at, lease_expires_at, started_at, available_at)
+		WHEN status = 'pending'
+		     AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		THEN COALESCE(completed_at, started_at, available_at)
+		ELSE NULL
+	END,
 	input_json, output_json,
-	CASE WHEN status = 'running' THEN 'migration_recovered_running' ELSE error_code END,
-	CASE WHEN status = 'running' THEN 'legacy running lease recovered without fabricating a capability' ELSE error_message END,
-	CASE WHEN status = 'running' THEN '{{}}' ELSE error_details_json END,
-	CASE WHEN status = 'running' AND retryable = 1 AND attempt_count < max_attempts THEN 1
-	     WHEN status = 'running' THEN 0 ELSE retryable END,
+	CASE
+		WHEN status = 'running' THEN 'migration_recovered_running'
+		WHEN status = 'pending'
+		     AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		THEN 'migration_exhausted_pending'
+		ELSE error_code
+	END,
+	CASE
+		WHEN status = 'running' THEN 'legacy running lease recovered without fabricating a capability'
+		WHEN status = 'pending'
+		     AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		THEN 'legacy pending job had no remaining attempt budget'
+		ELSE error_message
+	END,
+	CASE
+		WHEN status = 'running' OR (
+			status = 'pending' AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		) THEN '{{}}'
+		ELSE error_details_json
+	END,
+	CASE
+		WHEN status = 'succeeded' THEN 0
+		WHEN status = 'running' AND retryable = 1
+		     AND attempt_count < CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END THEN 1
+		WHEN status = 'running' OR (
+			status = 'pending' AND attempt_count >= CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END
+		) THEN 0
+		ELSE retryable
+	END,
 	id, public_id,
 	CASE
 		WHEN available_at <= COALESCE(started_at, available_at) AND available_at <= COALESCE(completed_at, available_at)

@@ -1014,7 +1014,7 @@ class JobDependency(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
-# TheSuperHackers @feature Leex 22/08/2026 Retain crash-safe stage output before lifecycle settlement. (#0)
+# TheSuperHackers @feature Leex 22/08/2026 Retain crash-safe stage output before lifecycle settlement. (#TBD)
 class JobStageResult(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
     __tablename__ = "job_stage_results"
     __table_args__ = (
