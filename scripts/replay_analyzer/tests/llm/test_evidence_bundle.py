@@ -257,7 +257,7 @@ def test_bundle_rejects_duplicate_claims_and_citations(public_ids: tuple[str, ..
     claim = _claim(public_ids[0])
     with pytest.raises(EvidenceBundleError, match="duplicate_claim"):
         _bundle(public_ids, (claim, claim))
-    with pytest.raises(EvidenceBundleError, match="duplicate_citation"):
+    with pytest.raises(EvidenceBundleError, match="conflicting_evidence"):
         _claim(public_ids[0], evidence_ids=(public_ids[0], public_ids[0]))
     with pytest.raises(EvidenceBundleError, match="duplicate_claim"):
         _bundle(
@@ -519,6 +519,49 @@ def test_feature_factory_rejects_self_authorized_invented_reference(public_ids: 
     )
     with pytest.raises(EvidenceBundleError, match="unauthorized_evidence"):
         EvidenceClaim.from_feature(feature, authorized_evidence=(invented,))
+
+
+def test_feature_factory_deduplicates_identical_ref_reused_across_roles(
+    public_ids: tuple[str, ...]
+) -> None:
+    ref = _observed_ref(public_ids[0])
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(feature, input_evidence=(ref,), supporting_evidence=(ref,))
+    claim = EvidenceClaim.from_feature(feature, authorized_evidence=(ref,))
+    assert claim.evidence_ids == (public_ids[0],)
+
+
+def test_feature_factory_rejects_conflicting_semantics_for_same_public_id(
+    public_ids: tuple[str, ...]
+) -> None:
+    observed = _observed_ref(public_ids[0], source_key="event:one")
+    conflicting = _observed_ref(public_ids[0], source_key="event:two")
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(
+        feature,
+        input_evidence=(observed,),
+        supporting_evidence=(conflicting,),
+    )
+    with pytest.raises(EvidenceBundleError, match="conflicting_evidence"):
+        EvidenceClaim.from_feature(
+            feature,
+            authorized_evidence=(observed, conflicting),
+        )
+
+
+@pytest.mark.parametrize(("unique_count", "accepted"), [(32, True), (33, False)])
+def test_citation_cap_applies_after_cross_role_deduplication(
+    public_ids: tuple[str, ...], unique_count: int, accepted: bool
+) -> None:
+    refs = tuple(_observed_ref(public_ids[index]) for index in range(unique_count))
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(feature, input_evidence=refs, supporting_evidence=refs)
+    if accepted:
+        claim = EvidenceClaim.from_feature(feature, authorized_evidence=refs)
+        assert len(claim.evidence_ids) == 32
+    else:
+        with pytest.raises(EvidenceBundleError, match="evidence_bundle_oversize"):
+            EvidenceClaim.from_feature(feature, authorized_evidence=refs)
 
 
 def test_feature_factory_reowns_forged_task6_value(public_ids: tuple[str, ...]) -> None:

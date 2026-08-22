@@ -154,17 +154,10 @@ def _authorize_refs(
 ) -> tuple[str, ...]:
     if type(refs) is not tuple or type(authorized) is not tuple or not refs:
         raise EvidenceBundleError("unauthorized_evidence")
-    if len(refs) > MAX_CITATIONS_PER_CLAIM or len(authorized) > MAX_CITATIONS_PER_CLAIM:
-        raise EvidenceBundleError("evidence_bundle_oversize")
     if any(type(ref) is not FeatureEvidenceRef for ref in refs + authorized):
         raise EvidenceBundleError("unauthorized_evidence")
-    if len({ref.public_id for ref in refs}) != len(refs):
-        raise EvidenceBundleError("duplicate_citation")
-    authorized_by_id = {ref.public_id: ref for ref in authorized}
-    if len(authorized_by_id) != len(authorized):
-        raise EvidenceBundleError("unauthorized_evidence")
-    seen: set[str] = set()
-    for ref in refs:
+
+    def validate_ref(ref: FeatureEvidenceRef) -> None:
         _public_id(ref.public_id, "evidence_id")
         allowed_kind = (
             ref.tier == "observed"
@@ -178,12 +171,29 @@ def _authorize_refs(
             or type(ref.schema_version) is not str
             or not ref.schema_version
             or ref.schema_version != ref.schema_version.strip()
-            or authorized_by_id.get(ref.public_id) != ref
-            or ref.public_id in seen
         ):
             raise EvidenceBundleError("unauthorized_evidence")
-        seen.add(ref.public_id)
-    return tuple(sorted(seen))
+
+    authorized_by_id: dict[str, FeatureEvidenceRef] = {}
+    for ref in authorized:
+        validate_ref(ref)
+        existing = authorized_by_id.get(ref.public_id)
+        if existing is not None and existing != ref:
+            raise EvidenceBundleError("conflicting_evidence")
+        authorized_by_id[ref.public_id] = ref
+
+    unique_refs: dict[str, FeatureEvidenceRef] = {}
+    for ref in refs:
+        validate_ref(ref)
+        existing = unique_refs.get(ref.public_id)
+        if existing is not None and existing != ref:
+            raise EvidenceBundleError("conflicting_evidence")
+        if authorized_by_id.get(ref.public_id) != ref:
+            raise EvidenceBundleError("unauthorized_evidence")
+        unique_refs[ref.public_id] = ref
+    if len(unique_refs) > MAX_CITATIONS_PER_CLAIM:
+        raise EvidenceBundleError("evidence_bundle_oversize")
+    return tuple(sorted(unique_refs))
 
 
 def _feature_quality(value: FeatureValue) -> tuple[EvidenceQuality, str | None]:
@@ -265,6 +275,8 @@ class EvidenceClaim:
         if type(feature) is not FeatureValue:
             raise EvidenceBundleError("invalid_source_dto")
         quality, reason = _feature_quality(feature)
+        if any(ref.tier != "observed" for ref in feature.input_evidence):
+            raise EvidenceBundleError("unauthorized_evidence")
         refs = feature.input_evidence + feature.supporting_evidence + feature.contradicting_evidence
         evidence_ids = _authorize_refs(refs, authorized_evidence)
         projection = {
@@ -287,6 +299,8 @@ class EvidenceClaim:
         if type(feature) is not FeatureValue:
             raise EvidenceBundleError("invalid_source_dto")
         quality, reason = _feature_quality(feature)
+        if any(ref.tier != "observed" for ref in feature.input_evidence):
+            raise EvidenceBundleError("unauthorized_evidence")
         refs = feature.input_evidence + feature.supporting_evidence + feature.contradicting_evidence
         evidence_ids = _authorize_refs(refs, authorized_evidence)
         projection = {

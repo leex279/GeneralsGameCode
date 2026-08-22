@@ -219,6 +219,27 @@ class OllamaProvider:
         if getattr(transport, "client_config", None) != self.client_config:
             raise ProviderError("transport_config_mismatch")
 
+    async def _exchange(
+        self,
+        method: str,
+        path: str,
+        payload: JSONValue | None,
+        cancellation: CancellationSignal | None,
+    ) -> JSONValue:
+        response = await self._transport.request(
+            method,
+            path,
+            payload,
+            client_config=self.client_config,
+            cancellation=cancellation,
+        )
+        if type(response) is not TransportResponse:
+            raise ProviderError("transport_config_mismatch")
+        try:
+            return await _decode_transport_response(response, self.client_config)
+        finally:
+            await response.aclose()
+
     async def _dispatch(
         self,
         method: str,
@@ -232,22 +253,9 @@ class OllamaProvider:
             if cancellation is not None and cancellation.is_set():
                 raise asyncio.CancelledError
             if cancellation is None:
-                response = await self._transport.request(
-                    method,
-                    path,
-                    payload,
-                    client_config=self.client_config,
-                    cancellation=None,
-                )
-                return await _decode_transport_response(response, self.client_config)
+                return await self._exchange(method, path, payload, None)
             request_task = asyncio.create_task(
-                self._transport.request(
-                    method,
-                    path,
-                    payload,
-                    client_config=self.client_config,
-                    cancellation=cancellation,
-                )
+                self._exchange(method, path, payload, cancellation)
             )
             cancellation_task = asyncio.create_task(cancellation.wait())
             try:
@@ -259,7 +267,7 @@ class OllamaProvider:
                     signalled = await cancellation_task
                     if signalled or cancellation.is_set():
                         raise asyncio.CancelledError
-                return await _decode_transport_response(await request_task, self.client_config)
+                return await request_task
             finally:
                 request_task.cancel()
                 cancellation_task.cancel()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias
 
@@ -79,7 +79,7 @@ class TransportHeaders:
 class TransportResponse:
     status_code: int
     headers: TransportHeaders
-    body: AsyncIterable[bytes]
+    body: TransportBody
     client_config: OllamaClientConfig
 
     def __post_init__(self) -> None:
@@ -87,8 +87,22 @@ class TransportResponse:
             raise ValueError("invalid transport status")
         if type(self.headers) is not TransportHeaders:
             raise ValueError("invalid transport headers")
+        if not callable(getattr(self.body, "__aiter__", None)) or not callable(
+            getattr(self.body, "aclose", None)
+        ):
+            raise ValueError("invalid transport body lifecycle")  # noqa: TRY004
         if type(self.client_config) is not OllamaClientConfig:
             raise ValueError("invalid transport client config")
+
+    async def aclose(self) -> None:
+        """Release the response stream for every terminal provider path."""
+        await self.body.aclose()
+
+
+class TransportBody(Protocol):
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class OllamaTransport(Protocol):

@@ -66,6 +66,29 @@ class FakeOllamaTransport:
             raise
 
 
+class TrackedBody:
+    def __init__(self, *chunks: object, release: asyncio.Event | None = None) -> None:
+        self._chunks = chunks
+        self.release = release
+        self.entered = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.close_calls = 0
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[bytes]:
+        self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
+        for chunk in self._chunks:
+            yield cast(bytes, chunk)
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        self.closed.set()
+
+
 async def _chunks(*chunks: bytes) -> AsyncIterator[bytes]:
     for chunk in chunks:
         yield chunk
@@ -90,6 +113,26 @@ def _raw_response(
         _chunks(body),
         config or OllamaClientConfig("http://127.0.0.1:11434"),
     )
+
+
+def _tracked_response(
+    body: bytes,
+    *,
+    status: int = 200,
+    content_length: int | None = None,
+    release: asyncio.Event | None = None,
+) -> tuple[TransportResponse, TrackedBody]:
+    stream = TrackedBody(body, release=release)
+    response = TransportResponse(
+        status,
+        TransportHeaders(
+            "application/json",
+            len(body) if content_length is None else content_length,
+        ),
+        stream,
+        OllamaClientConfig("http://127.0.0.1:11434"),
+    )
+    return response, stream
 
 
 def _request(public_ids: tuple[str, ...]) -> StructuredRequest:
@@ -282,6 +325,48 @@ async def test_invalid_or_failing_stream_chunks_are_sanitized(public_ids: tuple[
 
 
 @pytest.mark.anyio
+async def test_every_response_lifecycle_closes_exactly_once_on_all_exit_paths(
+    public_ids: tuple[str, ...]
+) -> None:
+    config = OllamaClientConfig("http://127.0.0.1:11434")
+    cases = (
+        (500, TransportHeaders("application/json", 2), TrackedBody(b"{}"), "http_status_error"),
+        (
+            200,
+            TransportHeaders("application/json", 262145),
+            TrackedBody(b""),
+            "response_oversize",
+        ),
+        (
+            200,
+            TransportHeaders("application/json", None),
+            TrackedBody(b"x" * 262145),
+            "response_oversize",
+        ),
+        (200, TransportHeaders("application/json", 1), TrackedBody(b"\xff"), "response_utf8_invalid"),
+        (200, TransportHeaders("application/json", 1), TrackedBody(b"{"), "response_json_invalid"),
+    )
+    for status, headers, body, code in cases:
+        transport = FakeOllamaTransport([TransportResponse(status, headers, body, config)])
+        with pytest.raises(ProviderError) as caught:
+            await OllamaProvider(
+                "http://127.0.0.1:11434", "qwen3.6:27b", transport
+            ).generate_structured(_request(public_ids), None)
+        assert caught.value.code == code
+        assert body.close_calls == 1
+        assert body.closed.is_set()
+
+    tags_response, tags_body = _tracked_response(json.dumps(_tags()).encode())
+    chat_response, chat_body = _tracked_response(json.dumps(_chat("{\"closed\":true}")).encode())
+    success_transport = FakeOllamaTransport([tags_response, chat_response])
+    result = await OllamaProvider(
+        "http://127.0.0.1:11434", "qwen3.6:27b", success_transport
+    ).generate_structured(_request(public_ids), None)
+    assert result.response_bytes == b'{"closed":true}'
+    assert (tags_body.close_calls, chat_body.close_calls) == (1, 1)
+
+
+@pytest.mark.anyio
 async def test_location_header_is_rejected_even_on_success(public_ids: tuple[str, ...]) -> None:
     response = _raw_response(b"{}", location="http://remote.invalid")
     transport = FakeOllamaTransport([response])
@@ -307,6 +392,12 @@ async def test_location_header_is_rejected_even_on_success(public_ids: tuple[str
             200,
             cast(TransportHeaders, object()),
             _chunks(b"{}"),
+            OllamaClientConfig("http://127.0.0.1:11434"),
+        ),
+        lambda: TransportResponse(
+            200,
+            TransportHeaders("application/json", 2),
+            cast(TrackedBody, object()),
             OllamaClientConfig("http://127.0.0.1:11434"),
         ),
         lambda: TransportResponse(
@@ -485,6 +576,26 @@ async def test_in_flight_cancellation_cancels_transport_await(public_ids: tuple[
         await task
     assert transport.cancelled is True
     assert len(transport.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_headers_cancels_body_read_and_closes_response(
+    public_ids: tuple[str, ...]
+) -> None:
+    cancellation = asyncio.Event()
+    release = asyncio.Event()
+    response, body = _tracked_response(json.dumps(_tags()).encode(), release=release)
+    transport = FakeOllamaTransport([response])
+    provider = OllamaProvider("http://127.0.0.1:11434", "qwen3.6:27b", transport)
+    task = asyncio.create_task(provider.generate_structured(_request(public_ids), cancellation))
+    await body.entered.wait()
+    cancellation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert task.done()
+    assert body.close_calls == 1
+    assert body.closed.is_set()
 
 
 @pytest.mark.anyio
