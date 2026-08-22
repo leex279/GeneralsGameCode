@@ -32,6 +32,11 @@ from generals_replay_analyzer.identity.normalize import (
 )
 
 JSON = dict[str, Any] | list[Any]
+PRESENCE_ABSENT = "absent"
+PRESENCE_ACTIVE = "active"
+PRESENCE_RETIRED = "retired"
+PRESENCE_RETIRED_TOMBSTONE = "retired_tombstone"
+PRESENCE_DETACHED_TOMBSTONE = "detached_tombstone"
 
 
 class IdentityError(RuntimeError):
@@ -134,7 +139,11 @@ class PlayerIdentityService:
         alias_ids: set[int] | None = None,
         replay_player_ids: set[int] | None = None,
         source_public_ids: tuple[str, ...] = (),
+        absent_player_public_ids: tuple[str, ...] = (),
+        absent_alias_public_ids: tuple[str, ...] = (),
+        player_presence_overrides: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
+        player_presence_overrides = player_presence_overrides or {}
         players = session.scalars(select(Player).where(Player.id.in_(player_ids))).all() if player_ids else []
         if alias_ids is None:
             aliases = session.scalars(select(PlayerAlias).where(PlayerAlias.player_id.in_(player_ids))).all()
@@ -149,32 +158,45 @@ class PlayerIdentityService:
         else:
             replay_players = []
         player_public = {player.id: player.public_id for player in session.scalars(select(Player)).all()}
+        player_entries = [
+            {
+                "player_public_id": player.public_id,
+                "identity_revision": player.identity_revision,
+                "retired": player.retired_at is not None,
+                "presence": player_presence_overrides.get(
+                    player.public_id,
+                    PRESENCE_RETIRED if player.retired_at is not None else PRESENCE_ACTIVE,
+                ),
+            }
+            for player in players
+        ]
+        player_entries.extend(
+            {"player_public_id": public_id, "presence": PRESENCE_ABSENT}
+            for public_id in absent_player_public_ids
+        )
+        alias_entries = [
+            {
+                "alias_public_id": alias.public_id,
+                "player_public_id": player_public[alias.player_id],
+                "namespace": alias.namespace,
+                "normalized_name": alias.normalized_name,
+                "external_subject": alias.external_subject,
+                "presence": (
+                    PRESENCE_DETACHED_TOMBSTONE
+                    if alias.namespace.startswith("external:detached:")
+                    else PRESENCE_ACTIVE
+                ),
+            }
+            for alias in aliases
+        ]
+        alias_entries.extend(
+            {"alias_public_id": public_id, "presence": PRESENCE_ABSENT}
+            for public_id in absent_alias_public_ids
+        )
         return {
             "operation_kind": operation_kind,
-            "players": sorted(
-                (
-                    {
-                        "player_public_id": player.public_id,
-                        "identity_revision": player.identity_revision,
-                        "retired": player.retired_at is not None,
-                    }
-                    for player in players
-                ),
-                key=lambda item: item["player_public_id"],
-            ),
-            "aliases": sorted(
-                (
-                    {
-                        "alias_public_id": alias.public_id,
-                        "player_public_id": player_public[alias.player_id],
-                        "namespace": alias.namespace,
-                        "normalized_name": alias.normalized_name,
-                        "external_subject": alias.external_subject,
-                    }
-                    for alias in aliases
-                ),
-                key=lambda item: item["alias_public_id"],
-            ),
+            "players": sorted(player_entries, key=lambda item: item["player_public_id"]),
+            "aliases": sorted(alias_entries, key=lambda item: item["alias_public_id"]),
             "replay_players": sorted(
                 (
                     {
@@ -274,13 +296,29 @@ class PlayerIdentityService:
                 except InvalidPlayerNameError:
                     decisions.append(self._decision(slot, None, "ineligible", None, None, None, "invalid_embedded_name"))
                     continue
-                alias = _one_or_none(
-                    session,
-                    select(PlayerAlias).where(
+                alias_candidates = session.scalars(
+                    select(PlayerAlias)
+                    .where(
                         PlayerAlias.namespace == EMBEDDED_REPLAY_NAME_NAMESPACE,
                         PlayerAlias.normalized_name == normalized,
-                    ),
-                )
+                    )
+                    .order_by(PlayerAlias.public_id)
+                    .limit(2)
+                ).all()
+                if len(alias_candidates) > 1:
+                    decisions.append(
+                        self._decision(
+                            slot,
+                            normalized,
+                            "manual_review",
+                            None,
+                            None,
+                            None,
+                            "ambiguous_exact_embedded_alias",
+                        )
+                    )
+                    continue
+                alias = alias_candidates[0] if alias_candidates else None
                 if slot.player_id is not None:
                     linked_player = session.get(Player, slot.player_id)
                     if (
@@ -530,8 +568,17 @@ class PlayerIdentityService:
                 raise IdentityNotFoundError("one or more replay players do not exist")
             if any(row.player_id != old_player.id for row in rows):
                 raise IdentityConflictError("split membership changed after review")
+            new_player_public_id = self._public_id_factory()
+            before = self._snapshot(
+                session,
+                operation_kind="split_alias",
+                player_ids={old_player.id},
+                alias_ids={alias.id},
+                replay_player_ids={row.id for row in rows},
+                absent_player_public_ids=(new_player_public_id,),
+            )
             new_player = Player(
-                public_id=self._public_id_factory(),
+                public_id=new_player_public_id,
                 display_name=new_display_name,
                 identity_revision=0,
                 updated_at=self._now_factory(),
@@ -542,13 +589,6 @@ class PlayerIdentityService:
             session.flush()
             players = [old_player, new_player]
             player_ids = {old_player.id, new_player.id}
-            before = self._snapshot(
-                session,
-                operation_kind="split_alias",
-                player_ids=player_ids,
-                alias_ids={alias.id},
-                replay_player_ids={row.id for row in rows},
-            )
             alias.player_id = new_player.id
             for row in rows:
                 row.player_id = new_player.id
@@ -607,10 +647,19 @@ class PlayerIdentityService:
             if existing is not None:
                 raise IdentityConflictError("external subject is already attached")
             alias_public_id = self._public_id_factory()
+            before = self._snapshot(
+                session,
+                operation_kind="attach_external_alias",
+                player_ids={player.id},
+                alias_ids=set(),
+                replay_player_ids=set(),
+                source_public_ids=(cast(Source, source).public_id,),
+                absent_alias_public_ids=(alias_public_id,),
+            )
             alias = PlayerAlias(
                 public_id=alias_public_id,
                 player_id=player.id,
-                namespace=f"external:detached:{alias_public_id}",
+                namespace=namespace,
                 normalized_name=external_subject,
                 original_name=external_subject,
                 external_subject=external_subject,
@@ -618,15 +667,6 @@ class PlayerIdentityService:
             )
             session.add(alias)
             session.flush()
-            before = self._snapshot(
-                session,
-                operation_kind="attach_external_alias",
-                player_ids={player.id},
-                alias_ids={alias.id},
-                replay_player_ids=set(),
-                source_public_ids=(cast(Source, source).public_id,),
-            )
-            alias.namespace = namespace
             player.identity_revision += 1
             player.updated_at = self._now_factory()
             session.flush()
@@ -700,6 +740,11 @@ class PlayerIdentityService:
                 player.identity_revision += 1
                 player.updated_at = now
             session.flush()
+            retired_tombstones = {
+                entry["player_public_id"]: PRESENCE_RETIRED_TOMBSTONE
+                for entry in restore.get("players", [])
+                if entry.get("presence") == PRESENCE_ABSENT
+            }
             restored = self._snapshot(
                 session,
                 operation_kind="inverse",
@@ -707,6 +752,7 @@ class PlayerIdentityService:
                 alias_ids=alias_ids,
                 replay_player_ids=replay_player_ids,
                 source_public_ids=tuple(restore.get("source_public_ids", [])),
+                player_presence_overrides=retired_tombstones,
             )
             inverse = self._append_operation(
                 session,
@@ -744,7 +790,12 @@ class PlayerIdentityService:
         }
         for entry in snapshot.get("players", []):
             player = players[entry["player_public_id"]]
-            player.retired_at = self._now_factory() if entry["retired"] else None
+            presence = entry.get("presence")
+            if presence == PRESENCE_ABSENT:
+                player.retired_at = self._now_factory()
+            else:
+                retired = entry.get("retired", presence in {PRESENCE_RETIRED, PRESENCE_RETIRED_TOMBSTONE})
+                player.retired_at = self._now_factory() if retired else None
         all_player_ids = {
             player.public_id: player.id
             for player in session.scalars(select(Player)).all()
@@ -754,6 +805,9 @@ class PlayerIdentityService:
             if alias is None:
                 raise IdentityConflictError("captured alias no longer exists")
             alias = cast(PlayerAlias, alias)
+            if entry.get("presence") == PRESENCE_ABSENT:
+                alias.namespace = f"external:detached:{alias.public_id}"
+                continue
             alias.player_id = all_player_ids[entry["player_public_id"]]
             alias.namespace = entry["namespace"]
             alias.normalized_name = entry["normalized_name"]

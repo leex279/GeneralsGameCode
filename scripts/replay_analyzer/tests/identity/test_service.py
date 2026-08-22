@@ -375,6 +375,85 @@ def test_conflicting_link_failed_run_and_run_mismatch_write_nothing(
         assert _revision_map(session) == {_public_id(400): 7, _public_id(401): 9}
 
 
+def test_legacy_duplicate_exact_aliases_return_manual_review_without_mutation(
+    identity_database_path: Path,
+    identity_engine: Engine,
+    identity_session_factory: sessionmaker[Session],
+) -> None:
+    """Catch legacy duplicate aliases escaping the deterministic manual-review corruption boundary."""
+    with identity_session_factory.begin() as session:
+        replay = _seed_replay(session)
+        run = _seed_run_with_slots(session, replay, ((0, "human", "leex279", 1_250),))
+        first = Player(public_id=_public_id(410), display_name="First", identity_revision=3, updated_at=NOW)
+        second = Player(public_id=_public_id(411), display_name="Second", identity_revision=5, updated_at=NOW)
+        session.add_all([first, second])
+        session.flush()
+        session.add(
+            PlayerAlias(
+                public_id=_public_id(412),
+                player_id=first.id,
+                namespace=EMBEDDED_REPLAY_NAME_NAMESPACE,
+                normalized_name="leex279",
+                original_name="leex279",
+                external_subject=None,
+                created_at=NOW,
+            )
+        )
+    identity_engine.dispose()
+    with sqlite3.connect(identity_database_path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("CREATE TABLE player_aliases_legacy AS SELECT * FROM player_aliases")
+        connection.execute("DROP TABLE player_aliases")
+        connection.execute("ALTER TABLE player_aliases_legacy RENAME TO player_aliases")
+        connection.execute(
+            "CREATE INDEX ix_player_aliases_player_namespace ON player_aliases (player_id, namespace)"
+        )
+        second_id = connection.execute(
+            "SELECT id FROM players WHERE public_id = ?", (_public_id(411),)
+        ).fetchone()
+        assert second_id is not None
+        connection.execute(
+            "INSERT INTO player_aliases "
+            "(player_id, namespace, normalized_name, original_name, external_subject, id, public_id, created_at) "
+            "VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+            (
+                second_id[0],
+                EMBEDDED_REPLAY_NAME_NAMESPACE,
+                "leex279",
+                "LEEX279",
+                2,
+                _public_id(413),
+                NOW.isoformat(),
+            ),
+        )
+        connection.commit()
+
+    with identity_session_factory() as session:
+        before = (
+            _revision_map(session),
+            session.scalar(select(func.count()).select_from(PlayerAlias)),
+            session.scalar(select(ReplayPlayer.player_id).where(ReplayPlayer.public_id == _public_id(1_250))),
+            session.scalar(select(func.count()).select_from(PlayerIdentityOperation)),
+        )
+    batch = _service(identity_session_factory).resolve_parser_run(
+        replay_public_id=replay.public_id, parser_run_id=run.run_id
+    )
+    assert len(batch.decisions) == 1
+    assert batch.decisions[0].outcome == "manual_review"
+    assert batch.decisions[0].reason_code == "ambiguous_exact_embedded_alias"
+    assert batch.decisions[0].player_public_id is None
+    assert batch.decisions[0].alias_public_id is None
+    assert batch.affected_player_revisions == ()
+    with identity_session_factory() as session:
+        after = (
+            _revision_map(session),
+            session.scalar(select(func.count()).select_from(PlayerAlias)),
+            session.scalar(select(ReplayPlayer.player_id).where(ReplayPlayer.public_id == _public_id(1_250))),
+            session.scalar(select(func.count()).select_from(PlayerIdentityOperation)),
+        )
+    assert after == before
+
+
 @settings(
     max_examples=100,
     deadline=None,
@@ -567,6 +646,7 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
     """Catch heuristic split membership or provider aliases entering automatic resolution."""
     target, source, source_alias, selected_slot, unselected_slot = _seed_manual_graph(identity_session_factory)
     service = _service(identity_session_factory)
+    source_token_before_split = service.identity_cache_token(player_public_id=source)
     split = service.split_alias(
         alias_public_id=source_alias,
         replay_player_public_ids=(selected_slot,),
@@ -577,6 +657,12 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
     )
     assert split.operation_kind == "split_alias"
     new_player = next(public_id for public_id, _ in split.affected_player_revisions if public_id != source)
+    assert split.affected_player_revisions == ((source, 5), (new_player, 1))
+    split_tokens = dict(split.cache_tokens)
+    assert split_tokens[source] == service.identity_cache_token(player_public_id=source)
+    assert split_tokens[new_player] == service.identity_cache_token(player_public_id=new_player)
+    assert split_tokens[source] != source_token_before_split
+    new_token_after_split = split_tokens[new_player]
     with identity_session_factory() as session:
         links = dict(
             session.execute(
@@ -589,6 +675,43 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
             select(Player.public_id).join(PlayerAlias, PlayerAlias.player_id == Player.id).where(PlayerAlias.public_id == source_alias)
         )
         assert alias_target == new_player
+        split_operation = session.scalar(
+            select(PlayerIdentityOperation).where(PlayerIdentityOperation.public_id == split.operation_public_id)
+        )
+        assert split_operation is not None
+        split_before_players = {
+            entry["player_public_id"]: entry for entry in split_operation.before_json["players"]
+        }
+        assert split_before_players[new_player] == {
+            "player_public_id": new_player,
+            "presence": "absent",
+        }
+        assert split_before_players[source]["presence"] == "active"
+        assert split_before_players[source]["identity_revision"] == 4
+        split_before_alias = split_operation.before_json["aliases"]
+        assert split_before_alias == [
+            {
+                "alias_public_id": source_alias,
+                "player_public_id": source,
+                "namespace": EMBEDDED_REPLAY_NAME_NAMESPACE,
+                "normalized_name": "source",
+                "external_subject": None,
+                "presence": "active",
+            }
+        ]
+        split_after_players = {
+            entry["player_public_id"]: entry for entry in split_operation.after_json["players"]
+        }
+        assert split_after_players[new_player]["presence"] == "active"
+        assert split_after_players[new_player]["identity_revision"] == 1
+        assert split_operation.inverse_payload_json == {"restore": split_operation.before_json}
+        split_original_raw = session.execute(
+            text(
+                "SELECT before_json, after_json, inverse_payload_json, affected_revisions_json "
+                "FROM player_identity_operations WHERE public_id = :public_id"
+            ),
+            {"public_id": split.operation_public_id},
+        ).one()
         source_row = session.scalar(select(Source))
         if source_row is None:
             replay_id = session.scalar(select(Replay.id).where(Replay.public_id == _public_id(1)))
@@ -612,6 +735,12 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
         reason="split selection corrected",
     )
     assert inverse.inverse_of_operation_public_id == split.operation_public_id
+    assert inverse.affected_player_revisions == ((source, 6), (new_player, 2))
+    inverse_tokens = dict(inverse.cache_tokens)
+    assert inverse_tokens[source] == service.identity_cache_token(player_public_id=source)
+    assert inverse_tokens[new_player] == service.identity_cache_token(player_public_id=new_player)
+    assert inverse_tokens[source] != split_tokens[source]
+    assert inverse_tokens[new_player] != new_token_after_split
     with identity_session_factory() as session:
         links = dict(
             session.execute(
@@ -624,6 +753,31 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
             select(Player.public_id).join(PlayerAlias, PlayerAlias.player_id == Player.id).where(PlayerAlias.public_id == source_alias)
         )
         assert alias_target == source
+        new_player_row = session.scalar(select(Player).where(Player.public_id == new_player))
+        assert new_player_row is not None and new_player_row.retired_at is not None
+        assert session.scalar(select(func.count()).select_from(PlayerAlias).where(PlayerAlias.player_id == new_player_row.id)) == 0
+        assert session.scalar(
+            select(func.count()).select_from(ReplayPlayer).where(ReplayPlayer.player_id == new_player_row.id)
+        ) == 0
+        inverse_operation = session.scalar(
+            select(PlayerIdentityOperation).where(PlayerIdentityOperation.public_id == inverse.operation_public_id)
+        )
+        assert inverse_operation is not None
+        assert inverse_operation.before_json == split_operation.after_json
+        assert inverse_operation.inverse_payload_json == {"restore": inverse_operation.before_json}
+        inverse_after_players = {
+            entry["player_public_id"]: entry for entry in inverse_operation.after_json["players"]
+        }
+        assert inverse_after_players[new_player]["presence"] == "retired_tombstone"
+        assert inverse_after_players[new_player]["identity_revision"] == 2
+        assert session.execute(
+            text(
+                "SELECT before_json, after_json, inverse_payload_json, affected_revisions_json "
+                "FROM player_identity_operations WHERE public_id = :public_id"
+            ),
+            {"public_id": split.operation_public_id},
+        ).one() == split_original_raw
+    target_token_before_attach = service.identity_cache_token(player_public_id=target)
     attachment = service.attach_external_alias(
         player_public_id=target,
         provider="strata",
@@ -634,10 +788,42 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
         expected_revisions={target: 2},
     )
     assert attachment.operation_kind == "attach_external_alias"
+    assert attachment.affected_player_revisions == ((target, 3),)
+    attach_token = dict(attachment.cache_tokens)[target]
+    assert attach_token == service.identity_cache_token(player_public_id=target)
+    assert attach_token != target_token_before_attach
     with identity_session_factory() as session:
         external = session.scalar(select(PlayerAlias).where(PlayerAlias.namespace == "external:strata"))
         assert external is not None and external.external_subject == "e80b96708aa4254945941fd5f81489bb"
         assert session.scalar(select(func.count()).select_from(Player)) == 3
+        attach_operation = session.scalar(
+            select(PlayerIdentityOperation).where(PlayerIdentityOperation.public_id == attachment.operation_public_id)
+        )
+        assert attach_operation is not None
+        assert attach_operation.before_json["aliases"] == [
+            {
+                "alias_public_id": external.public_id,
+                "presence": "absent",
+            }
+        ]
+        assert attach_operation.after_json["aliases"] == [
+            {
+                "alias_public_id": external.public_id,
+                "player_public_id": target,
+                "namespace": "external:strata",
+                "normalized_name": "e80b96708aa4254945941fd5f81489bb",
+                "external_subject": "e80b96708aa4254945941fd5f81489bb",
+                "presence": "active",
+            }
+        ]
+        assert attach_operation.inverse_payload_json == {"restore": attach_operation.before_json}
+        attach_original_raw = session.execute(
+            text(
+                "SELECT before_json, after_json, inverse_payload_json, affected_revisions_json "
+                "FROM player_identity_operations WHERE public_id = :public_id"
+            ),
+            {"public_id": attachment.operation_public_id},
+        ).one()
     detached = service.inverse_operation(
         operation_public_id=attachment.operation_public_id,
         expected_revisions=dict(attachment.affected_player_revisions),
@@ -645,13 +831,53 @@ def test_split_moves_only_explicit_members_and_external_alias_never_auto_links(
         reason="provider attachment corrected",
     )
     assert detached.inverse_of_operation_public_id == attachment.operation_public_id
+    assert detached.affected_player_revisions == ((target, 4),)
+    detached_token = dict(detached.cache_tokens)[target]
+    assert detached_token == service.identity_cache_token(player_public_id=target)
+    assert detached_token != attach_token
     with identity_session_factory() as session:
         external_target = session.scalar(
             select(Player.public_id).join(PlayerAlias, PlayerAlias.player_id == Player.id).where(
                 PlayerAlias.namespace == "external:strata"
             )
         )
-        assert external_target != target
+        assert external_target is None
+        detached_alias = session.scalar(
+            select(PlayerAlias).where(PlayerAlias.public_id == external.public_id)
+        )
+        assert detached_alias is not None
+        assert detached_alias.namespace == f"external:detached:{external.public_id}"
+        assert session.scalar(
+            select(func.count())
+            .select_from(PlayerAlias)
+            .where(
+                PlayerAlias.namespace == EMBEDDED_REPLAY_NAME_NAMESPACE,
+                PlayerAlias.normalized_name == detached_alias.normalized_name,
+            )
+        ) == 0
+        detached_operation = session.scalar(
+            select(PlayerIdentityOperation).where(PlayerIdentityOperation.public_id == detached.operation_public_id)
+        )
+        assert detached_operation is not None
+        assert detached_operation.before_json == attach_operation.after_json
+        assert detached_operation.inverse_payload_json == {"restore": detached_operation.before_json}
+        assert detached_operation.after_json["aliases"] == [
+            {
+                "alias_public_id": external.public_id,
+                "player_public_id": target,
+                "namespace": f"external:detached:{external.public_id}",
+                "normalized_name": "e80b96708aa4254945941fd5f81489bb",
+                "external_subject": "e80b96708aa4254945941fd5f81489bb",
+                "presence": "detached_tombstone",
+            }
+        ]
+        assert session.execute(
+            text(
+                "SELECT before_json, after_json, inverse_payload_json, affected_revisions_json "
+                "FROM player_identity_operations WHERE public_id = :public_id"
+            ),
+            {"public_id": attachment.operation_public_id},
+        ).one() == attach_original_raw
 
 
 def test_identity_changes_preserve_succeeded_longitudinal_history_byte_for_byte(
