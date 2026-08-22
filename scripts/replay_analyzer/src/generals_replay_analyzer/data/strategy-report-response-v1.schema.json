@@ -1,0 +1,90 @@
+{
+  "$id": "generals-replay-analyzer/strategy-report-response-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "definitions": {
+    "claim": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {"maxLength": 255, "minLength": 1, "type": "string"},
+        "confidence": {"maximum": 1, "minimum": 0, "type": "number"},
+        "evidence_ids": {
+          "items": {"format": "uuid", "type": "string"},
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "text": {"maxLength": 4096, "minLength": 1, "type": "string"}
+      },
+      "required": ["claim_id", "text", "confidence", "evidence_ids"],
+      "type": "object"
+    },
+    "window": {
+      "additionalProperties": false,
+      "properties": {
+        "frame_end": {"minimum": 0, "type": "integer"},
+        "frame_start": {"minimum": 0, "type": "integer"}
+      },
+      "required": ["frame_start", "frame_end"],
+      "type": "object"
+    },
+    "phase_claim": {
+      "additionalProperties": false,
+      "properties": {
+        "assessment": {"maxLength": 4096, "minLength": 1, "type": "string"},
+        "claim_id": {"maxLength": 255, "minLength": 1, "type": "string"},
+        "confidence": {"maximum": 1, "minimum": 0, "type": "number"},
+        "evidence_ids": {
+          "items": {"format": "uuid", "type": "string"},
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "phase": {"enum": ["opening", "early", "mid", "late", "cross_phase"], "type": "string"},
+        "window": {"$ref": "#/definitions/window"}
+      },
+      "required": ["claim_id", "phase", "window", "assessment", "confidence", "evidence_ids"],
+      "type": "object"
+    },
+    "strategy_claim": {
+      "additionalProperties": false,
+      "properties": {
+        "assessment": {"maxLength": 4096, "minLength": 1, "type": "string"},
+        "claim_id": {"maxLength": 255, "minLength": 1, "type": "string"},
+        "confidence": {"maximum": 1, "minimum": 0, "type": "number"},
+        "evidence_ids": {
+          "items": {"format": "uuid", "type": "string"},
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "phase": {"enum": ["opening", "early", "mid", "late", "cross_phase"], "type": "string"},
+        "strategy_label": {"maxLength": 255, "minLength": 1, "type": "string"},
+        "window": {"$ref": "#/definitions/window"}
+      },
+      "required": ["claim_id", "strategy_label", "phase", "window", "assessment", "confidence", "evidence_ids"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "comparative_observations": {"items": {"$ref": "#/definitions/claim"}, "maxItems": 64, "type": "array"},
+    "phase_assessments": {"items": {"$ref": "#/definitions/phase_claim"}, "maxItems": 64, "type": "array"},
+    "schema_version": {"const": "strategy-report-response-v1", "type": "string"},
+    "strategy_assessments": {"items": {"$ref": "#/definitions/strategy_claim"}, "maxItems": 64, "type": "array"},
+    "strengths": {"items": {"$ref": "#/definitions/claim"}, "maxItems": 64, "type": "array"},
+    "summary": {"maxLength": 4096, "minLength": 1, "type": "string"},
+    "uncertainty_notes": {"items": {"$ref": "#/definitions/claim"}, "maxItems": 64, "type": "array"},
+    "vulnerabilities": {"items": {"$ref": "#/definitions/claim"}, "maxItems": 64, "type": "array"}
+  },
+  "required": [
+    "schema_version",
+    "summary",
+    "phase_assessments",
+    "strategy_assessments",
+    "comparative_observations",
+    "strengths",
+    "vulnerabilities",
+    "uncertainty_notes"
+  ],
+  "type": "object"
+}
