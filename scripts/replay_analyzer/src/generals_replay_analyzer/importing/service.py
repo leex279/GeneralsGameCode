@@ -72,6 +72,15 @@ _STAGE_VERSIONS = MappingProxyType(
 )
 _STAGE_ORDER = {stage: index for index, stage in enumerate(_STAGE_VERSIONS)}
 _BUILT_IN_STAGES = frozenset({DISCOVER, HASH, MANAGE_COPY, PARSE, TELEMETRY})
+_DIRECT_DEPENDENCY_STAGES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        IMPORT_OBSERVATIONS: frozenset({PARSE, TELEMETRY}),
+        DERIVE_FEATURES: frozenset({IMPORT_OBSERVATIONS}),
+        ASSESS_STRATEGIES: frozenset({DERIVE_FEATURES}),
+        ANALYZE_LLM: frozenset({ASSESS_STRATEGIES}),
+        RENDER_REPORT: frozenset({ASSESS_STRATEGIES}),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -147,7 +156,11 @@ class StageDependencyOutput:
     job_public_id: str
     stage: str
     component_version: str
-    output: Mapping[str, FrozenJSONValue]
+    output: Mapping[str, FrozenJSONValue] | None
+    status: str = "succeeded"
+    error_code: str | None = None
+    error_message: str | None = None
+    error_details: Mapping[str, FrozenJSONValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +181,14 @@ class StageHandler(Protocol):
     def __call__(self, context: StageExecutionContext) -> Mapping[str, Any]: ...
 
 
+# TheSuperHackers @feature Leex 22/08/2026 Declare explicit failed direct dependencies that remain importable evidence. (#TBD)
+@dataclass(frozen=True)
+class TerminalDependencyPolicy:
+    """Closed opt-in for direct dependency stages whose failed state is evidence."""
+
+    failed_stages: frozenset[str] = frozenset()
+
+
 @dataclass(frozen=True)
 class StageHandlerRegistration:
     """Construction-time binding of one closed future stage to its handler."""
@@ -175,6 +196,7 @@ class StageHandlerRegistration:
     stage: str
     component_version: str
     handler: StageHandler
+    terminal_dependency_policy: TerminalDependencyPolicy = TerminalDependencyPolicy()
 
 
 @dataclass(frozen=True)
@@ -232,6 +254,7 @@ class ImportService:
         if telemetry_acquirer is not None:
             handlers[TELEMETRY] = self._telemetry
         seen: set[str] = set()
+        terminal_failure_stages: dict[str, frozenset[str]] = {}
         for registration in tuple(stage_handlers):
             if registration.stage in seen:
                 raise ValueError(f"duplicate_stage: {registration.stage}")
@@ -245,8 +268,27 @@ class ImportService:
                 raise ValueError(
                     f"version_mismatch: {registration.stage} requires component version {expected_version}"
                 )
+            policy = registration.terminal_dependency_policy
+            if not isinstance(policy, TerminalDependencyPolicy) or not isinstance(policy.failed_stages, frozenset):
+                raise TypeError("invalid_terminal_dependency_policy: policy must use the closed typed contract")
+            if any(not isinstance(stage, str) for stage in policy.failed_stages):
+                raise ValueError("invalid_terminal_dependency_policy: failed dependency stages must be strings")
+            unknown = sorted(policy.failed_stages.difference(STAGES))
+            if unknown:
+                raise ValueError(f"unknown_terminal_dependency_stage: {unknown[0]}")
+            direct_stages = _DIRECT_DEPENDENCY_STAGES.get(registration.stage, frozenset())
+            non_direct = sorted(policy.failed_stages.difference(direct_stages))
+            if non_direct:
+                raise ValueError(
+                    f"non_direct_terminal_dependency_stage: {non_direct[0]} is not a direct dependency of "
+                    f"{registration.stage}"
+                )
+            terminal_failure_stages[registration.stage] = frozenset(policy.failed_stages)
             handlers[registration.stage] = self._adapt_stage_handler(registration.handler)
         self._registered_future_stages = frozenset(seen)
+        self._terminal_failure_stages: Mapping[str, frozenset[str]] = MappingProxyType(
+            terminal_failure_stages
+        )
         self._handlers: Mapping[str, Callable[[ClaimedJob], Mapping[str, Any]]] = MappingProxyType(handlers)
 
     def submit(self, request: ImportRequest) -> ImportSubmissionDTO:
@@ -277,7 +319,11 @@ class ImportService:
         for _ in range(limit):
             if IMPORT_OBSERVATIONS in self._registered_future_stages:
                 self._materialize_ready_observation_jobs()
-            claimed = self._jobs.claim(worker_id, self._handlers)
+            claimed = self._jobs.claim(
+                worker_id,
+                self._handlers,
+                terminal_failure_stages=self._terminal_failure_stages,
+            )
             if claimed is None:
                 break
             handler = self._handlers[claimed.stage]
@@ -326,10 +372,15 @@ class ImportService:
                     .where(JobDependency.job_id == claimed.internal_id)
                 )
             )
-            if any(dependency.status != "succeeded" for dependency in dependencies):
+            tolerated_failures = self._terminal_failure_stages.get(claimed.stage, frozenset())
+            if any(
+                dependency.status != "succeeded"
+                and not (dependency.status == "failed" and dependency.stage in tolerated_failures)
+                for dependency in dependencies
+            ):
                 raise StageFailure(
                     "dependency_unavailable",
-                    "registered stage dependency output is not succeeded",
+                    "registered stage dependency is not terminal evidence",
                     retryable=True,
                 )
             dependencies.sort(
@@ -738,12 +789,21 @@ class ImportService:
                         .where(JobDependency.job_id == candidate.id)
                     )
                 )
-                if not dependencies or any(dependency.status != "succeeded" for dependency in dependencies):
+                tolerated_failures = self._terminal_failure_stages.get(
+                    IMPORT_OBSERVATIONS,
+                    frozenset(),
+                )
+                if not dependencies or any(
+                    dependency.status != "succeeded"
+                    and not (dependency.status == "failed" and dependency.stage in tolerated_failures)
+                    for dependency in dependencies
+                ):
                     continue
                 dependencies.sort(
                     key=lambda dependency: (
                         _STAGE_ORDER.get(dependency.stage, len(_STAGE_ORDER)),
                         dependency.component_version,
+                        dependency.public_id,
                     )
                 )
                 replay_sha256 = candidate_input.get("replay_sha256")
@@ -1122,25 +1182,113 @@ def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, FrozenJSONValue]:
 
 
 def _dependency_output(row: Job) -> StageDependencyOutput:
-    output = row.output_json
-    if not isinstance(output, Mapping):
+    if row.status == "succeeded":
+        output = row.output_json
+        if not isinstance(output, Mapping):
+            raise StageFailure(
+                "dependency_output_invalid",
+                "succeeded dependency has no mapping output",
+                retryable=False,
+                details={"dependency_public_id": row.public_id, "dependency_stage": row.stage},
+            )
+        return StageDependencyOutput(
+            job_public_id=row.public_id,
+            stage=row.stage,
+            component_version=row.component_version,
+            output=_freeze_mapping(output),
+            status="succeeded",
+        )
+    if row.status == "failed":
+        code, message, details = _dependency_failure_evidence(row)
+        return StageDependencyOutput(
+            job_public_id=row.public_id,
+            stage=row.stage,
+            component_version=row.component_version,
+            output=None,
+            status="failed",
+            error_code=code,
+            error_message=message,
+            error_details=_freeze_mapping(details),
+        )
+    raise StageFailure(
+        "dependency_unavailable",
+        "dependency is not terminal",
+        retryable=True,
+        details={"dependency_public_id": row.public_id, "dependency_stage": row.stage},
+    )
+
+
+_PRIVATE_FAILURE_KEYS = frozenset(
+    {
+        "available_at",
+        "completed_at",
+        "created_at",
+        "id",
+        "job_id",
+        "lease_expires_at",
+        "lease_owner",
+        "managed_asset_id",
+        "map_asset_paths",
+        "replay_id",
+        "runner_config",
+        "runner_result",
+        "started_at",
+    }
+)
+
+
+def _sanitize_failure_text(value: str) -> str:
+    redacted = re.sub(r"(?i)(?:[a-z]:[\\/]|\\\\).*$", "[redacted-path]", value)
+    if redacted == value and (value.startswith("/") or " /" in value):
+        prefix, _separator, _tail = value.partition(" /")
+        return "[redacted-path]" if not prefix else f"{prefix} [redacted-path]"
+    return redacted
+
+
+def _sanitize_failure_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise TypeError("dependency failure details keys must be strings")
+            if (
+                key.startswith("_")
+                or key in _PRIVATE_FAILURE_KEYS
+                or key.endswith("_at")
+                or (key.endswith("_path") and key != "logical_path")
+            ):
+                continue
+            sanitized[key] = _sanitize_failure_json(value[key])
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_failure_json(item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_failure_text(value)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    raise TypeError(f"dependency failure details contain non-JSON value: {type(value).__name__}")
+
+
+def _dependency_failure_evidence(row: Job) -> tuple[str, str, dict[str, Any]]:
+    if not isinstance(row.error_code, str) or not row.error_code:
         raise StageFailure(
-            "dependency_output_invalid",
-            "succeeded dependency has no mapping output",
+            "dependency_error_invalid",
+            "failed dependency has no stable error code",
             retryable=False,
             details={"dependency_public_id": row.public_id, "dependency_stage": row.stage},
         )
-    return StageDependencyOutput(
-        job_public_id=row.public_id,
-        stage=row.stage,
-        component_version=row.component_version,
-        output=_freeze_mapping(output),
-    )
+    message = row.error_message if isinstance(row.error_message, str) else "dependency failed"
+    raw_details = row.error_details_json if isinstance(row.error_details_json, Mapping) else {}
+    details = _sanitize_failure_json(raw_details)
+    if not isinstance(details, dict):
+        raise TypeError("dependency failure details must canonicalize to an object")
+    return row.error_code, _sanitize_failure_text(message), details
 
 
 _NON_SEMANTIC_IDENTITY_KEYS = frozenset(
     {
         "asset_public_id",
+        "dependency_public_id",
         "job_public_id",
         "replay_public_id",
     }
@@ -1162,16 +1310,30 @@ def _semantic_identity_json(value: Any) -> Any:
 
 
 def _dependency_identity(row: Job) -> dict[str, Any]:
-    output = row.output_json
     input_json = row.input_json
-    if not isinstance(input_json, Mapping) or not isinstance(output, Mapping):
-        raise TypeError("succeeded dependency has invalid canonical evidence")
-    return {
+    if not isinstance(input_json, Mapping):
+        raise TypeError("dependency has invalid canonical input")
+    identity: dict[str, Any] = {
         "stage": row.stage,
         "component_version": row.component_version,
+        "status": row.status,
         "input": _semantic_identity_json(input_json),
-        "output": _semantic_identity_json(output),
     }
+    if row.status == "succeeded":
+        output = row.output_json
+        if not isinstance(output, Mapping):
+            raise TypeError("succeeded dependency has invalid canonical output")
+        identity["output"] = _semantic_identity_json(output)
+        return identity
+    if row.status == "failed":
+        code, message, details = _dependency_failure_evidence(row)
+        identity["error"] = {
+            "code": code,
+            "message": message,
+            "details": _semantic_identity_json(details),
+        }
+        return identity
+    raise TypeError("dependency identity requires a terminal status")
 
 
 def _canonical_output(output: Mapping[str, Any]) -> dict[str, Any]:

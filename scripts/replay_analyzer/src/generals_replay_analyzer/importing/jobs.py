@@ -211,26 +211,40 @@ class JobCoordinator:
             )
         return False
 
-    def claim(self, worker_id: str, registered_stages: Collection[str]) -> ClaimedJob | None:
+    def claim(
+        self,
+        worker_id: str,
+        registered_stages: Collection[str],
+        *,
+        terminal_failure_stages: Mapping[str, Collection[str]] | None = None,
+    ) -> ClaimedJob | None:
         owner = worker_id.strip()
         if not owner:
             raise ValueError("worker_id must be nonempty")
         stages = frozenset(registered_stages)
         if not stages:
             return None
+        tolerated_failures = {
+            stage: frozenset(dependency_stages)
+            for stage, dependency_stages in (terminal_failure_stages or {}).items()
+        }
         with self._session_factory.begin() as session:
             now = self.now()
             self._reclaim_expired(session, now)
-            self._project_dependency_failures(session, now)
+            self._project_dependency_failures(session, now, tolerated_failures)
             for candidate in session.scalars(self._candidate_query(stages, now)):
                 dependencies = list(
-                    session.scalars(
-                        select(Job.status)
+                    session.execute(
+                        select(Job.stage, Job.status)
                         .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
                         .where(JobDependency.job_id == candidate.id)
                     )
                 )
-                if any(status != "succeeded" for status in dependencies):
+                allowed = tolerated_failures.get(candidate.stage, frozenset())
+                if any(
+                    status != "succeeded" and not (status == "failed" and stage in allowed)
+                    for stage, status in dependencies
+                ):
                     continue
                 result = session.execute(
                     update(Job)
@@ -296,25 +310,41 @@ class JobCoordinator:
                 row.completed_at = now
         session.flush()
 
-    def _project_dependency_failures(self, session: Session, now: datetime) -> None:
+    def _project_dependency_failures(
+        self,
+        session: Session,
+        now: datetime,
+        terminal_failure_stages: Mapping[str, Collection[str]],
+    ) -> None:
         changed = True
         while changed:
             changed = False
             pending = list(session.scalars(select(Job).where(Job.status == "pending")))
             for row in pending:
-                failed_dependency = session.scalar(
-                    select(Job.public_id)
-                    .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
-                    .where(JobDependency.job_id == row.id, Job.status == "failed")
-                    .limit(1)
+                failed_dependencies = list(
+                    session.execute(
+                        select(Job.public_id, Job.stage)
+                        .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
+                        .where(JobDependency.job_id == row.id, Job.status == "failed")
+                        .order_by(Job.id)
+                    )
                 )
-                if failed_dependency is None:
+                allowed = frozenset(terminal_failure_stages.get(row.stage, ()))
+                required_failure = next(
+                    (
+                        public_id
+                        for public_id, dependency_stage in failed_dependencies
+                        if dependency_stage not in allowed
+                    ),
+                    None,
+                )
+                if required_failure is None:
                     continue
                 row.status = "failed"
                 row.retryable = False
                 row.error_code = "dependency_failed"
                 row.error_message = "a required dependency failed"
-                row.error_details_json = {"dependency_public_id": failed_dependency}
+                row.error_details_json = {"dependency_public_id": required_failure}
                 row.lease_owner = None
                 row.lease_expires_at = None
                 row.completed_at = now

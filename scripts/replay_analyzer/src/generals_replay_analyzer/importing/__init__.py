@@ -15,6 +15,7 @@ from .service import (
     StageHandlerRegistration,
     TelemetryAcquirer,
     TelemetryArtifact,
+    TerminalDependencyPolicy,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "StageHandlerRegistration",
     "TelemetryAcquirer",
     "TelemetryArtifact",
+    "TerminalDependencyPolicy",
 ]

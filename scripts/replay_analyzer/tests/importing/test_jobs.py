@@ -86,6 +86,80 @@ def test_dependencies_gate_claims_reject_cycles_and_project_terminal_failure(
         assert projected.lease_owner is None and projected.lease_expires_at is None
 
 
+def test_terminal_failure_policy_never_treats_nonterminal_dependencies_as_evidence(
+    session_factory: sessionmaker[Session], clock: MutableClock
+) -> None:
+    """Catch pending, retryable-pending, or running dependencies making an opted-in stage runnable."""
+    jobs = _coordinator(session_factory, clock)
+    terminal = jobs.create_job(_spec("terminal-parse"))
+    pending = jobs.create_job(_spec("pending-parse"))
+    retryable = jobs.create_job(_spec("retryable-parse"))
+    running = jobs.create_job(_spec("running-parse"))
+    terminal_child = jobs.create_job(_spec("terminal-import"))
+    pending_child = jobs.create_job(_spec("pending-import"))
+    retryable_child = jobs.create_job(_spec("retryable-import"))
+    running_child = jobs.create_job(_spec("running-import"))
+    jobs.add_dependency(terminal_child.public_id, terminal.public_id)
+    jobs.add_dependency(pending_child.public_id, pending.public_id)
+    jobs.add_dependency(retryable_child.public_id, retryable.public_id)
+    jobs.add_dependency(running_child.public_id, running.public_id)
+
+    retryable_claim = jobs.claim("dependency-worker", frozenset({"retryable-parse"}))
+    assert retryable_claim is not None
+    jobs.fail(
+        retryable_claim.public_id,
+        "dependency-worker",
+        StageFailure("retryable_fixture", "retryable fixture", retryable=True),
+    )
+    running_claim = jobs.claim("dependency-worker", frozenset({"running-parse"}))
+    assert running_claim is not None
+    terminal_claim = jobs.claim("dependency-worker", frozenset({"terminal-parse"}))
+    assert terminal_claim is not None
+    jobs.fail(
+        terminal_claim.public_id,
+        "dependency-worker",
+        StageFailure("terminal_fixture", "terminal fixture", retryable=False),
+    )
+
+    policies = {
+        "terminal-import": frozenset({"terminal-parse"}),
+        "pending-import": frozenset({"pending-parse"}),
+        "retryable-import": frozenset({"retryable-parse"}),
+        "running-import": frozenset({"running-parse"}),
+    }
+    claimed = jobs.claim(
+        "observation-worker",
+        frozenset(policies),
+        terminal_failure_stages=policies,
+    )
+    assert claimed is not None and claimed.public_id == terminal_child.public_id
+    assert jobs.claim(
+        "observation-worker",
+        frozenset(policies),
+        terminal_failure_stages=policies,
+    ) is None
+    with session_factory() as session:
+        states = {
+            row.stage: row.status
+            for row in session.scalars(
+                select(Job).where(
+                    Job.public_id.in_(
+                        {
+                            pending_child.public_id,
+                            retryable_child.public_id,
+                            running_child.public_id,
+                        }
+                    )
+                )
+            )
+        }
+    assert states == {
+        "pending-import": "pending",
+        "retryable-import": "pending",
+        "running-import": "pending",
+    }
+
+
 def test_claim_is_exclusive_and_increments_attempt_exactly_once(
     session_factory: sessionmaker[Session], clock: MutableClock
 ) -> None:

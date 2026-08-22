@@ -22,21 +22,33 @@ from generals_replay_analyzer.db.models import (
     Entity,
     EntitySample,
     EvidenceItem,
+    Job,
     ManagedAsset,
     Map,
     MapRegion,
     MapResource,
+    ParserRun,
     Player,
     PlayerAlias,
     ProductionEvent,
     Replay,
+    ReplayCommand,
+    ReplayPlayer,
     ReplayQualityIssue,
     TelemetryEvent,
     TelemetryRun,
 )
+from generals_replay_analyzer.importing import (
+    AcquisitionDiagnostic,
+    ImportRequest,
+    ImportService,
+    StageHandlerRegistration,
+    TelemetryArtifact,
+    TerminalDependencyPolicy,
+)
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.map_import import normalize_map_asset
-from generals_replay_analyzer.importing.parser_import import ParserImportResult
+from generals_replay_analyzer.importing.parser_import import ParserImportResult, ParserObservationImporter
 from generals_replay_analyzer.importing.service import StageDependencyOutput, StageExecutionContext
 from generals_replay_analyzer.importing.telemetry_import import (
     ManagedTelemetryArtifact,
@@ -45,9 +57,13 @@ from generals_replay_analyzer.importing.telemetry_import import (
     TelemetryImportResult,
     TelemetryObservationImporter,
 )
+from generals_replay_analyzer.parser import parse_replay
+from generals_replay_analyzer.storage import ContentAddressedStore
 from generals_replay_analyzer.telemetry import load_validated_telemetry_bundle
 from generals_replay_analyzer.telemetry.map_asset import BridgeFeature, Position3, WaypointFeature
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
+
+from .conftest import MutableClock
 
 NOW = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 ENGINE_IDENTITY = "zero-hour-test-exe-00000000-ini-00000000"
@@ -918,6 +934,201 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
     )
     with pytest.raises(StageFailure, match="telemetry artifact descriptor is incomplete"):
         handler(incomplete_telemetry)
+
+
+def test_real_dag_failed_telemetry_persists_attempt_assets_issues_and_zero_children(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch real Task 3 terminal telemetry evidence never reaching the Task 4 transaction."""
+    run_id = "a23e4567-e89b-12d3-a456-426614174000"
+    artifact_root = tmp_path / "failed-telemetry"
+    artifact_root.mkdir()
+    stdout = artifact_root / "engine-stdout.log"
+    outcome = artifact_root / "engine-outcome.json"
+    stdout.write_text("engine failed after launch", encoding="utf-8")
+    outcome.write_text('{"runner_status":"invalid_trace"}\n', encoding="utf-8")
+    artifact = TelemetryArtifact(
+        run_id=run_id,
+        runner_status="invalid_trace",
+        replay_quality="failed",
+        strategy_analysis_scope="none",
+        trace_path=None,
+        catalog_path=None,
+        map_asset_paths=(),
+        outcome_path=outcome,
+        stdout_path=stdout,
+        stderr_path=None,
+        exit_code=7,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="c" * 64,
+        diagnostics=(AcquisitionDiagnostic("invalid_trace", "trace completion record was invalid"),),
+    )
+
+    class FailedAcquirer:
+        def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
+            assert replay.is_file() and len(replay_sha256) == 64
+            return artifact
+
+    parser_importer = ParserObservationImporter(
+        session_factory,
+        settings.data_root,
+        parser=parse_replay,
+        parser_version="test-parser-1",
+        schema_version=1,
+        clock=clock,
+        uuid_factory=DeterministicUUIDs(30_000),
+    )
+    telemetry_importer = TelemetryObservationImporter(
+        session_factory,
+        settings.data_root,
+        clock=clock,
+        uuid_factory=DeterministicUUIDs(40_000),
+    )
+    handler = ObservationImportHandler(parser_importer, telemetry_importer)
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        parser=parse_replay,
+        telemetry_acquirer=FailedAcquirer(),
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="failed-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                handler,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    completed = service.run_available("task-4-integration", limit=10)
+    assert tuple(job.stage for job in completed)[-2:] == ("telemetry", "import_observations")
+    assert completed[-2].status == "failed"
+    assert completed[-1].status == "succeeded"
+
+    with session_factory() as session:
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        telemetry_run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert import_job is not None and import_job.status == "succeeded"
+        assert telemetry_run is not None and telemetry_run.status == "failed"
+        assert telemetry_run.runner_status == "invalid_trace"
+        assert telemetry_run.trace_asset_id is None
+        manifest = telemetry_run.settings_json["artifact_manifest"]
+        assert [item["logical_path"] for item in manifest] == ["outcome.json", "stdout.log"]
+        assert all("/" not in item["logical_path"] for item in manifest)
+        retained_ids = {item["asset_public_id"] for item in manifest}
+        assert set(
+            session.scalars(select(ManagedAsset.public_id).where(ManagedAsset.public_id.in_(retained_ids)))
+        ) == retained_ids
+        issues = set(
+            session.scalars(
+                select(ReplayQualityIssue.issue_code).where(
+                    ReplayQualityIssue.telemetry_run_id == telemetry_run.id
+                )
+            )
+        )
+        assert issues == {"exporter_failure"}
+        assert session.scalar(
+            select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == telemetry_run.id)
+        ) == 0
+        for model in (
+            TelemetryEvent,
+            Entity,
+            EntitySample,
+            ProductionEvent,
+            EconomyEvent,
+            CombatEvent,
+        ):
+            assert session.scalar(select(func.count()).select_from(model)) == 0
+
+
+def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch parser terminal evidence being lost before Task 4 can retain its failed attempt shell."""
+
+    def failing_parser(_path: Path) -> object:
+        raise ValueError("parser rejected fixture bytes")
+
+    parser_importer = ParserObservationImporter(
+        session_factory,
+        settings.data_root,
+        parser=parse_replay,
+        parser_version="test-parser-1",
+        schema_version=1,
+        clock=clock,
+        uuid_factory=DeterministicUUIDs(50_000),
+    )
+    telemetry_importer = TelemetryObservationImporter(
+        session_factory,
+        settings.data_root,
+        clock=clock,
+        uuid_factory=DeterministicUUIDs(60_000),
+    )
+    handler = ObservationImportHandler(parser_importer, telemetry_importer)
+    service = ImportService(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        parser=failing_parser,  # type: ignore[arg-type]
+        clock=clock,
+        parser_version="test-parser-1",
+        telemetry_acquirer_version="unused-acquirer-1",
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                handler,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-4-integration", limit=10)
+    assert tuple(job.stage for job in completed)[-2:] == ("parse", "import_observations")
+    assert completed[-2].status == "failed"
+    assert completed[-1].status == "succeeded"
+
+    with session_factory() as session:
+        parser_run = session.scalar(select(ParserRun))
+        import_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert parser_run is not None and parser_run.status == "failed"
+        assert parser_run.error_json["code"] == "parser_failed"
+        assert import_job is not None and import_job.status == "succeeded"
+        assert session.scalar(select(func.count()).select_from(ReplayCommand)) == 0
+        assert session.scalar(select(func.count()).select_from(ReplayPlayer)) == 0
+        assert session.scalar(
+            select(func.count()).select_from(EvidenceItem).where(EvidenceItem.parser_run_id == parser_run.id)
+        ) == 0
+        assert set(
+            session.scalars(
+                select(ReplayQualityIssue.issue_code).where(
+                    ReplayQualityIssue.parser_run_id == parser_run.id
+                )
+            )
+        ) == {"parser_failure"}
 
 
 def test_seeded_map_feature_permutations_are_semantically_canonical_and_duplicates_fail(

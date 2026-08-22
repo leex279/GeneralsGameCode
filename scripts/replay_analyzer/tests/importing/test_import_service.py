@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +42,7 @@ from generals_replay_analyzer.importing import (
     StageFailure,
     StageHandlerRegistration,
     TelemetryArtifact,
+    TerminalDependencyPolicy,
 )
 from generals_replay_analyzer.importing import service as importing_service
 from generals_replay_analyzer.storage import ContentAddressedStore
@@ -267,6 +268,213 @@ def test_registered_stage_never_receives_failed_dependency_output(
         assert imported is not None and imported.status == "failed"
         assert imported.error_code == "dependency_failed"
         assert imported.output_json is None
+
+
+def test_opted_in_terminal_parse_dependency_is_frozen_redacted_evidence(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch terminal parser evidence being projected away or leaking private mutable state."""
+    received: list[StageExecutionContext] = []
+    private_path = tmp_path / "private-run" / "source.rep"
+
+    def failing_parser(_path: Path) -> SimpleNamespace:
+        raise StageFailure(
+            "parser_fixture_failed",
+            f"parser failed while reading {private_path}",
+            retryable=False,
+            details={
+                "exception_type": "FixtureParserError",
+                "run_path": str(private_path.parent),
+                "attempted_at": "2026-08-22T12:00:00Z",
+                "nested": {"values": ["retained", str(private_path)]},
+            },
+        )
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        received.append(context)
+        assert tuple(dependency.stage for dependency in context.dependencies) == ("parse",)
+        dependency = context.dependencies[0]
+        assert dependency.status == "failed"
+        assert dependency.output is None
+        assert dependency.error_code == "parser_fixture_failed"
+        assert dependency.error_message is not None
+        assert str(private_path) not in dependency.error_message
+        assert dependency.error_details is not None
+        assert set(dependency.error_details) == {"exception_type", "nested"}
+        nested = dependency.error_details["nested"]
+        assert isinstance(nested, Mapping)
+        assert str(private_path) not in repr(dependency)
+        with pytest.raises(TypeError):
+            dependency.error_details["exception_type"] = "mutated"  # type: ignore[index]
+        with pytest.raises(AttributeError):
+            cast(Any, cast(Any, nested)["values"]).append("mutated")
+        return {"status": "failure-evidence-imported"}
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        parser=failing_parser,
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                import_observations,
+                terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
+            ),
+        ),
+    )
+    service.submit(ImportRequest(replay_file))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert tuple(job.stage for job in completed) == (
+        "discover",
+        "hash",
+        "manage_copy",
+        "parse",
+        "import_observations",
+    )
+    assert completed[-1].status == "succeeded"
+    assert len(received) == 1
+    with session_factory() as session:
+        parse_job = session.scalar(select(Job).where(Job.stage == "parse"))
+        imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert parse_job is not None and parse_job.status == "failed"
+        assert imported is not None and imported.status == "succeeded"
+        assert imported.input_json["selected_dependency_digest"] in imported.idempotency_key
+
+
+def test_opted_in_terminal_telemetry_dependency_keeps_mixed_success_failure_context(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch mixed parser success and terminal telemetry evidence being flattened to one status."""
+    received: list[StageExecutionContext] = []
+
+    def import_observations(context: StageExecutionContext) -> dict[str, str]:
+        received.append(context)
+        assert tuple((item.stage, item.status) for item in context.dependencies) == (
+            ("parse", "succeeded"),
+            ("telemetry", "failed"),
+        )
+        parsed, telemetry = context.dependencies
+        assert parsed.output is not None and parsed.error_code is None
+        assert telemetry.output is None and telemetry.error_code == "exporter_failure"
+        assert telemetry.error_details is not None
+        artifacts = telemetry.error_details["artifacts"]
+        assert isinstance(artifacts, tuple) and artifacts
+        assert cast(Any, artifacts[0])["logical_path"] == "stdout.log"
+        with pytest.raises(TypeError):
+            cast(Any, artifacts[0])["logical_path"] = "changed.log"
+        return {"status": "mixed-evidence-imported"}
+
+    service = _service(
+        session_factory,
+        settings,
+        replay_store,
+        artifact_store,
+        clock,
+        acquirer=_FakeAcquirer(_artifact(tmp_path, status="nonzero_engine_failure")),
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                "1",
+                import_observations,
+                terminal_dependency_policy=TerminalDependencyPolicy(
+                    failed_stages=frozenset({"parse", "telemetry"})
+                ),
+            ),
+        ),
+    )
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    completed = service.run_available("task-4-worker", limit=10)
+    assert tuple(job.stage for job in completed)[-2:] == ("telemetry", "import_observations")
+    assert completed[-2].status == "failed"
+    assert completed[-1].status == "succeeded"
+    assert len(received) == 1
+
+
+def test_terminal_failure_evidence_changes_materialized_identity_deterministically(
+    tmp_path: Path,
+    clock: MutableClock,
+) -> None:
+    """Catch failed dependency status/details being omitted from the durable observation identity."""
+    keys: list[str] = []
+    variants = (
+        ("first", "parser_fixture_failed", "fixture failure", {"reason": "alpha"}),
+        ("changed", "parser_fixture_failed", "fixture failure", {"reason": "beta"}),
+        ("repeat", "parser_fixture_failed", "fixture failure", {"reason": "alpha"}),
+    )
+
+    def failing_parser_for(
+        failure_code: str,
+        failure_message: str,
+        failure_details: dict[str, str],
+    ) -> Callable[[Path], SimpleNamespace]:
+        def fail(_path: Path) -> SimpleNamespace:
+            raise StageFailure(
+                failure_code,
+                failure_message,
+                retryable=False,
+                details=failure_details,
+            )
+
+        return fail
+
+    for label, code, message, details in variants:
+        root = tmp_path / label
+        configured = AnalyzerSettings(data_root=root / "product-data")
+        configured.ensure_directories()
+        upgrade_database(configured.database_path)
+        engine = create_database_engine(configured.database_path)
+        factory = create_session_factory(engine)
+        replay = root / "same.rep"
+        replay.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(PINNED_REPLAY, replay)
+
+        try:
+            service = _service(
+                factory,
+                configured,
+                ContentAddressedStore(configured.managed_replay_directory),
+                ContentAddressedStore(configured.cache_directory / "artifacts"),
+                clock,
+                parser=failing_parser_for(code, message, details),
+                stage_handlers=(
+                    StageHandlerRegistration(
+                        "import_observations",
+                        "1",
+                        lambda _context: {"status": "imported"},
+                        terminal_dependency_policy=TerminalDependencyPolicy(
+                            failed_stages=frozenset({"parse"})
+                        ),
+                    ),
+                ),
+            )
+            service.submit(ImportRequest(replay))
+            completed = service.run_available(f"{label}-worker", limit=10)
+            assert completed[-1].stage == "import_observations" and completed[-1].status == "succeeded"
+            with factory() as session:
+                imported = session.scalar(select(Job).where(Job.stage == "import_observations"))
+                assert imported is not None
+                keys.append(imported.idempotency_key)
+        finally:
+            engine.dispose()
+
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
 
 
 def test_registered_stage_uses_existing_typed_failure_and_retry_semantics(
@@ -509,6 +717,32 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
         ((StageHandlerRegistration("import_observations", "999", handler),), "version_mismatch"),
         (
             (
+                StageHandlerRegistration(
+                    "import_observations",
+                    "1",
+                    handler,
+                    terminal_dependency_policy=TerminalDependencyPolicy(
+                        failed_stages=frozenset({"*"})
+                    ),
+                ),
+            ),
+            "unknown_terminal_dependency_stage",
+        ),
+        (
+            (
+                StageHandlerRegistration(
+                    "import_observations",
+                    "1",
+                    handler,
+                    terminal_dependency_policy=TerminalDependencyPolicy(
+                        failed_stages=frozenset({"manage_copy"})
+                    ),
+                ),
+            ),
+            "non_direct_terminal_dependency_stage",
+        ),
+        (
+            (
                 StageHandlerRegistration("import_observations", "1", handler),
                 StageHandlerRegistration("import_observations", "1", handler),
             ),
@@ -525,6 +759,22 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
                 clock,
                 stage_handlers=registrations,
             )
+    with pytest.raises(TypeError, match="invalid_terminal_dependency_policy"):
+        _service(
+            session_factory,
+            settings,
+            replay_store,
+            artifact_store,
+            clock,
+            stage_handlers=(
+                StageHandlerRegistration(
+                    "import_observations",
+                    "1",
+                    handler,
+                    terminal_dependency_policy=cast(Any, frozenset({"parse"})),
+                ),
+            ),
+        )
 
 
 def test_default_service_keeps_future_observation_stage_pending(

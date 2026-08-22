@@ -36,7 +36,7 @@ from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundl
 from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
 from .parser_import import ParserObservationImporter
-from .service import FrozenJSONValue, StageExecutionContext
+from .service import FrozenJSONValue, StageDependencyOutput, StageExecutionContext
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _PRODUCTION_TYPES = {
@@ -827,23 +827,54 @@ class ObservationImportHandler:
         self._telemetry_importer = telemetry_importer
 
     def __call__(self, context: StageExecutionContext) -> Mapping[str, Any]:
-        dependencies = {dependency.stage: dependency.output for dependency in context.dependencies}
-        parse_output = dependencies.get("parse")
-        if parse_output is None:
+        dependencies = {dependency.stage: dependency for dependency in context.dependencies}
+        parse_dependency = dependencies.get("parse")
+        if parse_dependency is None:
             raise StageFailure("parser_dependency_missing", "parser dependency output is missing", retryable=False)
-        parser_version = parse_output.get("parser_version")
-        if not isinstance(parser_version, str):
-            raise StageFailure("parser_dependency_invalid", "parser dependency version is invalid", retryable=False)
-        parser_result = self._parser_importer.import_replay(context.replay_sha256, parser_version=parser_version)
-        if parser_result.status != "succeeded":
-            raise StageFailure("parser_import_failed", "parser observations failed validation", retryable=False)
+        if parse_dependency.status == "succeeded":
+            parse_output = _succeeded_dependency_output(parse_dependency)
+            parser_version = parse_output.get("parser_version")
+            if not isinstance(parser_version, str):
+                raise StageFailure("parser_dependency_invalid", "parser dependency version is invalid", retryable=False)
+            parser_result = self._parser_importer.import_replay(
+                context.replay_sha256,
+                parser_version=parser_version,
+            )
+            if parser_result.status != "succeeded":
+                raise StageFailure("parser_import_failed", "parser observations failed validation", retryable=False)
+        elif parse_dependency.status == "failed":
+            parser_version = _failed_parser_version(context)
+            code, message, details = _failed_dependency_error(parse_dependency)
+            parser_result = self._parser_importer.record_failed_dependency(
+                context.replay_sha256,
+                parser_version=parser_version,
+                error_code=code,
+                error_message=message,
+                error_details=details,
+            )
+        else:
+            raise StageFailure("parser_dependency_invalid", "parser dependency is not terminal", retryable=False)
         telemetry_result: TelemetryImportResult | None = None
-        telemetry_output = dependencies.get("telemetry")
-        if telemetry_output is not None:
-            attempt = _attempt_from_dependency(telemetry_output)
+        telemetry_dependency = dependencies.get("telemetry")
+        if telemetry_dependency is not None and telemetry_dependency.status == "succeeded":
+            attempt = _attempt_from_dependency(_succeeded_dependency_output(telemetry_dependency))
             telemetry_result = self._telemetry_importer.import_replay(context.replay_sha256, attempt)
             if telemetry_result.status != "succeeded":
                 raise StageFailure("telemetry_import_failed", "telemetry observations failed validation", retryable=False)
+        elif (
+            telemetry_dependency is not None
+            and telemetry_dependency.status == "failed"
+            and telemetry_dependency.error_code != "dependency_failed"
+        ):
+            _code, _message, details = _failed_dependency_error(telemetry_dependency)
+            attempt = _attempt_from_dependency(details)
+            telemetry_result = self._telemetry_importer.import_replay(context.replay_sha256, attempt)
+            if telemetry_result.status != "failed":
+                raise StageFailure(
+                    "telemetry_dependency_invalid",
+                    "failed telemetry dependency produced successful observations",
+                    retryable=False,
+                )
         return {
             "idempotency_key": context.idempotency_key,
             "parser_run_id": parser_result.run_id,
@@ -851,6 +882,47 @@ class ObservationImportHandler:
             "telemetry_run_id": telemetry_result.run_id if telemetry_result else None,
             "telemetry_event_count": telemetry_result.event_count if telemetry_result else 0,
         }
+
+
+def _succeeded_dependency_output(
+    dependency: StageDependencyOutput,
+) -> Mapping[str, FrozenJSONValue]:
+    if dependency.output is None:
+        raise StageFailure(
+            f"{dependency.stage}_dependency_invalid",
+            f"{dependency.stage} dependency output is missing",
+            retryable=False,
+        )
+    return dependency.output
+
+
+def _failed_dependency_error(
+    dependency: StageDependencyOutput,
+) -> tuple[str, str, Mapping[str, FrozenJSONValue]]:
+    if (
+        not dependency.error_code
+        or not dependency.error_message
+        or dependency.error_details is None
+    ):
+        raise StageFailure(
+            f"{dependency.stage}_dependency_invalid",
+            f"{dependency.stage} dependency failure evidence is incomplete",
+            retryable=False,
+        )
+    return dependency.error_code, dependency.error_message, dependency.error_details
+
+
+def _failed_parser_version(context: StageExecutionContext) -> str:
+    branch_recipe = context.input.get("branch_recipe")
+    if not isinstance(branch_recipe, Mapping):
+        raise StageFailure("parser_dependency_invalid", "parser branch recipe is missing", retryable=False)
+    parse_recipe = branch_recipe.get("parse")
+    if not isinstance(parse_recipe, Mapping):
+        raise StageFailure("parser_dependency_invalid", "parser branch recipe is invalid", retryable=False)
+    parser_version = parse_recipe.get("parser_version")
+    if not isinstance(parser_version, str) or not parser_version:
+        raise StageFailure("parser_dependency_invalid", "parser dependency version is invalid", retryable=False)
+    return parser_version
 
 
 def _attempt_from_dependency(output: Mapping[str, FrozenJSONValue]) -> TelemetryAttempt:

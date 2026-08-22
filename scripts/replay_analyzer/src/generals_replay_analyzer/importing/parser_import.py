@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -179,6 +180,65 @@ class ParserObservationImporter:
             self._commit_failure(replay_id, run_id, error, code, now)
             return ParserImportResult(run_id, "failed", "unsupported" if code == "parser_unsupported" else "failed", 0, False)
         return ParserImportResult(run_id, "succeeded", parsed.completion_status, len(parsed.commands), False)
+
+    # TheSuperHackers @feature Leex 22/08/2026 Retain an upstream terminal parser attempt without inventing observations. (#TBD)
+    def record_failed_dependency(
+        self,
+        replay_sha256: str,
+        *,
+        parser_version: str,
+        error_code: str,
+        error_message: str,
+        error_details: Mapping[str, object],
+    ) -> ParserImportResult:
+        sha256 = _require_sha256(replay_sha256)
+        if not parser_version or not error_code or not error_message:
+            raise ValueError("failed parser dependency metadata is incomplete")
+        run_id = str(self._uuid_factory())
+        now = _utc(self._clock())
+        replay_id = self._create_attempt(sha256, parser_version, run_id, now)
+        unsupported = "unsupported" in error_code
+        issue_code = "parser_unsupported" if unsupported else "parser_failure"
+        error_json = json.loads(
+            canonical_json(
+                {
+                    "type": "stage_dependency",
+                    "code": error_code,
+                    "message": error_message,
+                    "details": dict(error_details),
+                }
+            )
+        )
+        with self._session_factory.begin() as session:
+            replay = session.get(Replay, replay_id)
+            run = session.scalar(select(ParserRun).where(ParserRun.run_id == run_id))
+            if replay is None or run is None or run.status != "running":
+                raise RuntimeError("parser attempt shell disappeared while recording dependency failure")
+            run.status = "failed"
+            run.completion_status = "unsupported" if unsupported else "failed"
+            run.error_json = error_json
+            run.completed_at = now
+            self._add_issue(
+                session,
+                replay,
+                run,
+                issue_code,
+                "error",
+                {"error_code": error_code},
+                now,
+            )
+            if unsupported:
+                replay.lifecycle_state = "unsupported"
+            elif replay.lifecycle_state == "discovered":
+                replay.lifecycle_state = "failed"
+            replay.updated_at = now
+        return ParserImportResult(
+            run_id,
+            "failed",
+            "unsupported" if unsupported else "failed",
+            0,
+            False,
+        )
 
     def _successful_run(self, sha256: str, parser_version: str) -> ParserRun | None:
         with self._session_factory() as session:
