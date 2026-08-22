@@ -247,7 +247,13 @@ class ReportService:
                 *self._longitudinal_values(session, replay.id, replay_player),
             )
             ollama, inferred, analysis_id = self._ollama_values(
-                session, replay.id, replay_player, request.include_validated_ollama, derived, observed
+                session,
+                replay.id,
+                replay_player,
+                request.include_validated_ollama,
+                derived,
+                observed,
+                request.analysis_run_id,
             )
             component_identity: dict[str, object] = {
                 "parser": None
@@ -952,6 +958,7 @@ class ReportService:
         requested: bool,
         derived: tuple[ReportValue, ...],
         observed: tuple[ReportValue, ...],
+        analysis_run_id: str | None = None,
     ) -> tuple[OllamaReportStatus, tuple[ReportValue, ...], int | None]:
         if not requested:
             return OllamaReportStatus.not_requested(), (), None
@@ -960,7 +967,11 @@ class ReportService:
             query = query.where(AnalysisRun.replay_player_id == replay_player.id)
         else:
             query = query.where(AnalysisRun.replay_player_id.is_(None))
+        if analysis_run_id is not None:
+            query = query.where(AnalysisRun.run_id == analysis_run_id)
         runs = tuple(session.scalars(query))
+        if analysis_run_id is not None and not runs:
+            raise ReportContractError("selected analysis run was not found in the requested replay graph")
         successful = tuple(run for run in runs if run.status == "succeeded")
         if len(successful) > 1:
             raise ReportContractError("successful Task 10 analysis graph is ambiguous")

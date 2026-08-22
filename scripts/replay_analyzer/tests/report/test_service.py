@@ -562,6 +562,51 @@ def test_invalid_stored_ollama_citation_is_status_only(report_database: SeededRe
     assert receipt.document.inferred == ()
 
 
+def test_report_selects_exact_requested_analysis_run_amid_other_attempts(
+    report_database: SeededReportDatabase,
+) -> None:
+    now = datetime(2026, 8, 22, 13, 30, tzinfo=UTC)
+    selected_run_id = stable_uuid("selected-exact-analysis-run")
+    with report_database.session_factory() as session:  # type: ignore[operator]
+        replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+        assert replay is not None
+        session.add(
+            AnalysisRun(
+                run_id=selected_run_id,
+                replay_id=replay.id,
+                replay_player_id=None,
+                provider="ollama",
+                model_name="qwen3.6:27b",
+                model_digest="7" * 64,
+                prompt_version="strategy-report-v1",
+                prompt_digest="c2603f4f4cff1b3563801d83a6c2e567700eba4a86fe3af83524bcb98d6693d7",
+                response_schema_version="strategy-report-response-v1",
+                response_schema_digest="a758faf24d931094b18ade9cf37c49bbe032686f7499180872f1d7bd7669b76e",
+                settings_digest="a" * 64,
+                input_digest="b" * 64,
+                cache_key="f" * 64,
+                status="unavailable",
+                validated_response_json=None,
+                diagnostics_json=[{"code": "selected_unavailable"}],
+                created_at=now,
+                completed_at=now,
+            )
+        )
+        session.commit()
+
+    receipt = _service(report_database).create(
+        ReportRequest(
+            report_database.replay_public_id,
+            include_validated_ollama=True,
+            publish=False,
+            analysis_run_id=selected_run_id,
+        )
+    )
+
+    assert receipt.document.ollama.analysis_run_id == selected_run_id
+    assert receipt.document.ollama.status == "unavailable"
+
+
 def test_succeeded_task10_run_requires_pinned_prompt_and_response_resources(
     report_database: SeededReportDatabase,
 ) -> None:

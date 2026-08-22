@@ -436,11 +436,16 @@ class ReportRequest:
     replay_player_public_id: str | None = None
     include_validated_ollama: bool = False
     publish: bool = True
+    analysis_run_id: str | None = None
 
     def __post_init__(self) -> None:
         _public_uuid(self.replay_public_id, "replay_public_id")
         if self.replay_player_public_id is not None:
             _public_uuid(self.replay_player_public_id, "replay_player_public_id")
+        if self.analysis_run_id is not None:
+            _public_uuid(self.analysis_run_id, "analysis_run_id")
+            if not self.include_validated_ollama:
+                raise ValueError("analysis_run_id requires validated Ollama inclusion")
         if type(self.include_validated_ollama) is not bool or type(self.publish) is not bool:
             raise TypeError("report request switches must be built-in booleans")
 
