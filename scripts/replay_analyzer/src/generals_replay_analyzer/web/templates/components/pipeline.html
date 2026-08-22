@@ -1,0 +1,10 @@
+{% macro pipeline_summary(pipeline) -%}
+<section class="pipeline-summary" aria-labelledby="pipeline-heading">
+  <h2 id="pipeline-heading">Pipeline</h2>
+  {% if pipeline %}
+  <p>Stage: {{ pipeline.stage }}. State: {{ pipeline.state }}. Attempt: {{ pipeline.attempt }}.</p>
+  {% else %}
+  <p>Pipeline: unavailable.</p>
+  {% endif %}
+</section>
+{%- endmacro %}

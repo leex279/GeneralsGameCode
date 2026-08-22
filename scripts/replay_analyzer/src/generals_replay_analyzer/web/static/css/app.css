@@ -1,0 +1,56 @@
+:root {
+  --surface: #f8fafc;
+  --surface-raised: #ffffff;
+  --text: #172033;
+  --muted-text: #46536b;
+  --border: #bdc7d8;
+  --focus: #005fcc;
+  --player-one: #005fcc;
+  --player-two: #a34100;
+  --evidence-observed: #005f56;
+  --evidence-derived: #593fa0;
+  --evidence-inferred: #805000;
+  --success: #146c2e;
+  --warning: #805000;
+  --error: #a40000;
+  --font-body: system-ui, sans-serif;
+  --space-1: 0.5rem;
+  --space-2: 1rem;
+  --space-3: 1.5rem;
+  --radius: 0.35rem;
+  --motion-duration: 160ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #111827;
+    --surface-raised: #1f2937;
+    --text: #f8fafc;
+    --muted-text: #d1d9e6;
+    --border: #91a0b8;
+    --focus: #80bfff;
+  }
+}
+
+* { box-sizing: border-box; }
+body { background: var(--surface); color: var(--text); font-family: var(--font-body); line-height: 1.5; margin: 0; }
+a { color: inherit; }
+.site-header, main, footer { margin: auto; max-width: 70rem; padding: var(--space-2); }
+.site-header { background: var(--surface-raised); border-bottom: 1px solid var(--border); }
+.brand { display: inline-block; font-weight: 700; margin-bottom: var(--space-1); }
+.primary-navigation { display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; margin: var(--space-1) 0; padding: 0; }
+.upcoming-navigation { color: var(--muted-text); }
+.badge, .empty-state, .pipeline-summary, .error-panel, .metric { border: 1px solid var(--border); border-radius: var(--radius); display: block; margin: var(--space-2) 0; padding: var(--space-1); }
+.availability-available { border-left: 0.35rem solid var(--success); }
+.availability-partial { border-left: 0.35rem solid var(--warning); }
+.availability-unavailable, .error-panel { border-left: 0.35rem solid var(--error); }
+.skip-link { background: var(--surface-raised); left: -9999px; padding: var(--space-1); position: absolute; top: 0; z-index: 1; }
+.skip-link:focus { left: var(--space-1); }
+:focus-visible { outline: 0.2rem solid var(--focus); outline-offset: 0.2rem; }
+.visually-hidden { height: 1px; margin: -1px; overflow: hidden; position: absolute; width: 1px; }
+dialog { background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); max-width: 30rem; }
+dialog::backdrop { background: rgb(0 0 0 / 60%); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+}

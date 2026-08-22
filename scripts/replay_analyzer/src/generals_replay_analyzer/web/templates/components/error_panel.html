@@ -1,0 +1,8 @@
+{% macro error_panel(problem_code, message, correlation_id) -%}
+<section class="error-panel" role="alert">
+  <h2>Unable to show this area</h2>
+  <p>Problem: {{ problem_code }}</p>
+  <p>{{ message }}</p>
+  {% if correlation_id %}<p>Correlation: {{ correlation_id }}</p>{% endif %}
+</section>
+{%- endmacro %}

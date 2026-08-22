@@ -1,0 +1,22 @@
+{
+  "assets": [
+    {
+      "filename": "htmx.min.js",
+      "license_record": "THIRD_PARTY_LICENSES.md",
+      "license_spdx": "0BSD",
+      "name": "htmx",
+      "sha256": "71ea67185bfa8c98c39d31717c6fce5d852370fcdfd129db4543774d3145c0de",
+      "source_url": "https://github.com/bigskysoftware/htmx/releases/tag/v2.0.10",
+      "version": "2.0.10"
+    },
+    {
+      "filename": "echarts.min.js",
+      "license_record": "THIRD_PARTY_LICENSES.md",
+      "license_spdx": "Apache-2.0",
+      "name": "Apache ECharts",
+      "sha256": "b66b25aeb4df84e33199dc21694014d336d222cbd9deb0e5a7c14bd6aa0d0fd0",
+      "source_url": "https://github.com/apache/echarts/releases/tag/6.1.0",
+      "version": "6.1.0"
+    }
+  ]
+}

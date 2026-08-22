@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% import "components/badges.html" as badges %}
+{% import "components/empty_state.html" as states %}
+{% block content %}
+  <h1>Player identity</h1>
+  {{ badges.availability_badge(shell.availability) }}
+  {{ badges.terminal_quality_badge(shell.terminal_quality) }}
+  {% if shell.availability.state == "unavailable" %}
+    {{ states.empty_state("Player identity unavailable", shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied", "Identity actions are unavailable until the accepted identity adapter is installed.") }}
+  {% elif shell.availability.state == "partial" %}
+    <p class="availability-detail">Player identity is partially available. Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}.</p>
+  {% else %}
+    <p class="availability-detail">Player identity data is available from the accepted adapter.</p>
+  {% endif %}
+{% endblock %}

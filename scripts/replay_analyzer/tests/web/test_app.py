@@ -76,12 +76,16 @@ def test_unready_dependency_returns_sanitized_problem_with_stable_diagnostics(
 
 
 @pytest.mark.parametrize(
-    ("path", "expected_key"),
-    [("/", "pipeline_states"), ("/players", "availability")],
+    ("path", "expected_heading", "expected_reason"),
+    [
+        ("/", "Replay dashboard", "analytics_adapter_pending"),
+        ("/players", "Player identity", "identity_adapter_pending"),
+    ],
 )
-def test_reserved_routes_return_only_fake_port_snapshots_and_close_each_scope(
+def test_reserved_routes_render_fake_port_snapshots_and_close_each_scope(
     path: str,
-    expected_key: str,
+    expected_heading: str,
+    expected_reason: str,
     port_factory: CountingPortFactory,
     bootstrapper: RecordingBootstrapper,
 ) -> None:
@@ -89,8 +93,10 @@ def test_reserved_routes_return_only_fake_port_snapshots_and_close_each_scope(
         response = client.get(path, headers={"host": "localhost"})
 
     assert response.status_code == 200
-    assert expected_key in response.json()
-    assert response.json()["availability"]["state"] == "unavailable"
+    assert response.headers["content-type"].startswith("text/html")
+    assert f"<h1>{expected_heading}</h1>" in response.text
+    assert "Availability: unavailable" in response.text
+    assert expected_reason in response.text
     assert port_factory.created == port_factory.closed == 1
 
 
@@ -131,8 +137,6 @@ def test_reserved_pages_publish_distinct_semantic_names_and_non_color_availabili
 
     assert schema["paths"]["/"]["get"]["summary"] == "Dashboard"
     assert schema["paths"]["/players"]["get"]["summary"] == "Identity management"
-    availability = schema["components"]["schemas"]["AvailabilityDTO"]
-    assert availability["properties"]["state"]["enum"] == ["available", "partial", "unavailable"]
 
 
 def test_public_dtos_reject_absolute_paths_internal_ids_and_noncanonical_public_ids() -> None:

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ shell.page_title }}</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+    <script src="/static/js/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <a class="brand" href="/">Generals Replay Analyzer</a>
+      <button class="command-trigger" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">Open navigation</button>
+      <nav aria-label="Primary navigation">
+        <ul class="primary-navigation">
+          {% for item in shell.navigation if item.availability == "available" %}
+          <li><a href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
+          {% endfor %}
+        </ul>
+        <details class="upcoming-navigation">
+          <summary>Upcoming areas</summary>
+          <ul>
+            {% for item in shell.navigation if item.availability == "unavailable" %}
+            <li><span aria-disabled="true">{{ item.label }}: {{ item.unavailable_reason_code }}</span></li>
+            {% endfor %}
+          </ul>
+        </details>
+      </nav>
+    </header>
+    <div id="app-feedback" class="visually-hidden" aria-live="polite"></div>
+    <main id="main-content" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+    <footer>Local-only replay evidence viewer.</footer>
+    <dialog id="command-palette" aria-labelledby="command-palette-title">
+      <h2 id="command-palette-title">Navigate</h2>
+      <ul>
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/players">Players</a></li>
+        <li><span aria-disabled="true">Import: import_ui_not_installed</span></li>
+      </ul>
+      <button type="button" data-command-palette-close>Close</button>
+    </dialog>
+  </body>
+</html>

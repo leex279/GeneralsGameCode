@@ -1,0 +1,7 @@
+{% macro empty_state(heading, reason_code, detail) -%}
+<section class="empty-state">
+  <h2>{{ heading }}</h2>
+  <p>Reason: {{ reason_code }}</p>
+  <p>{{ detail }}</p>
+</section>
+{%- endmacro %}

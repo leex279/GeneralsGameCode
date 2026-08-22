@@ -1,0 +1,6 @@
+{% macro evidence_drawer(drawer_id, evidence_public_id, tier, title, body) -%}
+<details id="{{ drawer_id }}" class="evidence-drawer" data-evidence-public-id="{{ evidence_public_id }}">
+  <summary>{{ title }} — Evidence tier: {{ tier }}</summary>
+  <p>{{ body }}</p>
+</details>
+{%- endmacro %}

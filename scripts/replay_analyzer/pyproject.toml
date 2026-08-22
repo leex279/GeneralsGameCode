@@ -28,7 +28,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/generals_replay_analyzer"]
-exclude = ["src/generals_replay_analyzer/db/migrations/**"]
+exclude = [
+    "src/generals_replay_analyzer/db/migrations/**",
+    "src/generals_replay_analyzer/web/templates/**",
+    "src/generals_replay_analyzer/web/static/**",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 "contracts/zero_hour_1_04_message_types.json" = "generals_replay_analyzer/data/zero_hour_1_04_message_types.json"
@@ -38,7 +42,27 @@ exclude = ["src/generals_replay_analyzer/db/migrations/**"]
 "contracts/map-asset-v1.schema.json" = "generals_replay_analyzer/data/map-asset-v1.schema.json"
 "contracts/map-asset-v2.schema.json" = "generals_replay_analyzer/data/map-asset-v2.schema.json"
 "contracts/zero-hour-combat-types-v1.json" = "generals_replay_analyzer/data/zero-hour-combat-types-v1.json"
-"src/generals_replay_analyzer/db/migrations" = "generals_replay_analyzer/db/migrations"
+"src/generals_replay_analyzer/db/migrations/env.py" = "generals_replay_analyzer/db/migrations/env.py"
+"src/generals_replay_analyzer/db/migrations/script.py.mako" = "generals_replay_analyzer/db/migrations/script.py.mako"
+"src/generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py" = "generals_replay_analyzer/db/migrations/versions/0001_replay_analyzer_v2.py"
+"src/generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py" = "generals_replay_analyzer/db/migrations/versions/0002_player_identity_audit.py"
+"src/generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py" = "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py"
+"src/generals_replay_analyzer/web/templates/base.html" = "generals_replay_analyzer/web/templates/base.html"
+"src/generals_replay_analyzer/web/templates/dashboard.html" = "generals_replay_analyzer/web/templates/dashboard.html"
+"src/generals_replay_analyzer/web/templates/identity/landing.html" = "generals_replay_analyzer/web/templates/identity/landing.html"
+"src/generals_replay_analyzer/web/templates/components/badges.html" = "generals_replay_analyzer/web/templates/components/badges.html"
+"src/generals_replay_analyzer/web/templates/components/empty_state.html" = "generals_replay_analyzer/web/templates/components/empty_state.html"
+"src/generals_replay_analyzer/web/templates/components/error_panel.html" = "generals_replay_analyzer/web/templates/components/error_panel.html"
+"src/generals_replay_analyzer/web/templates/components/metric.html" = "generals_replay_analyzer/web/templates/components/metric.html"
+"src/generals_replay_analyzer/web/templates/components/pagination.html" = "generals_replay_analyzer/web/templates/components/pagination.html"
+"src/generals_replay_analyzer/web/templates/components/pipeline.html" = "generals_replay_analyzer/web/templates/components/pipeline.html"
+"src/generals_replay_analyzer/web/templates/components/evidence_drawer.html" = "generals_replay_analyzer/web/templates/components/evidence_drawer.html"
+"src/generals_replay_analyzer/web/static/css/app.css" = "generals_replay_analyzer/web/static/css/app.css"
+"src/generals_replay_analyzer/web/static/js/app.js" = "generals_replay_analyzer/web/static/js/app.js"
+"src/generals_replay_analyzer/web/static/vendor/htmx.min.js" = "generals_replay_analyzer/web/static/vendor/htmx.min.js"
+"src/generals_replay_analyzer/web/static/vendor/echarts.min.js" = "generals_replay_analyzer/web/static/vendor/echarts.min.js"
+"src/generals_replay_analyzer/web/static/vendor/vendor-manifest.json" = "generals_replay_analyzer/web/static/vendor/vendor-manifest.json"
+"src/generals_replay_analyzer/web/static/vendor/THIRD_PARTY_LICENSES.md" = "generals_replay_analyzer/web/static/vendor/THIRD_PARTY_LICENSES.md"
 
 [dependency-groups]
 dev = [

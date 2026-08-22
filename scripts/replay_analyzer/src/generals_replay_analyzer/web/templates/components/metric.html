@@ -1,0 +1,6 @@
+{% macro metric(label, display_value, availability, reason_code) -%}
+<section class="metric" aria-label="{{ label }}">
+  <h2>{{ label }}</h2>
+  {% if availability.state == "available" %}<p>{{ display_value }}</p>{% else %}<p>Unavailable: {{ reason_code }}</p>{% endif %}
+</section>
+{%- endmacro %}

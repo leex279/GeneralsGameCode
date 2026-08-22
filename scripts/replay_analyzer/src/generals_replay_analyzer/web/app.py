@@ -10,12 +10,14 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
 from generals_replay_analyzer.web.bootstrap import BootstrapSettings
 from generals_replay_analyzer.web.dependencies import WebApplicationPortFactory
 from generals_replay_analyzer.web.errors import CONTENT_SECURITY_POLICY, install_problem_handlers, problem_response
+from generals_replay_analyzer.web.resources import package_resource
 from generals_replay_analyzer.web.routes import dashboard, health, identity
 
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1"})
@@ -138,6 +140,8 @@ def create_app(
     app.include_router(health.router)
     app.include_router(dashboard.router)
     app.include_router(identity.router)
+    # TheSuperHackers @feature Leex 22/08/2026 Serve only package-owned local shell assets. (#TBD)
+    app.mount("/static", StaticFiles(directory=str(package_resource("web/static"))), name="static")
     app.add_middleware(
         LocalRequestSecurityMiddleware,
         csrf_validator=csrf_validator or RejectAllCsrfValidator(),

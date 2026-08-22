@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% import "components/badges.html" as badges %}
+{% import "components/pipeline.html" as pipeline_components %}
+{% import "components/empty_state.html" as states %}
+{% block content %}
+  <h1>Replay dashboard</h1>
+  {{ badges.availability_badge(shell.availability) }}
+  {{ badges.terminal_quality_badge(shell.terminal_quality) }}
+  {{ pipeline_components.pipeline_summary(shell.pipeline) }}
+  {% if shell.availability.state == "unavailable" %}
+    {{ states.empty_state("Analysis data unavailable", shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied", "No completed report is shown until an accepted analytics adapter supplies immutable data.") }}
+  {% elif shell.availability.state == "partial" %}
+    <p class="availability-detail">Analysis is partially available. Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}. No completed report is implied.</p>
+  {% else %}
+    <p class="availability-detail">Analysis data is available from the accepted adapter.</p>
+  {% endif %}
+{% endblock %}

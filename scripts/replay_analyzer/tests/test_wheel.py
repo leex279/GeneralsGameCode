@@ -1,11 +1,13 @@
 """Installed-wheel smoke tests for replay-analyzer package data."""
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import textwrap
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -27,6 +29,75 @@ WEB_BOUNDARY_RESOURCES = {
     "generals_replay_analyzer/web/routes/dashboard.py",
     "generals_replay_analyzer/web/routes/identity.py",
 }
+WEB_SHELL_RESOURCES = {
+    "generals_replay_analyzer/web/presentation/__init__.py",
+    "generals_replay_analyzer/web/presentation/shell.py",
+    "generals_replay_analyzer/web/templates/base.html",
+    "generals_replay_analyzer/web/templates/dashboard.html",
+    "generals_replay_analyzer/web/templates/identity/landing.html",
+    "generals_replay_analyzer/web/templates/components/badges.html",
+    "generals_replay_analyzer/web/templates/components/empty_state.html",
+    "generals_replay_analyzer/web/templates/components/error_panel.html",
+    "generals_replay_analyzer/web/templates/components/metric.html",
+    "generals_replay_analyzer/web/templates/components/pagination.html",
+    "generals_replay_analyzer/web/templates/components/pipeline.html",
+    "generals_replay_analyzer/web/templates/components/evidence_drawer.html",
+    "generals_replay_analyzer/web/static/css/app.css",
+    "generals_replay_analyzer/web/static/js/app.js",
+    "generals_replay_analyzer/web/static/vendor/htmx.min.js",
+    "generals_replay_analyzer/web/static/vendor/echarts.min.js",
+    "generals_replay_analyzer/web/static/vendor/vendor-manifest.json",
+    "generals_replay_analyzer/web/static/vendor/THIRD_PARTY_LICENSES.md",
+}
+
+
+def _source_resource(resource_name: str) -> Path:
+    return PROJECT_ROOT / "src" / resource_name
+
+
+def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_resources() -> None:
+    configuration = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    force_include = configuration["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    web_force_includes = {
+        destination
+        for source, destination in force_include.items()
+        if source.startswith("src/generals_replay_analyzer/web/")
+    }
+    assert web_force_includes == WEB_SHELL_RESOURCES - {
+        "generals_replay_analyzer/web/presentation/__init__.py",
+        "generals_replay_analyzer/web/presentation/shell.py",
+    }
+    assert all(Path(source).suffix for source in force_include)
+    assert not any("*" in source or ".task" in source or "cache" in source or "secret" in source for source in force_include)
+
+
+def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path: Path) -> None:
+    """The wheel must never absorb an unlisted cache or secret placed below web assets."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    poison = PROJECT_ROOT / "src" / "generals_replay_analyzer" / "web" / "static" / "vendor" / ".cache-secret"
+    poison.write_bytes(b"not-package-data")
+    try:
+        distribution_directory = tmp_path / "dist"
+        _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+        wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+        with zipfile.ZipFile(wheel) as archive:
+            web_resources = {
+                name
+                for name in archive.namelist()
+                if name.startswith(
+                    ("generals_replay_analyzer/web/templates/", "generals_replay_analyzer/web/static/")
+                )
+            }
+            assert web_resources == WEB_SHELL_RESOURCES - {
+                "generals_replay_analyzer/web/presentation/__init__.py",
+                "generals_replay_analyzer/web/presentation/shell.py",
+            }
+            assert "generals_replay_analyzer/web/static/vendor/.cache-secret" not in archive.namelist()
+            assert not any("cache" in name.lower() or "secret" in name.lower() for name in archive.namelist())
+    finally:
+        poison.unlink(missing_ok=True)
 
 
 def _run(
@@ -97,6 +168,79 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     environment["TEST_DATABASE_PATH"] = str(database_path)
     environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
     result = _run([str(environment_python), "-c", migration_script], tmp_path, environment)
+    assert result.returncode == 0
+
+
+def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: Path) -> None:
+    """Reject a wheel that needs checkout templates, assets, or network-loaded vendors."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    distribution_directory = tmp_path / "dist"
+    _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+    wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        assert WEB_SHELL_RESOURCES <= set(archive.namelist())
+        for resource_name in WEB_SHELL_RESOURCES:
+            assert archive.read(resource_name) == _source_resource(resource_name).read_bytes()
+
+    environment_directory = tmp_path / "shell-wheel-environment"
+    _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
+    environment_python = environment_directory / "Scripts" / "python.exe"
+    _run([str(environment_python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], tmp_path)
+    shell_script = textwrap.dedent(
+        """
+        import hashlib
+        import json
+        import os
+
+        from fastapi.testclient import TestClient
+
+        import generals_replay_analyzer
+        from generals_replay_analyzer.web.app import create_app
+        from generals_replay_analyzer.web.ports import AvailabilityDTO, DashboardDTO, IdentityLandingDTO, ReadinessDTO
+        from generals_replay_analyzer.web.resources import package_resource
+
+        class Port:
+            def readiness(self):
+                return ReadinessDTO(ready=True, schema_revision="wheel")
+            def dashboard(self):
+                from datetime import UTC, datetime
+                return DashboardDTO(generated_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC), availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+            def identity_landing(self):
+                from datetime import UTC, datetime
+                return IdentityLandingDTO(generated_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC), availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+        class Factory:
+            def __enter__(self): return Port()
+            def __exit__(self, *args): return None
+        class Bootstrapper:
+            def prepare(self, settings): return None
+
+        assert "shell-wheel-environment" in str(generals_replay_analyzer.__file__)
+        expected_hashes = json.loads(os.environ["WHEEL_WEB_RESOURCE_HASHES"])
+        for resource_name, expected_hash in expected_hashes.items():
+            resource = package_resource(resource_name.removeprefix("generals_replay_analyzer/"))
+            assert hashlib.sha256(resource.read_bytes()).hexdigest() == expected_hash
+        manifest = json.loads(package_resource("web/static/vendor/vendor-manifest.json").read_text(encoding="utf-8"))
+        with TestClient(create_app(object(), port_factory=lambda: Factory(), bootstrapper=Bootstrapper())) as client:
+            for path, heading in (("/", "Replay dashboard"), ("/players", "Player identity")):
+                response = client.get(path, headers={"host": "localhost", "accept": "text/html"})
+                assert response.status_code == 200
+                assert heading in response.text
+                assert 'src="/static/vendor/htmx.min.js"' not in response.text
+                assert 'src="/static/vendor/echarts.min.js"' not in response.text
+            stylesheet = client.get("/static/css/app.css", headers={"host": "localhost"})
+            assert stylesheet.status_code == 200
+            assert stylesheet.headers["content-security-policy"]
+        """
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
+    environment["WHEEL_WEB_RESOURCE_HASHES"] = json.dumps(
+        {resource: hashlib.sha256(_source_resource(resource).read_bytes()).hexdigest() for resource in WEB_SHELL_RESOURCES},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    result = _run([str(environment_python), "-c", shell_script], tmp_path, environment)
     assert result.returncode == 0
 
 
