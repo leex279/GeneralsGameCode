@@ -23,7 +23,7 @@ _REGISTRY_NAME = "watched-roots-v1.json"
 _LOCK_NAME = ".watched-roots-v1.lock"
 _REGISTRY_VERSION = 1
 _MAX_REGISTRY_BYTES = 256 * 1024
-_MAX_REGISTRY_ENTRIES = 4096
+_MAX_REGISTRY_ENTRIES = 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _GENERIC_LABEL_PATTERN = re.compile(r"^Replay folder ([1-9][0-9]{0,8})$")
 _WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('<>:"\\|?*')
@@ -96,6 +96,10 @@ class IngressSnapshot:
     relative_name: str
     created: bool
 
+    def read_verified_bytes(self) -> bytes:
+        """Reopen product-owned bytes through verified parents and recheck immutable identity."""
+        return _read_verified_ingress_target(self.snapshot_path, self.sha256, self.size_bytes)
+
 
 @dataclass(frozen=True, slots=True)
 class _RegistryEntry:
@@ -148,7 +152,7 @@ def _unlock_descriptor(descriptor: int) -> None:
 
 
 @contextmanager
-def _registry_lock(data_root: Path) -> Iterator[None]:
+def _registry_lock(data_root: Path) -> Iterator[_BoundDirectory]:
     bound_root: tuple[_BoundDirectory, ...] = ()
     try:
         data_root.mkdir(parents=True, exist_ok=True)
@@ -211,7 +215,7 @@ def _registry_lock(data_root: Path) -> Iterator[None]:
                         lock_identity = _win_file_identity(msvcrt.get_osfhandle(descriptor))
                 _lock_descriptor(descriptor)
                 try:
-                    yield
+                    yield bound_root[-1]
                 finally:
                     if os.name == "nt":
                         lock_changed = _win_file_identity(msvcrt.get_osfhandle(descriptor)) != lock_identity
@@ -242,39 +246,88 @@ def _registry_lock(data_root: Path) -> Iterator[None]:
 @contextmanager
 def _digest_lock(lock_directory: Path, digest: str) -> Iterator[None]:
     lock_path = lock_directory / f"{digest}.lock"
+    bound_directory: tuple[_BoundDirectory, ...] = ()
     try:
-        lock_directory.mkdir(parents=True, exist_ok=True)
-        directory_info = lock_directory.lstat()
-        if (
-            lock_directory.is_symlink()
-            or _is_reparse(directory_info)
-            or not stat.S_ISDIR(directory_info.st_mode)
-        ):
-            raise SnapshotIngressError("ingress_snapshot_unavailable")
+        _ensure_owned_directory(lock_directory.parent)
+        _ensure_owned_directory(lock_directory, enforcement_site="locks")
+        bound_directory = _open_absolute_directory_chain(lock_directory)
+        _race_hook("digest_lock_directory_bound")
         with _thread_lock(lock_path):
-            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOINHERIT", 0), 0o600)
+            if os.name == "nt":
+                handle = _win_open_relative(
+                    bound_directory[-1],
+                    lock_path.name,
+                    directory=False,
+                    deny_mutation=False,
+                    prevent_rename=True,
+                    writable=True,
+                    disposition=_FILE_OPEN_IF,
+                )
+                try:
+                    descriptor = msvcrt.open_osfhandle(
+                        handle,
+                        os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+                    )
+                except Exception:
+                    _win_close(handle)
+                    raise
+            else:  # pragma: no cover - exercised on POSIX hosts
+                descriptor = os.open(
+                    lock_path.name,
+                    os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=bound_directory[-1].handle,
+                )
             try:
                 opened = os.fstat(descriptor)
-                named = lock_path.lstat()
-                if (
-                    lock_path.is_symlink()
-                    or _is_reparse(named)
-                    or not stat.S_ISREG(named.st_mode)
-                    or named.st_nlink != 1
-                    or not _same_opened_identity(opened, named)
-                ):
+                if os.name == "nt":
+                    lock_identity = _win_file_identity(msvcrt.get_osfhandle(descriptor))
+                    invalid = (
+                        _enforce_reparse_identity(
+                            "locks", lock_identity.object_identity.reparse_attributes != 0
+                        )
+                        or lock_identity.object_identity.file_type != stat.S_IFREG
+                        or lock_identity.link_count != 1
+                    )
+                else:  # pragma: no cover - exercised on POSIX hosts
+                    named = os.stat(
+                        lock_path.name,
+                        dir_fd=bound_directory[-1].handle,
+                        follow_symlinks=False,
+                    )
+                    lock_identity = _file_identity(named)
+                    invalid = (
+                        _is_reparse(named)
+                        or not stat.S_ISREG(named.st_mode)
+                        or named.st_nlink != 1
+                        or not _same_opened_identity(opened, named)
+                    )
+                if invalid:
                     raise SnapshotIngressError("ingress_snapshot_collision")
                 if opened.st_size == 0:
                     os.write(descriptor, b"\0")
                     os.fsync(descriptor)
                     _fsync_directory(lock_directory)
+                    if os.name == "nt":
+                        lock_identity = _win_file_identity(msvcrt.get_osfhandle(descriptor))
                 _lock_descriptor(descriptor)
                 try:
                     yield
                 finally:
-                    current = lock_path.lstat()
-                    if current.st_nlink != 1 or not _same_opened_identity(os.fstat(descriptor), current):
+                    if os.name == "nt":
+                        changed = _win_file_identity(msvcrt.get_osfhandle(descriptor)) != lock_identity
+                    else:  # pragma: no cover - exercised on POSIX hosts
+                        current = os.stat(
+                            lock_path.name,
+                            dir_fd=bound_directory[-1].handle,
+                            follow_symlinks=False,
+                        )
+                        changed = current.st_nlink != 1 or not _same_opened_identity(
+                            os.fstat(descriptor), current
+                        )
+                    if changed:
                         raise SnapshotIngressError("ingress_snapshot_changed")
+                    _revalidate_bound_directory_chain(lock_directory, bound_directory)
                     _unlock_descriptor(descriptor)
             finally:
                 os.close(descriptor)
@@ -282,6 +335,9 @@ def _digest_lock(lock_directory: Path, digest: str) -> Iterator[None]:
         raise
     except OSError:
         raise SnapshotIngressError("ingress_snapshot_unavailable") from None
+    finally:
+        for directory in reversed(bound_directory):
+            directory.close()
 
 
 def _absolute_without_following(path: Path) -> Path:
@@ -298,6 +354,11 @@ def _is_reparse(info: os.stat_result) -> bool:
     attributes = getattr(info, "st_file_attributes", 0)
     marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(attributes & marker)
+
+
+def _enforce_reparse_identity(_site: str, marked: bool) -> bool:
+    """Native-identity seam for enforcement-site tests and platform adapters."""
+    return marked
 
 
 def _path_components(path: Path) -> tuple[Path, ...]:
@@ -403,7 +464,12 @@ def _read_registry(path: Path) -> tuple[list[_RegistryEntry], bytes | None, _Fil
         return [], None, None
     except OSError:
         raise RootRegistryError("watched_root_registry_unavailable") from None
-    if path.is_symlink() or _is_reparse(info) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    if (
+        path.is_symlink()
+        or _enforce_reparse_identity("registry", _is_reparse(info))
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+    ):
         raise RootRegistryError("watched_root_registry_invalid")
     descriptor = -1
     try:
@@ -483,41 +549,246 @@ def _unlink_if_identity(path: Path, expected: _FileIdentity) -> None:
         path.unlink(missing_ok=True)
 
 
+def _replace_registry_windows(
+    path: Path,
+    temporary_path: Path,
+    expected_bytes: bytes | None,
+    expected_identity: _FileIdentity | None,
+    temporary_descriptor: int,
+    bound_data_root: _BoundDirectory,
+) -> tuple[Path | None, _FileIdentity | None]:
+    if expected_bytes is None:
+        _race_hook("registry_after_final_compare")
+        try:
+            _win_link_handle(msvcrt.get_osfhandle(temporary_descriptor), bound_data_root, path.name)
+        except FileExistsError:
+            raise RootRegistryError("watched_root_registry_changed") from None
+        _win_mark_delete(msvcrt.get_osfhandle(temporary_descriptor))
+        return None, None
+
+    backup_path = path.parent / f".{path.name}.{uuid4().hex}.backup"
+    _race_hook("registry_after_final_compare")
+    if not _KERNEL32.ReplaceFileW(os.fspath(path), os.fspath(temporary_path), os.fspath(backup_path), 0, None, None):
+        _win_raise_last_error()
+    backup_identity = _file_identity(backup_path.lstat())
+    try:
+        _entries, displaced_bytes, displaced_identity = _read_registry(backup_path)
+    except RootRegistryError:
+        if not _KERNEL32.ReplaceFileW(os.fspath(path), os.fspath(backup_path), None, 0, None, None):
+            raise RootRegistryError("watched_root_registry_changed") from None
+        raise RootRegistryError("watched_root_registry_changed") from None
+    identity_matches = (
+        expected_identity is not None
+        and displaced_identity is not None
+        and displaced_identity.object_identity == expected_identity.object_identity
+        and displaced_identity.size == expected_identity.size
+        and displaced_identity.modified_ns == expected_identity.modified_ns
+        and displaced_identity.link_count == expected_identity.link_count
+    )
+    if displaced_bytes != expected_bytes or not identity_matches:
+        if not _KERNEL32.ReplaceFileW(os.fspath(path), os.fspath(backup_path), None, 0, None, None):
+            raise RootRegistryError("watched_root_registry_changed")
+        raise RootRegistryError("watched_root_registry_changed")
+    return backup_path, backup_identity
+
+
+def _read_registry_at(  # pragma: no cover - exercised on POSIX hosts
+    parent: _BoundDirectory, name: str
+) -> tuple[list[_RegistryEntry], bytes, _FileIdentity]:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent.handle,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or _is_reparse(opened):
+            raise RootRegistryError("watched_root_registry_invalid")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, _MAX_REGISTRY_BYTES - size + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > _MAX_REGISTRY_BYTES:
+                raise RootRegistryError("watched_root_registry_invalid")
+        after = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent.handle, follow_symlinks=False)
+        if not _same_opened_identity(opened, after) or not _same_opened_identity(after, named):
+            raise RootRegistryError("watched_root_registry_changed")
+        raw = b"".join(chunks)
+        return _parse_registry(raw), raw, _file_identity(after)
+    finally:
+        os.close(descriptor)
+
+
+def _rename_exchange_at(  # pragma: no cover - exercised on Linux hosts
+    parent: _BoundDirectory, left: str, right: str
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(parent.handle, os.fsencode(left), parent.handle, os.fsencode(right), 2) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "secure POSIX registry exchange failed")
+
+
+def _replace_registry_posix(  # pragma: no cover - exercised on POSIX hosts
+    path: Path,
+    temporary_path: Path,
+    parent: _BoundDirectory,
+    expected_bytes: bytes | None,
+    expected_identity: _FileIdentity | None,
+    payload: bytes,
+) -> None:
+    _race_hook("registry_after_final_compare")
+    if expected_bytes is None:
+        os.link(
+            temporary_path.name,
+            path.name,
+            src_dir_fd=parent.handle,
+            dst_dir_fd=parent.handle,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary_path.name, dir_fd=parent.handle)
+        return
+    _rename_exchange_at(parent, temporary_path.name, path.name)
+    try:
+        _entries, displaced_bytes, displaced_identity = _read_registry_at(parent, temporary_path.name)
+        identity_matches = (
+            expected_identity is not None
+            and displaced_identity.object_identity == expected_identity.object_identity
+            and displaced_identity.size == expected_identity.size
+            and displaced_identity.modified_ns == expected_identity.modified_ns
+            and displaced_identity.link_count == expected_identity.link_count
+        )
+        if displaced_bytes != expected_bytes or not identity_matches:
+            raise RootRegistryError("watched_root_registry_changed")
+        _entries, published_bytes, _published_identity = _read_registry_at(parent, path.name)
+        if published_bytes != payload:
+            raise RootRegistryError("watched_root_registry_changed")
+        os.unlink(temporary_path.name, dir_fd=parent.handle)
+    except (OSError, RootRegistryError):
+        _rename_exchange_at(parent, temporary_path.name, path.name)
+        raise RootRegistryError("watched_root_registry_changed") from None
+
+
 def _publish_registry(
     path: Path,
     payload: bytes,
     *,
     expected_bytes: bytes | None,
     expected_identity: _FileIdentity | None,
+    bound_data_root: _BoundDirectory | None = None,
 ) -> None:
     temporary_path: Path | None = None
     temporary_identity: _FileIdentity | None = None
+    descriptor = -1
+    backup_path: Path | None = None
+    backup_identity: _FileIdentity | None = None
+    _parse_registry(payload)
     try:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        temporary_path = Path(temporary_name)
-        with os.fdopen(descriptor, "wb") as destination:
-            destination.write(payload)
-            destination.flush()
-            os.fsync(destination.fileno())
-        temporary_identity = _file_identity(temporary_path.lstat())
+        if os.name == "nt" and bound_data_root is not None:
+            temporary_name = f".{path.name}.{uuid4().hex}.tmp"
+            handle = _win_open_relative(
+                bound_data_root,
+                temporary_name,
+                directory=False,
+                deny_mutation=False,
+                prevent_rename=True,
+                writable=True,
+                allow_delete=True,
+                disposition=_FILE_CREATE,
+            )
+            try:
+                descriptor = msvcrt.open_osfhandle(
+                    handle,
+                    os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+                )
+            except Exception:  # pragma: no cover - native descriptor conversion failure
+                _win_close(handle)
+                raise
+            temporary_path = path.parent / temporary_name
+        elif os.name != "nt" and bound_data_root is not None:  # pragma: no cover - POSIX
+            temporary_name = f".{path.name}.{uuid4().hex}.tmp"
+            descriptor = os.open(
+                temporary_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=bound_data_root.handle,
+            )
+            temporary_path = path.parent / temporary_name
+        else:  # pragma: no cover - legacy direct helper use
+            descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            temporary_path = Path(temporary_name)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise OSError("registry write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        temporary_identity = _file_identity(os.fstat(descriptor))
         _race_hook("registry_before_replace")
         _entries, current_bytes, current_identity = _read_registry(path)
         if current_bytes != expected_bytes or current_identity != expected_identity:
             raise RootRegistryError("watched_root_registry_changed")
-        os.replace(temporary_path, path)
+        if os.name == "nt":
+            if bound_data_root is None:
+                raise RootRegistryError("watched_root_registry_unavailable")
+            if expected_bytes is not None:
+                os.close(descriptor)
+                descriptor = -1
+            backup_path, backup_identity = _replace_registry_windows(
+                path,
+                temporary_path,
+                expected_bytes,
+                expected_identity,
+                descriptor,
+                bound_data_root,
+            )
+            if expected_bytes is None:
+                os.close(descriptor)
+                descriptor = -1
+        else:  # pragma: no cover - exercised on POSIX hosts
+            if bound_data_root is None:
+                raise RootRegistryError("watched_root_registry_unavailable")
+            _replace_registry_posix(path, temporary_path, bound_data_root, expected_bytes, expected_identity, payload)
         temporary_path = None
         _entries, published_bytes, _published_identity = _read_registry(path)
         if published_bytes != payload:
             raise RootRegistryError("watched_root_registry_changed")
+        if backup_path is not None and backup_identity is not None:
+            _unlink_if_identity(backup_path, backup_identity)
+            backup_path = None
+            backup_identity = None
         _fsync_directory(path.parent)
     except RootRegistryError:
+        if (
+            os.name == "nt"
+            and backup_path is not None
+            and backup_path.exists()
+            and _KERNEL32.ReplaceFileW(os.fspath(path), os.fspath(backup_path), None, 0, None, None)
+        ):
+            backup_path = None
+            backup_identity = None
         raise
     except OSError:
         raise RootRegistryError("watched_root_registry_unavailable") from None
     finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         if temporary_path is not None and temporary_identity is not None:
             try:
                 _unlink_if_identity(temporary_path, temporary_identity)
+            except OSError:
+                pass
+        if backup_path is not None and backup_identity is not None:
+            try:
+                _unlink_if_identity(backup_path, backup_identity)
             except OSError:
                 pass
 
@@ -616,6 +887,17 @@ if os.name == "nt":
             ("FileAttributes", wintypes.DWORD),
         ]
 
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+    class _FileLinkInfo(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
     _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _NTDLL = ctypes.WinDLL("ntdll")
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -624,6 +906,8 @@ if os.name == "nt":
     _FILE_LIST_DIRECTORY = 0x0001
     _FILE_READ_DATA = 0x0001
     _FILE_WRITE_DATA = 0x0002
+    _FILE_WRITE_ATTRIBUTES = 0x0100
+    _DELETE_ACCESS = 0x00010000
     _FILE_TRAVERSE = 0x0020
     _FILE_READ_ATTRIBUTES = 0x0080
     _SYNCHRONIZE = 0x00100000
@@ -631,6 +915,7 @@ if os.name == "nt":
     _FILE_SHARE_WRITE = 0x2
     _FILE_SHARE_DELETE = 0x4
     _FILE_OPEN = 0x1
+    _FILE_CREATE = 0x2
     _FILE_OPEN_IF = 0x3
     _FILE_DIRECTORY_FILE = 0x1
     _FILE_SYNCHRONOUS_IO_NONALERT = 0x20
@@ -638,6 +923,8 @@ if os.name == "nt":
     _FILE_OPEN_REPARSE_POINT = 0x00200000
     _OBJ_CASE_INSENSITIVE = 0x40
     _FILE_BASIC_INFO_CLASS = 0
+    _FILE_DISPOSITION_INFO_CLASS = 4
+    _FILE_LINK_INFO_CLASS = 11
 
     _KERNEL32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -669,6 +956,22 @@ if os.name == "nt":
         wintypes.DWORD,
     ]
     _KERNEL32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    _KERNEL32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _KERNEL32.ReplaceFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    _KERNEL32.ReplaceFileW.restype = wintypes.BOOL
     _KERNEL32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _KERNEL32.FlushFileBuffers.restype = wintypes.BOOL
     _NTDLL.NtCreateFile.argtypes = [
@@ -685,6 +988,14 @@ if os.name == "nt":
         wintypes.ULONG,
     ]
     _NTDLL.NtCreateFile.restype = wintypes.LONG
+    _NTDLL.NtSetInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+    ]
+    _NTDLL.NtSetInformationFile.restype = wintypes.LONG
     _NTDLL.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
     _NTDLL.RtlNtStatusToDosError.restype = wintypes.ULONG
 
@@ -730,6 +1041,63 @@ def _win_file_identity(handle: int) -> _FileIdentity:
     )
 
 
+def _win_final_path(handle: int) -> str:
+    final_path = ctypes.create_unicode_buffer(32768)
+    final_size = _KERNEL32.GetFinalPathNameByHandleW(handle, final_path, len(final_path), 0)
+    if final_size == 0 or final_size >= len(final_path):  # pragma: no cover - native API failure
+        _win_raise_last_error()
+    return final_path.value
+
+
+def _win_mark_delete(handle: int) -> None:
+    disposition = _FileDispositionInfo(True)
+    if not _KERNEL32.SetFileInformationByHandle(
+        handle,
+        _FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
+    ):
+        _win_raise_last_error()
+
+
+def _win_link_handle(handle: int, target_directory: _BoundDirectory, target_name: str) -> None:
+    encoded_name = target_name.encode("utf-16-le")
+    allocation_size = _FileLinkInfo.FileName.offset + len(encoded_name) + ctypes.sizeof(wintypes.WCHAR)
+    allocation = ctypes.create_string_buffer(allocation_size)
+    information = ctypes.cast(allocation, ctypes.POINTER(_FileLinkInfo)).contents
+    information.ReplaceIfExists = False
+    information.RootDirectory = target_directory.handle
+    information.FileNameLength = len(encoded_name)
+    ctypes.memmove(ctypes.addressof(allocation) + _FileLinkInfo.FileName.offset, encoded_name, len(encoded_name))
+    io_status = _IoStatusBlock()
+    status = _NTDLL.NtSetInformationFile(
+        handle,
+        ctypes.byref(io_status),
+        allocation,
+        allocation_size,
+        _FILE_LINK_INFO_CLASS,
+    )
+    if status < 0:
+        error = int(_NTDLL.RtlNtStatusToDosError(status))
+        if error in {80, 183}:
+            raise FileExistsError(error, "immutable snapshot target exists")
+        raise OSError(error, "secure Windows hardlink failed")
+
+
+def _posix_link_handle(  # pragma: no cover - exercised on Linux hosts
+    descriptor: int, target_directory: _BoundDirectory, target_name: str
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    linkat = libc.linkat
+    linkat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    linkat.restype = ctypes.c_int
+    if linkat(descriptor, b"", target_directory.handle, os.fsencode(target_name), 0x1000) != 0:
+        error = ctypes.get_errno()
+        if error == 17:
+            raise FileExistsError(error, "immutable snapshot target exists")
+        raise OSError(error, "secure POSIX descriptor link failed")
+
+
 def _win_open_drive_root(path: Path) -> _BoundDirectory:
     drive, tail = os.path.splitdrive(os.fspath(path))
     if not drive or not tail.startswith("\\") or drive.startswith("\\"):  # pragma: no cover - rejected alias
@@ -750,13 +1118,7 @@ def _win_open_drive_root(path: Path) -> _BoundDirectory:
         _win_raise_last_error()
     value = int(handle)
     try:
-        final_path = ctypes.create_unicode_buffer(32768)
-        final_size = _KERNEL32.GetFinalPathNameByHandleW(handle, final_path, len(final_path), 0)
-        if (  # pragma: no cover - host-dependent volume alias
-            final_size == 0
-            or final_size >= len(final_path)
-            or final_path.value.rstrip("\\").casefold() != root.rstrip("\\").casefold()
-        ):
+        if _win_final_path(value).rstrip("\\").casefold() != root.rstrip("\\").casefold():  # pragma: no cover
             raise OSError("aliased Windows drive identity")
         identity = _win_file_identity(value)
         if (  # pragma: no cover - host-dependent drive reparse
@@ -778,6 +1140,7 @@ def _win_open_relative(
     deny_mutation: bool,
     prevent_rename: bool = False,
     writable: bool = False,
+    allow_delete: bool = False,
     disposition: int = 1,
 ) -> int:
     buffer = ctypes.create_unicode_buffer(name)
@@ -802,6 +1165,8 @@ def _win_open_relative(
         access |= _FILE_READ_DATA
         if writable:
             access |= _FILE_WRITE_DATA
+        if allow_delete:
+            access |= _DELETE_ACCESS | _FILE_WRITE_ATTRIBUTES
     share = _FILE_SHARE_READ if deny_mutation else _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
     if prevent_rename:
         share &= ~_FILE_SHARE_DELETE
@@ -913,6 +1278,27 @@ def _revalidate_bound_directory_chain(path: Path, expected: Sequence[_BoundDirec
             directory.close()
 
 
+def _native_root_identity_key(path: Path, directory: _BoundDirectory) -> str:
+    if os.name == "nt":
+        object_identity = directory.identity.object_identity
+        canonical_path = unicodedata.normalize("NFC", _win_final_path(directory.handle)).casefold()
+        return f"windows:{object_identity.device}:{object_identity.inode}:{canonical_path}"
+    return unicodedata.normalize("NFC", os.path.normpath(os.fspath(path))).casefold()  # pragma: no cover - POSIX
+
+
+def _verified_root_path_key(path: Path) -> str:
+    directories: tuple[_BoundDirectory, ...] = ()
+    try:
+        directories = _open_absolute_directory_chain(path)
+        material = _native_root_identity_key(path, directories[-1])
+    except OSError:
+        return _normalized_path_key(path)
+    finally:
+        for directory in reversed(directories):
+            directory.close()
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _open_child_directory(parent: _BoundDirectory, name: str) -> _BoundDirectory:
     if os.name == "nt":
         handle = _win_open_relative(
@@ -980,7 +1366,9 @@ def _open_source_securely(root: Path, components: Sequence[str], max_replay_byte
         descriptor = _open_child_file_descriptor(directories[-1], components[-1], deny_mutation=True)
         info = os.fstat(descriptor)
         identity = _file_identity(info)
-        if identity.object_identity.reparse_attributes:  # pragma: no cover - descriptor defense in depth
+        if _enforce_reparse_identity(  # pragma: no cover - descriptor defense in depth
+            "source", bool(identity.object_identity.reparse_attributes)
+        ):
             raise SnapshotIngressError("replay_source_unsafe")
         if identity.object_identity.file_type != stat.S_IFREG:  # pragma: no cover - descriptor defense in depth
             raise SnapshotIngressError("replay_source_not_regular")
@@ -1006,9 +1394,11 @@ def _revalidate_secure_source(root: Path, components: Sequence[str], opened: _Op
             fresh_directories.append(_open_child_directory(fresh_directories[-1], component))
         if len(fresh_directories) != len(opened.directories):
             raise SnapshotIngressError("replay_source_changed")
+        root_index = len(_path_components(root))
         if any(
-            fresh.identity != original.identity
-            for fresh, original in zip(fresh_directories, opened.directories, strict=True)
+            fresh.identity.object_identity != original.identity.object_identity
+            or (index >= root_index and fresh.identity != original.identity)
+            for index, (fresh, original) in enumerate(zip(fresh_directories, opened.directories, strict=True))
         ):
             raise SnapshotIngressError("replay_source_changed")
         fresh_descriptor = _open_child_file_descriptor(fresh_directories[-1], components[-1], deny_mutation=True)
@@ -1079,7 +1469,11 @@ def _capture_directory_chain(root: Path, relative_components: Sequence[str]) -> 
     identities: list[tuple[Path, _ObjectIdentity]] = []
     for path in paths:
         info = _lstat(path)
-        if path.is_symlink() or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        if (
+            path.is_symlink()
+            or _enforce_reparse_identity("source", _is_reparse(info))
+            or not stat.S_ISDIR(info.st_mode)
+        ):
             raise SnapshotIngressError("replay_source_unsafe")
         identities.append((path, _object_identity(info)))
     return tuple(identities)
@@ -1102,7 +1496,7 @@ def _revalidate_directory_chain(chain: Sequence[tuple[Path, _ObjectIdentity]]) -
 
 def _require_source_leaf(path: Path, max_replay_bytes: int) -> tuple[os.stat_result, _FileIdentity]:
     info = _lstat(path)
-    if path.is_symlink() or _is_reparse(info):
+    if path.is_symlink() or _enforce_reparse_identity("source", _is_reparse(info)):
         raise SnapshotIngressError("replay_source_unsafe")
     if not stat.S_ISREG(info.st_mode):
         raise SnapshotIngressError("replay_source_not_regular")
@@ -1126,27 +1520,109 @@ def _race_hook(_event: str) -> None:
     """Deterministic no-op seam used only to place real filesystem race mutations in tests."""
 
 
-def _ensure_owned_directory(path: Path) -> None:
+def _ensure_owned_directory(path: Path, *, enforcement_site: str = "ingress") -> None:
+    created = False
+    parent_directories: tuple[_BoundDirectory, ...] = ()
+    child_directory: _BoundDirectory | None = None
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        info = path.lstat()
+        parent_directories = _open_absolute_directory_chain(path.parent)
+        if os.name == "nt":
+            try:
+                handle = _win_open_relative(
+                    parent_directories[-1],
+                    path.name,
+                    directory=True,
+                    deny_mutation=False,
+                    prevent_rename=True,
+                )
+            except OSError as error:
+                if error.errno not in {2, 3}:
+                    raise
+                handle = _win_open_relative(
+                    parent_directories[-1],
+                    path.name,
+                    directory=True,
+                    deny_mutation=False,
+                    prevent_rename=True,
+                    disposition=_FILE_OPEN_IF,
+                )
+                created = True
+            identity = _win_file_identity(handle)
+            child_directory = _BoundDirectory(handle, identity, True)
+            unsafe = _enforce_reparse_identity(
+                enforcement_site, bool(identity.object_identity.reparse_attributes)
+            ) or identity.object_identity.file_type != stat.S_IFDIR
+        else:  # pragma: no cover - exercised on POSIX hosts
+            try:
+                os.mkdir(path.name, 0o700, dir_fd=parent_directories[-1].handle)
+                created = True
+            except FileExistsError:
+                pass
+            child_directory = _open_child_directory(parent_directories[-1], path.name)
+            unsafe = _enforce_reparse_identity(
+                enforcement_site, bool(child_directory.identity.object_identity.reparse_attributes)
+            )
     except OSError:
         raise SnapshotIngressError("ingress_snapshot_unavailable") from None
-    if path.is_symlink() or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+    finally:
+        if child_directory is not None:
+            child_directory.close()
+        for directory in reversed(parent_directories):
+            directory.close()
+    if unsafe:
         raise SnapshotIngressError("ingress_snapshot_unavailable")
+    if created:
+        _fsync_directory(path.parent)
+        _race_hook("owned_directory_parent_fsynced")
 
 
 def _copy_descriptor(
     source_descriptor: int,
     staging_directory: Path,
     max_replay_bytes: int,
+    *,
+    bound_staging: _BoundDirectory | None = None,
 ) -> tuple[Path, str, int, int]:
     temporary_path: Path | None = None
     temporary_identity: _FileIdentity | None = None
     descriptor = -1
     try:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".replay-", suffix=".tmp", dir=staging_directory)
-        temporary_path = Path(temporary_name)
+        if os.name == "nt" and bound_staging is not None:
+            temporary_name = f".replay-{uuid4().hex}.tmp"
+            handle = _win_open_relative(
+                bound_staging,
+                temporary_name,
+                directory=False,
+                deny_mutation=False,
+                prevent_rename=True,
+                writable=True,
+                allow_delete=True,
+                disposition=_FILE_CREATE,
+            )
+            try:
+                descriptor = msvcrt.open_osfhandle(
+                    handle,
+                    os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+                )
+            except Exception:  # pragma: no cover - native descriptor conversion failure
+                _win_close(handle)
+                raise
+            temporary_path = staging_directory / temporary_name
+        elif os.name != "nt" and bound_staging is not None:  # pragma: no cover - exercised on POSIX hosts
+            temporary_name = f".anonymous-{uuid4().hex}.tmp"
+            temporary_path = staging_directory / temporary_name
+            temporary_flags = getattr(os, "O_TMPFILE", 0)
+            if temporary_flags == 0:
+                raise SnapshotIngressError("ingress_snapshot_unavailable")
+            descriptor = os.open(
+                ".",
+                os.O_RDWR | temporary_flags | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=bound_staging.handle,
+            )
+        else:  # pragma: no cover - legacy direct helper calls
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".replay-", suffix=".tmp", dir=staging_directory)
+            temporary_path = Path(temporary_name)
         temporary_identity = _file_identity(os.fstat(descriptor))
         digest = hashlib.sha256()
         size = 0
@@ -1167,13 +1643,13 @@ def _copy_descriptor(
             digest.update(chunk)
         os.fsync(descriptor)
         return temporary_path, digest.hexdigest(), size, descriptor
-    except SnapshotIngressError:
+    except SnapshotIngressError:  # pragma: no cover - POSIX concurrent growth path
         if descriptor >= 0:
             os.close(descriptor)
         if temporary_path is not None and temporary_identity is not None:
             _unlink_if_identity(temporary_path, temporary_identity)
         raise
-    except OSError:
+    except OSError:  # pragma: no cover - defensive low-level write failure cleanup
         if descriptor >= 0:
             try:
                 os.close(descriptor)
@@ -1211,19 +1687,43 @@ def _same_opened_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _verify_ingress_target(target: Path, expected_sha256: str, expected_size: int) -> None:
+def _verify_ingress_target(
+    target: Path,
+    expected_sha256: str,
+    expected_size: int,
+    *,
+    bound_parent: _BoundDirectory | None = None,
+) -> None:
+    fresh_descriptor = -1
     try:
-        before = target.lstat()
-        if target.is_symlink() or _is_reparse(before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-            raise SnapshotIngressError("ingress_snapshot_collision")
-        descriptor = os.open(target, _source_open_flags())
+        if bound_parent is not None:
+            descriptor = _open_child_file_descriptor(bound_parent, target.name, deny_mutation=True)
+            before = os.fstat(descriptor)
+        else:
+            before = target.lstat()
+            if target.is_symlink() or _is_reparse(before):
+                raise SnapshotIngressError("ingress_snapshot_collision")
+            descriptor = os.open(target, _source_open_flags())
         try:
             opened = os.fstat(descriptor)
-            if not _same_opened_identity(opened, before):
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or _is_reparse(opened)
+                or not _same_opened_identity(opened, before)
+            ):
                 raise SnapshotIngressError("ingress_snapshot_collision")
             actual_sha256, actual_size = _hash_open_descriptor(descriptor, expected_size)
             after = os.fstat(descriptor)
-            named_after = target.lstat()
+            if bound_parent is not None:
+                fresh_descriptor = _open_child_file_descriptor(bound_parent, target.name, deny_mutation=True)
+                try:
+                    named_after = os.fstat(fresh_descriptor)
+                finally:
+                    os.close(fresh_descriptor)
+                    fresh_descriptor = -1
+            else:
+                named_after = target.lstat()
         finally:
             os.close(descriptor)
     except SnapshotIngressError:
@@ -1239,11 +1739,73 @@ def _verify_ingress_target(target: Path, expected_sha256: str, expected_size: in
         raise SnapshotIngressError("ingress_snapshot_collision")
 
 
-def _publish_snapshot(temporary_path: Path, target: Path, expected_sha256: str, expected_size: int) -> bool:
+def _read_verified_ingress_target(target: Path, expected_sha256: str, expected_size: int) -> bytes:
+    directories: tuple[_BoundDirectory, ...] = ()
+    descriptor = -1
+    fresh_descriptor = -1
     try:
-        os.link(temporary_path, target)
+        directories = _open_absolute_directory_chain(target.parent)
+        descriptor = _open_child_file_descriptor(directories[-1], target.name, deny_mutation=True)
+        opened = os.fstat(descriptor)
+        identity = _file_identity(opened)
+        if (
+            identity.object_identity.reparse_attributes
+            or identity.object_identity.file_type != stat.S_IFREG
+            or identity.link_count != 1
+            or identity.size != expected_size
+        ):
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        _race_hook("snapshot_reader_after_open")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK_SIZE, expected_size - size + 1))
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > expected_size:
+                raise SnapshotIngressError("ingress_snapshot_collision")
+            chunks.append(chunk)
+            digest.update(chunk)
+        fresh_descriptor = _open_child_file_descriptor(directories[-1], target.name, deny_mutation=True)
+        if not _same_opened_identity(os.fstat(fresh_descriptor), os.fstat(descriptor)):
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        _revalidate_bound_directory_chain(target.parent, directories)
+        if size != expected_size or digest.hexdigest() != expected_sha256:
+            raise SnapshotIngressError("ingress_snapshot_collision")
+        return b"".join(chunks)
+    except SnapshotIngressError:
+        raise
+    except OSError:
+        raise SnapshotIngressError("ingress_snapshot_collision") from None
+    finally:
+        if fresh_descriptor >= 0:
+            os.close(fresh_descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        for directory in reversed(directories):
+            directory.close()
+
+
+def _publish_snapshot(
+    temporary_path: Path,
+    target: Path,
+    expected_sha256: str,
+    expected_size: int,
+    *,
+    source_descriptor: int | None = None,
+    target_directory: _BoundDirectory | None = None,
+) -> bool:
+    try:
+        if os.name == "nt" and source_descriptor is not None and target_directory is not None:
+            _win_link_handle(msvcrt.get_osfhandle(source_descriptor), target_directory, target.name)
+        elif os.name != "nt" and source_descriptor is not None and target_directory is not None:  # pragma: no cover
+            _posix_link_handle(source_descriptor, target_directory, target.name)
+        else:  # pragma: no cover - exercised on POSIX hosts and legacy direct helper calls
+            os.link(temporary_path, target)
     except FileExistsError:
-        _verify_ingress_target(target, expected_sha256, expected_size)
+        _verify_ingress_target(target, expected_sha256, expected_size, bound_parent=target_directory)
         return False
     except OSError:
         raise SnapshotIngressError("ingress_snapshot_unavailable") from None
@@ -1278,14 +1840,14 @@ class WatchedRootRegistry:
         configured_keys: set[str] = set()
         for folder in watched_folders:
             path = _absolute_without_following(Path(folder))
-            key = _normalized_path_key(path)
+            key = _verified_root_path_key(path)
             if key in configured_keys:
                 raise RootRegistryError("watched_root_path_collision")
             configured_keys.add(key)
             configured.append((key, path))
 
         registry_path = self._data_root / _REGISTRY_NAME
-        with _registry_lock(self._data_root):
+        with _registry_lock(self._data_root) as bound_data_root:
             entries, original_bytes, original_identity = _read_registry(registry_path)
             by_key = {entry.path_key_sha256: entry for entry in entries}
             next_label = max(
@@ -1306,6 +1868,7 @@ class WatchedRootRegistry:
                     _serialized_registry(entries),
                     expected_bytes=original_bytes,
                     expected_identity=original_identity,
+                    bound_data_root=bound_data_root,
                 )
 
         selectable: dict[str, _SelectableRoot] = {}
@@ -1377,6 +1940,7 @@ class WatchedRootRegistry:
                     opened_source.descriptor,
                     staging_directory,
                     self._max_replay_bytes,
+                    bound_staging=staging_bound[-1],
                 )
             except OSError:
                 raise SnapshotIngressError("ingress_snapshot_changed") from None
@@ -1407,7 +1971,16 @@ class WatchedRootRegistry:
                     _race_hook("before_publish")
                 except OSError:
                     raise SnapshotIngressError("ingress_snapshot_changed") from None
-                created = _publish_snapshot(temporary_path, target, digest, size)
+                created = _publish_snapshot(
+                    temporary_path,
+                    target,
+                    digest,
+                    size,
+                    source_descriptor=temporary_descriptor,
+                    target_directory=shard_bound[-1],
+                )
+                if os.name == "nt":
+                    _win_mark_delete(msvcrt.get_osfhandle(temporary_descriptor))
                 os.close(temporary_descriptor)
                 temporary_descriptor = -1
                 if created:
@@ -1424,7 +1997,10 @@ class WatchedRootRegistry:
                         created_target_identity = None
                     raise SnapshotIngressError("ingress_snapshot_changed")
                 _revalidate_bound_directory_chain(shard, shard_bound)
-                _verify_ingress_target(target, digest, size)
+                _verify_ingress_target(target, digest, size, bound_parent=shard_bound[-1])
+                _revalidate_bound_directory_chain(shard, shard_bound)
+                _race_hook("after_final_verify")
+                _verify_ingress_target(target, digest, size, bound_parent=shard_bound[-1])
                 _revalidate_bound_directory_chain(shard, shard_bound)
             return IngressSnapshot(target, digest, size, root_public_id, relative_name, created)
         except SnapshotIngressError:
@@ -1433,14 +2009,21 @@ class WatchedRootRegistry:
             raise SnapshotIngressError("ingress_snapshot_unavailable") from None
         finally:
             opened_source.close()
+            if temporary_path is not None and temporary_identity is not None:
+                _race_hook("before_temporary_cleanup")
             if temporary_descriptor >= 0:
+                if os.name == "nt":
+                    try:
+                        _win_mark_delete(msvcrt.get_osfhandle(temporary_descriptor))
+                    except OSError:
+                        pass
                 os.close(temporary_descriptor)
-            for chain in (shard_bound, staging_bound, ingress_bound):
-                for directory in reversed(chain):
-                    directory.close()
             if temporary_path is not None and temporary_identity is not None:
                 try:
                     _unlink_if_identity(temporary_path, temporary_identity)
                     _fsync_directory(temporary_path.parent)
                 except OSError:
                     pass
+            for chain in (shard_bound, staging_bound, ingress_bound):
+                for directory in reversed(chain):
+                    directory.close()

@@ -14,7 +14,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -50,6 +50,17 @@ def _hold_digest_lock_in_spawned_process(arguments: tuple[str, str, str]) -> Non
         while not (coordination / "release").exists():
             if time.monotonic() >= deadline:
                 raise TimeoutError("test digest lock release was not signaled")
+            time.sleep(0.01)
+
+
+def _hold_named_digest_lock_in_spawned_process(arguments: tuple[str, str, str, str]) -> None:
+    lock_directory, digest, ready_path, release_path = arguments
+    with roots_module._digest_lock(Path(lock_directory), digest):
+        Path(ready_path).write_bytes(b"ready")
+        deadline = time.monotonic() + 10
+        while not Path(release_path).exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("named digest lock release was not signaled")
             time.sleep(0.01)
 
 
@@ -243,6 +254,28 @@ def test_casefolded_configured_path_collision_is_rejected_without_registry_write
     assert str(lower) not in repr(raised.value)
 
 
+def test_verified_native_root_aliases_cannot_receive_two_public_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hashing lexical root spellings must assign two IDs when native handles identify the same directory."""
+    first = tmp_path / "alias-one"
+    second = tmp_path / "alias-two"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(
+        roots_module,
+        "_native_root_identity_key",
+        lambda _path, _directory: "fixed-volume:file-id:canonical-root",
+    )
+    registry = WatchedRootRegistry(tmp_path / "product")
+
+    with pytest.raises(RootRegistryError) as raised:
+        registry.reconcile((first, second))
+
+    assert raised.value.code == "watched_root_path_collision"
+    assert not (registry.data_root / "watched-roots-v1.json").exists()
+
+
 def test_registry_path_must_be_an_ordinary_file(tmp_path: Path) -> None:
     """Accepting a directory at the private registry path would make identity state ambiguous."""
     data_root = tmp_path / "product"
@@ -301,6 +334,7 @@ def test_registry_change_after_read_is_not_overwritten(
         *,
         expected_bytes: bytes | None,
         expected_identity: object,
+        bound_data_root: object | None = None,
     ) -> None:
         path.write_bytes(caller_bytes)
         real_publish(
@@ -308,6 +342,7 @@ def test_registry_change_after_read_is_not_overwritten(
             payload,
             expected_bytes=expected_bytes,
             expected_identity=expected_identity,  # type: ignore[arg-type]
+            bound_data_root=bound_data_root,  # type: ignore[arg-type]
         )
 
     monkeypatch.setattr(roots_module, "_publish_registry", replace_before_publish)
@@ -346,6 +381,70 @@ def test_registry_change_at_final_replace_seam_is_not_overwritten(
     assert seam_seen == [True]
     assert raised.value.code == "watched_root_registry_changed"
     assert registry_path.read_bytes() == caller_bytes
+
+
+def test_registry_change_after_final_compare_is_restored_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the verified descriptor before replace must overwrite bytes installed after the final comparison."""
+    data_root = tmp_path / "product"
+    first = tmp_path / "compare-first"
+    second = tmp_path / "compare-second"
+    first.mkdir()
+    second.mkdir()
+    registry = WatchedRootRegistry(data_root)
+    registry.reconcile((first,))
+    registry_path = data_root / "watched-roots-v1.json"
+    caller_bytes = b'{"roots":[],"version":1}\n'
+    seam_seen: list[bool] = []
+
+    def replace_after_compare(event: str) -> None:
+        if event == "registry_after_final_compare":
+            seam_seen.append(True)
+            registry_path.write_bytes(caller_bytes)
+
+    monkeypatch.setattr(roots_module, "_race_hook", replace_after_compare)
+    with pytest.raises(RootRegistryError) as raised:
+        registry.reconcile((first, second))
+
+    assert seam_seen == [True]
+    assert raised.value.code == "watched_root_registry_changed"
+    assert registry_path.read_bytes() == caller_bytes
+
+
+def test_outgoing_label_overflow_preserves_valid_registry(tmp_path: Path) -> None:
+    """Publishing an unparseable next generic label must corrupt a previously valid registry."""
+    data_root = tmp_path / "product"
+    first = tmp_path / "label-first"
+    second = tmp_path / "label-second"
+    first.mkdir()
+    second.mkdir()
+    registry = WatchedRootRegistry(data_root)
+    registry.reconcile((first,))
+    registry_path = data_root / "watched-roots-v1.json"
+    document = json.loads(registry_path.read_text(encoding="utf-8"))
+    document["roots"][0]["label"] = "Replay folder 999999999"
+    original = (json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    registry_path.write_bytes(original)
+
+    with pytest.raises(RootRegistryError) as raised:
+        registry.reconcile((first, second))
+
+    assert raised.value.code == "watched_root_registry_invalid"
+    assert registry_path.read_bytes() == original
+
+
+def test_maximum_registry_entry_count_fits_registry_byte_bound() -> None:
+    """Allowing more entries than the byte bound can serialize must make the declared capacity self-invalidating."""
+    entries = [
+        roots_module._RegistryEntry(f"{index:064x}", str(uuid4()), f"Replay folder {index + 1}")
+        for index in range(roots_module._MAX_REGISTRY_ENTRIES)
+    ]
+
+    payload = roots_module._serialized_registry(entries)
+
+    assert len(payload) <= roots_module._MAX_REGISTRY_BYTES
+    assert roots_module._parse_registry(payload) == entries
 
 
 def test_public_root_snapshot_is_frozen_and_path_free(tmp_path: Path) -> None:
@@ -456,6 +555,7 @@ def test_snapshot_copies_verified_descriptor_to_immutable_owned_content(tmp_path
     assert snapshot.created is True
     assert snapshot.snapshot_path == registry.data_root / "ingress" / digest[:2] / f"{digest}.rep"
     assert snapshot.snapshot_path.read_bytes() == payload
+    assert snapshot.read_verified_bytes() == payload
     assert source.read_bytes() == payload
     assert source.stat().st_ino == source_before.st_ino
     assert source.stat().st_mtime_ns == source_before.st_mtime_ns
@@ -471,6 +571,24 @@ def test_snapshot_copies_verified_descriptor_to_immutable_owned_content(tmp_path
     }
     with pytest.raises(FrozenInstanceError):
         snapshot.size_bytes = 0  # type: ignore[misc]
+
+
+def test_each_new_ingress_directory_fsyncs_its_parent_before_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Creating ingress directories without parent fsync must leave four namespace updates crash-ambiguous."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    (source_root / "durable.rep").write_bytes(b"durable replay")
+    durable_events: list[str] = []
+
+    def collect_durability(event: str) -> None:
+        if event == "owned_directory_parent_fsynced":
+            durable_events.append(event)
+
+    monkeypatch.setattr(roots_module, "_race_hook", collect_durability)
+    registry.snapshot_replay(root_public_id, "durable.rep")
+
+    assert durable_events == ["owned_directory_parent_fsynced"] * 4
 
 
 @pytest.mark.parametrize(
@@ -953,6 +1071,87 @@ def test_different_digest_publication_is_not_blocked_cross_process(tmp_path: Pat
     assert created is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory share-mode enforcement is platform specific")
+def test_digest_lock_directory_cannot_be_replaced_to_split_cross_process_lock(tmp_path: Path) -> None:
+    """Opening the digest lock only by pathname must let a replacement `.locks` directory split serialization."""
+    lock_directory = tmp_path / "ingress" / ".locks"
+    displaced = tmp_path / "ingress" / ".locks-displaced"
+    digest = hashlib.sha256(b"split lock").hexdigest()
+    first_ready = tmp_path / "first-ready"
+    first_release = tmp_path / "first-release"
+    second_ready = tmp_path / "second-ready"
+    second_release = tmp_path / "second-release"
+    context = multiprocessing.get_context("spawn")
+
+    with ProcessPoolExecutor(max_workers=2, mp_context=context) as executor:
+        holder = executor.submit(
+            _hold_named_digest_lock_in_spawned_process,
+            (str(lock_directory), digest, str(first_ready), str(first_release)),
+        )
+        deadline = time.monotonic() + 10
+        while not first_ready.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        replacement_blocked = False
+        try:
+            lock_directory.rename(displaced)
+        except PermissionError:
+            replacement_blocked = True
+        second = None
+        if not replacement_blocked:
+            lock_directory.mkdir()
+            second = executor.submit(
+                _hold_named_digest_lock_in_spawned_process,
+                (str(lock_directory), digest, str(second_ready), str(second_release)),
+            )
+            deadline = time.monotonic() + 2
+            while not second_ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        second_release.write_bytes(b"release")
+        first_release.write_bytes(b"release")
+        if second is not None:
+            try:
+                second.result(timeout=10)
+            except SnapshotIngressError:
+                pass
+        try:
+            holder.result(timeout=10)
+        except SnapshotIngressError:
+            pass
+
+    assert replacement_blocked is True
+    assert lock_directory.is_dir()
+    assert not displaced.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory share-mode enforcement is platform specific")
+def test_digest_lock_binds_locks_directory_before_opening_lock_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathname open after directory validation must follow a replacement installed before the lock open."""
+    lock_directory = tmp_path / "ingress" / ".locks"
+    displaced = tmp_path / "ingress" / ".locks-displaced"
+    seam_seen: list[bool] = []
+    replacement_blocked: list[bool] = []
+
+    def replace_after_bind(event: str) -> None:
+        if event == "digest_lock_directory_bound":
+            seam_seen.append(True)
+            try:
+                lock_directory.rename(displaced)
+            except PermissionError:
+                replacement_blocked.append(True)
+
+    monkeypatch.setattr(roots_module, "_race_hook", replace_after_bind)
+    with roots_module._digest_lock(lock_directory, hashlib.sha256(b"bound lock").hexdigest()):
+        pass
+
+    assert seam_seen == [True]
+    assert replacement_blocked == [True]
+    assert lock_directory.is_dir()
+    assert not displaced.exists()
+
+
 def test_corrupt_snapshot_collision_is_preserved_and_owned_temp_is_cleaned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -988,16 +1187,51 @@ def test_staging_directory_replacement_before_copy_is_rejected(
     real_copy = roots_module._copy_descriptor
     displaced = registry.data_root / "ingress" / ".staging-displaced"
 
-    def replace_staging(source_descriptor: int, staging: Path, maximum: int) -> tuple[Path, str, int]:
+    def replace_staging(
+        source_descriptor: int,
+        staging: Path,
+        maximum: int,
+        **kwargs: object,
+    ) -> tuple[Path, str, int, int]:
         staging.rename(displaced)
         staging.mkdir()
-        return real_copy(source_descriptor, staging, maximum)
+        return real_copy(source_descriptor, staging, maximum, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(roots_module, "_copy_descriptor", replace_staging)
     with pytest.raises(SnapshotIngressError) as raised:
         registry.snapshot_replay(root_public_id, "staging-race.rep")
 
     assert raised.value.code == "ingress_snapshot_changed"
+    assert _owned_temporary_files(registry.data_root) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory share-mode enforcement is platform specific")
+def test_failure_cleanup_keeps_verified_staging_parent_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing staging handles before temp cleanup must let cleanup follow a replacement parent pathname."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    (source_root / "cleanup-race.rep").write_bytes(b"cleanup race replay")
+    staging = registry.data_root / "ingress" / ".staging"
+    displaced = registry.data_root / "ingress" / ".staging-displaced"
+    replacement_blocked: list[bool] = []
+
+    def fail_then_replace(event: str) -> None:
+        if event == "after_copy":
+            raise SnapshotIngressError("ingress_snapshot_changed")
+        if event == "before_temporary_cleanup":
+            try:
+                staging.rename(displaced)
+            except PermissionError:
+                replacement_blocked.append(True)
+
+    monkeypatch.setattr(roots_module, "_race_hook", fail_then_replace)
+    with pytest.raises(SnapshotIngressError):
+        registry.snapshot_replay(root_public_id, "cleanup-race.rep")
+
+    assert replacement_blocked == [True]
+    assert staging.is_dir()
+    assert not displaced.exists()
     assert _owned_temporary_files(registry.data_root) == []
 
 
@@ -1035,8 +1269,14 @@ def test_final_target_replacement_after_publish_is_rejected(
     source.write_bytes(payload)
     real_publish = roots_module._publish_snapshot
 
-    def replace_after_publish(temporary: Path, target: Path, digest: str, size: int) -> bool:
-        created = real_publish(temporary, target, digest, size)
+    def replace_after_publish(
+        temporary: Path,
+        target: Path,
+        digest: str,
+        size: int,
+        **kwargs: object,
+    ) -> bool:
+        created = real_publish(temporary, target, digest, size, **kwargs)  # type: ignore[arg-type]
         target.unlink()
         target.write_bytes(b"attacker replacement")
         return created
@@ -1047,6 +1287,46 @@ def test_final_target_replacement_after_publish_is_rejected(
 
     assert raised.value.code in {"ingress_snapshot_changed", "ingress_snapshot_collision"}
     assert _owned_temporary_files(registry.data_root) == []
+
+
+def test_snapshot_consumer_reopens_and_reverifies_owned_bytes_after_return(tmp_path: Path) -> None:
+    """A consumer that trusts the returned pathname must accept replacement bytes installed after publication."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    source = source_root / "consumer.rep"
+    source.write_bytes(b"verified consumer replay")
+    snapshot = registry.snapshot_replay(root_public_id, source.name)
+    snapshot.snapshot_path.unlink()
+    snapshot.snapshot_path.write_bytes(b"replacement consumer bytes")
+
+    with pytest.raises(SnapshotIngressError) as raised:
+        snapshot.read_verified_bytes()
+
+    assert raised.value.code == "ingress_snapshot_collision"
+
+
+def test_target_replacement_after_final_verify_is_rejected_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Returning immediately after verification must expose a target replaced at the final return boundary."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    payload = b"final boundary replay"
+    (source_root / "final-boundary.rep").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    target = registry.data_root / "ingress" / digest[:2] / f"{digest}.rep"
+    seam_seen: list[bool] = []
+
+    def replace_at_return(event: str) -> None:
+        if event == "after_final_verify":
+            seam_seen.append(True)
+            target.unlink()
+            target.write_bytes(b"return-boundary replacement")
+
+    monkeypatch.setattr(roots_module, "_race_hook", replace_at_return)
+    with pytest.raises(SnapshotIngressError) as raised:
+        registry.snapshot_replay(root_public_id, "final-boundary.rep")
+
+    assert seam_seen == [True]
+    assert raised.value.code == "ingress_snapshot_collision"
 
 
 def test_poisoned_ingress_directory_and_nonregular_target_fail_closed(tmp_path: Path) -> None:
@@ -1085,3 +1365,40 @@ def test_windows_reparse_attribute_is_recognized_synthetically() -> None:
     """Ignoring FILE_ATTRIBUTE_REPARSE_POINT must fail even when symlink privileges are unavailable."""
     info = SimpleNamespace(st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
     assert roots_module._is_reparse(cast(os.stat_result, info)) is True
+
+
+@pytest.mark.parametrize(
+    ("site", "expected_code"),
+    [
+        ("registry", "watched_root_registry_invalid"),
+        ("source", "replay_source_unsafe"),
+        ("ingress", "ingress_snapshot_unavailable"),
+        ("locks", "ingress_snapshot_unavailable"),
+    ],
+)
+def test_synthetic_reparse_identity_fails_at_each_enforcement_site(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site: str,
+    expected_code: str,
+) -> None:
+    """Calling the reparse helper without wiring every security site must allow one synthetic alias through."""
+    registry, source_root, root_public_id = _configured_registry(tmp_path)
+    (source_root / "synthetic.rep").write_bytes(b"synthetic reparse replay")
+
+    monkeypatch.setattr(
+        roots_module,
+        "_enforce_reparse_identity",
+        lambda enforcement_site, marked: marked or enforcement_site == site,
+    )
+
+    if site == "registry":
+        operation = lambda: registry.reconcile((source_root,))
+    else:
+        operation = lambda: registry.snapshot_replay(root_public_id, "synthetic.rep")
+
+    error_type = RootRegistryError if site == "registry" else SnapshotIngressError
+    with pytest.raises(error_type) as raised:
+        operation()
+
+    assert raised.value.code == expected_code
