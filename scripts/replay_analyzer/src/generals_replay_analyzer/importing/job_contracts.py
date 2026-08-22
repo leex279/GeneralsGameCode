@@ -9,6 +9,8 @@ from enum import Enum, StrEnum
 from typing import Literal, Protocol
 from uuid import UUID
 
+from .stages import STAGES
+
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
@@ -149,6 +151,30 @@ def _integer(value: int, field_name: str, *, minimum: int = 0) -> None:
 def _boolean(value: bool, field_name: str) -> None:
     if type(value) is not bool:
         raise TypeError(f"{field_name} must be an exact boolean")
+
+
+# TheSuperHackers @feature Leex 22/08/2026 Bound worker claims to public replay and stage identities. (#TBD)
+@dataclass(frozen=True, slots=True)
+class JobClaimSelectorDTO:
+    """Optional locator-free restriction applied to one atomic job claim."""
+
+    replay_public_id: str | None = None
+    stages: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.replay_public_id is not None:
+            _uuid(self.replay_public_id, "replay_public_id")
+        if type(self.stages) is not tuple:
+            raise TypeError("stages must be an immutable tuple")
+        if len(self.stages) > 16:
+            raise ValueError("stages may contain at most 16 entries")
+        if any(type(stage) is not str or stage not in STAGES for stage in self.stages):
+            raise ValueError("stages must use the closed replay-analysis vocabulary")
+        if self.stages != tuple(sorted(set(self.stages))):
+            raise ValueError("stages must be sorted and unique")
+
+
+DEFAULT_JOB_CLAIM_SELECTOR = JobClaimSelectorDTO()
 
 
 @dataclass(frozen=True)
@@ -468,7 +494,12 @@ class OwnedExecutionSettlementDTO:
 class WorkerControlPort(Protocol):
     def registered_stages(self) -> tuple[str, ...]: ...
 
-    def claim_next(self, worker_public_id: str, lease_seconds: int) -> WorkerLeaseDTO | None: ...
+    def claim_next(
+        self,
+        worker_public_id: str,
+        lease_seconds: int,
+        selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR,
+    ) -> WorkerLeaseDTO | None: ...
 
     def heartbeat(
         self, worker_public_id: str, claim: WorkerLeaseDTO, lease_seconds: int

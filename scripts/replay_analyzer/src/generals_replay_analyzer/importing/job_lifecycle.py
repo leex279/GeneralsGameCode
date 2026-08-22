@@ -31,8 +31,10 @@ from generals_replay_analyzer.db.models import (
 from generals_replay_analyzer.storage import ContentAddressedStore, StoredContent
 
 from .job_contracts import (
+    DEFAULT_JOB_CLAIM_SELECTOR,
     CancelJobCommandDTO,
     CancellationReasonCode,
+    JobClaimSelectorDTO,
     JobDetailDTO,
     JobErrorSummaryDTO,
     JobEventKind,
@@ -309,30 +311,63 @@ class JobLifecycleService:
         delay: timedelta = min(candidate, self._retry_max_delay)
         return now + delay
 
-    def claim_next(self, worker_public_id: str, lease_seconds: int) -> WorkerLeaseDTO | None:
+    def claim_next(
+        self,
+        worker_public_id: str,
+        lease_seconds: int,
+        selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR,
+    ) -> WorkerLeaseDTO | None:
         worker = self._worker_identifier(worker_public_id)
         duration = _validate_seconds(lease_seconds)
+        if type(selector) is not JobClaimSelectorDTO:
+            raise TypeError("selector must be an exact JobClaimSelectorDTO")
         if not self._stages:
             return None
         with self._writer() as session:
             now = self.now()
             self._recover(session, now)
             self._project_dependency_terminals(session, now)
-            for candidate in session.scalars(self._candidate_query(now)):
+            selected_stages = (
+                self._stages
+                if not selector.stages
+                else tuple(stage for stage in selector.stages if stage in self._stages)
+            )
+            selected_replay_id: int | None = None
+            if selector.replay_public_id is not None:
+                selected_replay_id = session.scalar(
+                    select(Replay.id).where(Replay.public_id == selector.replay_public_id)
+                )
+                if selected_replay_id is None:
+                    return None
+            candidate_query = (
+                self._candidate_query(now)
+                if selector == DEFAULT_JOB_CLAIM_SELECTOR
+                else self._candidate_query(
+                    now,
+                    replay_id=selected_replay_id,
+                    selected_stages=selected_stages,
+                )
+            )
+            for candidate in session.scalars(candidate_query):
                 if not self._dependencies_satisfied(session, candidate):
                     continue
                 token = secrets.token_urlsafe(32)
                 execution_public_id = str(uuid4())
                 next_revision = candidate.revision + 1
+                claim_conditions: list[Any] = [
+                    Job.id == candidate.id,
+                    Job.status == "pending",
+                    Job.available_at <= now,
+                    Job.attempt_count < Job.max_attempts,
+                    Job.revision == candidate.revision,
+                ]
+                if selector.replay_public_id is not None:
+                    claim_conditions.append(Job.replay_id == selected_replay_id)
+                if selector != DEFAULT_JOB_CLAIM_SELECTOR:
+                    claim_conditions.append(Job.stage.in_(selected_stages))
                 result = session.execute(
                     update(Job)
-                    .where(
-                        Job.id == candidate.id,
-                        Job.status == "pending",
-                        Job.available_at <= now,
-                        Job.attempt_count < Job.max_attempts,
-                        Job.revision == candidate.revision,
-                    )
+                    .where(*claim_conditions)
                     .values(
                         status="running",
                         attempt_count=Job.attempt_count + 1,
@@ -371,17 +406,27 @@ class JobLifecycleService:
                 )
         return None
 
-    def _candidate_query(self, now: datetime) -> Select[tuple[Job]]:
-        return (
+    def _candidate_query(
+        self,
+        now: datetime,
+        *,
+        replay_id: int | None = None,
+        selected_stages: tuple[str, ...] | None = None,
+    ) -> Select[tuple[Job]]:
+        stages = self._stages if selected_stages is None else selected_stages
+        query = (
             select(Job)
             .where(
                 Job.status == "pending",
                 Job.available_at <= now,
                 Job.attempt_count < Job.max_attempts,
-                Job.stage.in_(self._stages),
+                Job.stage.in_(stages),
             )
             .order_by(Job.priority.desc(), Job.available_at, Job.id)
         )
+        if replay_id is not None:
+            query = query.where(Job.replay_id == replay_id)
+        return query
 
     def _dependencies_satisfied(self, session: Session, row: Job) -> bool:
         dependencies = list(
