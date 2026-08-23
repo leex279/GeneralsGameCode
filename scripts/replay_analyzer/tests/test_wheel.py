@@ -75,6 +75,7 @@ WEB_LIBRARY_TEMPLATE_RESOURCES = {
     "generals_replay_analyzer/web/templates/replays/index.html",
     "generals_replay_analyzer/web/templates/replays/_table.html",
     "generals_replay_analyzer/web/templates/imports/dialog.html",
+    "generals_replay_analyzer/web/templates/imports/page.html",
 }
 WEB_LIBRARY_SOURCE_RESOURCES = {
     "generals_replay_analyzer/web/routes/replays.py",
@@ -140,6 +141,17 @@ WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = (
 
 def _source_resource(resource_name: str) -> Path:
     return PROJECT_ROOT / "src" / resource_name
+
+
+def _complete_web_template_static_resources() -> dict[str, bytes]:
+    web_root = PROJECT_ROOT / "src" / "generals_replay_analyzer" / "web"
+    resources: dict[str, bytes] = {}
+    for relative_root in (Path("templates"), Path("static")):
+        for path in sorted((web_root / relative_root).rglob("*")):
+            if path.is_file():
+                relative = path.relative_to(web_root).as_posix()
+                resources[f"generals_replay_analyzer/web/{relative}"] = path.read_bytes()
+    return resources
 
 
 def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_resources() -> None:
@@ -214,6 +226,37 @@ def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path
             assert not any("cache" in name.lower() or "secret" in name.lower() for name in archive.namelist())
     finally:
         poison.unlink(missing_ok=True)
+
+
+def test_wheel_recursively_matches_every_accepted_web_template_and_static_resource(tmp_path: Path) -> None:
+    """Reject missing, stale, or test-only bytes anywhere in the installed web resource trees."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    expected = _complete_web_template_static_resources()
+    distribution_directory = tmp_path / "dist"
+    _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+    wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+
+    with zipfile.ZipFile(wheel) as archive:
+        web_members = {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith(("generals_replay_analyzer/web/templates/", "generals_replay_analyzer/web/static/"))
+        }
+        assert web_members == expected
+        forbidden_fragments = (
+            "/tests/browser/",
+            "axe.min.js",
+            "--desktop.png",
+            "--tablet.png",
+            "--mobile.png",
+            ".trace",
+            ".sqlite",
+            ".log",
+            ".superpowers",
+            ".pytest_cache",
+        )
+        assert not any(fragment in name for name in archive.namelist() for fragment in forbidden_fragments)
 
 
 def _run(
@@ -444,7 +487,10 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
         separators=(",", ":"),
         sort_keys=True,
     )
-    result = _run([str(environment_python), "-c", shell_script], tmp_path, environment)
+    try:
+        result = _run([str(environment_python), "-c", shell_script], tmp_path, environment)
+    except subprocess.CalledProcessError as error:
+        raise AssertionError(error.stderr or "installed-wheel shell proof failed without stderr") from error
     assert result.returncode == 0
 
 
