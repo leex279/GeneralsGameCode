@@ -274,6 +274,7 @@ _OBJECT_REFERENCE_RULES: dict[str, dict[str, _ReferenceRequirement]] = {
     "veterancy_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "entity_state_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
     "entity_sample": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
+    "object_visibility_changed": {"object_id": _ReferenceRequirement.REQUIRES_ALIVE},
 }
 
 
@@ -1701,6 +1702,265 @@ def _validate_v2_order_movement(
     )
 
 
+# TheSuperHackers @feature Leex 23/08/2026 Validate engine-native evidence without modifying replay state. (#0)
+def _validate_v2_engine_native_trace(
+    path: Path,
+    records: tuple[TelemetryRecord, ...],
+    final_frame: int,
+    engine_player_indices: frozenset[int],
+    resolved_occupied_player_indices: frozenset[int],
+) -> None:
+    """Validate optional engine-native observation families as one trace-level authority."""
+    score_indexes: list[int] = []
+    cpm_by_frame: dict[int, TelemetryRecord] = {}
+    grid_players_by_frame: dict[int, set[int]] = {}
+    grid_layout: tuple[int, int, tuple[tuple[int, int], ...]] | None = None
+    grid_world_geometry_by_frame: dict[int, tuple[tuple[float, float, float], ...]] = {}
+    visibility_state: dict[tuple[int, int], str] = {}
+    visibility_seen_clear: set[tuple[int, int]] = set()
+    visibility_summaries_by_frame: dict[int, dict[str, object]] = {}
+    visibility_transition_cycles_by_frame: dict[int, list[int]] = {}
+    live_objects: dict[int, str] = {}
+    last_visibility_cycle: int | None = None
+    last_visibility_cursor_end: int | None = None
+    last_visibility_cycle_complete = False
+    last_visibility_eligible_count: int | None = None
+    last_grid_key: tuple[int, int] | None = None
+    last_income_frame = 0
+    income_buckets = {player_index: [0] * 60 for player_index in resolved_occupied_player_indices}
+    current_income_bucket = dict.fromkeys(resolved_occupied_player_indices, 0)
+    missing_income_provenance = False
+
+    if not resolved_occupied_player_indices <= engine_player_indices:
+        raise TelemetryTraceValidationError(
+            f"trace '{path}': resolved occupied players must belong to the engine player domain"
+        )
+
+    def fail(record_index: int, detail: str) -> None:
+        record = records[record_index]
+        raise _error(path, record_index + 1, record.sequence, detail)
+
+    def require_nondecreasing_income_frame(frame: int) -> None:
+        nonlocal last_income_frame
+        if frame < last_income_frame:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': cash-per-minute evidence frames must be nondecreasing"
+            )
+        last_income_frame = frame
+
+    def rotate_player_to_frame(player_index: int, frame: int) -> None:
+        target_bucket = (frame // 30) % 60
+        if current_income_bucket[player_index] != target_bucket:
+            income_buckets[player_index][target_bucket] = 0
+            current_income_bucket[player_index] = target_bucket
+
+    for index, record in enumerate(records):
+        event_type = record.event_type
+        payload = cast(dict[str, object], record.payload.model_dump())
+        if event_type == "object_created":
+            live_objects[cast(int, payload["object_id"])] = cast(str, payload["template_name"])
+        elif event_type == "object_destroyed":
+            live_objects.pop(cast(int, payload["object_id"]), None)
+        elif event_type == "scorekeeper_snapshot":
+            score_indexes.append(index)
+            players = cast(list[dict[str, object]], payload["players"])
+            if {
+                cast(int, player["player_index"]) for player in players
+            } != resolved_occupied_player_indices:
+                fail(index, "scorekeeper_snapshot player domain must exactly match initialized players")
+            if record.frame != final_frame:
+                fail(index, "scorekeeper_snapshot must use the terminal frame")
+        elif event_type == "cash_changed":
+            if not cast(bool, payload["track_income"]):
+                continue
+            amount = payload.get("tracked_income_amount")
+            bucket = payload.get("income_bucket_index")
+            if not isinstance(amount, int) or not isinstance(bucket, int):
+                missing_income_provenance = True
+                continue
+            player_index = cast(int, payload["player_index"])
+            if player_index not in resolved_occupied_player_indices:
+                fail(index, "cash_changed income provenance player is outside initialized domain")
+            require_nondecreasing_income_frame(record.frame)
+            target_bucket = (record.frame // 30) % 60
+            if bucket == target_bucket and current_income_bucket[player_index] != target_bucket:
+                rotate_player_to_frame(player_index, record.frame)
+            elif bucket != current_income_bucket[player_index]:
+                fail(index, "cash_changed income bucket is invalid before or after frame rotation")
+            buckets = income_buckets[player_index]
+            buckets[bucket] = (buckets[bucket] + amount) % _UINT32_MODULUS
+        elif event_type == "cash_per_minute_snapshot":
+            if record.frame in cpm_by_frame:
+                fail(index, "duplicate cash-per-minute snapshot frame")
+            cpm_by_frame[record.frame] = record
+            require_nondecreasing_income_frame(record.frame)
+            for player_index in resolved_occupied_player_indices:
+                rotate_player_to_frame(player_index, record.frame)
+            players = cast(list[dict[str, object]], payload["players"])
+            if {
+                cast(int, player["player_index"]) for player in players
+            } != resolved_occupied_player_indices:
+                fail(index, "cash-per-minute player domain must exactly match initialized players")
+            for player in players:
+                player_index = cast(int, player["player_index"])
+                if cast(bool, player["has_money"]):
+                    expected = sum(income_buckets[player_index]) % _UINT32_MODULUS
+                    if player["cash_per_minute"] != expected:
+                        fail(index, "cash-per-minute snapshot contradicts unsigned income bucket fold")
+        elif event_type == "object_visibility_changed":
+            if record.frame % 15 != 0:
+                fail(index, "object visibility sampling cadence must be every 15 frames")
+            player_index = cast(int, payload["player_index"])
+            object_id = cast(int, payload["object_id"])
+            if player_index not in resolved_occupied_player_indices:
+                fail(index, "object visibility player is outside initialized domain")
+            template_name = live_objects.get(object_id)
+            if template_name is None:
+                fail(index, "object visibility must reference a live object")
+            if template_name != payload["template_name"]:
+                fail(index, "object visibility template differs from live object identity")
+            key = (player_index, object_id)
+            expected_previous = visibility_state.get(key, "unseen")
+            if payload["previous_status"] != expected_previous:
+                fail(index, "object visibility previous visibility status contradicts trace state")
+            status = cast(str, payload["status"])
+            expected_first_clear = status == "clear" and key not in visibility_seen_clear
+            if cast(bool, payload["first_observed_clear"]) != expected_first_clear:
+                fail(index, "object visibility first_observed_clear contradicts trace history")
+            visibility_state[key] = status
+            if status == "clear":
+                visibility_seen_clear.add(key)
+            visibility_transition_cycles_by_frame.setdefault(record.frame, []).append(
+                cast(int, payload["sampling_cycle_id"])
+            )
+        elif event_type == "visibility_sampling_summary":
+            if record.frame % 15 != 0:
+                fail(index, "visibility sampling cadence must be every 15 frames")
+            cycle_id = cast(int, payload["sampling_cycle_id"])
+            cursor_start = cast(int, payload["cursor_start"])
+            cursor_end = cast(int, payload["cursor_end"])
+            eligible_count = cast(int, payload["eligible_pair_count"])
+            sampled_count = cast(int, payload["sampled_pair_count"])
+            cycle_complete = cast(bool, payload["cycle_complete"])
+            if record.frame in visibility_summaries_by_frame:
+                fail(index, "visibility sampling requires exactly one summary per pass frame")
+            if cursor_end - cursor_start != sampled_count:
+                fail(index, "visibility sampling cursor span must equal sampled pair count")
+            if last_visibility_cycle is None:
+                if cycle_id != 0 or cursor_start != 0:
+                    fail(index, "visibility sampling must begin at cycle and cursor zero")
+            else:
+                if cycle_id == last_visibility_cycle and cursor_start != last_visibility_cursor_end:
+                    fail(index, "visibility sampling cursor must continue within one cycle")
+                if cycle_id not in {last_visibility_cycle, last_visibility_cycle + 1}:
+                    fail(index, "visibility sampling cycle IDs must be contiguous")
+                if cycle_id == last_visibility_cycle:
+                    if last_visibility_cycle_complete:
+                        fail(index, "a completed visibility cycle cannot continue")
+                    if eligible_count != last_visibility_eligible_count:
+                        fail(index, "visibility eligible count must remain stable within a cycle")
+                elif not last_visibility_cycle_complete or cursor_start != 0:
+                    fail(index, "a new visibility sampling cycle must follow completion at cursor zero")
+            if cycle_complete != (cursor_end == eligible_count):
+                fail(index, "visibility sampling cycle_complete contradicts its cursor")
+            visibility_summaries_by_frame[record.frame] = payload
+            last_visibility_cycle = cycle_id
+            last_visibility_cursor_end = cursor_end
+            last_visibility_cycle_complete = cycle_complete
+            last_visibility_eligible_count = eligible_count
+        elif event_type == "partition_engine_grid_sample":
+            player_index = cast(int, payload["player_index"])
+            if player_index not in resolved_occupied_player_indices:
+                fail(index, "partition sample player is outside initialized domain")
+            if record.frame % 300 != 0 and record.frame != final_frame:
+                fail(index, "partition sampling cadence must be every 300 frames plus terminal")
+            grid_key = (record.frame, player_index)
+            if last_grid_key is not None and grid_key <= last_grid_key:
+                fail(index, "partition samples must be ordered by frame and player")
+            last_grid_key = grid_key
+            grid = cast(dict[str, object], payload["grid"])
+            cells = cast(list[dict[str, object]], payload["cells"])
+            current_grid_layout = (
+                cast(int, grid["cell_count_x"]),
+                cast(int, grid["cell_count_y"]),
+                tuple(
+                    (cast(int, cell["cell_x"]), cast(int, cell["cell_y"]))
+                    for cell in cells
+                ),
+            )
+            if grid_layout is None:
+                grid_layout = current_grid_layout
+            elif current_grid_layout != grid_layout:
+                fail(index, "partition grid layout must remain stable across players and frames")
+            current_world_geometry = tuple(
+                (
+                    cast(float, cast(dict[str, object], cell["world_position"])["x"]),
+                    cast(float, cast(dict[str, object], cell["world_position"])["y"]),
+                    cast(float, cast(dict[str, object], cell["world_position"])["z"]),
+                )
+                for cell in cells
+            )
+            frame_geometry = grid_world_geometry_by_frame.setdefault(
+                record.frame,
+                current_world_geometry,
+            )
+            if current_world_geometry != frame_geometry:
+                fail(index, "partition grid world geometry must match across players in one frame")
+            sampled_grid_players = grid_players_by_frame.setdefault(record.frame, set())
+            if player_index in sampled_grid_players:
+                fail(index, "duplicate partition sample for player and frame")
+            sampled_grid_players.add(player_index)
+
+    if score_indexes:
+        if len(score_indexes) != 1:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': engine-native family requires exactly one scorekeeper_snapshot"
+            )
+        score_index = score_indexes[0]
+        if score_index + 1 >= len(records) or records[score_index + 1].event_type != "match_outcome":
+            fail(score_index, "scorekeeper_snapshot must immediately precede match_outcome")
+    if cpm_by_frame:
+        expected_frames = set(range(30, final_frame + 1, 30))
+        expected_frames.add(final_frame)
+        if set(cpm_by_frame) != expected_frames:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': cash-per-minute sampling cadence must include every 30 frames plus terminal"
+            )
+        if missing_income_provenance:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': cash-per-minute snapshots require bucket provenance for tracked income"
+            )
+    if grid_players_by_frame:
+        expected_frames = set(range(300, final_frame + 1, 300))
+        expected_frames.add(final_frame)
+        if set(grid_players_by_frame) != expected_frames or any(
+            players != resolved_occupied_player_indices for players in grid_players_by_frame.values()
+        ):
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': partition sample player domain must cover every player at cadence and terminal"
+            )
+    if visibility_summaries_by_frame or visibility_transition_cycles_by_frame:
+        expected_frames = set(range(15, final_frame + 1, 15))
+        if set(visibility_summaries_by_frame) != expected_frames:
+            raise TelemetryTraceValidationError(
+                f"trace '{path}': visibility sampling requires one summary for every 15-frame pass"
+            )
+        for frame, transition_cycles in visibility_transition_cycles_by_frame.items():
+            summary = visibility_summaries_by_frame.get(frame)
+            if summary is None:
+                raise TelemetryTraceValidationError(
+                    f"trace '{path}': visibility transition is missing its pass summary"
+                )
+            if set(transition_cycles) != {cast(int, summary["sampling_cycle_id"])}:
+                raise TelemetryTraceValidationError(
+                    f"trace '{path}': visibility transition cycle differs from its pass summary"
+                )
+            if len(transition_cycles) > cast(int, summary["sampled_pair_count"]):
+                raise TelemetryTraceValidationError(
+                    f"trace '{path}': visibility transitions exceed sampled pairs in their pass"
+                )
+
+
 # TheSuperHackers @feature Leex 19/08/2026 Validate immutable observed telemetry before later import stages consume it. (#TBD)
 def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     """Return an iterator only after the complete trace is validated as immutable evidence."""
@@ -1736,6 +1996,7 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
     upgrade_queues: dict[int, _QueueState] = {}
     cash_after_by_player: dict[int, int] = {}
     engine_player_indices: frozenset[int] | None = None
+    resolved_occupied_player_indices: frozenset[int] | None = None
     pending_supply_cash_pair: _PendingSupplyCashPair | None = None
     complete_record: CompleteRecord | None = None
     slot_player_indices: dict[int, int] = {}
@@ -1862,6 +2123,7 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
                     for slot in validated.payload.slots
                     if slot.player_index is not None
                 }
+                resolved_occupied_player_indices = frozenset(slot_player_indices.values())
                 players_start_positions = {
                     slot.slot_index: _position_tuple(slot.start_position)
                     for slot in validated.payload.slots
@@ -2040,7 +2302,15 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
             )
         assert complete_record is not None
         assert engine_player_indices is not None
+        assert resolved_occupied_player_indices is not None
         _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player, engine_player_indices)
+        _validate_v2_engine_native_trace(
+            path,
+            tuple(validated_records),
+            complete_record.payload.final_frame,
+            engine_player_indices,
+            resolved_occupied_player_indices,
+        )
         _validate_v2_outcome(
             path,
             tuple(validated_records),

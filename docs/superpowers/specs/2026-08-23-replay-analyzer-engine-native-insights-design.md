@@ -38,6 +38,8 @@ Sample resolved-player/live-object pairs every 15 frames with a deterministic ro
 
 Every 300 frames plus terminal, sample a deterministic row-major uniform lattice of at most 128 unique partition cells per resolved player, including map edges. Record cell index/world position, shroud status, `getThreatValue()`, and `getCashValue()`. Labels must say `Engine AI threat heuristic` and `Engine AI cash-value heuristic`; these values are not territory, danger probability, resources, or objective map control.
 
+The lattice contract is exact. Choose integer `(sample_count_x, sample_count_y)` from the valid range `1..cell_count_x`, `1..cell_count_y` with a product no greater than 128. Maximize sample count first, minimize aspect distortion `abs(sample_count_x * cell_count_y - sample_count_y * cell_count_x)` second, then prefer the larger X count for a deterministic tie. For either axis with one sample use index `0`; otherwise axis sample `i` maps to `floor(i * (cell_count - 1) / (sample_count - 1))`. Emit the Cartesian product with Y outer and X inner. This produces true 2D coverage, includes all four available map corners, fixes row-major ordering, and remains cross-run comparable.
+
 ## Analytics and reconciliation
 
 The generic telemetry-event table stores the new events; no specialized-table migration is required. Derived features expose cash-per-minute series/latest/peak, exact bucket reconciliation share, terminal ScoreKeeper snapshots, and explicitly caveated event reconciliation.

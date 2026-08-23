@@ -302,13 +302,16 @@ def test_reader_exposes_no_early_records_when_terminal_validation_fails(tmp_path
         next(iter_validated_trace(incomplete_path))
 
 
-def test_python_event_types_match_the_packaged_schema_event_contract() -> None:
-    """Catch one surface accepting an event family that the installed v1 schema cannot validate."""
-    schema_path = Path(__file__).parents[2] / "contracts" / "telemetry-v1.schema.json"
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    schema_events = set(schema["$defs"]["eventPayloads"])
+def test_python_event_types_match_the_current_schema_and_preserve_the_v1_subset() -> None:
+    """Keep the Python union aligned with v2 without adding new families to frozen v1."""
+    contract_dir = Path(__file__).parents[2] / "contracts"
+    v1 = json.loads((contract_dir / "telemetry-v1.schema.json").read_text(encoding="utf-8"))
+    v2 = json.loads((contract_dir / "telemetry-v2.schema.json").read_text(encoding="utf-8"))
+    v1_events = set(v1["$defs"]["eventPayloads"]) | {"manifest", "complete"}
+    v2_events = set(v2["$defs"]["eventPayloads"]) | {"manifest", "complete"}
 
-    assert schema_events | {"manifest", "complete"} == set(EVENT_TYPES)
+    assert v1_events < v2_events
+    assert v2_events == set(EVENT_TYPES)
 
 
 @pytest.mark.parametrize(

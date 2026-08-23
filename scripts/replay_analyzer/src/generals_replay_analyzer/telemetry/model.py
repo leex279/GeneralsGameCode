@@ -36,7 +36,9 @@ EVENT_TYPES = (
     "production_completed", "upgrade_queued", "upgrade_cancelled", "upgrade_completed", "science_purchased",
     "special_power_used", "cash_changed", "supply_collected", "damage_applied", "healing_applied",
     "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome",
-    "order_issued", "entity_state_changed", "entity_sample", "complete",
+    "order_issued", "entity_state_changed", "entity_sample", "scorekeeper_snapshot",
+    "cash_per_minute_snapshot", "object_visibility_changed", "visibility_sampling_summary",
+    "partition_engine_grid_sample", "complete",
 )
 TASK7_STATE_NAMES = frozenset(STATE_SOURCES)
 
@@ -366,6 +368,8 @@ class CashChangedPayload(OpenPayload):
     after: int
     track_income: bool
     reason: str = Field(min_length=1)
+    tracked_income_amount: Annotated[int, Field(ge=1, le=UINT32_MAX)] | None = None
+    income_bucket_index: Annotated[int, Field(ge=0, lt=60)] | None = None
 
     @field_validator("before", "after")
     @classmethod
@@ -373,6 +377,238 @@ class CashChangedPayload(OpenPayload):
         if _validation_schema_version(info) == SCHEMA_VERSION and not 0 <= value <= UINT32_MAX:
             raise ValueError(f"v2 cash value must be between 0 and {UINT32_MAX}")
         return value
+
+    @model_validator(mode="after")
+    def _require_joint_income_bucket_provenance(self) -> "CashChangedPayload":
+        fields = {"tracked_income_amount", "income_bucket_index"}
+        provided = fields & self.model_fields_set
+        if provided and (
+            provided != fields
+            or self.tracked_income_amount is None
+            or self.income_bucket_index is None
+        ):
+            raise ValueError("cash_changed bucket provenance fields must be jointly present")
+        if provided and not self.track_income:
+            raise ValueError("cash_changed bucket provenance requires track_income")
+        if provided and self.tracked_income_amount != (self.after - self.before) % (UINT32_MAX + 1):
+            raise ValueError("tracked income amount must equal the unsigned cash mutation")
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Define closed engine-native analyzer evidence contracts. (#0)
+class ClosedObservationPayload(BaseModel):
+    """Strict payload base for additive telemetry-v2 engine observations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ScoreKeeperPlayerSnapshot(ClosedObservationPayload):
+    player_index: NonNegativeInt
+    money_earned: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    money_spent: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    units_built: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    units_lost: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    units_destroyed: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    buildings_built: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    buildings_lost: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    buildings_destroyed: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    tech_buildings_captured: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+    faction_buildings_captured: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)]
+
+
+class ScoreKeeperSnapshotPayload(ClosedObservationPayload):
+    source: Literal["Player::getScoreKeeper"]
+    player_scope: Literal["resolved_occupied_replay_slots"]
+    scoring_enabled: bool
+    players: Annotated[list[ScoreKeeperPlayerSnapshot], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _require_ordered_unique_players(self) -> "ScoreKeeperSnapshotPayload":
+        player_indices = [player.player_index for player in self.players]
+        if player_indices != sorted(set(player_indices)):
+            raise ValueError("scorekeeper players must be strictly ordered and unique")
+        return self
+
+
+class CashPerMinutePlayer(ClosedObservationPayload):
+    player_index: NonNegativeInt
+    has_money: bool
+    cash_per_minute: Annotated[int, Field(ge=0, le=UINT32_MAX)] | None
+
+    @model_validator(mode="after")
+    def _require_money_value_when_available(self) -> "CashPerMinutePlayer":
+        if self.has_money != (self.cash_per_minute is not None):
+            raise ValueError("cash_per_minute must be present exactly when money is available")
+        return self
+
+
+class CashPerMinuteSnapshotPayload(ClosedObservationPayload):
+    source: Literal["Money::getCashPerMinute"]
+    sample_interval_frames: Literal[30]
+    income_window_buckets: Literal[60]
+    bucket_width_frames: Literal[30]
+    players: Annotated[list[CashPerMinutePlayer], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _require_ordered_unique_players(self) -> "CashPerMinuteSnapshotPayload":
+        player_indices = [player.player_index for player in self.players]
+        if player_indices != sorted(set(player_indices)):
+            raise ValueError("cash-per-minute players must be strictly ordered and unique")
+        return self
+
+
+class ObjectVisibilityChangedPayload(ClosedObservationPayload):
+    player_index: NonNegativeInt
+    object_id: Annotated[int, Field(ge=1)]
+    template_name: Annotated[str, Field(min_length=1)]
+    previous_status: Literal["unseen", "clear", "fogged", "shrouded"]
+    status: Literal["clear", "fogged", "shrouded"]
+    first_observed_clear: bool
+    position: RawPosition
+    observation_basis: Literal["object_center_partition_cell"]
+    source: Literal["PartitionManager::getShroudStatusForPlayer"]
+    sample_interval_frames: Literal[15]
+    sampling_cycle_id: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _require_real_visibility_transition(self) -> "ObjectVisibilityChangedPayload":
+        if self.previous_status == self.status:
+            raise ValueError("object_visibility_changed requires a real status transition")
+        if self.first_observed_clear and self.status != "clear":
+            raise ValueError("first_observed_clear requires a transition to clear")
+        if self.previous_status == "unseen" and self.status == "clear" and not self.first_observed_clear:
+            raise ValueError("first_observed_clear must mark an initial unseen-to-clear transition")
+        if self.position.model_extra:
+            raise ValueError("visibility position must be closed")
+        for axis, value in (
+            ("x", self.position.x),
+            ("y", self.position.y),
+            ("z", self.position.z),
+        ):
+            _require_v2_engine_real(f"visibility.position.{axis}", value)
+        return self
+
+
+class VisibilitySamplingSummaryPayload(ClosedObservationPayload):
+    source: Literal["PartitionManager::getShroudStatusForPlayer"]
+    sample_interval_frames: Literal[15]
+    maximum_pairs_per_pass: Literal[8192]
+    eligible_pair_count: NonNegativeInt
+    sampled_pair_count: NonNegativeInt
+    cursor_start: NonNegativeInt
+    cursor_end: NonNegativeInt
+    sampling_cycle_id: NonNegativeInt
+    cycle_complete: bool
+
+    @model_validator(mode="after")
+    def _require_bounded_sampling_counts(self) -> "VisibilitySamplingSummaryPayload":
+        if self.sampled_pair_count > min(self.maximum_pairs_per_pass, self.eligible_pair_count):
+            raise ValueError("sampled pair count cannot exceed the pass cap or eligible pairs")
+        if self.eligible_pair_count == 0:
+            if self.cursor_start != 0 or self.cursor_end != 0 or self.sampled_pair_count != 0:
+                raise ValueError("empty visibility sampling must keep cursors and count at zero")
+        elif self.cursor_start >= self.eligible_pair_count or self.cursor_end > self.eligible_pair_count:
+            raise ValueError("visibility sampling cursors must remain inside the eligible pair domain")
+        expected_count = min(
+            self.maximum_pairs_per_pass,
+            self.eligible_pair_count - self.cursor_start,
+        )
+        if self.sampled_pair_count != expected_count:
+            raise ValueError("sampled pair count must exhaust the pass cap or remaining cycle")
+        return self
+
+
+class PartitionGridMetadata(ClosedObservationPayload):
+    cell_count_x: Annotated[int, Field(ge=1)]
+    cell_count_y: Annotated[int, Field(ge=1)]
+    total_cell_count: Annotated[int, Field(ge=1)]
+    sampled_cell_count: NonNegativeInt
+    maximum_sampled_cells: Literal[128]
+    complete: bool
+
+
+class PartitionGridProviders(ClosedObservationPayload):
+    shroud: Literal["PartitionCell::getShroudStatusForPlayer"]
+    threat: Literal["PartitionCell::getThreatValue"]
+    cash: Literal["PartitionCell::getCashValue"]
+
+
+class PartitionGridCellSample(ClosedObservationPayload):
+    cell_x: NonNegativeInt
+    cell_y: NonNegativeInt
+    world_position: RawPosition
+    shroud_status: Literal["clear", "fogged", "shrouded"]
+    threat_value: Annotated[int, Field(ge=0, le=UINT32_MAX)]
+    cash_value: Annotated[int, Field(ge=0, le=UINT32_MAX)]
+
+
+def _uniform_partition_lattice_coordinates(
+    cell_count_x: int,
+    cell_count_y: int,
+    maximum_samples: int,
+) -> list[tuple[int, int]]:
+    """Choose an endpoint-inclusive 2D lattice with maximum coverage and minimum aspect distortion."""
+    candidates = (
+        (sample_count_x * sample_count_y, -abs(sample_count_x * cell_count_y - sample_count_y * cell_count_x), sample_count_x, sample_count_y)
+        for sample_count_x in range(1, min(cell_count_x, maximum_samples) + 1)
+        for sample_count_y in range(1, min(cell_count_y, maximum_samples // sample_count_x) + 1)
+    )
+    _, _, sample_count_x, sample_count_y = max(candidates)
+
+    def axis_positions(cell_count: int, sample_count: int) -> list[int]:
+        if sample_count == 1:
+            return [0]
+        return [
+            sample_index * (cell_count - 1) // (sample_count - 1)
+            for sample_index in range(sample_count)
+        ]
+
+    x_positions = axis_positions(cell_count_x, sample_count_x)
+    y_positions = axis_positions(cell_count_y, sample_count_y)
+    return [(cell_x, cell_y) for cell_y in y_positions for cell_x in x_positions]
+
+
+class PartitionEngineGridSamplePayload(ClosedObservationPayload):
+    player_index: NonNegativeInt
+    sample_interval_frames: Literal[300]
+    sampling_scheme: Literal["uniform_partition_lattice_v1"]
+    heuristic_semantics: Literal["engine_ai_owner_contribution_heuristic"]
+    grid: PartitionGridMetadata
+    providers: PartitionGridProviders
+    cells: Annotated[list[PartitionGridCellSample], Field(min_length=1, max_length=128)]
+
+    @model_validator(mode="after")
+    def _require_exact_bounded_grid_cells(self) -> "PartitionEngineGridSamplePayload":
+        coordinates = [(cell.cell_x, cell.cell_y) for cell in self.cells]
+        total = self.grid.cell_count_x * self.grid.cell_count_y
+        expected_coordinates = _uniform_partition_lattice_coordinates(
+            self.grid.cell_count_x,
+            self.grid.cell_count_y,
+            self.grid.maximum_sampled_cells,
+        )
+        if (
+            self.grid.total_cell_count != total
+            or self.grid.sampled_cell_count != len(self.cells)
+            or len(self.cells) != len(expected_coordinates)
+            or len(coordinates) != len(set(coordinates))
+            or coordinates != expected_coordinates
+            or any(
+                cell_x >= self.grid.cell_count_x or cell_y >= self.grid.cell_count_y
+                for cell_x, cell_y in coordinates
+            )
+            or self.grid.complete != (len(self.cells) == total)
+        ):
+            raise ValueError("grid cells must be unique, bounded, and agree with exact grid counts")
+        if any(cell.world_position.model_extra for cell in self.cells):
+            raise ValueError("grid cells must contain closed world positions")
+        for cell in self.cells:
+            for axis, value in (
+                ("x", cell.world_position.x),
+                ("y", cell.world_position.y),
+                ("z", cell.world_position.z),
+            ):
+                _require_v2_engine_real(f"grid.world_position.{axis}", value)
+        return self
 
 
 class SupplyCollectedPayload(OpenPayload):
@@ -744,6 +980,16 @@ class TelemetryEnvelope(BaseModel):
         return self
 
 
+class V2OnlyTelemetryEnvelope(TelemetryEnvelope):
+    """Reject additive observation families when directly validating historical v1."""
+
+    @model_validator(mode="after")
+    def _require_v2_schema(self) -> "V2OnlyTelemetryEnvelope":
+        if self.schema_version != 2:
+            raise ValueError("engine-native observation events require schema_version 2")
+        return self
+
+
 class ManifestRecord(TelemetryEnvelope):
     event_type: Literal["manifest"]
     payload: ManifestPayload
@@ -936,6 +1182,15 @@ class SpecialPowerUsedRecord(TelemetryEnvelope):
 class CashChangedRecord(TelemetryEnvelope):
     event_type: Literal["cash_changed"]
     payload: CashChangedPayload
+
+    @model_validator(mode="after")
+    def _forbid_v2_income_provenance_in_v1(self) -> "CashChangedRecord":
+        if self.schema_version == 1 and {
+            "tracked_income_amount",
+            "income_bucket_index",
+        } & self.payload.model_fields_set:
+            raise ValueError("income bucket provenance requires schema_version 2")
+        return self
 
 
 class SupplyCollectedRecord(TelemetryEnvelope):
@@ -1444,6 +1699,31 @@ class EntitySampleRecord(TelemetryEnvelope):
         return self
 
 
+class ScoreKeeperSnapshotRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["scorekeeper_snapshot"]
+    payload: ScoreKeeperSnapshotPayload
+
+
+class CashPerMinuteSnapshotRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["cash_per_minute_snapshot"]
+    payload: CashPerMinuteSnapshotPayload
+
+
+class ObjectVisibilityChangedRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["object_visibility_changed"]
+    payload: ObjectVisibilityChangedPayload
+
+
+class VisibilitySamplingSummaryRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["visibility_sampling_summary"]
+    payload: VisibilitySamplingSummaryPayload
+
+
+class PartitionEngineGridSampleRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["partition_engine_grid_sample"]
+    payload: PartitionEngineGridSamplePayload
+
+
 class CompleteRecord(TelemetryEnvelope):
     event_type: Literal["complete"]
     payload: CompletePayload
@@ -1487,6 +1767,8 @@ TelemetryRecord = Annotated[
     | ProductionCompletedRecord | UpgradeQueuedRecord | UpgradeCancelledRecord | UpgradeCompletedRecord | SciencePurchasedRecord
     | SpecialPowerUsedRecord | CashChangedRecord | SupplyCollectedRecord | DamageAppliedRecord | HealingAppliedRecord
     | VeterancyChangedRecord | PlayerDefeatedRecord | PlayerSurrenderedRecord | PlayerDisconnectedRecord | MatchOutcomeRecord
-    | OrderIssuedRecord | EntityStateChangedRecord | EntitySampleRecord | CompleteRecord,
+    | OrderIssuedRecord | EntityStateChangedRecord | EntitySampleRecord | ScoreKeeperSnapshotRecord
+    | CashPerMinuteSnapshotRecord | ObjectVisibilityChangedRecord | VisibilitySamplingSummaryRecord
+    | PartitionEngineGridSampleRecord | CompleteRecord,
     Field(discriminator="event_type"),
 ]
