@@ -572,7 +572,21 @@ def test_factory_root_submission_commits_one_path_free_discovery_job(tmp_path: P
     assert jobs[0].input_json["request_telemetry"] is False
 
 
-def test_factory_root_submission_requests_telemetry_when_engine_is_configured(tmp_path: Path) -> None:
+def test_factory_root_submission_requests_telemetry_without_launching_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from generals_replay_analyzer.engine import runner as engine_runner
+    from generals_replay_analyzer.importing.engine_acquirer import EngineTelemetryAcquirer
+
+    launches: list[str] = []
+
+    def reject_launch(*_args: object, **_kwargs: object) -> object:
+        launches.append("engine")
+        raise AssertionError("Web request handling must not launch the telemetry exporter")
+
+    monkeypatch.setattr(engine_runner, "export_telemetry", reject_launch)
+    monkeypatch.setattr(EngineTelemetryAcquirer, "acquire", reject_launch)
     root_path = tmp_path / "external-private-root"
     root_path.mkdir()
     (root_path / "league.rep").write_bytes(b"factory replay bytes")
@@ -596,6 +610,7 @@ def test_factory_root_submission_requests_telemetry_when_engine_is_configured(tm
         )
 
     assert _jobs(settings)[0].input_json["request_telemetry"] is True
+    assert launches == []
 
 
 def test_factory_rolls_back_root_submission_when_request_scope_fails(tmp_path: Path) -> None:

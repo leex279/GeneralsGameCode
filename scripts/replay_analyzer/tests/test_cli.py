@@ -344,11 +344,74 @@ def test_import_service_uses_the_single_production_bootstrap_coordinator(
     )
     monkeypatch.setattr(web_bootstrap, "create_production_bootstrapper", lambda _readiness: FakeCoordinator())
 
-    _service, engine = cli_module._import_service()
+    _service, engine, _request_telemetry = cli_module._import_service()
     try:
         assert prepared == [(tmp_path / "product").resolve()]
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_import_composition_matches_the_configured_telemetry_policy(
+    configured: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the public import composition diverging from its worker's telemetry capability."""
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(tmp_path / "product"))
+    monkeypatch.delenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", raising=False)
+    if configured:
+        executable = tmp_path / "generalszh.exe"
+        executable.write_bytes(b"engine")
+        monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", str(executable))
+
+    composition = cli_module._import_service()
+    service, engine = composition[0], composition[1]
+    try:
+        registered = service.worker_control_port().registered_stages()
+        assert ("telemetry" in registered) is configured
+        assert service._telemetry_acquirer_version == (
+            "engine-telemetry-v1" if configured else "none"
+        )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_public_import_persists_the_configured_telemetry_intent(
+    configured: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    """Catch the public import command silently requesting parser-only processing."""
+    from sqlalchemy import select
+
+    from generals_replay_analyzer.config import AnalyzerSettings
+    from generals_replay_analyzer.db import create_database_engine, create_session_factory
+    from generals_replay_analyzer.db.models import Job
+
+    data_root = tmp_path / "product"
+    replay = tmp_path / "league.rep"
+    replay.write_bytes(b"replay bytes")
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", raising=False)
+    if configured:
+        executable = tmp_path / "generalszh.exe"
+        executable.write_bytes(b"engine")
+        monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", str(executable))
+
+    assert main(["import", str(replay), "--json"]) == 0
+    _json_output(capsys)
+    settings = AnalyzerSettings.model_validate({})
+    query_engine = create_database_engine(settings.database_path)
+    try:
+        with create_session_factory(query_engine)() as session:
+            discovery = session.scalar(select(Job).where(Job.stage == "discover"))
+            assert discovery is not None
+            assert discovery.input_json["request_telemetry"] is configured
+    finally:
+        query_engine.dispose()
 
 
 def test_worker_command_uses_external_runtime_defaults_without_uvicorn_or_migration(

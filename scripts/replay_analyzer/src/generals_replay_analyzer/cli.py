@@ -228,8 +228,12 @@ def _runtime_configuration(
     )
 
 
-def _import_service() -> tuple[ImportService, Engine]:
+def _import_service() -> tuple[ImportService, Engine, bool]:
     """Initialize managed paths and the packaged database only at the CLI application boundary."""
+    from .analysis_pipeline.composition import (
+        ENGINE_TELEMETRY_ACQUIRER_VERSION,
+        configured_engine_telemetry_acquirer,
+    )
     from .db import create_database_engine, create_session_factory
     from .importing import ImportService
     from .storage import ContentAddressedStore
@@ -240,6 +244,8 @@ def _import_service() -> tuple[ImportService, Engine]:
     create_production_bootstrapper(readiness).prepare(settings)
     engine = create_database_engine(settings.database_path)
     session_factory = create_session_factory(engine)
+    # TheSuperHackers @fix Leex 23/08/2026 Keep public import telemetry intent aligned with its launch-capable worker. (#TBD)
+    telemetry_acquirer = configured_engine_telemetry_acquirer(settings)
     return (
         ImportService(
             session_factory,
@@ -247,24 +253,29 @@ def _import_service() -> tuple[ImportService, Engine]:
             ContentAddressedStore(settings.managed_replay_directory),
             ContentAddressedStore(settings.cache_directory / "artifacts"),
             parser=parse_replay,
+            telemetry_acquirer=telemetry_acquirer,
             clock=lambda: datetime.now(UTC),
             parser_version=__version__,
-            telemetry_acquirer_version="none",
+            telemetry_acquirer_version=(
+                ENGINE_TELEMETRY_ACQUIRER_VERSION if telemetry_acquirer is not None else "none"
+            ),
         ),
         engine,
+        telemetry_acquirer is not None,
     )
 
 
 def _run_import(arguments: argparse.Namespace) -> int:
     from .importing import ImportRequest
 
-    service, engine = _import_service()
+    service, engine, request_telemetry = _import_service()
     try:
         submission = service.submit(
             ImportRequest(
                 _absolute_cli_path(arguments.path),
                 recursive=arguments.recursive,
                 reference_only=True if arguments.reference_only else None,
+                request_telemetry=request_telemetry,
             )
         )
         if arguments.json_output:
@@ -282,7 +293,7 @@ def _run_import(arguments: argparse.Namespace) -> int:
 def _run_jobs(arguments: argparse.Namespace) -> int:
     from .importing.jobs import JobStateError
 
-    service, engine = _import_service()
+    service, engine, _request_telemetry = _import_service()
     try:
         result = service.retry(arguments.job_id)
     except JobStateError as error:
