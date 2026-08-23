@@ -80,4 +80,6 @@
     {% include "replays/_table.html" %}
   </div>
   <div id="import-modal-host" aria-live="polite"></div>
+  {# TheSuperHackers @fix Leex 23/08/2026 Load the vendored enhancement runtime only where replay-library dialogs use it. (#TBD) #}
+  <script src="/static/vendor/htmx.min.js" defer></script>
 {% endblock %}

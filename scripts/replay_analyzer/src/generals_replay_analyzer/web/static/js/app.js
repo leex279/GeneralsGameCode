@@ -10,6 +10,30 @@
   const shortcutLabel = "Ctrl+K";
   let lastInvoker = openButton;
 
+  // TheSuperHackers @fix Leex 23/08/2026 Keep keyboard focus inside every open local dialog in Chromium. (#TBD)
+  const trapDialogFocus = (dialog) => {
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      const controls = Array.from(dialog.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]):not([type='hidden']), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"))
+        .filter((control) => control instanceof HTMLElement && !control.hidden && control.getAttribute("aria-hidden") !== "true");
+      if (controls.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+  };
+
   if (!(openButton instanceof HTMLButtonElement) || !(closeButton instanceof HTMLButtonElement) || !(palette instanceof HTMLDialogElement)) {
     return;
   }
@@ -33,6 +57,7 @@
 
   openButton.addEventListener("click", openPalette);
   closeButton.addEventListener("click", () => palette.close());
+  trapDialogFocus(palette);
   document.addEventListener("keydown", (event) => {
     const target = event.target;
     const isEditing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
@@ -56,6 +81,7 @@
   let filterInvoker = filterButton;
 
   if (filterButton instanceof HTMLButtonElement && filterCloseButton instanceof HTMLButtonElement && filterDialog instanceof HTMLDialogElement) {
+    trapDialogFocus(filterDialog);
     filterButton.addEventListener("click", () => {
       filterInvoker = filterButton;
       filterDialog.showModal();
@@ -85,6 +111,7 @@
     if (!(dialog instanceof HTMLDialogElement) || !(close instanceof HTMLButtonElement)) {
       return;
     }
+    trapDialogFocus(dialog);
     close.addEventListener("click", () => dialog.close());
     dialog.addEventListener("close", () => {
       const host = document.querySelector("#import-modal-host");
