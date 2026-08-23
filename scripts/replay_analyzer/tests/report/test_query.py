@@ -64,10 +64,12 @@ from generals_replay_analyzer.report.model import ReportRequest, document_to_map
 from generals_replay_analyzer.report.query import (
     EvidenceQuery,
     FixedReportQuery,
+    LatestReportQuery,
     ReportGraphAmbiguousError,
     ReportGraphContractError,
     ReportGraphNotFoundError,
     ReportQueryService,
+    TimelineChartQuery,
 )
 from generals_replay_analyzer.report.read_model import (
     DerivedAssessmentEvidenceDTO,
@@ -76,6 +78,13 @@ from generals_replay_analyzer.report.read_model import (
     InferredAssessmentEvidenceDTO,
     ObservedCommandEvidenceDTO,
     ObservedTelemetryEvidenceDTO,
+    TimelineChartDTO,
+    TimelineEvidenceDTO,
+    TimelineFamilyOptionDTO,
+    TimelineIntervalDTO,
+    TimelineOptionDTO,
+    TimelinePointDTO,
+    TimelineSeriesDTO,
 )
 from generals_replay_analyzer.report.service import ReportService
 from generals_replay_analyzer.storage import ContentAddressedStore
@@ -536,6 +545,251 @@ def test_fixed_query_verifies_assets_and_aggregates_replay_and_players_without_w
     with pytest.raises(FrozenInstanceError):
         graph.selected_report_public_id = published_graph.replay_wide_report_id  # type: ignore[misc]
     assert str(report_database.settings.data_root) not in repr(graph)
+
+
+def test_latest_resolution_selects_exact_replay_and_player_reports_without_writes(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    before = _row_counts(report_database.session_factory)  # type: ignore[arg-type]
+
+    replay_wide = published_graph.service.resolve_latest(
+        LatestReportQuery(published_graph.replay_public_id)
+    )
+    player = published_graph.service.resolve_latest(
+        LatestReportQuery(
+            published_graph.replay_public_id,
+            published_graph.player_public_id,
+        )
+    )
+
+    assert replay_wide.report_public_id == published_graph.replay_wide_report_id
+    assert replay_wide.replay_player_public_id is None
+    assert player.report_public_id == published_graph.player_report_id
+    assert player.replay_player_public_id == published_graph.player_public_id
+    assert replay_wide.report_version == player.report_version == "replay-report-v1"
+    assert _row_counts(report_database.session_factory) == before  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="canonical lowercase UUID"):
+        LatestReportQuery(published_graph.replay_public_id.upper())
+    with pytest.raises(ReportGraphNotFoundError):
+        published_graph.service.resolve_latest(
+            LatestReportQuery(published_graph.replay_public_id, stable_uuid("unknown-report-player"))
+        )
+
+
+def test_timeline_query_is_frame_canonical_sorted_and_report_scoped(
+    published_graph: PublishedGraph,
+) -> None:
+    first = published_graph.service.timeline_chart(
+        TimelineChartQuery(
+            published_graph.replay_public_id,
+            published_graph.player_report_id,
+            (published_graph.player_public_id, published_graph.player_public_id),
+            ("strategy", "build_order", "strategy"),
+        )
+    )
+    second = published_graph.service.timeline_chart(
+        TimelineChartQuery(
+            published_graph.replay_public_id,
+            published_graph.player_report_id,
+            (published_graph.player_public_id,),
+            ("build_order", "strategy"),
+        )
+    )
+
+    assert first == second
+    assert first.schema_version == "replay-report-timeline-v1"
+    assert first.frames_per_second == 30
+    assert first.replay_public_id == published_graph.replay_public_id
+    assert first.report_public_id == published_graph.player_report_id
+    assert first.selected_player_public_ids == (published_graph.player_public_id,)
+    assert first.selected_families == ("build_order", "strategy")
+    assert tuple((series.family, series.player_public_id or "", series.series_id) for series in first.series) == tuple(
+        sorted((series.family, series.player_public_id or "", series.series_id) for series in first.series)
+    )
+    assert any(series.family == "build_order" for series in first.series)
+    assert all(point.frame >= 0 and not hasattr(point, "second") for series in first.series for point in series.points)
+    with pytest.raises(ReportGraphNotFoundError):
+        published_graph.service.timeline_chart(
+            TimelineChartQuery(
+                stable_uuid("cross-timeline-replay"),
+                published_graph.player_report_id,
+            )
+        )
+
+
+def test_latest_and_timeline_queries_reject_wrong_types_ambiguity_and_unknown_filters(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    with pytest.raises(TypeError, match="LatestReportQuery"):
+        published_graph.service.resolve_latest(  # type: ignore[arg-type]
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+    with pytest.raises(TypeError, match="TimelineChartQuery"):
+        published_graph.service.timeline_chart(  # type: ignore[arg-type]
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+    with pytest.raises(ReportGraphNotFoundError):
+        published_graph.service.resolve_latest(LatestReportQuery(stable_uuid("unknown-latest-replay")))
+    with pytest.raises(ReportGraphContractError, match="outside the report graph"):
+        published_graph.service.timeline_chart(
+            TimelineChartQuery(
+                published_graph.replay_public_id,
+                published_graph.player_report_id,
+                (stable_uuid("unknown-timeline-player"),),
+            )
+        )
+    with pytest.raises(TypeError, match="immutable tuple"):
+        TimelineChartQuery(  # type: ignore[arg-type]
+            published_graph.replay_public_id,
+            published_graph.player_report_id,
+            [],
+        )
+    with pytest.raises(TypeError, match="immutable tuple"):
+        TimelineChartQuery(  # type: ignore[arg-type]
+            published_graph.replay_public_id,
+            published_graph.player_report_id,
+            families=[],
+        )
+    with pytest.raises(ValueError, match="unsupported"):
+        TimelineChartQuery(
+            published_graph.replay_public_id,
+            published_graph.player_report_id,
+            families=("terrain",),  # type: ignore[arg-type]
+        )
+
+    factory = report_database.session_factory  # type: ignore[assignment]
+    with factory.begin() as session:
+        original = session.scalar(
+            select(Report).where(Report.public_id == published_graph.player_report_id)
+        )
+        assert original is not None
+        session.add(
+            Report(
+                public_id=stable_uuid("ambiguous-latest-player-report"),
+                replay_id=original.replay_id,
+                replay_player_id=original.replay_player_id,
+                analysis_run_id=original.analysis_run_id,
+                report_version=original.report_version,
+                input_digest="0" * 64,
+                cache_key="1" * 64,
+                report_json=original.report_json,
+                structured_asset_id=original.structured_asset_id,
+                rendered_asset_id=original.rendered_asset_id,
+                created_at=original.created_at,
+            )
+        )
+    with pytest.raises(ReportGraphAmbiguousError, match="latest"):
+        published_graph.service.resolve_latest(
+            LatestReportQuery(published_graph.replay_public_id, published_graph.player_public_id)
+        )
+
+
+def test_timeline_read_model_closes_scalar_geometry_and_availability_contracts(
+    published_graph: PublishedGraph,
+) -> None:
+    chart = published_graph.service.timeline_chart(
+        TimelineChartQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+    marker = next(item for item in chart.series if item.kind == "marker")
+    point = marker.points[0]
+    evidence = TimelineEvidenceDTO(published_graph.parser_evidence_id, "observed")
+    interval = TimelineIntervalDTO(point.frame, point.frame + 1, "phase", (evidence,))
+
+    assert published_graph.service._timeline_scalar(0) == 0
+    assert published_graph.service._timeline_scalar({"not": "scalar"}) is None  # type: ignore[arg-type]
+    assert published_graph.service._timeline_family("availability", "x") == "quality"
+    assert published_graph.service._timeline_family("features", "cash sample") == "economy"
+    assert published_graph.service._timeline_family("features", "unit production") == "production"
+    assert published_graph.service._timeline_family("features", "damage event") == "combat"
+    assert published_graph.service._timeline_family("features", "phase timing") == "strategy"
+    assert published_graph.service._timeline_family("features", "cursor motion") == "activity"
+
+    invalid_values = (
+        lambda: TimelinePointDTO(-1, 1, None, ()),
+        lambda: TimelinePointDTO(1, -0.0, None, ()),
+        lambda: TimelinePointDTO(1, True, None, ()),
+        lambda: TimelineIntervalDTO(2, 1, "bad", ()),
+        lambda: TimelineSeriesDTO(
+            marker.series_id,
+            "marker",
+            marker.family,
+            marker.player_public_id,
+            marker.label,
+            marker.unit,
+            "partial",
+            None,
+            marker.points,
+            (),
+        ),
+        lambda: replace(marker, availability="available", unavailable_reason="unexpected"),
+        lambda: replace(marker, points=(point, point)),
+        lambda: replace(marker, kind="band"),
+        lambda: replace(marker, intervals=(interval,)),
+        lambda: TimelineSeriesDTO(
+            "zero-width-band",
+            "band",
+            "strategy",
+            marker.player_public_id,
+            "Zero width",
+            None,
+            "available",
+            None,
+            (),
+            (TimelineIntervalDTO(point.frame, point.frame, "zero", ()),),
+        ),
+        lambda: replace(marker, availability="unavailable", unavailable_reason="no_evidence"),
+        lambda: TimelineOptionDTO(published_graph.player_public_id.upper(), "Player"),
+        lambda: TimelineFamilyOptionDTO("terrain", "Terrain"),  # type: ignore[arg-type]
+        lambda: TimelineEvidenceDTO(published_graph.parser_evidence_id, "manual"),  # type: ignore[arg-type]
+        lambda: replace(chart, schema_version="future"),
+        lambda: replace(chart, selected_player_public_ids=(stable_uuid("outside-chart-player"),)),
+        lambda: replace(chart, selected_families=("terrain",)),  # type: ignore[arg-type]
+        lambda: replace(chart, available_players=(chart.available_players[0], chart.available_players[0])),
+        lambda: replace(chart, series=(marker, marker)),
+        lambda: replace(chart, availability="partial", unavailable_reason=None),
+        lambda: replace(chart, availability="unavailable", unavailable_reason="no_evidence"),
+    )
+    for invalid in invalid_values:
+        with pytest.raises((TypeError, ValueError)):
+            invalid()
+    with pytest.raises(FrozenInstanceError):
+        chart.frames_per_second = 60  # type: ignore[misc]
+    assert evidence.public_id == published_graph.parser_evidence_id
+    assert isinstance(chart, TimelineChartDTO)
+
+
+def test_timeline_uses_only_fixed_report_evidence_and_preserves_exact_markers(
+    published_graph: PublishedGraph,
+) -> None:
+    chart = published_graph.service.timeline_chart(
+        TimelineChartQuery(published_graph.replay_public_id, published_graph.replay_wide_report_id)
+    )
+
+    assert chart.report_public_id == published_graph.replay_wide_report_id
+    assert chart.selected_player_public_ids == ()
+    assert chart.available_players == ()
+    assert all(item.player_public_id is None for item in chart.series)
+    assert all(item.kind != "step" for item in chart.series if len(item.points) == 1)
+    for series in chart.series:
+        for item in (*series.points, *series.intervals):
+            for cited in item.evidence:
+                detail = published_graph.service.get_evidence(
+                    EvidenceQuery(chart.report_public_id, cited.public_id, cited.tier)
+                )
+                assert detail.evidence_public_id == cited.public_id
+
+
+def test_published_sqlite_timestamp_is_normalized_to_aware_utc(
+    published_graph: PublishedGraph,
+) -> None:
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+
+    assert graph.selected.created_at_utc.tzinfo is UTC
+    assert graph.selected.created_at_utc.utcoffset() is not None
 
 
 def test_fixed_query_rejects_cross_replay_lookup_and_ambiguous_stage_graph(

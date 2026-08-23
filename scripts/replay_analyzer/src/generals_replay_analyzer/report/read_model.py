@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Literal, TypeAlias
 from uuid import UUID
 
@@ -17,6 +18,15 @@ from generals_replay_analyzer.report.model import (
 )
 
 EvidenceRole: TypeAlias = Literal["input", "supporting", "contradicting"]
+TimelineFamily: TypeAlias = Literal[
+    "build_order",
+    "economy",
+    "production",
+    "combat",
+    "activity",
+    "strategy",
+    "quality",
+]
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -85,6 +95,7 @@ class PublishedReportDTO:
     presentation_asset: PublishedReportAssetDTO
     html: str
     text: str
+    created_at_utc: datetime
 
     def __post_init__(self) -> None:
         if type(self.document) is not ReportDocument:
@@ -98,6 +109,53 @@ class PublishedReportDTO:
             raise TypeError("published report assets use their exact closed roles")
         _payload_text(self.html, "html")
         _payload_text(self.text, "text")
+        if type(self.created_at_utc) is not datetime or self.created_at_utc.utcoffset() != timedelta(0):
+            raise ValueError("published report timestamp must be an aware UTC datetime")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportPlayerIdentityDTO:
+    public_id: str
+    display_name: str
+    slot: int
+    faction: str | None
+    result: str | None
+
+    def __post_init__(self) -> None:
+        _uuid(self.public_id, "report player public_id")
+        _text(self.display_name, "report player display_name")
+        if type(self.slot) is not int or not 1 <= self.slot <= 16:
+            raise ValueError("report player slot must be a built-in integer from 1 through 16")
+        if self.faction is not None:
+            _text(self.faction, "report player faction")
+        if self.result is not None:
+            _text(self.result, "report player result")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportReplayIdentityDTO:
+    label: str
+    map_name: str | None
+    patch: str | None
+    duration_frames: int | None
+    players: tuple[ReportPlayerIdentityDTO, ...]
+
+    def __post_init__(self) -> None:
+        _text(self.label, "report replay label")
+        if self.map_name is not None:
+            _text(self.map_name, "report replay map_name")
+        if self.patch is not None:
+            _text(self.patch, "report replay patch")
+        if self.duration_frames is not None and (type(self.duration_frames) is not int or self.duration_frames < 0):
+            raise ValueError("report replay duration must be a nonnegative built-in frame count")
+        if type(self.players) is not tuple or not self.players or any(
+            type(item) is not ReportPlayerIdentityDTO for item in self.players
+        ):
+            raise TypeError("report replay players must be a nonempty immutable typed tuple")
+        ordered = tuple(sorted(self.players, key=lambda item: (item.slot, item.public_id)))
+        if len(ordered) != len({item.public_id for item in ordered}) or len(ordered) != len({item.slot for item in ordered}):
+            raise ValueError("report replay players must use unique public IDs and slots")
+        object.__setattr__(self, "players", ordered)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +164,7 @@ class PublishedReportGraphDTO:
     output_schema_version: Literal["report-output-v1"]
     replay_public_id: str
     selected_report_public_id: str
+    identity: ReportReplayIdentityDTO
     replay_wide: PublishedReportDTO
     player_reports: tuple[PublishedReportDTO, ...]
 
@@ -116,6 +175,8 @@ class PublishedReportGraphDTO:
             raise ValueError("unsupported render-report output version")
         _uuid(self.replay_public_id, "replay_public_id")
         _uuid(self.selected_report_public_id, "selected_report_public_id")
+        if type(self.identity) is not ReportReplayIdentityDTO:
+            raise TypeError("identity must be a ReportReplayIdentityDTO")
         if type(self.replay_wide) is not PublishedReportDTO:
             raise TypeError("replay_wide must be a PublishedReportDTO")
         if self.replay_wide.document.replay_player_public_id is not None:
@@ -141,6 +202,240 @@ class PublishedReportGraphDTO:
             if item.document.report_public_id == self.selected_report_public_id:
                 return item
         raise RuntimeError("validated selected report disappeared")  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedReportDTO:
+    replay_public_id: str
+    replay_player_public_id: str | None
+    report_public_id: str
+    report_version: Literal["replay-report-v1"]
+
+    def __post_init__(self) -> None:
+        _uuid(self.replay_public_id, "replay_public_id")
+        if self.replay_player_public_id is not None:
+            _uuid(self.replay_player_public_id, "replay_player_public_id")
+        _uuid(self.report_public_id, "report_public_id")
+        if self.report_version != "replay-report-v1":
+            raise ValueError("unsupported resolved report version")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineEvidenceDTO:
+    public_id: str
+    tier: ReportEvidenceTier
+
+    def __post_init__(self) -> None:
+        _uuid(self.public_id, "timeline evidence public_id")
+        if self.tier not in ("observed", "derived", "inferred"):
+            raise ValueError("invalid timeline evidence tier")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineOptionDTO:
+    public_id: str
+    label: str
+
+    def __post_init__(self) -> None:
+        _uuid(self.public_id, "timeline option public_id")
+        _text(self.label, "timeline option label")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineFamilyOptionDTO:
+    family: TimelineFamily
+    label: str
+
+    def __post_init__(self) -> None:
+        if self.family not in ("build_order", "economy", "production", "combat", "activity", "strategy", "quality"):
+            raise ValueError("invalid timeline family option")
+        _text(self.label, "timeline family option label")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelinePointDTO:
+    frame: int
+    value: int | float | str | None
+    label: str | None
+    evidence: tuple[TimelineEvidenceDTO, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.frame) is not int or self.frame < 0:
+            raise ValueError("timeline point frame must be a nonnegative built-in integer")
+        if self.value is not None:
+            if type(self.value) is float and (not math.isfinite(self.value) or self.value == 0.0 and math.copysign(1.0, self.value) < 0):
+                raise ValueError("timeline point float must be finite and not negative zero")
+            if type(self.value) not in (int, float, str):
+                raise TypeError("timeline point value must use the closed scalar union")
+            if type(self.value) is str:
+                _text(self.value, "timeline point value")
+        if self.label is not None:
+            _text(self.label, "timeline point label")
+        if type(self.evidence) is not tuple or any(type(item) is not TimelineEvidenceDTO for item in self.evidence):
+            raise TypeError("timeline point evidence must be an immutable typed tuple")
+        ordered = tuple(sorted(set(self.evidence), key=lambda item: (item.tier, item.public_id)))
+        object.__setattr__(self, "evidence", ordered)
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineIntervalDTO:
+    frame_start: int
+    frame_end: int
+    label: str
+    evidence: tuple[TimelineEvidenceDTO, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.frame_start) is not int
+            or type(self.frame_end) is not int
+            or self.frame_start < 0
+            or self.frame_end < self.frame_start
+        ):
+            raise ValueError("timeline interval must use an inclusive nonnegative frame window")
+        _text(self.label, "timeline interval label")
+        if type(self.evidence) is not tuple or any(type(item) is not TimelineEvidenceDTO for item in self.evidence):
+            raise TypeError("timeline interval evidence must be an immutable typed tuple")
+        ordered = tuple(sorted(set(self.evidence), key=lambda item: (item.tier, item.public_id)))
+        object.__setattr__(self, "evidence", ordered)
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineSeriesDTO:
+    series_id: str
+    kind: Literal["marker", "line", "step", "band"]
+    family: TimelineFamily
+    player_public_id: str | None
+    label: str
+    unit: str | None
+    availability: ReportAvailability
+    unavailable_reason: str | None
+    points: tuple[TimelinePointDTO, ...]
+    intervals: tuple[TimelineIntervalDTO, ...]
+
+    def __post_init__(self) -> None:
+        _text(self.series_id, "timeline series_id")
+        if self.kind not in ("marker", "line", "step", "band"):
+            raise ValueError("invalid timeline series kind")
+        if self.family not in ("build_order", "economy", "production", "combat", "activity", "strategy", "quality"):
+            raise ValueError("invalid timeline family")
+        if self.player_public_id is not None:
+            _uuid(self.player_public_id, "timeline player_public_id")
+        _text(self.label, "timeline series label")
+        if self.unit is not None:
+            _text(self.unit, "timeline series unit")
+        if self.availability not in ("available", "partial", "unavailable"):
+            raise ValueError("invalid timeline availability")
+        if self.unavailable_reason is not None:
+            _text(self.unavailable_reason, "timeline unavailable reason")
+        if self.availability == "available" and self.unavailable_reason is not None:
+            raise ValueError("available timeline series cannot have an unavailable reason")
+        if self.availability != "available" and self.unavailable_reason is None:
+            raise ValueError("partial or unavailable timeline series requires a stable reason")
+        if type(self.points) is not tuple or any(type(item) is not TimelinePointDTO for item in self.points):
+            raise TypeError("timeline points must be an immutable typed tuple")
+        if type(self.intervals) is not tuple or any(type(item) is not TimelineIntervalDTO for item in self.intervals):
+            raise TypeError("timeline intervals must be an immutable typed tuple")
+        points = tuple(sorted(self.points, key=lambda item: (item.frame, item.label or "", item.evidence)))
+        intervals = tuple(
+            sorted(self.intervals, key=lambda item: (item.frame_start, item.frame_end, item.label, item.evidence))
+        )
+        if len(points) != len(set(points)) or len(intervals) != len(set(intervals)):
+            raise ValueError("duplicate logical timeline point or interval")
+        if self.availability == "unavailable":
+            if points or intervals:
+                raise ValueError("unavailable timeline series cannot expose geometry")
+        elif self.kind == "band":
+            if points or not intervals or any(item.frame_end <= item.frame_start for item in intervals):
+                raise ValueError("band timeline series require nonzero intervals only")
+        elif self.kind == "marker":
+            if not points or intervals:
+                raise ValueError("marker timeline series require points only")
+        elif not points or intervals or any(item.value is None for item in points):
+            raise ValueError("line and step timeline series require valued points only")
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "intervals", intervals)
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineChartDTO:
+    schema_version: Literal["replay-report-timeline-v1"]
+    replay_public_id: str
+    report_public_id: str
+    report_version: Literal["replay-report-v1"]
+    frames_per_second: Literal[30]
+    axis_version: Literal["logic-frame-axis-v1"]
+    seconds_display_policy_version: Literal["frame-div-30-v1"]
+    selected_player_public_ids: tuple[str, ...]
+    selected_families: tuple[TimelineFamily, ...]
+    available_players: tuple[TimelineOptionDTO, ...]
+    available_families: tuple[TimelineFamilyOptionDTO, ...]
+    series: tuple[TimelineSeriesDTO, ...]
+    availability: ReportAvailability
+    unavailable_reason: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != "replay-report-timeline-v1"
+            or self.report_version != "replay-report-v1"
+            or self.frames_per_second != 30
+            or self.axis_version != "logic-frame-axis-v1"
+            or self.seconds_display_policy_version != "frame-div-30-v1"
+        ):
+            raise ValueError("unsupported timeline schema or timebase")
+        _uuid(self.replay_public_id, "timeline replay_public_id")
+        _uuid(self.report_public_id, "timeline report_public_id")
+        players = tuple(sorted({_uuid(item, "selected timeline player") for item in self.selected_player_public_ids}))
+        families = tuple(sorted(set(self.selected_families)))
+        if any(
+            family not in ("build_order", "economy", "production", "combat", "activity", "strategy", "quality")
+            for family in families
+        ):
+            raise ValueError("timeline contains an unknown selected family")
+        if type(self.available_players) is not tuple or any(
+            type(item) is not TimelineOptionDTO for item in self.available_players
+        ):
+            raise TypeError("available timeline players must be an immutable typed tuple")
+        available = tuple(sorted(self.available_players, key=lambda item: item.public_id))
+        if len(available) != len({item.public_id for item in available}) or not set(players).issubset(
+            {item.public_id for item in available}
+        ):
+            raise ValueError("selected timeline players must be an available unique subset")
+        if type(self.available_families) is not tuple or any(
+            type(item) is not TimelineFamilyOptionDTO for item in self.available_families
+        ):
+            raise TypeError("available timeline families must be an immutable typed tuple")
+        available_families = tuple(sorted(self.available_families, key=lambda item: item.family))
+        if len(available_families) != len({item.family for item in available_families}) or not set(families).issubset(
+            {item.family for item in available_families}
+        ):
+            raise ValueError("selected timeline families must be an available unique subset")
+        if type(self.series) is not tuple or any(type(item) is not TimelineSeriesDTO for item in self.series):
+            raise TypeError("timeline series must be an immutable typed tuple")
+        series = tuple(sorted(self.series, key=lambda item: (item.family, item.player_public_id or "", item.series_id)))
+        if len(series) != len({item.series_id for item in series}):
+            raise ValueError("timeline series IDs must be unique")
+        if self.availability not in ("available", "partial", "unavailable"):
+            raise ValueError("invalid timeline chart availability")
+        if self.unavailable_reason is not None:
+            _text(self.unavailable_reason, "timeline unavailable reason")
+        if self.availability == "available" and self.unavailable_reason is not None:
+            raise ValueError("available timeline chart cannot have an unavailable reason")
+        if self.availability != "available" and self.unavailable_reason is None:
+            raise ValueError("partial or unavailable timeline chart requires a stable reason")
+        expected_availability: ReportAvailability
+        if not series or all(item.availability == "unavailable" for item in series):
+            expected_availability = "unavailable"
+        elif all(item.availability == "available" for item in series):
+            expected_availability = "available"
+        else:
+            expected_availability = "partial"
+        if self.availability != expected_availability:
+            raise ValueError("timeline chart availability must match its series")
+        object.__setattr__(self, "selected_player_public_ids", players)
+        object.__setattr__(self, "selected_families", families)
+        object.__setattr__(self, "available_players", available)
+        object.__setattr__(self, "available_families", available_families)
+        object.__setattr__(self, "series", series)
 
 
 @dataclass(frozen=True, slots=True)

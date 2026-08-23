@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Literal, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -90,6 +91,7 @@ from generals_replay_analyzer.report.model import (
     ReportValue,
     document_to_mapping,
     freeze_report_value,
+    thaw_report_value,
 )
 from generals_replay_analyzer.report.read_model import (
     DerivedAssessmentEvidenceDTO,
@@ -105,6 +107,17 @@ from generals_replay_analyzer.report.read_model import (
     PublishedReportAssetDTO,
     PublishedReportDTO,
     PublishedReportGraphDTO,
+    ReportPlayerIdentityDTO,
+    ReportReplayIdentityDTO,
+    ResolvedReportDTO,
+    TimelineChartDTO,
+    TimelineEvidenceDTO,
+    TimelineFamily,
+    TimelineFamilyOptionDTO,
+    TimelineIntervalDTO,
+    TimelineOptionDTO,
+    TimelinePointDTO,
+    TimelineSeriesDTO,
 )
 from generals_replay_analyzer.report.render_html import render_html
 from generals_replay_analyzer.report.render_json import render_json
@@ -161,6 +174,39 @@ class FixedReportQuery:
     def __post_init__(self) -> None:
         _uuid(self.replay_public_id, "replay_public_id")
         _uuid(self.report_public_id, "report_public_id")
+
+
+@dataclass(frozen=True, slots=True)
+class LatestReportQuery:
+    replay_public_id: str
+    replay_player_public_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _uuid(self.replay_public_id, "replay_public_id")
+        if self.replay_player_public_id is not None:
+            _uuid(self.replay_player_public_id, "replay_player_public_id")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineChartQuery:
+    replay_public_id: str
+    report_public_id: str
+    replay_player_public_ids: tuple[str, ...] = ()
+    families: tuple[TimelineFamily, ...] = ()
+
+    def __post_init__(self) -> None:
+        _uuid(self.replay_public_id, "replay_public_id")
+        _uuid(self.report_public_id, "report_public_id")
+        if type(self.replay_player_public_ids) is not tuple:
+            raise TypeError("timeline replay players must be an immutable tuple")
+        players = tuple(sorted({_uuid(value, "replay_player_public_id") for value in self.replay_player_public_ids}))
+        if type(self.families) is not tuple:
+            raise TypeError("timeline families must be an immutable tuple")
+        allowed = frozenset({"build_order", "economy", "production", "combat", "activity", "strategy", "quality"})
+        if any(type(value) is not str or value not in allowed for value in self.families):
+            raise ValueError("timeline family is unsupported")
+        object.__setattr__(self, "replay_player_public_ids", players)
+        object.__setattr__(self, "families", tuple(sorted(set(self.families))))
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +325,193 @@ class ReportQueryService:
         graph, _selection = self._read_graph(query)
         return graph
 
+    # TheSuperHackers @feature Leex 23/08/2026 Resolve one latest immutable report subject without assembling or writing. (#TBD)
+    def resolve_latest(self, query: LatestReportQuery) -> ResolvedReportDTO:
+        if type(query) is not LatestReportQuery:
+            raise TypeError("query must be a LatestReportQuery")
+        with self._session_factory() as session:
+            replay = session.scalar(select(Replay).where(Replay.public_id == query.replay_public_id))
+            if replay is None:
+                raise ReportGraphNotFoundError("requested replay public ID was not found")
+            replay_player_id: int | None = None
+            if query.replay_player_public_id is not None:
+                players = tuple(
+                    session.scalars(
+                        select(ReplayPlayer).where(
+                            ReplayPlayer.replay_id == replay.id,
+                            ReplayPlayer.public_id == query.replay_player_public_id,
+                        )
+                    )
+                )
+                if len(players) != 1:
+                    raise ReportGraphNotFoundError("requested replay player has no exact report subject")
+                replay_player_id = players[0].id
+            rows = tuple(
+                session.scalars(
+                    select(Report).where(
+                        Report.replay_id == replay.id,
+                        Report.report_version == REPORT_VERSION,
+                        Report.replay_player_id.is_(None)
+                        if replay_player_id is None
+                        else Report.replay_player_id == replay_player_id,
+                    )
+                )
+            )
+            if not rows:
+                raise ReportGraphNotFoundError("requested report subject has not been generated")
+            latest_created_at = max(row.created_at for row in rows)
+            latest = tuple(row for row in rows if row.created_at == latest_created_at)
+            if len(latest) != 1:
+                raise ReportGraphAmbiguousError("latest report subject is ambiguous")
+            report_public_id = latest[0].public_id
+        graph = self.get_report(FixedReportQuery(query.replay_public_id, report_public_id))
+        selected = graph.selected.document
+        if selected.replay_player_public_id != query.replay_player_public_id:
+            raise ReportGraphContractError("resolved report subject does not match its query")
+        return ResolvedReportDTO(
+            selected.replay_public_id,
+            selected.replay_player_public_id,
+            selected.report_public_id,
+            "replay-report-v1",
+        )
+
+    # TheSuperHackers @feature Leex 23/08/2026 Project report claims onto a fixed frame-canonical timeline without interpolation. (#TBD)
+    def timeline_chart(self, query: TimelineChartQuery) -> TimelineChartDTO:
+        if type(query) is not TimelineChartQuery:
+            raise TypeError("query must be a TimelineChartQuery")
+        graph = self.get_report(FixedReportQuery(query.replay_public_id, query.report_public_id))
+        selected_document = graph.selected.document
+        available_players = (
+            ()
+            if selected_document.replay_player_public_id is None
+            else (TimelineOptionDTO(selected_document.replay_player_public_id, "Selected player"),)
+        )
+        available_player_ids = {item.public_id for item in available_players}
+        if not set(query.replay_player_public_ids).issubset(available_player_ids):
+            raise ReportGraphContractError("timeline player selection is outside the report graph")
+        selected_player_ids = query.replay_player_public_ids or tuple(item.public_id for item in available_players)
+        documents = (selected_document,)
+        available_family_values: tuple[TimelineFamily, ...] = (
+            "build_order",
+            "economy",
+            "production",
+            "combat",
+            "activity",
+            "strategy",
+            "quality",
+        )
+        selected_families = query.families or available_family_values
+        family_labels = {
+            "build_order": "Build order",
+            "economy": "Economy",
+            "production": "Production",
+            "combat": "Combat",
+            "activity": "Activity",
+            "strategy": "Strategy",
+            "quality": "Quality",
+        }
+        series: list[TimelineSeriesDTO] = []
+        for document in documents:
+            for value in (
+                *document.evidence_availability,
+                *document.observed,
+                *document.derived,
+                *document.inferred,
+            ):
+                family = self._timeline_family(value.section, value.label)
+                if value.frame_window is None or family not in selected_families:
+                    continue
+                evidence = tuple(TimelineEvidenceDTO(item.public_id, item.tier) for item in value.evidence)
+                start, end = value.frame_window
+                points: tuple[TimelinePointDTO, ...] = ()
+                intervals: tuple[TimelineIntervalDTO, ...] = ()
+                kind: Literal["marker", "band"]
+                if value.availability == "unavailable":
+                    kind = "marker"
+                elif start == end:
+                    scalar = self._timeline_scalar(value.raw_value)
+                    kind = "marker"
+                    points = (
+                        TimelinePointDTO(
+                            start,
+                            scalar,
+                            value.label,
+                            evidence,
+                        ),
+                    )
+                else:
+                    kind = "band"
+                    intervals = (TimelineIntervalDTO(start, end, value.label, evidence),)
+                series.append(
+                    TimelineSeriesDTO(
+                        value.claim_id,
+                        kind,
+                        family,
+                        document.replay_player_public_id,
+                        value.label,
+                        value.unit,
+                        value.availability,
+                        value.unavailable_reason,
+                        points,
+                        intervals,
+                    )
+                )
+        ordered = tuple(sorted(series, key=lambda item: (item.family, item.player_public_id or "", item.series_id)))
+        if not ordered:
+            availability: ReportAvailability = "unavailable"
+            reason = "timeline_frame_evidence_unavailable"
+        elif all(item.availability == "unavailable" for item in ordered):
+            availability = "unavailable"
+            reason = "timeline_frame_evidence_unavailable"
+        elif any(item.availability != "available" for item in ordered):
+            availability = "partial"
+            reason = "timeline_evidence_partial"
+        else:
+            availability = "available"
+            reason = None
+        return TimelineChartDTO(
+            "replay-report-timeline-v1",
+            query.replay_public_id,
+            query.report_public_id,
+            "replay-report-v1",
+            30,
+            "logic-frame-axis-v1",
+            "frame-div-30-v1",
+            selected_player_ids,
+            selected_families,
+            available_players,
+            tuple(TimelineFamilyOptionDTO(item, family_labels[item]) for item in available_family_values),
+            ordered,
+            availability,
+            reason,
+        )
+
+    @staticmethod
+    def _timeline_scalar(value: CanonicalValue | None) -> int | float | str | None:
+        thawed = thaw_report_value(value)
+        if type(thawed) in (int, float, str):
+            return cast(int | float | str, thawed)
+        return None
+
+    @staticmethod
+    def _timeline_family(section: str, label: str) -> TimelineFamily:
+        if section == "strategy" or section == "longitudinal":
+            return "strategy"
+        if section == "availability":
+            return "quality"
+        normalized = label.casefold()
+        if any(token in normalized for token in ("construct", "build", "dozer", "opening")):
+            return "build_order"
+        if any(token in normalized for token in ("cash", "economy", "income", "resource", "supply")):
+            return "economy"
+        if any(token in normalized for token in ("production", "upgrade", "unit_composition")):
+            return "production"
+        if any(token in normalized for token in ("combat", "damage", "attack", "kill", "engagement")):
+            return "combat"
+        if any(token in normalized for token in ("strategy", "phase", "transition", "timing")):
+            return "strategy"
+        return "activity"
+
     # TheSuperHackers @feature Leex 23/08/2026 Resolve bounded evidence only inside one validated immutable report graph. (#TBD)
     def get_evidence(self, query: EvidenceQuery) -> EvidenceDetailDTO:
         if type(query) is not EvidenceQuery:
@@ -393,10 +626,47 @@ class ReportQueryService:
                 "report-output-v1",
                 replay.public_id,
                 requested.public_id,
+                self._replay_identity(session, replay),
                 replay_wide[0],
                 players,
             )
             return graph, validated.subjects
+
+    @staticmethod
+    def _replay_identity(session: Session, replay: Replay) -> ReportReplayIdentityDTO:
+        rows = tuple(
+            session.scalars(
+                select(ReplayPlayer)
+                .where(ReplayPlayer.replay_id == replay.id)
+                .order_by(ReplayPlayer.slot_index, ReplayPlayer.public_id)
+            )
+        )
+        players: list[ReportPlayerIdentityDTO] = []
+        for row in rows:
+            observed = row.observed_json if isinstance(row.observed_json, Mapping) else {}
+            faction = observed.get("faction")
+            result = observed.get("result")
+            players.append(
+                ReportPlayerIdentityDTO(
+                    row.public_id,
+                    row.original_name or f"Player {row.slot_index + 1}",
+                    row.slot_index + 1,
+                    faction if type(faction) is str else None,
+                    result if type(result) is str else None,
+                )
+            )
+        if not players:
+            raise ReportGraphContractError("report replay identity has no player subjects")
+        names = tuple(item.display_name for item in players)
+        joined = " vs ".join(names)
+        label = joined if len(names) <= 2 and len(joined) <= 256 else f"{len(names)}-player replay"
+        return ReportReplayIdentityDTO(
+            label,
+            replay.map_name,
+            replay.version_string,
+            replay.frame_count,
+            tuple(players),
+        )
 
     @staticmethod
     def _mentions_assets(value: object, structured_id: str, presentation_id: str) -> bool:
@@ -812,7 +1082,8 @@ class ReportQueryService:
             "report_presentation_bundle",
             bundle_bytes,
         )
-        return PublishedReportDTO(document, structured, presentation, html, text)
+        created_at = row.created_at.replace(tzinfo=UTC) if row.created_at.tzinfo is None else row.created_at.astimezone(UTC)
+        return PublishedReportDTO(document, structured, presentation, html, text, created_at)
 
     def _asset(
         self,
