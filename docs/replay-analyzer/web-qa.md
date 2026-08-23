@@ -2,7 +2,7 @@
 
 Date: 23 August 2026
 
-Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture now builds successfully and has been consumed by fresh installed wheels. The responsive, populated security, Settings mutation, external-worker, Axe, semantic-alternative, offline, no-script, keyboard, and screenshot-capture matrices are green. A required comparable result cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current fixed result remains truthfully unavailable; it is not weakened or presented as comparable. Final static/build gates and manual screenshot review remain incomplete.
+Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture and installed-wheel browser matrix are green. The retained frozen-wheel run completed 138 browser tests and produced a digest-bound manifest with 20 screenshots plus accessibility evidence. Manual review found two real visual defects: the import dialog lacks usable spacing and the player-pattern table overlaps columns. A required comparable result also cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current result remains truthfully unavailable; it is not weakened or presented as comparable. The later parser-only provenance repair at `592ec74a8` requires one new final wheel and browser run after the visual corrections.
 
 ## Accepted inputs
 
@@ -21,7 +21,8 @@ Status: **PARTIAL - release acceptance remains blocked.** The production-service
 
 | Item | Observed value |
 |---|---|
-| Latest populated-probe application wheel SHA-256 | `bef8a0bc5beb37d994c5666de892cfa7e385206dc5a4260c95ec58ab19df10f8` |
+| Retained populated-probe application wheel SHA-256 | `fa5431c92cf808c60e457c208d40ce01691cfb9a1501515bf0a44c5e2bed99b3` |
+| Retained run-manifest SHA-256 | `9a4d6282c5d0387f7186236c147d6c390fe69a1525cbe504d7d34b56d6fcc242` |
 | Application module | isolated wheel environment |
 | Python | 3.12.9 |
 | pytest | 9.1.1 |
@@ -60,7 +61,10 @@ The fixture manifest and database remain external. No ORM seed, forged job row, 
 | Populated installed-wheel security | `uv run --project . pytest tests/browser/test_security.py -q --browser chromium` | 52 passed in 32.93s; fixed JSON timeline, map JSON, and real map PNG hardening included |
 | Populated Axe and semantic matrix | `uv run --project . pytest -q tests/browser/test_accessibility.py` | 10 passed in 48.68s; report, evidence, map, both player profiles, comparison unavailable state, job, and identity audit green |
 | Populated offline/no-script/reflow matrix | `uv run --project . pytest -q tests/browser/test_offline.py` | 37 passed in 65.64s; desktop/tablet/mobile, installed-wheel isolation, no-script, packaged assets, and comparison overflow green |
-| Web and wheel | `uv run --project . pytest tests/web tests/test_wheel.py -q` | 577 passed, 1 skipped in 49.21s |
+| Final retained installed-wheel browser matrix | `uv run --project . pytest tests/browser -q --browser chromium` | 138 passed in 167.86s |
+| Web and wheel | `uv run --project . pytest tests/web tests/test_wheel.py -q` | 578 passed, 1 skipped in 46.62s |
+| SQLite/report/pipeline/telemetry/parity/CLI/wheel audit after `592ec74a8` | focused aggregate gate | 931 passed, 1 skipped in 438.05s |
+| Feature/strategy/longitudinal/spatial audit after `592ec74a8` | focused aggregate gate | 464 passed in 105.12s |
 | Ruff | `uv run --project . ruff check src tests` | all checks passed |
 | Strict mypy | `uv run --project . mypy --strict src` | success, 158 source files |
 | Package build | `uv build` | sdist and wheel built successfully |
@@ -104,24 +108,28 @@ Artifacts are external and are not in Git or the application wheel.
 
 | Logical name | Viewport | SHA-256 | Review |
 |---|---:|---|---|
-| `dashboard--desktop.png` | 1440x900 | `e3d7c0e8116429e7ef4820b43b5bd6b64237213677aae2c2d7829a580f0b85cb` | captured; full manual matrix pending |
-| `library--desktop.png` | 1440x900 | `b29057b46107c8211a50a284ef6a369f1f7f588436059c4611835a6201f2edf9` | reviewed at actual size; readable, no overflow |
+| `dashboard--desktop.png` | 1440x900 | `bcc4c1ec021b471d7de6f6b4821117430f964aade0fa0cef03916fe0d798e9a5` | captured; no automated defect |
+| `library--desktop.png` | 1440x900 | `dfcb5029be3c2d435d2ebd7a05beae362f25e057f35314278fa365c85ea069ed` | reviewed at actual size; readable, no overflow |
 | `jobs--desktop.png` | 1440x900 | `baabc5e19a986ff286028703cb1aee7e629eb9aa76b7c9807b34bea062f3adbd` | captured; populated state pending |
 | `maps-index--desktop.png` | 1440x900 | `5c71cbbe9f82650399b7d6a395582a15343af1251e2a6381f9db72e686aafa47` | captured; map detail pending |
 | `players--desktop.png` | 1440x900 | `a9fe3a6cd7dbcda67b963197c86f700a3b306bcf6d4f47e49d2179006cb20ebc` | captured; profile/identity pending |
 | `compare--desktop.png` | 1440x900 | `ac757d4d48bb38587e6ab9b2aa6cf4f0652f2700c7481a734b9bc60e8f30e1f9` | captured; fixed result pending |
 | `settings--desktop.png` | 1440x900 | `3a01a40cbba7b195d970a8a0b06d2e0156da3147583d143db91edfca390d3251` | captured; mutation/diagnostic pending |
-| `library--tablet.png` | 1024x768 | `4a328260ea794e0fdef63faf7fa83da77c2f94909996cc1ae128958e4aaf6eb9` | captured; automated reflow pass |
-| `library--mobile.png` | 390x844 | `d37d8c4b32d7b70eb9989e7ce4b0252c304b44894194864884198258fa399762` | reviewed at actual size; readable, no overflow |
-| `compare--mobile.png` | 390x844 | `cf51e1a9692ebb8db7ee9e4eb54aa4fdac67dd049416aab109865b6e342dfd49` | captured; automated reflow pass |
+| `library--tablet.png` | 1024x768 | `95e467ec0da57ed5548d425220c4936e056c40f1906d968316a84e21574a4913` | captured; automated reflow pass |
+| `library--mobile.png` | 390x844 | `d8f697a076c0add9d1e6004502b6673e2ff1d874ca42124248cd68eb68b61269` | reviewed at actual size; readable, no overflow |
+| `compare--mobile.png` | 390x844 | `0094503bb88f3315e43d7bd2a9fd7d8123a6bbbd4326646277ff687c3198fcaa` | captured; automated reflow pass |
+| `import-dialog--desktop.png` | 1440x900 | `262b26bfd0efdd47082afc661136cd7fd73aeec19fda8bb2435d4c22e919a891` | manual fail: controls and labels are cramped |
+| `map-detail--desktop.png` | 1440x900 | `c7efa5ce9dddf412837a6afdd2ce5696966fc3742c505ea00e22e8925d02bba0` | manual pass: useful spatial evidence is visible |
+| `player-profile--desktop.png` | 1440x900 | `12d954962a2b67486a371be2ec98118f7370251b4b51de8561b0f38499e40aee` | manual fail: player-pattern columns overlap |
 
-Required populated screenshot cases ran successfully for import dialog, fixed report, evidence disclosure, map detail, player profile, identity confirmation, report tablet/mobile, and map-detail tablet/mobile. Their final retained hashes and actual-size manual review are not yet claimed.
+Required populated screenshot cases ran successfully for import dialog, fixed report, evidence disclosure, map detail, player profile, identity confirmation, report tablet/mobile, and map-detail tablet/mobile. The retained manifest is external at `C:\tmp\replay-analyzer-final-20260823-1610\task9-fa5431c92cf8`. Full-page report screenshots are too tall to establish actual-size readability by themselves; targeted viewport captures remain required in the final rerun.
 
 ## Release blockers
 
 The production-service populated fixture and worker-supported pending discover now exist. Release acceptance is still blocked by these non-waived items:
 
 - No truthful comparable result can be derived from the only available replay: `leex279` and `FOX27` use different factions, while all accepted match and longitudinal comparison definitions are same-faction-only. The current fixed result correctly reports `subject_value_unavailable`; the underlying cross-faction cohort cannot supply an aligned value. A fabricated replay, self-comparison, or relaxed comparison semantics is forbidden.
-- Full final static/build gates, retained screenshot hashes, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
+- The import dialog and player-pattern table fail manual visual review and need the approved spacing/scroll-container corrections.
+- The final wheel, 138-test browser matrix, targeted report captures, and manual 100%/200% review must be rerun after those corrections and the later provenance repair.
 
 These items are pending, not skipped or waived. `web-qa.md` remains a factual partial record rather than release closure.
