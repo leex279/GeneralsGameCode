@@ -1159,6 +1159,7 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayMovementSampler.h
         Include/Common/ReplayOutcome.h
         Include/Common/ReplayParseDump.h
+        Include/Common/ReplayScoreKeeper.h
         Include/Common/ReplayTelemetry.h
 		Source/Common/ReplayCombat.cpp
         Source/Common/ReplayGameDataExport.cpp
@@ -1168,6 +1169,7 @@ if(NOT IS_VS6_BUILD)
         Source/Common/ReplayMovementSampler.cpp
         Source/Common/ReplayOutcome.cpp
         Source/Common/ReplayParseDump.cpp
+        Source/Common/ReplayScoreKeeper.cpp
         Source/Common/ReplayTelemetry.cpp
     )
 endif()

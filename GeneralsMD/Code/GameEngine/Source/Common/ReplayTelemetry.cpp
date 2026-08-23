@@ -12,6 +12,7 @@
 #include "Common/ReplayOutcome.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
+#include "Common/ReplayScoreKeeper.h"
 #include "Common/version.h"
 #include "GameNetwork/GameInfo.h"
 
@@ -511,6 +512,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	ReplayMapExport::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local combat and terminal observations before a new replay. (#TBD)
 	ReplayCombat::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Start each trace with an empty terminal ScoreKeeper domain. (#0)
+	ReplayScoreKeeper::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local economy and queue identities before a new replay. (#TBD)
 	ReplayEconomy::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local entity snapshots whenever telemetry is reconfigured. (#TBD)
@@ -578,6 +581,8 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 		return;
 	}
 	ReplayCombat::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Reset terminal ScoreKeeper emission at the exact replay transaction boundary. (#0)
+	ReplayScoreKeeper::reset();
 	// TheSuperHackers @feature Leex 21/08/2026 Begin every replay with an empty trace-local authoritative map reference. (#TBD)
 	ReplayMapExport::reset();
 
@@ -679,6 +684,8 @@ void ReplayTelemetry::initialize()
 	}
 	s_initialized = TRUE;
 	ReplayGameDataExport::emitPlayersInitialized();
+	// TheSuperHackers @feature Leex 23/08/2026 Freeze the resolved occupied player domain published above. (#0)
+	ReplayScoreKeeper::initialize();
 	// TheSuperHackers @feature Leex 20/08/2026 Freeze the authoritative player domain after publishing the matching snapshot. (#TBD)
 	ReplayCombat::initialize();
 	// TheSuperHackers @feature Leex 20/08/2026 Preserve manifest-first ordering while flushing pre-initialization entity snapshots. (#TBD)
@@ -750,6 +757,8 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationR
 		return;
 	}
 
+	// TheSuperHackers @feature Leex 23/08/2026 Emit raw terminal score totals immediately before the authoritative outcome. (#0)
+	ReplayScoreKeeper::writeTerminalSnapshot(static_cast<Int>(finalFrame));
 	// TheSuperHackers @feature Leex 20/08/2026 Emit exactly one authoritative outcome immediately before trace completion. (#TBD)
 	ReplayCombat::emitMatchOutcome(finalFrame, reason);
 	flushOutput();
