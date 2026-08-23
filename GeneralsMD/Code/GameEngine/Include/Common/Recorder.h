@@ -80,7 +80,7 @@ protected:
 		CRCInfo();
 		CRCInfo(UnsignedInt localPlayer, Bool isMultiplayer);
 		void addCRC(UnsignedInt val, UnsignedInt frame);
-		CRCRecord readCRC();
+		Bool readCRC(CRCRecord &record);
 		int GetQueueSize() const { return m_data.size(); }
 		UnsignedInt getLocalPlayer() const { return m_localPlayer; }
 		void setSawCRCMismatch() { m_sawCRCMismatch = TRUE; }
@@ -124,7 +124,7 @@ public:
 	Bool isPlaybackInProgress() const;
 
 public:
-	void handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool fromPlayback);
+	void handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool fromPlayback, Bool hasSnapshotFrame, UnsignedInt snapshotFrame);
 
 	// read in info relating to a replay, conditionally setting up m_file for playback
 	struct ReplayHeader

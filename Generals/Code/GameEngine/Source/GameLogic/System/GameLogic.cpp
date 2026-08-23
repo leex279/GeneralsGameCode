@@ -3246,6 +3246,11 @@ void GameLogic::update()
 		GameMessage *msg = newInstance(GameMessage)(GameMessage::MSG_LOGIC_CRC);
 		msg->appendIntegerArgument(m_CRC);
 		msg->appendBooleanArgument(isPlayback);
+		if (isPlayback)
+		{
+			// TheSuperHackers @fix Leex 23/08/2026 Preserve the calculation frame when rendered playback dispatches this local CRC later. (#TBD)
+			msg->appendIntegerArgument(m_frame);
+		}
 
 		// TheSuperHackers @info helmutbuhler 13/04/2025
 		// During replay simulation, we bypass TheMessageStream and instead put the CRC message

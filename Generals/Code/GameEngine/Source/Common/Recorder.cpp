@@ -130,18 +130,18 @@ void RecorderClass::CRCInfo::addCRC(UnsignedInt val, UnsignedInt frame)
 	//DEBUG_LOG(("CRCInfo::addCRC() - crc %8.8X pushes list to %d entries (full=%d)", val, m_data.size(), !m_data.empty()));
 }
 
-RecorderClass::CRCInfo::CRCRecord RecorderClass::CRCInfo::readCRC()
+Bool RecorderClass::CRCInfo::readCRC(CRCRecord &record)
 {
 	if (m_data.empty())
 	{
 		DEBUG_LOG(("CRCInfo::readCRC() - bailing, full=0, size=%d", m_data.size()));
-		return CRCRecord();
+		return FALSE;
 	}
 
-	CRCRecord record = m_data.front();
+	record = m_data.front();
 	m_data.pop_front();
 	//DEBUG_LOG(("CRCInfo::readCRC() - returning %8.8X from frame %d, full=%d, size=%d", record.value, record.frame, !m_data.empty(), m_data.size()));
-	return record;
+	return TRUE;
 }
 
 void RecorderClass::logGameStart(AsciiString options)
@@ -979,12 +979,15 @@ Bool RecorderClass::sawCRCMismatch() const
 	return m_crcInfo.sawCRCMismatch();
 }
 
-void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool fromPlayback)
+void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool fromPlayback, Bool hasSnapshotFrame, UnsignedInt snapshotFrame)
 {
 	if (fromPlayback)
 	{
 		//DEBUG_LOG(("RecorderClass::handleCRCMessage() - Adding CRC of %X from %d to m_crcInfo", newCRC, playerIndex));
-		m_crcInfo.addCRC(newCRC, TheGameLogic->getFrame());
+		if (hasSnapshotFrame)
+		{
+			m_crcInfo.addCRC(newCRC, snapshotFrame);
+		}
 		return;
 	}
 
@@ -993,7 +996,12 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 	const Bool isLocalPlayer = !p || ThePlayerList->getSlotIndex(playerIndex) == localPlayerIndex;
 	if (isLocalPlayer)
 	{
-		CRCInfo::CRCRecord playbackCRC = m_crcInfo.readCRC();
+		CRCInfo::CRCRecord playbackCRC;
+		// TheSuperHackers @bugfix Leex 23/08/2026 Treat an empty local CRC queue as absent evidence instead of a synthetic frame-zero record. (#TBD)
+		if (!m_crcInfo.readCRC(playbackCRC))
+		{
+			return;
+		}
 		//DEBUG_LOG(("RecorderClass::handleCRCMessage() - Comparing CRCs of InGame:%8.8X Replay:%8.8X Frame:%d from Player %d",
 		//	playbackCRC.value, newCRC, playbackCRC.frame, playerIndex));
 		if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC.value && !m_crcInfo.sawCRCMismatch())

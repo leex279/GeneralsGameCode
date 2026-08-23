@@ -2433,10 +2433,18 @@ bool GameLogic::onLogicCrc(MAYBE_UNUSED GameMessage *msg)
 	else if (TheRecorder && TheRecorder->isPlaybackMode())
 	{
 		UnsignedInt newCRC = msg->getArgument(0)->integer;
+		const Bool fromPlayback = msg->getArgument(1)->boolean;
+		// TheSuperHackers @fix Leex 23/08/2026 Accept snapshot attribution only from locally generated playback CRC messages. (#TBD)
+		const Bool hasSnapshotFrame = fromPlayback && msg->getArgumentCount() > 2;
+		UnsignedInt snapshotFrame = 0;
+		if (hasSnapshotFrame)
+		{
+			snapshotFrame = msg->getArgument(2)->integer;
+		}
 		//DEBUG_LOG(("Saw CRC of %X from player %d.  Our CRC is %X.  Arg count is %d",
 			//newCRC, msgPlayer->getPlayerIndex(), getCRC(), msg->getArgumentCount()));
 
-		TheRecorder->handleCRCMessage(newCRC, msgPlayer->getPlayerIndex(), (msg->getArgument(1)->boolean));
+		TheRecorder->handleCRCMessage(newCRC, msgPlayer->getPlayerIndex(), fromPlayback, hasSnapshotFrame, snapshotFrame);
 	}
 
 	return true;
