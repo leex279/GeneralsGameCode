@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self, runtime_checkable
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
@@ -12,6 +13,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from pydantic.functional_validators import AfterValidator
 
 from generals_replay_analyzer.ingress_contract import validate_replay_relative_name, validate_root_public_id
+from generals_replay_analyzer.report.model import freeze_report_value
 
 
 def _lowercase_uuid(value: str) -> str:
@@ -698,3 +700,658 @@ class WebApplicationPort(Protocol):
     def cancel_job(self, command: CancelJobCommandDTO) -> JobMutationDTO: ...
 
     def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO: ...
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Resolve mutable latest-report navigation into an immutable fixed report identity. (#TBD)
+class LatestReportQueryDTO(WebDTO):
+    replay_public_id: PublicId
+    replay_player_public_id: PublicId | None = None
+
+
+class FixedReportQueryDTO(WebDTO):
+    replay_public_id: PublicId
+    report_public_id: PublicId
+
+
+class ReportVersionDTO(WebDTO):
+    report_public_id: PublicId
+    report_version: str = Field(min_length=1, max_length=128)
+    replay_player_public_id: PublicId | None = None
+
+
+class ReportResolutionDTO(WebDTO):
+    state: Literal["available", "not_generated", "pipeline_active", "pipeline_failed"]
+    fixed_report: FixedReportQueryDTO | None = None
+    version: ReportVersionDTO | None = None
+    reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+    pipeline: PipelineStateDTO | None = None
+
+    @model_validator(mode="after")
+    def _require_exact_resolution_shape(self) -> Self:
+        if self.state == "available":
+            if (
+                self.fixed_report is None
+                or self.version is None
+                or self.reason_code is not None
+                or self.pipeline is not None
+                or self.fixed_report.report_public_id != self.version.report_public_id
+            ):
+                raise ValueError("available report resolution requires one matching fixed report and version")
+            return self
+        if self.fixed_report is not None or self.version is not None or self.reason_code is None:
+            raise ValueError("unavailable report resolution requires one reason and no fixed report")
+        if self.state == "not_generated" and self.pipeline is not None:
+            raise ValueError("not-generated report resolution cannot claim pipeline state")
+        if self.state in {"pipeline_active", "pipeline_failed"} and self.pipeline is None:
+            raise ValueError("pipeline report resolution requires pipeline state")
+        return self
+
+
+ReportSectionKey = Literal[
+    "overview",
+    "players_results",
+    "opening_build_order",
+    "economy",
+    "production_composition",
+    "combat_engagements",
+    "activity",
+    "strategy_phases",
+    "spatial_analysis",
+    "longitudinal_context",
+    "llm_interpretation",
+]
+ReportTier = Literal["observed", "derived", "inferred"]
+ReportAvailability = Literal["available", "partial", "unavailable"]
+_REPORT_SECTION_ORDER: tuple[ReportSectionKey, ...] = (
+    "overview",
+    "players_results",
+    "opening_build_order",
+    "economy",
+    "production_composition",
+    "combat_engagements",
+    "activity",
+    "strategy_phases",
+    "spatial_analysis",
+    "longitudinal_context",
+    "llm_interpretation",
+)
+
+
+class ReportEvidenceReferenceDTO(WebDTO):
+    public_id: PublicId
+    tier: ReportTier
+
+
+class ReportLifecycleDTO(WebDTO):
+    lifecycle_state: str = Field(min_length=1, max_length=64)
+    parser_completion_status: str | None = Field(default=None, min_length=1, max_length=64)
+    telemetry_status: str | None = Field(default=None, min_length=1, max_length=64)
+    telemetry_runner_status: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ReportClaimDTO(WebDTO):
+    claim_id: str = Field(min_length=1, max_length=256)
+    section: ReportSectionKey
+    label: str = Field(min_length=1, max_length=256)
+    raw_value: object | None
+    display_value: str | None = Field(default=None, min_length=1, max_length=2048)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    availability: ReportAvailability
+    unavailable_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    scope: object
+    frame_window: tuple[int, int] | None = None
+    confidence: float | None = None
+    evidence: tuple[ReportEvidenceReferenceDTO, ...] = ()
+    details: object
+
+    @field_validator("raw_value", "scope", "details", mode="before")
+    @classmethod
+    def _freeze_canonical_values(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _require_bounded_confidence(cls, value: object) -> object:
+        if value is None:
+            return None
+        if type(value) is not float or not 0.0 <= value <= 1.0:
+            raise ValueError("report confidence must be a bounded float")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_claim_semantics(self) -> Self:
+        if self.frame_window is not None and (
+            type(self.frame_window[0]) is not int
+            or type(self.frame_window[1]) is not int
+            or self.frame_window[0] < 0
+            or self.frame_window[1] < self.frame_window[0]
+        ):
+            raise ValueError("report frame window must be ordered and nonnegative")
+        identities = tuple((item.public_id, item.tier) for item in self.evidence)
+        if len(identities) != len(set(identities)):
+            raise ValueError("report claim evidence must be unique")
+        if self.availability == "available":
+            if self.raw_value is None or self.display_value is None or self.unavailable_reason is not None:
+                raise ValueError("available report claim requires raw and display values without a reason")
+            if not self.evidence:
+                raise ValueError("available report claim requires public evidence")
+        elif self.availability == "partial":
+            if self.raw_value is None or self.display_value is None or self.unavailable_reason is None:
+                raise ValueError("partial report claim requires values and one reason")
+            if not self.evidence:
+                raise ValueError("partial report claim requires public evidence")
+        elif self.raw_value is not None or self.display_value is not None:
+            raise ValueError("unavailable report claim cannot expose a value")
+        elif self.unavailable_reason is None:
+            raise ValueError("unavailable report claim requires one reason")
+        return self
+
+
+class ReportSectionDTO(WebDTO):
+    key: ReportSectionKey
+    title: str = Field(min_length=1, max_length=128)
+    availability: AvailabilityDTO
+    claims: tuple[ReportClaimDTO, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_section_claims(self) -> Self:
+        if any(claim.section != self.key for claim in self.claims):
+            raise ValueError("report claim section must match its containing section")
+        identities = tuple(claim.claim_id for claim in self.claims)
+        if len(identities) != len(set(identities)):
+            raise ValueError("report section claim IDs must be unique")
+        return self
+
+
+class OllamaReportStatusDTO(WebDTO):
+    requested: bool
+    status: Literal["not_requested", "disabled", "succeeded", "unavailable", "failed", "invalid", "cancelled"]
+    analysis_run_id: PublicId | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    model_name: str | None = Field(default=None, min_length=1, max_length=256)
+    model_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=128)
+    response_schema_version: str | None = Field(default=None, min_length=1, max_length=128)
+    diagnostic_codes: tuple[str, ...] = ()
+    validated_prose: object | None = None
+
+    @field_validator("validated_prose", mode="before")
+    @classmethod
+    def _freeze_validated_prose(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @model_validator(mode="after")
+    def _validate_ollama_state(self) -> Self:
+        fields = (
+            self.analysis_run_id,
+            self.provider,
+            self.model_name,
+            self.model_digest,
+            self.prompt_version,
+            self.response_schema_version,
+            self.validated_prose,
+        )
+        if not self.requested:
+            if self.status != "not_requested" or any(item is not None for item in fields) or self.diagnostic_codes:
+                raise ValueError("not-requested Ollama status cannot expose analysis data")
+        elif self.status == "not_requested":
+            raise ValueError("requested Ollama status cannot be not_requested")
+        elif self.status == "succeeded":
+            if any(item is None for item in fields):
+                raise ValueError("succeeded Ollama status requires complete validated identity and prose")
+        elif self.validated_prose is not None:
+            raise ValueError("only succeeded Ollama status can expose validated prose")
+        object.__setattr__(self, "diagnostic_codes", tuple(sorted(set(self.diagnostic_codes))))
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Keep every report section explicit and evidence-backed at the web boundary. (#TBD)
+class ReplayReportDTO(TimestampedWebDTO):
+    schema_version: Literal["web-replay-report-v1"]
+    fixed_report: FixedReportQueryDTO
+    version: ReportVersionDTO
+    availability: AvailabilityDTO
+    replay_label: str = Field(min_length=1, max_length=256)
+    replay_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    players: tuple[ReplayPlayerDisplayDTO, ...] = Field(min_length=1, max_length=16)
+    result: str | None = Field(default=None, min_length=1, max_length=128)
+    map_name: str | None = Field(default=None, min_length=1, max_length=256)
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    duration_frames: int | None = Field(default=None, ge=0)
+    source_mode: Literal["deterministic_only", "deterministic_with_ollama"]
+    lifecycle: ReportLifecycleDTO
+    terminal_quality: TerminalQualityDTO
+    sections: tuple[ReportSectionDTO, ...]
+    ollama: OllamaReportStatusDTO
+    warnings: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_report_graph(self) -> Self:
+        if self.fixed_report.report_public_id != self.version.report_public_id:
+            raise ValueError("report version does not match its fixed report identity")
+        by_key = {section.key: section for section in self.sections}
+        if len(by_key) != len(self.sections) or set(by_key) != set(_REPORT_SECTION_ORDER):
+            raise ValueError("report must contain exactly one of every report section")
+        object.__setattr__(self, "sections", tuple(by_key[key] for key in _REPORT_SECTION_ORDER))
+        object.__setattr__(self, "warnings", tuple(sorted(set(self.warnings))))
+        return self
+
+
+TimelineFamily = Literal[
+    "build_order",
+    "economy",
+    "production",
+    "combat",
+    "activity",
+    "strategy",
+    "quality",
+]
+
+
+class TimelineChartQueryDTO(WebDTO):
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    players: tuple[PublicId, ...] = ()
+    families: tuple[TimelineFamily, ...] = ()
+
+    @model_validator(mode="after")
+    def _normalize_filters(self) -> Self:
+        object.__setattr__(self, "players", tuple(sorted(set(self.players))))
+        object.__setattr__(self, "families", tuple(sorted(set(self.families))))
+        return self
+
+
+class TimelinePlayerOptionDTO(WebDTO):
+    public_id: PublicId
+    label: str = Field(min_length=1, max_length=256)
+
+
+class TimelineFamilyOptionDTO(WebDTO):
+    value: TimelineFamily
+    label: str = Field(min_length=1, max_length=128)
+
+
+class TimelinePointDTO(WebDTO):
+    frame: int = Field(ge=0)
+    value: int | float | str | None
+    label: str = Field(min_length=1, max_length=256)
+    evidence: tuple[ReportEvidenceReferenceDTO, ...] = Field(min_length=1)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _require_finite_value(cls, value: object) -> object:
+        if value is None:
+            return None
+        if type(value) is int:
+            return value
+        if type(value) is float:
+            if not math.isfinite(value) or value == 0.0 and math.copysign(1.0, value) < 0:
+                raise ValueError("timeline point float must be finite and not negative zero")
+            return value
+        if type(value) is str:
+            if not value or value != value.strip():
+                raise ValueError("timeline point string must be nonempty and canonical")
+            freeze_report_value(value)
+            return value
+        raise ValueError("timeline point value must use the closed scalar union")
+
+
+class TimelineIntervalDTO(WebDTO):
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    label: str = Field(min_length=1, max_length=256)
+    evidence: tuple[ReportEvidenceReferenceDTO, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _require_ordered_interval(self) -> Self:
+        if self.frame_end <= self.frame_start:
+            raise ValueError("timeline interval must have positive frame width")
+        return self
+
+
+class TimelineSeriesDTO(WebDTO):
+    series_id: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=128)
+    kind: Literal["marker", "line", "step", "band"]
+    player_public_id: PublicId | None = None
+    event_family: TimelineFamily
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    availability: AvailabilityDTO
+    points: tuple[TimelinePointDTO, ...] = ()
+    intervals: tuple[TimelineIntervalDTO, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_series_shape(self) -> Self:
+        points = tuple(sorted(self.points, key=lambda item: (item.frame, item.label)))
+        intervals = tuple(sorted(self.intervals, key=lambda item: (item.frame_start, item.frame_end, item.label)))
+        if self.availability.state == "unavailable":
+            if points or intervals:
+                raise ValueError("unavailable timeline series cannot expose data")
+        elif self.kind == "band":
+            if points or not intervals:
+                raise ValueError("timeline series kind band requires intervals only")
+        elif self.kind == "marker":
+            if intervals or not points:
+                raise ValueError("timeline series kind marker requires points only")
+        elif intervals or not points or any(point.value is None for point in points):
+            raise ValueError("timeline series kind line or step requires valued points only")
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "intervals", intervals)
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Preserve authoritative frame time at a fixed 30 FPS chart boundary. (#TBD)
+class TimelineChartDTO(WebDTO):
+    schema_version: Literal["web-report-timeline-v1"]
+    query: TimelineChartQueryDTO
+    availability: AvailabilityDTO
+    timebase_fps: Literal[30]
+    available_players: tuple[TimelinePlayerOptionDTO, ...]
+    available_families: tuple[TimelineFamilyOptionDTO, ...]
+    series: tuple[TimelineSeriesDTO, ...]
+
+    @model_validator(mode="after")
+    def _canonicalize_chart(self) -> Self:
+        players = {item.public_id: item for item in self.available_players}
+        families = {item.value: item for item in self.available_families}
+        series = {item.series_id: item for item in self.series}
+        if (
+            len(players) != len(self.available_players)
+            or len(families) != len(self.available_families)
+            or len(series) != len(self.series)
+        ):
+            raise ValueError("timeline options and series identities must be unique")
+        if any(
+            item.event_family not in families
+            or (item.player_public_id is not None and item.player_public_id not in players)
+            for item in series.values()
+        ):
+            raise ValueError("timeline series must use an available player and family")
+        if self.availability.state == "unavailable" and any(
+            item.availability.state != "unavailable" for item in series.values()
+        ):
+            raise ValueError("unavailable timeline chart cannot expose available geometry")
+        if series and all(item.availability.state == "unavailable" for item in series.values()):
+            object.__setattr__(
+                self,
+                "availability",
+                AvailabilityDTO(
+                    state="unavailable",
+                    reason_codes=self.availability.reason_codes or ("timeline_series_unavailable",),
+                    evidence_references=self.availability.evidence_references,
+                ),
+            )
+        object.__setattr__(self, "available_players", tuple(players[key] for key in sorted(players)))
+        object.__setattr__(self, "available_families", tuple(families[key] for key in sorted(families)))
+        object.__setattr__(
+            self,
+            "series",
+            tuple(
+                sorted(
+                    series.values(),
+                    key=lambda item: (item.event_family, item.player_public_id or "", item.kind, item.series_id),
+                )
+            ),
+        )
+        return self
+
+
+EvidenceRole = Literal["input", "supporting", "contradicting"]
+
+
+class EvidenceQueryDTO(WebDTO):
+    report_public_id: PublicId
+    evidence_public_id: PublicId
+    expected_tier: ReportTier
+
+
+class EvidenceLinkDTO(WebDTO):
+    public_id: PublicId
+    tier: ReportTier
+    role: EvidenceRole
+
+
+def _ordered_evidence_links(values: tuple[EvidenceLinkDTO, ...]) -> tuple[EvidenceLinkDTO, ...]:
+    identities = tuple((item.public_id, item.tier, item.role) for item in values)
+    if len(identities) != len(set(identities)):
+        raise ValueError("evidence links must be unique")
+    return tuple(sorted(values, key=lambda item: (item.role, item.public_id, item.tier)))
+
+
+def _validate_source_availability(
+    availability: ReportAvailability,
+    unavailable_reason: str | None,
+    value: object | None,
+) -> None:
+    if availability == "available" and (unavailable_reason is not None or value is None):
+        raise ValueError("available evidence requires a value without a reason")
+    if availability == "partial" and (unavailable_reason is None or value is None):
+        raise ValueError("partial evidence requires a value and reason")
+    if availability == "unavailable" and (unavailable_reason is None or value is not None):
+        raise ValueError("unavailable evidence requires a reason and no value")
+
+
+class ObservedCommandEvidenceDTO(WebDTO):
+    kind: Literal["replay_command"]
+    parser_run_id: PublicId
+    parser_version: str = Field(min_length=1, max_length=255)
+    parser_schema_version: int = Field(ge=0)
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(ge=1)
+    frame: int = Field(ge=0)
+    message_type: int = Field(ge=0)
+    message_name: str = Field(min_length=1, max_length=256)
+    replay_player_public_id: PublicId | None = None
+    arguments: object
+
+    @field_validator("arguments", mode="before")
+    @classmethod
+    def _freeze_arguments(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> Self:
+        if self.end_offset <= self.start_offset:
+            raise ValueError("observed command offsets must be ordered")
+        return self
+
+
+class ObservedTelemetryEvidenceDTO(WebDTO):
+    kind: Literal["telemetry_event"]
+    telemetry_run_id: PublicId
+    engine_build: str = Field(min_length=1, max_length=256)
+    telemetry_schema_version: int = Field(ge=0)
+    sequence: int = Field(ge=0)
+    frame: int = Field(ge=0)
+    event_type: str = Field(min_length=1, max_length=256)
+    payload: object
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _freeze_payload(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+
+class DerivedFeatureEvidenceDTO(WebDTO):
+    kind: Literal["derived_feature"]
+    feature_public_id: PublicId
+    feature_set_public_id: PublicId
+    feature_name: str = Field(min_length=1, max_length=256)
+    extractor_name: str = Field(min_length=1, max_length=256)
+    extractor_version: str = Field(min_length=1, max_length=128)
+    raw_value: object | None
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    scope: object
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    availability: ReportAvailability
+    unavailable_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    details: object
+    inputs: tuple[EvidenceLinkDTO, ...]
+
+    @field_validator("raw_value", "scope", "details", mode="before")
+    @classmethod
+    def _freeze_values(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @model_validator(mode="after")
+    def _validate_feature(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("derived feature window must be ordered")
+        _validate_source_availability(self.availability, self.unavailable_reason, self.raw_value)
+        object.__setattr__(self, "inputs", _ordered_evidence_links(self.inputs))
+        return self
+
+
+class DerivedAssessmentEvidenceDTO(WebDTO):
+    kind: Literal["derived_assessment"]
+    assessment_public_id: PublicId
+    strategy_label: str = Field(min_length=1, max_length=256)
+    phase: str = Field(min_length=1, max_length=128)
+    taxonomy_version: str = Field(min_length=1, max_length=128)
+    rule_version: str = Field(min_length=1, max_length=128)
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    score: float | None
+    availability: ReportAvailability
+    unavailable_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    details: object
+    citations: tuple[EvidenceLinkDTO, ...]
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def _freeze_details(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _validate_score(cls, value: object) -> object:
+        if value is None:
+            return None
+        if type(value) is not float or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("derived assessment score must be a bounded float")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_assessment(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("derived assessment window must be ordered")
+        _validate_source_availability(self.availability, self.unavailable_reason, self.score)
+        object.__setattr__(self, "citations", _ordered_evidence_links(self.citations))
+        return self
+
+
+class DerivedLongitudinalEvidenceDTO(WebDTO):
+    kind: Literal["longitudinal_result"]
+    result_public_id: PublicId
+    longitudinal_run_id: PublicId
+    analyzer_name: str = Field(min_length=1, max_length=256)
+    analyzer_version: str = Field(min_length=1, max_length=128)
+    result_name: str = Field(min_length=1, max_length=256)
+    result_kind: str = Field(min_length=1, max_length=128)
+    sample_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    availability: ReportAvailability
+    unavailable_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    statistics: object | None
+    members: tuple[EvidenceLinkDTO, ...]
+
+    @field_validator("statistics", mode="before")
+    @classmethod
+    def _freeze_statistics(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @model_validator(mode="after")
+    def _validate_longitudinal(self) -> Self:
+        _validate_source_availability(self.availability, self.unavailable_reason, self.statistics)
+        object.__setattr__(self, "members", _ordered_evidence_links(self.members))
+        return self
+
+
+class InferredAssessmentEvidenceDTO(WebDTO):
+    kind: Literal["inferred_assessment"]
+    assessment_public_id: PublicId
+    analysis_run_id: PublicId
+    assessment_key: str = Field(min_length=1, max_length=256)
+    strategy_label: str = Field(min_length=1, max_length=256)
+    phase: str = Field(min_length=1, max_length=128)
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    confidence: float
+    provider: str = Field(min_length=1, max_length=128)
+    model_name: str = Field(min_length=1, max_length=256)
+    model_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_version: str = Field(min_length=1, max_length=128)
+    response_schema_version: str = Field(min_length=1, max_length=128)
+    assessment: object
+    citations: tuple[EvidenceLinkDTO, ...]
+
+    @field_validator("assessment", mode="before")
+    @classmethod
+    def _freeze_assessment(cls, value: object) -> object:
+        return freeze_report_value(value)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _validate_confidence(cls, value: object) -> object:
+        if type(value) is not float or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("inferred confidence must be a bounded float")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_inference(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("inferred assessment window must be ordered")
+        object.__setattr__(self, "citations", _ordered_evidence_links(self.citations))
+        return self
+
+
+EvidenceSourceDTO = Annotated[
+    ObservedCommandEvidenceDTO
+    | ObservedTelemetryEvidenceDTO
+    | DerivedFeatureEvidenceDTO
+    | DerivedAssessmentEvidenceDTO
+    | DerivedLongitudinalEvidenceDTO
+    | InferredAssessmentEvidenceDTO,
+    Field(discriminator="kind"),
+]
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Preserve each accepted evidence family as a typed report-scoped web value. (#TBD)
+class EvidenceDetailDTO(WebDTO):
+    schema_version: Literal["web-evidence-inspector-v1"]
+    query: EvidenceQueryDTO
+    replay_public_id: PublicId
+    source_kind: str = Field(min_length=1, max_length=128)
+    source_schema_version: int = Field(ge=0)
+    source: EvidenceSourceDTO
+
+    @model_validator(mode="after")
+    def _validate_source_identity(self) -> Self:
+        if type(self.source) is ObservedCommandEvidenceDTO:
+            expected = ("observed", "parser_command", self.source.parser_schema_version)
+        elif type(self.source) is ObservedTelemetryEvidenceDTO:
+            expected = ("observed", "telemetry_event", self.source.telemetry_schema_version)
+        elif type(self.source) is DerivedFeatureEvidenceDTO:
+            expected = ("derived", "feature", 1)
+        elif type(self.source) is DerivedAssessmentEvidenceDTO:
+            expected = ("derived", "strategy_rule", 1)
+        elif type(self.source) is DerivedLongitudinalEvidenceDTO:
+            expected = ("derived", "longitudinal_corpus", 1)
+        else:
+            expected = ("inferred", "llm", 1)
+        if (self.query.expected_tier, self.source_kind, self.source_schema_version) != expected:
+            raise ValueError("evidence tier, source kind, and schema version must match the typed source")
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Isolate report reads behind one immutable fakeable web capability. (#TBD)
+@runtime_checkable
+class ReportQueryPort(Protocol):
+    def resolve_latest(self, query: LatestReportQueryDTO) -> ReportResolutionDTO: ...
+
+    def get_report(self, query: FixedReportQueryDTO) -> ReplayReportDTO: ...
+
+    def timeline_chart(self, query: TimelineChartQueryDTO) -> TimelineChartDTO: ...
+
+    def get_evidence(self, query: EvidenceQueryDTO) -> EvidenceDetailDTO: ...

@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block content %}
+{% if report_view %}
+  {% set report = report_view.report %}
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">Library / Fixed replay report</span>
+      <h1>{{ report.replay_label }}</h1>
+      <p>Report {{ report.version.report_version }} · <code>{{ report.fixed_report.report_public_id }}</code></p>
+    </div>
+    <a class="button" href="/replays">Back to library</a>
+  </header>
+
+  <section class="workspace-panel" aria-labelledby="replay-identity-title">
+    <div class="section-heading"><div><span class="eyebrow">Replay identity</span><h2 id="replay-identity-title">Match record</h2></div></div>
+    <dl class="status-ledger">
+      <div><dt>Players</dt><dd>{% for player in report.players %}{{ player.display_name }}{% if player.faction %} / {{ player.faction }}{% endif %}{% if not loop.last %} vs {% endif %}{% endfor %}</dd></div>
+      <div><dt>Result</dt><dd>{{ report.result or "Result unavailable" }}</dd></div>
+      <div><dt>Map</dt><dd>{{ report.map_name or "Map unavailable" }}</dd></div>
+      <div><dt>Patch</dt><dd>{{ report.patch or "Patch unavailable" }}</dd></div>
+      <div><dt>Duration</dt><dd>{{ report_view.duration_label }}</dd></div>
+      <div><dt>Quality</dt><dd>{{ report.terminal_quality.lifecycle }}</dd></div>
+      <div><dt>Source mode</dt><dd>{{ report_view.source_mode_label }}</dd></div>
+      <div><dt>Evidence coverage</dt><dd>{{ report.availability.state }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="workspace-panel" aria-labelledby="quality-title">
+    <div class="section-heading"><div><span class="eyebrow">Read before analysis</span><h2 id="quality-title">Quality and availability</h2></div></div>
+    <p>Lifecycle: {{ report.lifecycle.lifecycle_state }}. Parser: {{ report.lifecycle.parser_completion_status or "unavailable" }}. Telemetry: {{ report.lifecycle.telemetry_status or "unavailable" }}.</p>
+    <p>{{ report_view.ollama_status_label }}{% if report.ollama.diagnostic_codes %}. Diagnostics: {{ report.ollama.diagnostic_codes|join(", ") }}{% endif %}.</p>
+    {% if report.warnings %}<ul class="notice-list">{% for warning in report.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}
+    {% if report.terminal_quality.issues %}<ul class="notice-list">{% for issue in report.terminal_quality.issues %}<li><strong>{{ issue.code }}</strong><span>{{ issue.message }}</span></li>{% endfor %}</ul>{% endif %}
+  </section>
+
+  <nav class="command-strip" aria-label="Jump to report section">
+    <a href="#report-overview"><span class="command-index">01</span><span>Overview</span></a>
+    {% if report_view.timeline.availability.state != "unavailable" %}<a href="#report-timeline"><span class="command-index">02</span><span>Timeline</span></a>{% endif %}
+    {% for section in report_view.jump_sections %}<a href="#section-{{ section.key }}"><span>{{ section.title }}</span></a>{% endfor %}
+    <a href="#report-evidence"><span>Evidence</span></a>
+  </nav>
+
+  <section id="report-timeline" class="workspace-panel" aria-labelledby="timeline-title">
+    <div class="section-heading"><div><span class="eyebrow">Frame timebase · 30 FPS</span><h2 id="timeline-title">Timeline</h2></div></div>
+    {% if report_view.timeline.availability.state == "unavailable" %}
+      <p>Timeline unavailable. Reason: {{ report_view.timeline.availability.reason_codes|join(", ") }}</p>
+    {% else %}
+      <form class="library-filters" data-timeline-controls aria-label="Timeline controls">
+        <div class="filter-grid">
+          <fieldset>
+            <legend>Time axis</legend>
+            <label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label>
+            <label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis disabled> Seconds</label>
+          </fieldset>
+          <fieldset>
+            <legend>Players</legend>
+            {% for player in report_view.timeline.available_players %}<label for="timeline-player-{{ loop.index }}"><input id="timeline-player-{{ loop.index }}" type="checkbox" value="{{ player.public_id }}" data-timeline-player checked disabled> {{ player.label }}</label>{% endfor %}
+          </fieldset>
+          <fieldset>
+            <legend>Event families</legend>
+            {% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}
+          </fieldset>
+        </div>
+      </form>
+      <div data-report-timeline data-source="/api/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/charts/timeline" role="img" aria-label="Replay event timeline"></div>
+      <table><caption>Timeline data in authoritative replay frames</caption><thead><tr><th scope="col">Series</th><th scope="col">Frame or interval</th><th scope="col">Event</th><th scope="col">Value</th></tr></thead><tbody>{% for series in report_view.timeline.series %}{% for point in series.points %}<tr><th scope="row">{{ series.label }}</th><td>{{ point.frame }}</td><td>{{ point.label }}</td><td>{% if point.value is not none %}{{ point.value }}{% else %}—{% endif %}</td></tr>{% endfor %}{% for interval in series.intervals %}<tr><th scope="row">{{ series.label }}</th><td>{{ interval.frame_start }}–{{ interval.frame_end }}</td><td>{{ interval.label }}</td><td>—</td></tr>{% endfor %}{% endfor %}</tbody></table>
+    {% endif %}
+  </section>
+
+  <section id="report-overview" aria-labelledby="analysis-title">
+    <div class="section-heading"><div><span class="eyebrow">Immutable report</span><h2 id="analysis-title">Report analysis</h2></div></div>
+    {% for section in report.sections %}
+      <section id="section-{{ section.key }}" class="workspace-panel" aria-labelledby="title-{{ section.key }}">
+        <div class="section-heading"><h3 id="title-{{ section.key }}">{{ section.title }}</h3><span>{{ section.availability.state }}</span></div>
+        {% if not section.claims %}<p>{{ section.availability.reason_codes|join(", ") or "No claims supplied" }}</p>{% endif %}
+        {% for claim in section.claims %}
+          <article>
+            <h4>{{ claim.label }}</h4>
+            {% if claim.availability == "unavailable" %}<p>Unavailable: {{ claim.unavailable_reason }}</p>{% else %}<p><strong>{{ claim.display_value }}</strong>{% if claim.unit %} {{ claim.unit }}{% endif %}</p>{% endif %}
+            {% for evidence in claim.evidence %}
+              <details class="evidence-drawer" data-evidence-public-id="{{ evidence.public_id }}">
+                <summary>Evidence tier: {{ evidence.tier }}</summary>
+                <p><code>{{ evidence.public_id }}</code></p>
+                <a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-get="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-select="#evidence-source" hx-target="closest details" hx-swap="innerHTML">Open evidence detail</a>
+              </details>
+            {% endfor %}
+          </article>
+        {% endfor %}
+      </section>
+    {% endfor %}
+  </section>
+  <section id="report-evidence" class="workspace-panel" aria-labelledby="evidence-summary-title"><h2 id="evidence-summary-title">Evidence</h2><p>Every available claim above links to its report-scoped evidence record.</p></section>
+{% else %}
+  <header class="page-heading"><div><span class="eyebrow">Library / Report</span><h1>Replay report unavailable</h1><p>{{ resolution.reason_code }}</p></div><a class="button" href="/replays">Back to library</a></header>
+  {% if resolution.pipeline %}<section class="workspace-panel"><h2>Pipeline state</h2><p>{{ resolution.pipeline.stage }} / {{ resolution.pipeline.state }}</p></section>{% endif %}
+{% endif %}
+  <noscript><p>Charts are optional. All available timeline values remain in the table above.</p></noscript>
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/vendor/echarts.min.js" defer></script>
+  <script src="/static/js/report.js" defer></script>
+{% endblock %}

@@ -17,6 +17,9 @@ from generals_replay_analyzer.web.ports import (
     CancelJobCommandDTO,
     DashboardDTO,
     DiagnosticDTO,
+    EvidenceDetailDTO,
+    EvidenceQueryDTO,
+    FixedReportQueryDTO,
     IdentityLandingDTO,
     ImportRootDTO,
     ImportSubmissionDTO,
@@ -26,11 +29,16 @@ from generals_replay_analyzer.web.ports import (
     JobMutationDTO,
     JobPageDTO,
     JobQueryDTO,
+    LatestReportQueryDTO,
     ReadinessDTO,
     ReplayLibraryPageDTO,
     ReplayLibraryQueryDTO,
+    ReplayReportDTO,
+    ReportResolutionDTO,
     RetryJobCommandDTO,
     RootImportCommandDTO,
+    TimelineChartDTO,
+    TimelineChartQueryDTO,
     UploadImportCommandDTO,
     WebApplicationPort,
 )
@@ -155,9 +163,10 @@ class UnavailablePortFactory:
 class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
     """Combine existing honest placeholders with accepted durable Jobs operations."""
 
-    def __init__(self, readiness: ReadinessState, jobs: object) -> None:
+    def __init__(self, readiness: ReadinessState, jobs: object, reports: object) -> None:
         super().__init__(readiness)
         self._jobs = jobs
+        self._reports = reports
 
     def list_jobs(self, query: JobQueryDTO) -> JobPageDTO:
         return self._jobs.list_jobs(query)  # type: ignore[attr-defined,no-any-return]
@@ -173,6 +182,18 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
 
     def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO:
         return self._jobs.read_job_log(query)  # type: ignore[attr-defined,no-any-return]
+
+    def resolve_latest(self, query: LatestReportQueryDTO) -> ReportResolutionDTO:
+        return self._reports.resolve_latest(query)  # type: ignore[attr-defined,no-any-return]
+
+    def get_report(self, query: FixedReportQueryDTO) -> ReplayReportDTO:
+        return self._reports.get_report(query)  # type: ignore[attr-defined,no-any-return]
+
+    def timeline_chart(self, query: TimelineChartQueryDTO) -> TimelineChartDTO:
+        return self._reports.timeline_chart(query)  # type: ignore[attr-defined,no-any-return]
+
+    def get_evidence(self, query: EvidenceQueryDTO) -> EvidenceDetailDTO:
+        return self._reports.get_evidence(query)  # type: ignore[attr-defined,no-any-return]
 
 
 # TheSuperHackers @fix Leex 22/08/2026 Own one atomic Analytics session through each complete Jobs response. (#TBD)
@@ -245,9 +266,11 @@ class AnalyticsPortFactory:
     def __call__(self) -> Iterator[WebApplicationPort]:
         from generals_replay_analyzer.db import create_database_engine, create_session_factory
         from generals_replay_analyzer.importing import JobLifecycleService
+        from generals_replay_analyzer.report.query import ReportQueryService
         from generals_replay_analyzer.storage import ContentAddressedStore
         from generals_replay_analyzer.watching import FileWatchStatusStore
         from generals_replay_analyzer.web.adapters.analytics import AnalyticsJobsAdapter
+        from generals_replay_analyzer.web.adapters.report import AnalyticsReportAdapter
 
         engine = create_database_engine(self._settings.database_path)
         request_sessions = _RequestSessionFactory(create_session_factory(engine))
@@ -265,6 +288,12 @@ class AnalyticsPortFactory:
                 AnalyticsJobsAdapter(
                     lifecycle,
                     watch_status_reader=FileWatchStatusStore(self._settings.data_root).read,
+                ),
+                AnalyticsReportAdapter(
+                    ReportQueryService(
+                        cast("sessionmaker[Session]", request_sessions),
+                        settings=self._settings,
+                    )
                 ),
             )
             request_sessions.commit()

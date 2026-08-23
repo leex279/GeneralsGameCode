@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">Replay report / Evidence</span>
+      <h1>{{ evidence.source_title }}</h1>
+      <p>Evidence tier: {{ evidence.detail.query.expected_tier }} · {{ evidence.detail.source_kind }}</p>
+    </div>
+    <a class="button" href="/replays/{{ evidence.detail.replay_public_id }}/reports/{{ evidence.detail.query.report_public_id }}">Back to fixed report</a>
+  </header>
+  <article id="evidence-source" class="workspace-panel" data-evidence-public-id="{{ evidence.detail.query.evidence_public_id }}">
+    <div class="section-heading"><div><span class="eyebrow">Typed immutable source</span><h2>Source identity</h2></div><span>{{ evidence.detail.source_kind }} / schema {{ evidence.detail.source_schema_version }}</span></div>
+    <dl class="status-ledger">
+      <div><dt>Evidence ID</dt><dd><code>{{ evidence.detail.query.evidence_public_id }}</code></dd></div>
+      <div><dt>Report ID</dt><dd><code>{{ evidence.detail.query.report_public_id }}</code></dd></div>
+      <div><dt>Replay ID</dt><dd><code>{{ evidence.detail.replay_public_id }}</code></dd></div>
+      {% for item in evidence.metadata %}<div><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>{% endfor %}
+    </dl>
+    <section aria-labelledby="evidence-payload-title">
+      <h2 id="evidence-payload-title">{{ evidence.payload_label }}</h2>
+      <pre>{{ evidence.payload_text }}</pre>
+    </section>
+    {% if evidence.citations %}
+      <section aria-labelledby="evidence-citations-title">
+        <h2 id="evidence-citations-title">Citations</h2>
+        <ul>{% for citation in evidence.citations %}<li>{{ citation.role }} · {{ citation.tier }} · <a href="/evidence/{{ citation.tier }}/{{ citation.public_id }}?report_id={{ evidence.detail.query.report_public_id }}"><code>{{ citation.public_id }}</code></a></li>{% endfor %}</ul>
+      </section>
+    {% endif %}
+  </article>
+{% endblock %}

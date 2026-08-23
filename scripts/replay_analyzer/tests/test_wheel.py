@@ -89,6 +89,11 @@ WEB_JOB_TEMPLATE_RESOURCES = {
     "generals_replay_analyzer/web/templates/jobs/detail.html",
     "generals_replay_analyzer/web/templates/jobs/_log.html",
 }
+WEB_REPORT_TEMPLATE_STATIC_RESOURCES = {
+    "generals_replay_analyzer/web/templates/replays/detail.html",
+    "generals_replay_analyzer/web/templates/evidence/detail.html",
+    "generals_replay_analyzer/web/static/js/report.js",
+}
 WEB_JOB_SOURCE_RESOURCES = {
     "generals_replay_analyzer/worker.py",
     "generals_replay_analyzer/watching/__init__.py",
@@ -101,7 +106,12 @@ WEB_JOB_SOURCE_RESOURCES = {
     "generals_replay_analyzer/web/viewmodels/jobs.py",
 }
 WEB_JOB_RESOURCES = WEB_JOB_TEMPLATE_RESOURCES | WEB_JOB_SOURCE_RESOURCES
-WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = WEB_SHELL_RESOURCES | WEB_LIBRARY_TEMPLATE_RESOURCES | WEB_JOB_TEMPLATE_RESOURCES
+WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = (
+    WEB_SHELL_RESOURCES
+    | WEB_LIBRARY_TEMPLATE_RESOURCES
+    | WEB_JOB_TEMPLATE_RESOURCES
+    | WEB_REPORT_TEMPLATE_STATIC_RESOURCES
+)
 
 
 def _source_resource(resource_name: str) -> Path:
