@@ -166,9 +166,14 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .cohort-requirement strong { color: var(--cc-warning); font-family: var(--cc-condensed); font-size: 1.25rem; text-transform: uppercase; }
 .cohort-requirement p { color: var(--cc-muted); margin: var(--cc-space-1) 0 0; }
 .comparison-meaning > p, .comparison-meaning > .reason-line { margin-inline: var(--cc-space-4); }
-[data-report-timeline] { min-height: 24rem; padding-inline: var(--cc-space-3); }
+[data-report-timeline] { min-height: 12rem; padding-inline: var(--cc-space-3); }
 [data-timeline-controls] fieldset { border: 1px solid var(--cc-rule); min-width: 0; }
 [data-timeline-controls] legend { color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.72rem; text-transform: uppercase; }
+/* TheSuperHackers @fix Leex 23/08/2026 Keep timeline filters scan-friendly without shrinking their touch targets. (#TBD) */
+[data-timeline-controls] label { align-items: center; display: flex; min-height: 44px; }
+[data-timeline-controls] input[type="checkbox"], [data-timeline-controls] input[type="radio"] { flex: 0 0 1.1rem; min-height: 1.1rem; padding: 0; width: 1.1rem; }
+[data-timeline-controls] .timeline-family-filter { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+[data-timeline-controls] .timeline-family-filter legend { grid-column: 1 / -1; }
 .wide-table-scroll table { border-collapse: collapse; min-width: 760px; width: 100%; }
 .wide-table-scroll th, .wide-table-scroll td { border-top: 1px solid var(--cc-rule); padding: var(--cc-space-2) var(--cc-space-3); text-align: left; }
 .wide-table-scroll th { color: var(--cc-muted); font-family: var(--cc-mono); font-size: 0.75rem; }

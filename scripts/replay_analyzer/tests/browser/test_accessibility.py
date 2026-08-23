@@ -207,6 +207,7 @@ def test_populated_charts_and_map_have_complete_server_rendered_alternatives(
 
     _goto_populated_page(page, origin, manifest.replay_report.fixed_url, populated_fixture_template)
     expect(page.get_by_role("img", name="Replay event timeline")).to_be_visible()
+    page.locator("details.timeline-event-log > summary").click()
     expect(page.get_by_role("table", name="Timeline data in authoritative replay frames")).to_be_visible()
     assert page.locator("details.evidence-drawer").count() > 0
 
@@ -223,14 +224,16 @@ def test_populated_charts_and_map_have_complete_server_rendered_alternatives(
     expect(page.get_by_text("Returned samples", exact=True)).to_be_visible()
 
     _goto_populated_page(page, origin, manifest.players[0].profile_url, populated_fixture_template)
-    expect(page.get_by_role("img", name="Player distribution chart")).to_be_visible()
-    expect(
-        page.get_by_role("table", name="Evidence-backed longitudinal insights with sample and missing counts")
-    ).to_be_visible()
+    expect(page.get_by_text("More analyzed matches are needed", exact=True)).to_be_visible()
+    assert page.get_by_role("img", name="Player distribution chart").count() == 0
+    assert page.get_by_role(
+        "table", name="Evidence-backed longitudinal insights with sample and missing counts"
+    ).count() == 0
 
     _goto_populated_page(page, origin, manifest.comparison.fixed_url, populated_fixture_template)
-    assert manifest.comparison.state == "unavailable"
-    expect(page.get_by_text("Status Reasons:", exact=False)).to_contain_text("subject_value_unavailable")
+    assert manifest.comparison.state == "not_comparable"
+    expect(page.get_by_text("More comparable matches are needed", exact=True)).to_be_visible()
+    expect(page.locator(".reason-line")).to_contain_text("Why:")
     assert page.locator("[data-comparison-chart] canvas").count() == 0
     expect(
         page.get_by_role("table", name="Comparison values, samples, exclusions, intervals, and evidence")

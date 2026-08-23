@@ -61,10 +61,8 @@ def _goto_populated_page(
         api_path = manifest.map.api_url.split("?", 1)[0]
     elif path == manifest.comparison.fixed_url:
         api_path = manifest.comparison.api_url.split("?", 1)[0]
-    else:
-        profile = next((item for item in manifest.players if item.profile_url == path), None)
-        if profile is not None:
-            api_path = profile.profile_api_url.split("?", 1)[0]
+    # Profiles with no supported tendencies deliberately render no chart and
+    # therefore make no optional profile-JSON request.
 
     if api_path is None:
         response = page.goto(f"{origin}{path}", wait_until="domcontentloaded", timeout=30_000)
@@ -83,8 +81,9 @@ def _goto_populated_page(
     elif path == manifest.map.fixed_url:
         expect(page.locator("#map-chart-status")).to_contain_text("Rendered")
     elif path == manifest.comparison.fixed_url:
-        assert manifest.comparison.state == "unavailable"
-        expect(page.get_by_text("Status Reasons:", exact=False)).to_contain_text("subject_value_unavailable")
+        assert manifest.comparison.state == "not_comparable"
+        expect(page.get_by_text("More comparable matches are needed", exact=True)).to_be_visible()
+        expect(page.locator(".reason-line")).to_contain_text("Why:")
         assert page.locator("[data-comparison-chart] canvas").count() == 0
 
 
@@ -401,11 +400,11 @@ def test_populated_fixed_pages_are_same_origin_and_truthful(
     origin = populated_server.origin
     manifest = populated_fixture_template.manifest
     routes = (
-        (manifest.replay_report.fixed_url, "Timeline data in authoritative replay frames", ("leex279", "FOX27")),
+        (manifest.replay_report.fixed_url, "Full event log", ("leex279", "FOX27")),
         (manifest.evidence.fixed_url, "Typed immutable source", (manifest.evidence.tier,)),
         (manifest.map.fixed_url, "Observed sample reduction", ("authoritative", "Frame start", "Frame end")),
-        (manifest.players[0].profile_url, "Names & Provenance", ("leex279", "Player Patterns")),
-        (manifest.players[1].profile_url, "Names & Provenance", ("FOX27", "Player Patterns")),
+        (manifest.players[0].profile_url, "Recent analyzed matches", ("leex279", "Player patterns")),
+        (manifest.players[1].profile_url, "Recent analyzed matches", ("FOX27", "Player patterns")),
         (manifest.comparison.fixed_url, "Comparison Evidence", ("economy.cash_change_total", "Sample")),
         (manifest.pending_job.fixed_url, "Job state", ("discover", "pending")),
     )
@@ -425,7 +424,8 @@ def test_populated_fixed_pages_are_same_origin_and_truthful(
         _goto_populated_page(page, origin, path, populated_fixture_template)
         expect(page.get_by_text(semantic_text, exact=False).first).to_be_visible()
         text = page.locator("main").inner_text()
-        assert all(value in text for value in expected_values)
+        missing = tuple(value for value in expected_values if value.casefold() not in text.casefold())
+        assert not missing, (path, missing)
     assert rejected == []
     assert failed_assets == []
     assert_browser_clean(console_errors, page_errors)
@@ -444,7 +444,7 @@ def test_populated_library_report_map_and_comparison_reflow_offline(
     manifest = populated_fixture_template.manifest
     routes = (
         ("/replays", "Replay library"),
-        (manifest.replay_report.fixed_url, "Timeline data in authoritative replay frames"),
+        (manifest.replay_report.fixed_url, "Full event log"),
         (manifest.map.fixed_url, "Observed sample reduction"),
         (manifest.comparison.fixed_url, "Comparison Evidence"),
     )
@@ -484,6 +484,8 @@ def test_populated_wide_evidence_tables_are_keyboard_scroll_regions(
     rejected = install_same_origin_guard(page, origin)
     for path, region_name in routes:
         _goto_populated_page(page, origin, path, populated_fixture_template)
+        if region_name == "Replay timeline table":
+            page.locator("details.timeline-event-log > summary").click()
         dimensions = page.evaluate(
             "({scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth})"
         )
@@ -523,10 +525,10 @@ def test_populated_essential_content_survives_without_javascript(
     manifest = populated_fixture_template.manifest
     routes = (
         ("/replays", "leex279"),
-        (manifest.replay_report.fixed_url, "Timeline data in authoritative replay frames"),
+        (manifest.replay_report.fixed_url, "Full event log"),
         (manifest.evidence.fixed_url, "Typed immutable source"),
         (manifest.map.fixed_url, "Observed sample reduction"),
-        (manifest.players[0].profile_url, "Player Patterns"),
+        (manifest.players[0].profile_url, "Player patterns"),
         (manifest.comparison.fixed_url, "Comparison Evidence"),
         (manifest.pending_job.fixed_url, "Job state"),
         ("/settings", "Editable settings"),

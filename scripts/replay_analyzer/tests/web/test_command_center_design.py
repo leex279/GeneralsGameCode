@@ -153,6 +153,18 @@ def test_strategy_report_has_tactical_panels_and_matching_chart_palette() -> Non
         assert "#f0966e" in script
 
 
+def test_timeline_uses_its_filter_controls_instead_of_a_duplicate_series_legend() -> None:
+    css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
+    script = package_resource("web/static/js/report.js").read_text(encoding="utf-8")
+
+    assert "legend: { show: false" in script
+    assert 'root.style.height = "12rem"' in script
+    assert "[data-report-timeline] { min-height: 12rem" in css
+    assert "axisLabel: { show: false }" in script
+    assert '[data-timeline-controls] input[type="checkbox"]' in css
+    assert ".timeline-family-filter" in css
+
+
 def test_command_dialog_restores_the_actual_invoker_and_mobile_uses_the_menu() -> None:
     html = _page("/")
     script = package_resource("web/static/js/app.js").read_text(encoding="utf-8")

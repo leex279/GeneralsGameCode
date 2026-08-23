@@ -13,10 +13,10 @@
 {% include "players/_history.html" %}
 
 <section class="workspace-panel" aria-labelledby="insights-title">
-  <div class="section-heading"><div><span class="eyebrow">Supported tendencies</span><h2 id="insights-title">Player patterns</h2></div><span>{{ profile.insights|length }} available</span></div>
-  {% if profile.insights %}
+  <div class="section-heading"><div><span class="eyebrow">Supported tendencies</span><h2 id="insights-title">Player patterns</h2></div><span>{{ view.supported_insights|length }} established</span></div>
+  {% if view.supported_insights %}
     <div class="player-insight-grid">
-      {% for insight in profile.insights %}
+      {% for insight in view.supported_insights %}
         <article class="player-insight-card">
           <span>{{ insight.insight_kind }}</span><h3>{{ insight.label }}</h3>
           {% if insight.raw_value is not none %}<strong>{{ insight.raw_value }}{% if insight.unit %} {{ insight.unit }}{% endif %}</strong>{% else %}<strong>Not established</strong>{% endif %}
@@ -30,14 +30,14 @@
   {% endif %}
 </section>
 
-{% if profile.insights %}
+{% if view.supported_insights %}
 <details class="workspace-panel technical-evidence">
   <summary><span>Pattern methods and evidence</span><small>Samples, intervals, exclusions, and fixed sources</small></summary>
-  <div class="technical-evidence-body wide-table-scroll" role="region" aria-label="Player pattern evidence table" tabindex="0"><table><caption>Evidence-backed longitudinal insights with sample and missing counts</caption><thead><tr><th scope="col">Pattern</th><th scope="col">Value</th><th scope="col">Sample / Missing</th><th scope="col">Interval</th><th scope="col">Evidence</th></tr></thead><tbody>{% for insight in profile.insights %}<tr><th scope="row">{{ insight.label }}<small>{{ insight.insight_kind }}</small></th><td>{% if insight.raw_value is not none %}{{ insight.raw_value }} {{ insight.unit or '' }}{% else %}Unavailable: {{ insight.availability.reason_codes|join(', ') }}{% endif %}</td><td>{{ insight.sample_count }} / {{ insight.missing_count }}{% if insight.quality_exclusion_codes %}<small>Excluded: {{ insight.quality_exclusion_codes|join(', ') }}</small>{% endif %}</td><td>{% if insight.interval %}{{ insight.interval.lower }}â€“{{ insight.interval.upper }} at {{ insight.interval.confidence_level }} confidence ({{ insight.interval.method }}){% else %}No interval{% endif %}</td><td>{% for evidence in insight.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.evidence_public_id }}?report_id={{ profile.version.fixed_reports[0].report_public_id if profile.version.fixed_reports else '' }}">{{ evidence.tier }} evidence</a>{% else %}No evidence supplied{% endfor %}</td></tr>{% endfor %}</tbody></table></div>
+  <div class="technical-evidence-body wide-table-scroll" role="region" aria-label="Player pattern evidence table" tabindex="0"><table><caption>Evidence-backed longitudinal insights with sample and missing counts</caption><thead><tr><th scope="col">Pattern</th><th scope="col">Value</th><th scope="col">Sample / Missing</th><th scope="col">Interval</th><th scope="col">Evidence</th></tr></thead><tbody>{% for insight in view.supported_insights %}<tr><th scope="row">{{ insight.label }}<small>{{ insight.insight_kind }}</small></th><td>{{ insight.raw_value }} {{ insight.unit or '' }}</td><td>{{ insight.sample_count }} / {{ insight.missing_count }}{% if insight.quality_exclusion_codes %}<small>Excluded: {{ insight.quality_exclusion_codes|join(', ') }}</small>{% endif %}</td><td>{% if insight.interval %}{{ insight.interval.lower }}â€“{{ insight.interval.upper }} at {{ insight.interval.confidence_level }} confidence ({{ insight.interval.method }}){% else %}No interval{% endif %}</td><td>{% for evidence in insight.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.evidence_public_id }}?report_id={{ profile.version.fixed_reports[0].report_public_id if profile.version.fixed_reports else '' }}">{{ evidence.tier }} evidence</a>{% else %}No evidence supplied{% endfor %}</td></tr>{% endfor %}</tbody></table></div>
 </details>
 {% endif %}
 
-<section class="workspace-panel" aria-labelledby="profile-chart-title"><div class="section-heading"><div><span class="eyebrow">Optional chart</span><h2 id="profile-chart-title">Pattern distribution</h2></div></div><div data-player-profile-chart data-source="{{ view.canonical_json_url }}" role="img" aria-label="Player distribution chart"></div><p>Every chart value is also listed in the pattern evidence table.</p><a href="{{ view.canonical_json_url }}">Open fixed profile data</a></section>
+{% if view.supported_insights %}<section class="workspace-panel" aria-labelledby="profile-chart-title"><div class="section-heading"><div><span class="eyebrow">Optional chart</span><h2 id="profile-chart-title">Pattern distribution</h2></div></div><div data-player-profile-chart data-source="{{ view.canonical_json_url }}" role="img" aria-label="Player distribution chart"></div><p>Every chart value is also listed in the pattern evidence table.</p><a href="{{ view.canonical_json_url }}">Open fixed profile data</a></section>{% endif %}
 
 <details class="workspace-panel technical-evidence profile-identity">
   <summary><span>Identity and data</span><small>Aliases, provenance, immutable bindings, and profile version</small></summary>

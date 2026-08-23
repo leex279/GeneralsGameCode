@@ -6,7 +6,12 @@ from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict
 
-from generals_replay_analyzer.web.ports import PlayerIndexPageDTO, PlayerIndexQueryDTO, PlayerProfileDTO
+from generals_replay_analyzer.web.ports import (
+    PlayerIndexPageDTO,
+    PlayerIndexQueryDTO,
+    PlayerInsightDTO,
+    PlayerProfileDTO,
+)
 
 
 class PlayerIndexViewModel(BaseModel):
@@ -27,6 +32,7 @@ class PlayerProfileViewModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     profile: PlayerProfileDTO
+    supported_insights: tuple[PlayerInsightDTO, ...]
     canonical_json_url: str
 
 
@@ -92,4 +98,16 @@ def profile_json_url(profile: PlayerProfileDTO) -> str:
 
 
 def player_profile_view(profile: PlayerProfileDTO) -> PlayerProfileViewModel:
-    return PlayerProfileViewModel(profile=profile, canonical_json_url=profile_json_url(profile))
+    # TheSuperHackers @fix Leex 23/08/2026 Keep zero-sample placeholders out of player-facing tendency claims. (#TBD)
+    supported = tuple(
+        insight
+        for insight in profile.insights
+        if insight.availability.state in {"available", "partial"}
+        and insight.raw_value is not None
+        and insight.sample_count > 0
+    )
+    return PlayerProfileViewModel(
+        profile=profile,
+        supported_insights=supported,
+        canonical_json_url=profile_json_url(profile),
+    )

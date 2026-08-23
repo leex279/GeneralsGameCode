@@ -89,10 +89,15 @@
       <form class="library-filters" data-timeline-controls aria-label="Timeline controls"><div class="filter-grid">
         <fieldset><legend>Time axis</legend><label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label><label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis disabled> Seconds</label></fieldset>
         <fieldset><legend>Players</legend>{% for player in report_view.timeline.available_players %}<label for="timeline-player-{{ loop.index }}"><input id="timeline-player-{{ loop.index }}" type="checkbox" value="{{ player.public_id }}" data-timeline-player checked disabled> {{ player.label }}</label>{% endfor %}</fieldset>
-        <fieldset><legend>Event families</legend>{% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}</fieldset>
+        <fieldset class="timeline-family-filter"><legend>Event families</legend>{% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}</fieldset>
       </div></form>
       <div data-report-timeline data-source="/api/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/charts/timeline" role="img" aria-label="Replay event timeline"></div>
+      <details class="technical-evidence timeline-event-log">
+        <summary><span>Full event log</span><small>All frame-level rows and raw event labels</small></summary>
+        <div class="technical-evidence-body">
       <div class="wide-table-scroll" role="region" aria-label="Replay timeline table" tabindex="0"><table><caption>Timeline data in authoritative replay frames</caption><thead><tr><th scope="col">Series</th><th scope="col">Frame or interval</th><th scope="col">Event</th><th scope="col">Value</th></tr></thead><tbody>{% for series in report_view.timeline.series %}{% for point in series.points %}<tr><th scope="row">{{ series.label }}</th><td>{{ point.frame }}</td><td>{{ point.label }}</td><td>{% if point.value is not none %}{{ point.value }}{% else %}—{% endif %}</td></tr>{% endfor %}{% for interval in series.intervals %}<tr><th scope="row">{{ series.label }}</th><td>{{ interval.frame_start }}–{{ interval.frame_end }}</td><td>{{ interval.label }}</td><td>—</td></tr>{% endfor %}{% endfor %}</tbody></table></div>
+        </div>
+      </details>
     {% endif %}
   </section>
 

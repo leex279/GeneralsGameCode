@@ -28,7 +28,7 @@ from generals_replay_analyzer.web.ports import (
     TerminalQualityDTO,
 )
 from generals_replay_analyzer.web.routes.players import _fixed_profile_url, router
-from generals_replay_analyzer.web.viewmodels.players import player_index_url, profile_json_url
+from generals_replay_analyzer.web.viewmodels.players import player_index_url, player_profile_view, profile_json_url
 
 from .test_player_profile_json import DIGEST, PLAYER_ID, _profile
 
@@ -309,6 +309,27 @@ def test_one_match_profile_explains_the_sample_requirement_once_without_empty_ro
     assert fixed.text.count("More analyzed matches are needed") == 1
     assert "minimum_sample_not_met" not in fixed.text.split("Identity and data", 1)[0]
     assert "Unavailable:</td>" not in fixed.text
+
+
+def test_profile_view_excludes_zero_sample_unestablished_patterns_from_the_player_summary() -> None:
+    profile = _full_profile()
+    unsupported = tuple(
+        insight.model_copy(
+            update={
+                "raw_value": None,
+                "sample_count": 0,
+                "availability": AvailabilityDTO(
+                    state="unavailable",
+                    reason_codes=("minimum_sample_not_met",),
+                ),
+            }
+        )
+        for insight in profile.insights
+    )
+
+    view = player_profile_view(profile.model_copy(update={"insights": unsupported}))
+
+    assert view.supported_insights == ()
 
 
 def test_unavailable_profile_and_invalid_queries_fail_closed_without_fixed_reads() -> None:

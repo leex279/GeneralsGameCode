@@ -59,6 +59,8 @@ def test_available_timeline_has_keyboard_filters_axis_toggle_and_native_frame_ta
     assert any(value and value.startswith("timeline-family-") for value in labels)
     assert any(tag == "caption" for tag, _attrs in parser.tags)
     assert any(tag == "div" and "data-report-timeline" in attrs for tag, attrs in parser.tags)
+    assert any(tag == "details" and "timeline-event-log" in attrs.get("class", "") for tag, attrs in parser.tags)
+    assert "Full event log" in html
     assert "Timeline data in authoritative replay frames" in html
     assert "<td>7</td>" in html
     assert "<noscript>" in html

@@ -32,12 +32,12 @@ SCREENSHOTS = (
     ("compare--mobile.png", "/compare", "Pattern Comparison", "mobile"),
 )
 POPULATED_SCREENSHOTS = (
-    ("report--desktop.png", "report", "Timeline data in authoritative replay frames", "desktop"),
+    ("report--desktop.png", "report", "Observed opening through 0:03.5", "desktop"),
     ("map-detail--desktop.png", "map", "Observed sample reduction", "desktop"),
-    ("player-profile--desktop.png", "profile", "Names & Provenance", "desktop"),
-    ("report--tablet.png", "report", "Timeline data in authoritative replay frames", "tablet"),
+    ("player-profile--desktop.png", "profile", "Recent analyzed matches", "desktop"),
+    ("report--tablet.png", "report", "Observed opening through 0:03.5", "tablet"),
     ("map-detail--tablet.png", "map", "Observed sample reduction", "tablet"),
-    ("report--mobile.png", "report", "Timeline data in authoritative replay frames", "mobile"),
+    ("report--mobile.png", "report", "Observed opening through 0:03.5", "mobile"),
     ("map-detail--mobile.png", "map", "Observed sample reduction", "mobile"),
 )
 
@@ -168,15 +168,15 @@ def test_configured_root_import_is_keyboard_submitted_without_claiming_completio
     page.keyboard.press("Enter")
     dialog = page.get_by_role("dialog", name="Import replay", exact=True)
     expect(dialog).to_be_visible()
-    root = page.get_by_label("Configured replay root", exact=True)
+    root = page.get_by_label("Replay folder", exact=True)
     _tab_to(page, root)
     expect(root).to_be_enabled()
     expect(root).to_have_value(manifest.import_root_public_id)
-    relative_name = page.get_by_label("Relative replay name", exact=True)
+    relative_name = page.get_by_label("Replay filename", exact=True)
     _tab_to(page, relative_name)
     relative_name.press_sequentially(manifest.import_relative_path)
     expect(relative_name).to_have_value(manifest.import_relative_path)
-    submit = page.get_by_role("button", name="Import configured replay", exact=True)
+    submit = page.get_by_role("button", name="Analyze replay", exact=True)
     _tab_to(page, submit)
     with page.expect_response(re.compile(rf"^{re.escape(origin)}/imports/root-selections$")) as response_info:
         page.keyboard.press("Enter")
@@ -300,7 +300,7 @@ def test_report_timeline_and_evidence_disclosure_are_keyboard_operable(
     console_errors, page_errors = install_browser_error_guard(page)
     rejected = install_same_origin_guard(page, origin)
     _goto_populated_page(page, origin, manifest.player_reports[0].fixed_url, populated_fixture_template)
-    expect(page.get_by_role("heading", name="Quality and availability", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", name="Observed opening through 0:03.5", exact=True)).to_be_visible()
 
     player_toggles = page.locator("[data-timeline-player]")
     assert player_toggles.count() == 1, "player report must expose its exact player timeline scope"
@@ -315,6 +315,11 @@ def test_report_timeline_and_evidence_disclosure_are_keyboard_operable(
     page.keyboard.press("Space")
     expect(family_toggle).not_to_be_checked()
 
+    technical = page.locator("#technical-evidence")
+    technical_summary = technical.locator(":scope > summary")
+    _tab_to(page, technical_summary)
+    page.keyboard.press("Enter")
+    expect(technical).to_have_attribute("open", "")
     drawer = page.locator("details.evidence-drawer").first
     summary = drawer.locator("summary")
     _tab_to(page, summary)
@@ -597,6 +602,9 @@ def test_populated_dialog_and_evidence_release_screenshots(
 
     page.keyboard.press("Escape")
     _goto_populated_page(page, origin, manifest.replay_report.fixed_url, populated_fixture_template)
+    technical = page.locator("#technical-evidence")
+    technical.locator(":scope > summary").click()
+    expect(technical).to_have_attribute("open", "")
     drawer = page.locator("details.evidence-drawer").first
     summary = drawer.locator("summary")
     _tab_to(page, summary)

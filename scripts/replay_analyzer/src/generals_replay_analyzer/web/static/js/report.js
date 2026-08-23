@@ -100,7 +100,8 @@
     }
     currentPayload = payload;
     if (!chart) {
-      root.style.height = "24rem";
+      // TheSuperHackers @fix Leex 23/08/2026 Keep the evidence timeline compact beneath its explicit player and family filters. (#TBD)
+      root.style.height = "12rem";
       chart = window.echarts.init(root, null, { renderer: "canvas" });
     }
     const categoricalLabels = Array.from(
@@ -125,7 +126,7 @@
           borderColor: "#31536a",
           textStyle: { color: "#eaf6ff" },
         },
-        legend: { show: true, textStyle: { color: "#9bb4c4" } },
+        legend: { show: false, textStyle: { color: "#9bb4c4" } },
         xAxis: {
           type: "value",
           name: seconds ? "Seconds (frames / 30)" : "Replay frame",
@@ -144,6 +145,8 @@
             data: categoricalLabels,
             position: "right",
             axisLine: { lineStyle: { color: "#31536a" } },
+            axisLabel: { show: false },
+            axisTick: { show: false },
           },
         ],
         series: chartSeries(payload),
