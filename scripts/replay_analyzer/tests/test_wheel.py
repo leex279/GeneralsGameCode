@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import textwrap
 import tomllib
 import zipfile
@@ -177,6 +178,39 @@ def test_wheel_configuration_explicitly_includes_only_web_templates_and_static_r
     assert {
         destination for destination in force_include.values() if destination.startswith("generals_replay_analyzer/data/")
     } == DATA_RESOURCES
+
+
+def test_source_distribution_excludes_local_environments_caches_and_unknown_root_files(tmp_path: Path) -> None:
+    """Catch the sdist traversing workstation state instead of the explicit release source set."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    canary = PROJECT_ROOT / ".sdist-leak-canary"
+    canary.mkdir()
+    (canary / "private.txt").write_text("must not ship", encoding="utf-8")
+    try:
+        distribution_directory = tmp_path / "dist"
+        environment = {**os.environ, "UV_CACHE_DIR": str(tmp_path / "uv-cache")}
+        _run(
+            [uv, "build", "--sdist", "--out-dir", str(distribution_directory)],
+            PROJECT_ROOT,
+            environment,
+        )
+    finally:
+        shutil.rmtree(canary)
+
+    source_distribution = next(distribution_directory.glob("generals_replay_analyzer-*.tar.gz"))
+    with tarfile.open(source_distribution, "r:gz") as archive:
+        members = tuple(archive.getnames())
+    forbidden_fragments = (
+        "/.sdist-leak-canary/",
+        "/.task",
+        "/.tmp",
+        "/.uv-cache",
+        "/.venv/",
+        "/dist/",
+    )
+    assert not any(fragment in member for member in members for fragment in forbidden_fragments)
+    assert source_distribution.stat().st_size < 5_000_000
 
 
 def test_wheel_data_resource_allow_list_excludes_temporary_poison_files(tmp_path: Path) -> None:
