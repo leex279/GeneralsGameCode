@@ -26,21 +26,17 @@
       {% if shell.availability.state != "unavailable" and dashboard.recent_replays %}
         <section class="dashboard-section" aria-labelledby="recent-matches-title">
           <div class="section-heading compact-heading"><div><span class="eyebrow">Latest evidence</span><h3 id="recent-matches-title">Recent matches</h3></div></div>
-          <div class="table-scroll">
-            <table class="dashboard-table">
-              <caption>Recent replay analysis supplied by the application adapter</caption>
-              <thead><tr><th scope="col">Replay</th><th scope="col">Players</th><th scope="col">Result</th><th scope="col">Map</th><th scope="col">Analysis</th><th scope="col">Evidence</th><th scope="col">Observed</th><th scope="col">Action</th></tr></thead>
-              <tbody>{% for replay in dashboard.recent_replays %}<tr>
-                <td>{{ replay.label }}</td>
-                <td>{{ replay.players|join(" vs ") }}</td>
-                <td>{{ replay.result or "unavailable" }}</td>
-                <td>{{ replay.map_name or "unavailable" }}</td>
-                <td>{{ replay.analysis_state }}</td>
-                <td>{{ replay.evidence_tier or "unavailable" }}</td>
-                <td>{{ replay.observed_at or "unavailable" }}</td>
-                <td><a href="/replays?search={{ replay.replay_public_id }}">Inspect replay</a></td>
-              </tr>{% endfor %}</tbody>
-            </table>
+          <!-- TheSuperHackers @feature Leex 23/08/2026 Open recent fixed reports directly and lead with player-readable match context. (#TBD) -->
+          <div class="recent-match-grid">
+            {% for replay in dashboard.recent_replays %}
+              <article class="recent-match-card">
+                <span>{{ replay.analysis_state }} analysis Â· {{ replay.evidence_tier or "evidence pending" }}</span>
+                <h4>{{ replay.players|join(" vs ") }}</h4>
+                <p>{{ replay.map_name or "Map unavailable" }}{% if replay.result %} Â· {{ replay.result }}{% endif %}</p>
+                <small>{{ replay.label }}{% if replay.observed_at %} Â· {{ replay.observed_at }}{% endif %}</small>
+                {% if replay.report_public_id %}<a href="/replays/{{ replay.replay_public_id }}/reports/{{ replay.report_public_id }}">View analysis</a>{% else %}<a href="/replays/{{ replay.replay_public_id }}">View analysis</a>{% endif %}
+              </article>
+            {% endfor %}
           </div>
         </section>
       {% endif %}

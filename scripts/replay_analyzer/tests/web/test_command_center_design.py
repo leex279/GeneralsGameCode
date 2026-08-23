@@ -254,11 +254,22 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     assert "Recent matches" in response.text and "command-center.rep" in response.text
     assert "Activity &amp; quality trends" in response.text and "10 verified, 2 partial" in response.text
     assert "Notable evidence" in response.text and "One replay needs evidence review" in response.text
+    assert 'class="recent-match-grid"' in response.text
     assert (
-        'href="/replays?search=123e4567-e89b-42d3-a456-426614174000">Inspect replay</a>'
+        'href="/replays/123e4567-e89b-42d3-a456-426614174000/reports/'
+        '123e4567-e89b-42d3-a456-426614174010">View analysis</a>'
     ) in response.text
     assert 'href="/replays?analysis_status=partial">Inspect matching replays</a>' in response.text
     assert 'href="/replays?search=123e4567-e89b-42d3-a456-426614174000">Inspect replay evidence</a>' in response.text
+
+
+def test_library_prefers_a_direct_analysis_journey_over_searching_the_same_row() -> None:
+    template = package_resource("web/templates/replays/_table.html").read_text(encoding="utf-8")
+
+    assert "replay.report_public_id" in template
+    assert 'reports/{{ replay.report_public_id }}' in template
+    assert ">View analysis<" in template
+    assert 'href="/replays?search={{ replay.replay_public_id }}">Inspect</a>' not in template
 
 
 def test_compact_filters_and_table_have_keyboard_truthful_interaction_contracts() -> None:

@@ -119,7 +119,10 @@ def test_import_dialog_labels_the_blocked_upload_and_disables_unavailable_roots(
     port = _ImportPort(state="unavailable")
 
     with _client(port) as client:
-        response = client.get("/imports/dialog", headers={"host": "localhost"})
+        response = client.get(
+            "/imports/dialog",
+            headers={"host": "localhost", "hx-request": "true", "accept": "text/html"},
+        )
 
     assert response.status_code == 200
     assert 'role="dialog"' in response.text
@@ -130,6 +133,24 @@ def test_import_dialog_labels_the_blocked_upload_and_disables_unavailable_roots(
     assert "Tournament archives" in response.text
     assert "root_fixture_reason" in response.text
     assert "<noscript>" in response.text
+
+
+def test_import_dialog_leads_with_the_working_replay_path_and_one_primary_action() -> None:
+    port = _ImportPort()
+
+    with _client(port) as client:
+        response = client.get(
+            "/imports/dialog",
+            headers={"host": "localhost", "hx-request": "true", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    assert 'class="import-group import-group-primary"' in response.text
+    assert 'class="import-group import-group-optional"' in response.text
+    assert response.text.index("Replay from a watched folder") < response.text.index("Direct replay upload")
+    assert 'class="button button-primary" type="submit">Analyze replay</button>' in response.text
+    assert '>Cancel<' in response.text
+    assert response.text.count("opaque_ingress_handoff_pending") == 1
 
 
 def test_direct_import_navigation_renders_full_shell_with_real_library_return_link() -> None:
@@ -522,7 +543,7 @@ def test_import_dialog_disables_configured_root_controls_when_none_are_available
     assert response.status_code == 200
     assert "No configured replay roots are available." in response.text
     assert '<select id="configured-root" name="root_public_id" required disabled>' in response.text
-    assert '<button type="submit" disabled>Import configured replay</button>' in response.text
+    assert '<button class="button button-primary" type="submit" disabled>Analyze replay</button>' in response.text
     assert "no configured roots" in response.text.casefold()
 
 
@@ -534,7 +555,7 @@ def test_import_dialog_disables_root_controls_when_every_configured_root_is_unav
 
     assert "No configured replay roots are currently available." in response.text
     assert '<select id="configured-root" name="root_public_id" required disabled>' in response.text
-    assert '<button type="submit" disabled>Import configured replay</button>' in response.text
+    assert '<button class="button button-primary" type="submit" disabled>Analyze replay</button>' in response.text
 
 
 def test_unsafe_host_origin_or_csrf_is_rejected_before_a_root_command_reaches_the_port() -> None:
