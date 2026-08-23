@@ -25,7 +25,7 @@ The initial trusted target is Zero Hour 1.04. Verify the file is an unmodified `
 
 A CRC mismatch is a replay-simulation boundary, not a telemetry success. The exporter records the mismatch frame and stops according to engine behavior. Reports may use evidence observed before that point only when labelled partial or deterministic-only.
 
-The pinned `leex279` versus `FOX27` fixture currently reaches an established modern-build CRC mismatch at frame 105 and stops at frame 108. This is a known release blocker for authoritative full-match playback; do not describe its natural short trace as complete. Compare telemetry-off and telemetry-on outcome/CRC results before attributing a mismatch to the analyzer.
+The pinned `leex279` versus `FOX27` fixture currently reaches a genuine modern-versus-retail CRC mismatch for snapshot frame 100 and stops at playback frame 108. This is a known release blocker for authoritative full-match playback; do not describe its natural short trace as complete. Compare telemetry-off and telemetry-on outcome/CRC results before attributing a mismatch to the analyzer.
 
 ## Partial or truncated trace
 

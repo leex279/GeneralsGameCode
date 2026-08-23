@@ -85,9 +85,9 @@ def test_natural_crc_boundary_has_only_unknown_authoritative_outcome(
     assert outcome.payload.terminal_reason == "crc_mismatch"
     assert complete.payload.final_frame == 108
     assert complete.payload.crc_mismatch is True
-    # Recorder's authoritative CRC queue calculation identifies frame 105 while
-    # playback closes at the frame-108 command boundary.
-    assert complete.payload.crc_mismatch_frame == outcome.payload.crc_mismatch_frame == 105
+    # The paired queue attributes the mismatch to its frame-100 snapshot while
+    # playback still closes at the frame-108 command boundary.
+    assert complete.payload.crc_mismatch_frame == outcome.payload.crc_mismatch_frame == 100
     assert complete.payload.quit_early == outcome.payload.quit_early
     assert complete.payload.replay_header_desync == outcome.payload.replay_header_desync
 

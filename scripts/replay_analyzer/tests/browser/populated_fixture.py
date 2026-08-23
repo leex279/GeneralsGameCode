@@ -430,7 +430,7 @@ def _write_fixture_trace(trace_root: Path, pinned_replay: Path) -> Path:
     outcome["payload"].update(
         terminal_reason="crc_mismatch",
         crc_mismatch=True,
-        crc_mismatch_frame=105,
+        crc_mismatch_frame=100,
         clean_shutdown=False,
     )
     complete["frame"] = 108
@@ -440,7 +440,7 @@ def _write_fixture_trace(trace_root: Path, pinned_replay: Path) -> Path:
         command_count=16,
         terminal_reason="crc_mismatch",
         crc_mismatch=True,
-        crc_mismatch_frame=105,
+        crc_mismatch_frame=100,
         replay_truncated=False,
         clean_shutdown=False,
     )

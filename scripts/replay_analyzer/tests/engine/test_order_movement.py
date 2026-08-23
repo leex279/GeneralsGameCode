@@ -240,11 +240,11 @@ def test_natural_pinned_replay_retains_frame_108_crc_boundary(
         "command_count": terminal.payload.command_count,
         "terminal_reason": "crc_mismatch",
         "crc_mismatch": True,
-        "crc_mismatch_frame": 105,
+        "crc_mismatch_frame": 100,
     }
     assert terminal.frame == 108
     assert terminal.payload.crc_mismatch is True
-    assert terminal.payload.crc_mismatch_frame == 105
+    assert terminal.payload.crc_mismatch_frame == 100
     assert hashlib.sha256(pinned_replay.read_bytes()).hexdigest() == original_hash
 
 

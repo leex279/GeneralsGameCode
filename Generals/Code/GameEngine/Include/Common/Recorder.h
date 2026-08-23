@@ -67,10 +67,20 @@ protected:
 	class CRCInfo
 	{
 	public:
+		// TheSuperHackers @fix Leex 23/08/2026 Keep replay CRC values paired with their deterministic snapshot frame. (#TBD)
+		struct CRCRecord
+		{
+			CRCRecord() : value(0), frame(0) {}
+			CRCRecord(UnsignedInt crcValue, UnsignedInt snapshotFrame) : value(crcValue), frame(snapshotFrame) {}
+
+			UnsignedInt value;
+			UnsignedInt frame;
+		};
+
 		CRCInfo();
 		CRCInfo(UnsignedInt localPlayer, Bool isMultiplayer);
-		void addCRC(UnsignedInt val);
-		UnsignedInt readCRC();
+		void addCRC(UnsignedInt val, UnsignedInt frame);
+		CRCRecord readCRC();
 		int GetQueueSize() const { return m_data.size(); }
 		UnsignedInt getLocalPlayer() const { return m_localPlayer; }
 		void setSawCRCMismatch() { m_sawCRCMismatch = TRUE; }
@@ -80,7 +90,7 @@ protected:
 		Bool m_sawCRCMismatch;
 		Bool m_skippedOne;
 		UnsignedInt m_localPlayer;
-		std::list<UnsignedInt> m_data;
+		std::list<CRCRecord> m_data;
 	};
 
 public:

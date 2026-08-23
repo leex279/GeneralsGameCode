@@ -84,9 +84,9 @@ Fixture: `scripts/replay_analyzer/tests/fixtures/zero_hour_1_04/leex279_vs_fox27
 
 - Replay SHA-256: `ea085767bfa11d2cfc167d9007173ce2eb29b5f557702ffd042e2e9a1a8f6bb8`
 - All six runs: exit code `1`, playback started, final frame `108`, command count `16`, terminal reason
-  `crc_mismatch`, mismatch frame `105`.
+  `crc_mismatch`, paired snapshot mismatch frame `100`.
 - All three normalized enabled traces:
-  `c1ad565b7cae2d307a5b3c45b8db3f85a867d2d6d909e72c930393c2814bb5b3`.
+  `3089a22fa7da6765d9f3f8dcff38156cee31ac326ed00205bc20655ad075f171`.
 - Enabled versus disabled deterministic stdout: byte-identical after removing only `Elapsed Time` lines.
 - Enabled versus disabled stderr: byte-identical without normalization.
 - Replay and executable SHA-256: unchanged before/after all runs, including failure paths.
@@ -98,21 +98,21 @@ Fixture: `scripts/replay_analyzer/tests/fixtures/zero_hour_1_04/leex279_vs_fox27
 - Writer error: `null` in every completion.
 
 The enabled `match_outcome` is kept separate: status `unknown`, source `unavailable`, engine player domain
-`[0,1,2,3,4]`, empty winner and loser lists, terminal reason `crc_mismatch`, and mismatch frame `105`. The historical
+`[0,1,2,3,4]`, empty winner and loser lists, terminal reason `crc_mismatch`, and paired snapshot mismatch frame `100`. The historical
 single-winner fields are `null`. Disabled winner/loser facts are therefore unknown, not inferred.
 
 ### Pinned map asset identity
 
 - Schema/cache contract: map asset v2 under `map-assets-v2`; the frozen v1 schema/loader remains compatible.
-- Content SHA-256: `9a82ae3469d9b703ad78689a35a1d28c51e6845e19f5a2bb1addc3fb85073563`
-- Exact manifest SHA-256: `e477663c021e6921be8214a6a1ac7f31341bfc4ed162a543eec918bbd976054f`
+- Content SHA-256: `0c1738bd68c432af9ac7d9c36488cadb2c1a41f751441f8a2f4d6b335ee433a8`
+- Exact manifest SHA-256: `3cee335865479bee3bccedb0569eeae3a19ad7a22dee27bc852b1bf4f64ce496`
 
 All six emitted file hashes were identical in the three enabled runs:
 
 | File | SHA-256 |
 |---|---|
 | `height.f32.zlib` | `3f2edd7a13e5bcf1e5746c6424ed6f4174dc615ba6252f19f9a476acee9e9645` |
-| `manifest.json` | `e477663c021e6921be8214a6a1ac7f31341bfc4ed162a543eec918bbd976054f` |
+| `manifest.json` | `3cee335865479bee3bccedb0569eeae3a19ad7a22dee27bc852b1bf4f64ce496` |
 | `pathing-amphibious.u8.zlib` | `fea4b10015030f0fd7b21aa0d1ca0e3a4f7bdb76f99586336af26d70a107d6af` |
 | `pathing-ground.u8.zlib` | `34d8c296e88744dea0aeae2a28b48a50cb1953ce9cc98e94e1948a4d98ebb2f1` |
 | `terrain.u8.zlib` | `58b84ba400e5aa883d71cc119f725d6f11cccc95e7f3d2e8edda8ee2bf1ed958` |

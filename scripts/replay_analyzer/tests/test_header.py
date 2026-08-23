@@ -71,6 +71,8 @@ def test_pinned_replay_header_matches_the_checked_in_source_grounded_json() -> N
 
     assert header.to_dict() == expected
     assert [slot.name for slot in header.slots if slot.kind == "human"] == ["leex279", "FOX27"]
+    assert header.slots[header.local_player_index].ip == 0
+    assert sum(slot.kind == "human" for slot in header.slots) == 2
     assert "3133811" not in {slot.name for slot in header.slots if slot.name is not None}
     assert "e80b96708aa4254945941fd5f81489bb" not in {
         slot.name for slot in header.slots if slot.name is not None
@@ -106,6 +108,23 @@ def test_header_parses_explicit_slot_kinds_without_arithmetic_player_mapping() -
         (7, "closed", None, None),
     ]
     assert header.local_player_index == 0
+    assert sum(slot.kind == "human" for slot in header.slots) == 1
+    assert sum(slot.kind == "ai" for slot in header.slots) == 1
+
+
+def test_header_preserves_two_human_multiplayer_shape_with_nonzero_local_ip() -> None:
+    """Reject using serialized IP values to decide whether two human slots are multiplayer-shaped."""
+    header = parse_replay_header(
+        _header_bytes(
+            slots="HAlice,ABCD,1234,TT,1,2,3,0,0:HBob,1,2345,FT,2,3,4,1,1:X:X:X:X:X:X:"
+        )
+    )
+
+    assert header.slots[header.local_player_index].ip == 0xABCD
+    assert [(slot.index, slot.kind) for slot in header.slots if slot.kind == "human"] == [
+        (0, "human"),
+        (1, "human"),
+    ]
 
 
 def test_header_rejects_unknown_game_options_tokens() -> None:

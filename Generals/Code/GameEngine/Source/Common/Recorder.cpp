@@ -113,7 +113,7 @@ RecorderClass::CRCInfo::CRCInfo(UnsignedInt localPlayer, Bool isMultiplayer)
 	m_localPlayer = localPlayer;
 }
 
-void RecorderClass::CRCInfo::addCRC(UnsignedInt val)
+void RecorderClass::CRCInfo::addCRC(UnsignedInt val, UnsignedInt frame)
 {
 	// TheSuperHackers @fix helmutbuhler 03/04/2025
 	// In Multiplayer, the first MSG_LOGIC_CRC message somehow doesn't make it through the network.
@@ -126,22 +126,22 @@ void RecorderClass::CRCInfo::addCRC(UnsignedInt val)
 		return;
 	}
 
-	m_data.push_back(val);
+	m_data.push_back(CRCRecord(val, frame));
 	//DEBUG_LOG(("CRCInfo::addCRC() - crc %8.8X pushes list to %d entries (full=%d)", val, m_data.size(), !m_data.empty()));
 }
 
-UnsignedInt RecorderClass::CRCInfo::readCRC()
+RecorderClass::CRCInfo::CRCRecord RecorderClass::CRCInfo::readCRC()
 {
 	if (m_data.empty())
 	{
 		DEBUG_LOG(("CRCInfo::readCRC() - bailing, full=0, size=%d", m_data.size()));
-		return 0;
+		return CRCRecord();
 	}
 
-	UnsignedInt val = m_data.front();
+	CRCRecord record = m_data.front();
 	m_data.pop_front();
-	//DEBUG_LOG(("CRCInfo::readCRC() - returning %8.8X, full=%d, size=%d", val, !m_data.empty(), m_data.size()));
-	return val;
+	//DEBUG_LOG(("CRCInfo::readCRC() - returning %8.8X from frame %d, full=%d, size=%d", record.value, record.frame, !m_data.empty(), m_data.size()));
+	return record;
 }
 
 void RecorderClass::logGameStart(AsciiString options)
@@ -984,7 +984,7 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 	if (fromPlayback)
 	{
 		//DEBUG_LOG(("RecorderClass::handleCRCMessage() - Adding CRC of %X from %d to m_crcInfo", newCRC, playerIndex));
-		m_crcInfo.addCRC(newCRC);
+		m_crcInfo.addCRC(newCRC, TheGameLogic->getFrame());
 		return;
 	}
 
@@ -993,10 +993,10 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 	const Bool isLocalPlayer = !p || ThePlayerList->getSlotIndex(playerIndex) == localPlayerIndex;
 	if (isLocalPlayer)
 	{
-		UnsignedInt playbackCRC = m_crcInfo.readCRC();
+		CRCInfo::CRCRecord playbackCRC = m_crcInfo.readCRC();
 		//DEBUG_LOG(("RecorderClass::handleCRCMessage() - Comparing CRCs of InGame:%8.8X Replay:%8.8X Frame:%d from Player %d",
-		//	playbackCRC, newCRC, TheGameLogic->getFrame()-m_crcInfo.GetQueueSize()-1, playerIndex));
-		if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC && !m_crcInfo.sawCRCMismatch())
+		//	playbackCRC.value, newCRC, playbackCRC.frame, playerIndex));
+		if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC.value && !m_crcInfo.sawCRCMismatch())
 		{
 			// Since we don't seem to have any *visible* desyncs when replaying games, but get this warning
 			// virtually every replay, the assumption is our CRC checking is faulty.  Since we're at the
@@ -1007,17 +1007,15 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 			// More than 20 years later, but finally fixed and re-enabled!
 			TheInGameUI->message("GUI:CRCMismatch");
 
-			// TheSuperHackers @info helmutbuhler 03/04/2025
-			// Note: We subtract the queue size from the frame number. This way we calculate the correct frame
-			// the mismatch first happened in case the NetCRCInterval is set to 1 during the game.
-			const UnsignedInt mismatchFrame = TheGameLogic->getFrame() - m_crcInfo.GetQueueSize() - 1;
+			// TheSuperHackers @fix Leex 23/08/2026 Report the exact queued CRC snapshot frame instead of a receive-frame queue offset. (#TBD)
+			const UnsignedInt mismatchFrame = playbackCRC.frame;
 
 			// Now also prints a UI message for it.
 			const UnicodeString mismatchDetailsStr = TheGameText->FETCH_OR_SUBSTITUTE("GUI:CRCMismatchDetails", L"InGame:%8.8X Replay:%8.8X Frame:%d");
-			TheInGameUI->message(mismatchDetailsStr, playbackCRC, newCRC, mismatchFrame);
+			TheInGameUI->message(mismatchDetailsStr, playbackCRC.value, newCRC, mismatchFrame);
 
 			DEBUG_LOG(("Replay has gone out of sync!\nInGame:%8.8X Replay:%8.8X\nFrame:%d",
-				playbackCRC, newCRC, mismatchFrame));
+				playbackCRC.value, newCRC, mismatchFrame));
 
 			// Print Mismatch in case we are simulating replays from console.
 			printf("CRC Mismatch in Frame %d\n", mismatchFrame);
@@ -1149,7 +1147,8 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 	}
 #endif
 
-	Bool isMultiplayer = m_gameInfo.getSlot(header.localPlayerIndex)->getIP() != 0;
+	// TheSuperHackers @bugfix Leex 23/08/2026 Align replay CRC warmup with recorded human multiplayer slots instead of the local IP sentinel. (#TBD)
+	Bool isMultiplayer = m_gameInfo.isMultiPlayer();
 	m_crcInfo = CRCInfo(header.localPlayerIndex, isMultiplayer);
 	REPLAY_CRC_INTERVAL = m_gameInfo.getCRCInterval();
 	DEBUG_LOG(("Player index is %d, replay CRC interval is %d", m_crcInfo.getLocalPlayer(), REPLAY_CRC_INTERVAL));

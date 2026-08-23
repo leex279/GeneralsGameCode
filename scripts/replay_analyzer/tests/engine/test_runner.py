@@ -1365,7 +1365,7 @@ def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
     assert isinstance(complete, CompleteRecord)
     assert complete.payload.final_frame == 108
     assert complete.payload.command_count == 16
-    assert complete.payload.crc_mismatch_frame == 105
+    assert complete.payload.crc_mismatch_frame == 100
     assert load_replay_outcome(result.outcome_path).model_dump() == {
         "schema_version": 1,
         "playback_started": True,
@@ -1373,7 +1373,7 @@ def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
         "command_count": 16,
         "terminal_reason": "crc_mismatch",
         "crc_mismatch": True,
-        "crc_mismatch_frame": 105,
+        "crc_mismatch_frame": 100,
     }
     assert len(result.map_assets) == 6 and all(path.is_file() for path in result.map_assets)
     assert (result.run_dir / "request.json").is_file()

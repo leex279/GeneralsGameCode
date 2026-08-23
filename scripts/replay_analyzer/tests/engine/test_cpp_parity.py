@@ -16,6 +16,75 @@ from generals_replay_analyzer.parity import (
 from generals_replay_analyzer.parser import parse_replay
 
 
+@pytest.mark.parametrize(
+    ("header_path", "source_path"),
+    (
+        (
+            "GeneralsMD/Code/GameEngine/Include/Common/Recorder.h",
+            "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp",
+        ),
+        (
+            "Generals/Code/GameEngine/Include/Common/Recorder.h",
+            "Generals/Code/GameEngine/Source/Common/Recorder.cpp",
+        ),
+    ),
+)
+def test_crc_queue_keeps_atomic_snapshot_frame_value_records(
+    repository_root: Path,
+    header_path: str,
+    source_path: str,
+) -> None:
+    """Reject value-only CRC queues that lose the deterministic snapshot frame during skip or FIFO reads."""
+    header = (repository_root / header_path).read_text(encoding="utf-8")
+    source = (repository_root / source_path).read_text(encoding="utf-8")
+    crc_info = header.split("class CRCInfo", maxsplit=1)[1].split("\n\t};\n\npublic:", maxsplit=1)[0]
+    crc_implementation = source.split("void RecorderClass::CRCInfo::addCRC", maxsplit=1)[1].split(
+        "void RecorderClass::logGameStart", maxsplit=1
+    )[0]
+
+    assert "struct CRCRecord" in crc_info
+    assert "UnsignedInt value;" in crc_info
+    assert "UnsignedInt frame;" in crc_info
+    assert "void addCRC(UnsignedInt val, UnsignedInt frame);" in crc_info
+    assert "CRCRecord readCRC();" in crc_info
+    assert "std::list<CRCRecord> m_data;" in crc_info
+    assert crc_implementation.index("if (!m_skippedOne)") < crc_implementation.index(
+        "m_data.push_back(CRCRecord(val, frame))"
+    )
+    assert crc_implementation.index("CRCRecord record = m_data.front()") < crc_implementation.index(
+        "m_data.pop_front()"
+    )
+    assert "return record;" in crc_implementation
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp",
+        "Generals/Code/GameEngine/Source/Common/Recorder.cpp",
+    ),
+)
+def test_crc_comparison_uses_human_slot_policy_and_paired_snapshot_frame(
+    repository_root: Path,
+    relative_path: str,
+) -> None:
+    """Reject local-IP multiplayer classification and receive-frame queue arithmetic attribution."""
+    source = (repository_root / relative_path).read_text(encoding="utf-8")
+    setup = source.split("m_gameInfo.setLocalIP", maxsplit=1)[1].split(
+        "m_crcInfo = CRCInfo", maxsplit=1
+    )[0]
+    handler = source.split("void RecorderClass::handleCRCMessage", maxsplit=1)[1].split(
+        "Bool RecorderClass::playbackFile", maxsplit=1
+    )[0]
+
+    assert "m_gameInfo.isMultiPlayer()" in setup
+    assert "getIP() != 0" not in setup
+    assert "m_crcInfo.addCRC(newCRC, TheGameLogic->getFrame())" in handler
+    assert "playbackCRC.value" in handler
+    assert "const UnsignedInt mismatchFrame = playbackCRC.frame;" in handler
+    assert "TheGameLogic->getFrame() - m_crcInfo.GetQueueSize() - 1" not in handler
+
+
 def _runtime_environment(repository_root: Path) -> dict[str, str]:
     """Expose built proprietary dependency DLLs without copying files outside pytest's temporary tree."""
     environment = os.environ.copy()

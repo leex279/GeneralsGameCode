@@ -8,7 +8,7 @@ Base branch: `feat/replay-analyzer-v2` at `9387086be`
 
 ## Player-visible outcome
 
-The installed web application opens the most useful player-specific report directly from the replay library. The pinned replay proof shows an honest opening-only analysis through frame 105 (3.5 seconds at 30 FPS): two identified players, 600 observed supplies, one observed Crusader, no invented winner, and no named strategy when the evidence is insufficient. Raw frame rows and provenance remain available behind disclosures.
+The installed web application opens the most useful player-specific report directly from the replay library. The pinned replay proof shows an honest opening-only trace through playback frame 108 (3.6 seconds at 30 FPS), with the CRC divergence attributed to snapshot frame 100: two identified players, 600 observed supplies, one observed Crusader, no invented winner, and no named strategy when the evidence is insufficient. Raw frame rows and provenance remain available behind disclosures.
 
 Player profiles no longer present zero-sample placeholders as established tendencies. Timeline controls are compact, the duplicate series legend is removed, and desktop/mobile reports retain the strategy summary above technical evidence.
 
@@ -64,8 +64,7 @@ Open `http://127.0.0.1:8765/replays`. New replay analysis uses the watched-folde
 
 ## Explicit limits
 
-- The pinned replay proof is partial at the frame-105 CRC mismatch. It is not a full-match result and does not establish midgame, late-game, winner, or recurring player tendencies.
+- The pinned replay proof is partial at the snapshot-frame-100 CRC mismatch and stops at playback frame 108. It is not a full-match result and does not establish midgame, late-game, winner, or recurring player tendencies.
 - Ollama is unavailable in this environment. The deterministic evidence-backed coaching projection works without it; live LLM commentary was not verified.
 - CMake 4.2.1 and Visual Studio Community are installed, but Win32/VC6/MinGW engine builds and replay non-interference were not rerun for this product checkpoint. The worktree contains five unrelated protected engine edits, so compiling them would not prove the isolated web-product change.
 - `cl`, `gcc`, `g++`, `mingw32-make`, and `msdev` were not available on the current shell PATH. VC6 and MinGW retail/toolchain validation remain unverified here.
-
