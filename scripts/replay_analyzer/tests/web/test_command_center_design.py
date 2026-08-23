@@ -29,23 +29,27 @@ def _page(path: str) -> str:
     return response.text
 
 
-def test_command_center_uses_the_approved_fixed_charcoal_visual_system() -> None:
+def test_command_center_uses_the_approved_tactical_visual_system() -> None:
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
 
     for token, value in (
-        ("--cc-canvas", "#151815"),
-        ("--cc-surface-1", "#1d211c"),
-        ("--cc-surface-2", "#252a23"),
-        ("--cc-rule", "#4b5246"),
-        ("--cc-text", "#f1f0e8"),
-        ("--cc-olive", "#a6b27b"),
-        ("--cc-amber", "#dfaf51"),
-        ("--cc-failure", "#e06a60"),
+        ("--cc-canvas", "#080f15"),
+        ("--cc-surface-1", "#0d1a24"),
+        ("--cc-surface-2", "#111f2b"),
+        ("--cc-surface-3", "#1a2f41"),
+        ("--cc-rule", "#31536a"),
+        ("--cc-text", "#eaf6ff"),
+        ("--cc-muted", "#9bb4c4"),
+        ("--cc-cyan", "#7fc6f5"),
+        ("--cc-blue", "#4a9fd8"),
+        ("--cc-success", "#a9d05a"),
+        ("--cc-warning", "#f0966e"),
+        ("--cc-opponent", "#d9764f"),
     ):
         assert f"{token}: {value}" in css
     assert "max-width: 1600px" in css
     assert "prefers-color-scheme" not in css
-    assert "linear-gradient" not in css and "radial-gradient" not in css
+    assert "linear-gradient" in css and "radial-gradient" in css
 
 
 def test_shell_has_a_persistent_mode_strip_and_keyboard_navigation_contract() -> None:
@@ -100,7 +104,7 @@ def test_command_center_declares_dark_browser_chrome_and_resilient_interactions(
     library = _page("/replays")
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
 
-    assert '<meta name="theme-color" content="#151815">' in dashboard
+    assert '<meta name="theme-color" content="#080f15">' in dashboard
     assert 'autocomplete="off"' in library
     assert 'placeholder="Filename or player…"' in library
     assert "touch-action: manipulation" in css
@@ -114,13 +118,35 @@ def test_command_center_declares_dark_browser_chrome_and_resilient_interactions(
 def test_review_hardening_keeps_controls_readable_and_unavailable_non_failure() -> None:
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
 
-    assert "--cc-control-border: #737b6c" in css
+    assert "--cc-control-border: #4a7592" in css
     assert "border: 1px solid var(--cc-control-border)" in css
     assert ".availability-unavailable { border-left: 4px solid var(--cc-amber); }" in css
     assert ".filter-grid label" in css and "font-size: 0.8125rem" in css
     assert ".replay-table th" in css and ".replay-table td" in css
     assert "width: calc(100% - 48px)" in css
     assert "box-shadow" not in css
+
+
+def test_strategy_report_has_tactical_panels_and_matching_chart_palette() -> None:
+    css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
+    script = package_resource("web/static/js/report.js").read_text(encoding="utf-8")
+
+    for selector in (
+        ".report-hero",
+        ".status-chip",
+        ".versus-grid",
+        ".player-match-card",
+        ".strategy-grid",
+        ".strategy-card",
+        ".review-prompt-list",
+        ".build-order-list",
+        ".technical-evidence",
+    ):
+        assert selector in css
+    assert "clip-path: polygon" in css
+    assert "#7fc6f5" in script
+    assert "#a9d05a" in script
+    assert "#f0966e" in script
 
 
 def test_command_dialog_restores_the_actual_invoker_and_mobile_uses_the_menu() -> None:
