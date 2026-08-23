@@ -28,7 +28,7 @@ from generals_replay_analyzer.web.ports import (
     TerminalQualityDTO,
 )
 from generals_replay_analyzer.web.routes.players import _fixed_profile_url, router
-from generals_replay_analyzer.web.viewmodels.players import player_index_url
+from generals_replay_analyzer.web.viewmodels.players import player_index_url, profile_json_url
 
 from .test_player_profile_json import DIGEST, PLAYER_ID, _profile
 
@@ -281,6 +281,8 @@ def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidenc
     assert 'src="/static/js/compare.js"' in fixed.text
     assert "Charts are optional" in fixed.text
     assert f"/api/players/{PLAYER_ID}/profile?" in fixed.text
+    json_url = profile_json_url(port.profile)
+    assert "report_public_id=" in json_url and "report_public=" not in json_url
     assert REPORT_ID in fixed.text
 
 

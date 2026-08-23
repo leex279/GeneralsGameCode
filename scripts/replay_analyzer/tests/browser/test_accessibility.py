@@ -229,7 +229,9 @@ def test_populated_charts_and_map_have_complete_server_rendered_alternatives(
     ).to_be_visible()
 
     _goto_populated_page(page, origin, manifest.comparison.fixed_url, populated_fixture_template)
-    expect(page.get_by_role("img", name="Comparison chart")).to_be_visible()
+    assert manifest.comparison.state == "unavailable"
+    expect(page.get_by_text("Status Reasons:", exact=False)).to_contain_text("subject_value_unavailable")
+    assert page.locator("[data-comparison-chart] canvas").count() == 0
     expect(
         page.get_by_role("table", name="Comparison values, samples, exclusions, intervals, and evidence")
     ).to_be_visible()

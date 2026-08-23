@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.comparison.service import LongitudinalSubject, MatchSubject, ReplayComparisonService
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
-from generals_replay_analyzer.db.models import LongitudinalRun, Player
+from generals_replay_analyzer.db.models import LongitudinalRun, Player, PlayerIdentityOperation
 from generals_replay_analyzer.identity.query import PlayerQueryService
 from generals_replay_analyzer.identity.service import PlayerIdentityService
 from generals_replay_analyzer.identity.workflow import PlayerIdentityWorkflowService
@@ -253,6 +253,35 @@ def test_persisted_audit_recovers_a_lost_adapter_execute_response_through_the_we
         assert response.status_code == 303
         assert "invalidation_state=already_queued" in response.headers["location"]
         assert adapter.audit(_id(1), 1, 25).operations[0].operation_public_id == receipt.operation.operation_public_id
+    finally:
+        engine.dispose()  # type: ignore[attr-defined]
+
+
+def test_audit_projects_automatic_identity_history_without_treating_it_as_executable(tmp_path: Path) -> None:
+    """Catch read-side audit kinds being narrowed to the operator-executable mutation union."""
+    adapter, factory, engine = _adapter(tmp_path / "automatic-audit.sqlite3")
+    try:
+        with factory.begin() as session:
+            session.add(
+                PlayerIdentityOperation(
+                    public_id=_id(101),
+                    operation_kind="auto_link",
+                    actor="parser:identity-resolution",
+                    reason="exact embedded replay name resolution",
+                    before_json={},
+                    after_json={},
+                    inverse_payload_json={},
+                    affected_revisions_json={
+                        "players": [{"player_public_id": _id(1), "identity_revision": 2}]
+                    },
+                    created_at=NOW,
+                )
+            )
+
+        audit = adapter.audit(_id(1), 1, 25)
+
+        assert audit.operations[0].operation_kind == "auto_link"
+        assert audit.operations[0].inverse_allowed is False
     finally:
         engine.dispose()  # type: ignore[attr-defined]
 

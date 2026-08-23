@@ -2,7 +2,7 @@
 
 Date: 23 August 2026
 
-Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture now builds successfully and has been consumed by a fresh installed wheel. The exact responsive table proof, populated security matrix, and Settings preview/cancel/apply/diagnostic flow are green. A required comparable result cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current fixed result remains truthfully not comparable; it is not weakened or presented as comparable. The remaining populated keyboard, Axe, offline, worker, screenshot, and manual-review matrices are not yet complete.
+Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture now builds successfully and has been consumed by fresh installed wheels. The responsive, populated security, Settings mutation, external-worker, Axe, semantic-alternative, offline, and no-script matrices are green. A required comparable result cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current fixed result remains truthfully unavailable; it is not weakened or presented as comparable. The remaining full populated keyboard, screenshot, and manual-review matrices are not yet complete.
 
 ## Accepted inputs
 
@@ -58,6 +58,8 @@ The fixture manifest and database remain external. No ORM seed, forged job row, 
 | Settings native mutation flow | `uv run --project . pytest tests/browser/test_user_flows.py::test_settings_preview_cancel_apply_and_diagnostic_are_keyboard_operable -q --browser chromium` | 1 passed in 27.59s; exact-origin native POST, keyboard cancel, confirmed apply, and explicit diagnostic green |
 | Installed external-worker flow | `uv run --project . pytest tests/browser/test_user_flows.py::test_pending_job_is_settled_only_by_the_external_installed_worker -q --browser chromium` | 1 passed in 33.16s; separate worker ownership, HTMX polling, focus preservation, and succeeded detail green |
 | Populated installed-wheel security | `uv run --project . pytest tests/browser/test_security.py -q --browser chromium` | 52 passed in 32.93s; fixed JSON timeline, map JSON, and real map PNG hardening included |
+| Populated Axe and semantic matrix | `uv run --project . pytest -q tests/browser/test_accessibility.py` | 10 passed in 48.68s; report, evidence, map, both player profiles, comparison unavailable state, job, and identity audit green |
+| Populated offline/no-script/reflow matrix | `uv run --project . pytest -q tests/browser/test_offline.py` | 37 passed in 65.64s; desktop/tablet/mobile, installed-wheel isolation, no-script, packaged assets, and comparison overflow green |
 | Web and wheel | `uv run --project . pytest tests/web tests/test_wheel.py -q` | 577 passed, 1 skipped in 49.21s |
 | Ruff | `uv run --project . ruff check src tests` | all checks passed |
 | Strict mypy | `uv run --project . mypy --strict src` | success, 158 source files |
@@ -75,7 +77,7 @@ The fixture manifest and database remain external. No ORM seed, forged job row, 
 | Compare selector unavailable | 0 | 0 |
 | Settings available shell | 0 | 0 |
 
-The tested pages also passed one-H1, banner, named primary navigation, main, footer, skip-link focus, nonempty main content without JavaScript, same-origin resource, and reduced-motion assertions. Populated report, evidence, map, two player profiles, job, and identity Axe/semantic cases are implemented but have not yet completed their final rerun. Their console/page-error guard was tightened after the prior partial review. No populated Axe pass is claimed here.
+The tested pages also passed one-H1, banner, named primary navigation, main, footer, skip-link focus, nonempty main content without JavaScript, same-origin resource, and reduced-motion assertions. Populated report, evidence, map, two player profiles, comparison unavailable state, job, and identity Axe/semantic cases passed the installed-wheel rerun. Chart ARIA names are restored after ECharts initialization, and the identity audit accepts durable automatic-link history without treating it as an executable operator mutation.
 
 All contexts use the same locale/timezone/device-scale/light/reduced-motion/service-worker/download policy. Every interactive flow fails on console or page errors. Child server processes receive isolated profile, app-data, and temporary directories and no inherited product-prefixed environment setting.
 
@@ -91,10 +93,10 @@ All contexts use the same locale/timezone/device-scale/light/reduced-motion/serv
 | locator/ORM/traceback/lease canaries in problem response | not exposed |
 | exact-origin browser guard and packaged assets | pass on all tested pages |
 | JavaScript-disabled essential index content | pass on Library, Jobs, Maps, Players, Compare, Settings |
-| document overflow | none on Library, Maps index, or Compare at 1440x900, 1024x768, or 390x844 |
+| document overflow | none on populated Library, fixed Report, Map detail, or Compare at 1440x900, 1024x768, or 390x844 |
 | browser-direct Ollama/external request | zero |
 
-Full unsafe-route Origin/CSRF session swapping, GET non-mutation, worker log canaries, fixed JSON/map PNG headers, and populated adapter redaction remain pending with the fixture.
+Unsafe-route Origin/CSRF session swapping, GET non-mutation, worker log canaries, fixed JSON/map PNG headers, and populated adapter redaction passed the installed-wheel security matrix.
 
 ## External screenshots
 
@@ -119,7 +121,7 @@ Required populated screenshot cases are now implemented for import dialog, fixed
 
 The production-service populated fixture and worker-supported pending discover now exist. Release acceptance is still blocked by these non-waived items:
 
-- No truthful comparable result can be derived from the only available replay: `leex279` and `FOX27` use different factions, while all accepted match and longitudinal comparison definitions are same-faction-only. The current fixed result correctly reports `faction_mismatch` and `subject_value_unavailable`. A fabricated replay, self-comparison, or relaxed comparison semantics is forbidden.
-- The remaining populated keyboard cases, populated Axe/offline matrices, remaining screenshots, full static/build gates, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
+- No truthful comparable result can be derived from the only available replay: `leex279` and `FOX27` use different factions, while all accepted match and longitudinal comparison definitions are same-faction-only. The current fixed result correctly reports `subject_value_unavailable`; the underlying cross-faction cohort cannot supply an aligned value. A fabricated replay, self-comparison, or relaxed comparison semantics is forbidden.
+- The remaining populated keyboard cases, remaining screenshots, full final static/build gates, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
 
 These items are pending, not skipped or waived. `web-qa.md` remains a factual partial record rather than release closure.

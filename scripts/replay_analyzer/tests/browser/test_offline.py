@@ -81,8 +81,9 @@ def _goto_populated_page(
     elif path == manifest.map.fixed_url:
         expect(page.locator("#map-chart-status")).to_contain_text("Rendered")
     elif path == manifest.comparison.fixed_url:
-        assert manifest.comparison.state == "comparable"
-        expect(page.locator("[data-comparison-chart] canvas")).to_be_visible()
+        assert manifest.comparison.state == "unavailable"
+        expect(page.get_by_text("Status Reasons:", exact=False)).to_contain_text("subject_value_unavailable")
+        assert page.locator("[data-comparison-chart] canvas").count() == 0
 
 
 def test_child_runtime_environment_redirects_profile_and_temporary_roots(

@@ -123,7 +123,8 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .status-ledger { margin: 0; }
 .status-ledger > div { align-items: baseline; border-bottom: 1px solid var(--cc-rule); display: flex; justify-content: space-between; padding: var(--cc-space-3); }
 .status-ledger dt { color: var(--cc-muted); font-size: 0.75rem; text-transform: uppercase; }
-.status-ledger dd { color: var(--cc-amber); font-family: var(--cc-mono); font-size: 0.78rem; margin: 0; }
+/* TheSuperHackers @fix Leex 23/08/2026 Allow immutable digests to wrap inside narrow status ledgers. (#TBD) */
+.status-ledger dd { color: var(--cc-amber); font-family: var(--cc-mono); font-size: 0.78rem; margin: 0; min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .operations-detail { padding: var(--cc-space-3); }
 .badge, .empty-state, .pipeline-summary, .error-panel, .metric { border: 1px solid var(--cc-rule); border-radius: var(--cc-radius); display: block; margin: var(--cc-space-2) 0; padding: var(--cc-space-2); }
 .availability-available { border-left: 4px solid var(--cc-success); }

@@ -113,7 +113,8 @@ class InvalidationJobReference:
 @dataclass(frozen=True, slots=True)
 class IdentityOperationSummary:
     operation_public_id: str
-    operation_kind: Literal["merge_players", "split_alias", "inverse"]
+    # TheSuperHackers @fix Leex 23/08/2026 Preserve automatic and provider-attachment records in read-only audit history. (#TBD)
+    operation_kind: Literal["auto_link", "merge_players", "split_alias", "attach_external_alias", "inverse"]
     inverse_of_operation_public_id: str | None
     operator_label: str
     reason: str
@@ -490,7 +491,10 @@ class PlayerIdentityWorkflowService:
             )
         )
         reversible = operation.operation_kind in {"merge_players", "split_alias"} and not already_inversed
-        kind = cast(Literal["merge_players", "split_alias", "inverse"], operation.operation_kind)
+        kind = cast(
+            Literal["auto_link", "merge_players", "split_alias", "attach_external_alias", "inverse"],
+            operation.operation_kind,
+        )
         revisions = tuple(
             RevisionPrecondition(
                 str(_mapping(item).get("player_public_id")), int(cast(int, _mapping(item).get("identity_revision")))

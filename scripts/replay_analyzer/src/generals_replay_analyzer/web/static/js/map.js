@@ -167,6 +167,9 @@
       legend: {type: "scroll"},
       series,
     });
+    // TheSuperHackers @fix Leex 23/08/2026 Restore the authored map name after ECharts rewrites ARIA attributes. (#TBD)
+    chartNode.setAttribute("role", "img");
+    chartNode.setAttribute("aria-label", "Authoritative replay map scene");
     const reasons = scene.availability.reason_codes || [];
     const presenceNote = scene.control_windows.length === 0
       ? " Presence cells are unavailable and are not inferred."

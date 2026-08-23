@@ -126,6 +126,9 @@
       },
       { notMerge: true },
     );
+    // TheSuperHackers @fix Leex 23/08/2026 Restore the authored accessible name after ECharts rewrites ARIA attributes. (#TBD)
+    root.setAttribute("role", "img");
+    root.setAttribute("aria-label", "Replay event timeline");
   };
 
   const filteredSource = () => {

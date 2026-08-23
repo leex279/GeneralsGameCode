@@ -1954,6 +1954,8 @@ class MapSceneQueryPort(Protocol):
 ComparisonState = Literal["comparable", "partial", "not_comparable", "unavailable"]
 ComparisonKind = Literal["players", "matches", "openings", "strategies", "time_periods"]
 IdentityOperationKind = Literal["merge_players", "split_alias", "inverse"]
+# TheSuperHackers @fix Leex 23/08/2026 Keep the read-only audit vocabulary aligned with durable identity records. (#TBD)
+IdentityAuditOperationKind = Literal["auto_link", "merge_players", "split_alias", "attach_external_alias", "inverse"]
 
 
 def _require_utc_datetime(value: datetime | None, *, label: str) -> datetime | None:
@@ -2381,7 +2383,7 @@ class InvalidationJobReferenceDTO(WebDTO):
 
 class IdentityOperationSummaryDTO(WebDTO):
     operation_public_id: PublicId
-    operation_kind: IdentityOperationKind
+    operation_kind: IdentityAuditOperationKind
     inverse_of_operation_public_id: PublicId | None = None
     operator_label: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=1024)

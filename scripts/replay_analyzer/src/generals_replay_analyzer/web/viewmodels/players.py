@@ -76,11 +76,16 @@ def profile_json_url(profile: PlayerProfileDTO) -> str:
     """Expose the exact profile binding as an ordinary same-origin link."""
     query = profile.query.model_dump(mode="json", exclude_none=True)
     pairs: list[tuple[str, object]] = []
+    repeated_names = {
+        "longitudinal_run_ids": "longitudinal_run_id",
+        "report_public_ids": "report_public_id",
+    }
     for name, value in query.items():
         if name == "player_public_id":
             continue
-        if isinstance(value, list):
-            pairs.extend((name.removesuffix("_ids"), item) for item in value)
+        if name in repeated_names:
+            # TheSuperHackers @fix Leex 23/08/2026 Preserve the fixed profile API's exact repeated binding names. (#TBD)
+            pairs.extend((repeated_names[name], item) for item in value)
         else:
             pairs.append((name, value))
     return f"/api/players/{profile.player.player_public_id}/profile?{urlencode(pairs)}"

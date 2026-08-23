@@ -29,6 +29,8 @@
       typeof metric.right?.raw_value === "number"
     );
     if (!comparable.length || !window.echarts) return;
+    // TheSuperHackers @fix Leex 23/08/2026 Give renderable comparison charts a stable visible canvas height. (#TBD)
+    element.style.height = "24rem";
     const chart = window.echarts.init(element, null, {renderer: "canvas"});
     chart.setOption({
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -41,6 +43,9 @@
         {name: "Right", type: "bar", data: comparable.map((metric) => metric.right.raw_value)},
       ],
     });
+    // TheSuperHackers @fix Leex 23/08/2026 Preserve authored chart names after ECharts initializes its canvas. (#TBD)
+    element.setAttribute("role", "img");
+    element.setAttribute("aria-label", "Comparison chart");
   };
 
   const renderProfile = async (element) => {
@@ -48,6 +53,7 @@
     if (!payload || payload.version?.schema_version !== "replay-player-profile-v1" || !window.echarts) return;
     const values = payload.insights.filter((insight) => typeof insight.raw_value === "number" && insight.availability?.state !== "unavailable");
     if (!values.length) return;
+    element.style.height = "24rem";
     const chart = window.echarts.init(element, null, {renderer: "canvas"});
     chart.setOption({
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -57,6 +63,8 @@
       yAxis: {type: "value"},
       series: [{name: "Raw Value", type: "bar", data: values.map((insight) => insight.raw_value)}],
     });
+    element.setAttribute("role", "img");
+    element.setAttribute("aria-label", "Player distribution chart");
   };
 
   const tasks = [
