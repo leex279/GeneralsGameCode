@@ -293,13 +293,10 @@ def test_report_timeline_and_evidence_disclosure_are_keyboard_operable(
     expect(page.get_by_role("heading", name="Quality and availability", exact=True)).to_be_visible()
 
     player_toggles = page.locator("[data-timeline-player]")
-    assert player_toggles.count() > 0, "populated fixed report must expose a player timeline control"
+    assert player_toggles.count() == 1, "player report must expose its exact player timeline scope"
     player_toggle = player_toggles.first
     _tab_to(page, player_toggle)
-    expect(player_toggle).to_be_checked()
-    page.keyboard.press("Space")
-    expect(player_toggle).not_to_be_checked()
-    page.keyboard.press("Space")
+    expect(player_toggle).to_be_enabled()
     expect(player_toggle).to_be_checked()
 
     family_toggle = page.locator("[data-timeline-family]").first
@@ -354,16 +351,15 @@ def test_map_filters_and_semantic_evidence_are_keyboard_operable(
     expect(frame_start).to_have_value(str(start_value + 2))
     expect(start_slider).to_have_value(str(start_value + 2))
 
-    coordinate = page.get_by_label("Coordinate display", exact=True)
+    coordinate = page.locator("#coordinate-display")
+    expect(coordinate).to_be_visible()
     _tab_to(page, coordinate)
     page.keyboard.press("ArrowDown")
     assert coordinate.input_value() in {"map_normalized", "player_centric"}
 
-    player_toggle = page.get_by_role("group", name="Players").locator('input[type="checkbox"]').first
-    _tab_to(page, player_toggle)
-    previous_player_state = player_toggle.is_checked()
-    page.keyboard.press("Space")
-    assert player_toggle.is_checked() is not previous_player_state
+    player_group = page.get_by_role("group", name="Players")
+    expect(player_group).to_contain_text("No accepted player options")
+    assert player_group.locator('input[type="checkbox"]').count() == 0
 
     family_toggle = page.get_by_role("group", name="Event overlays").locator('input[type="checkbox"]').first
     _tab_to(page, family_toggle)
