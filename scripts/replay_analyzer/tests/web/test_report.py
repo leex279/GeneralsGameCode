@@ -38,6 +38,8 @@ REPLAY_ID = "123e4567-e89b-42d3-a456-426614174100"
 REPORT_ID = "123e4567-e89b-42d3-a456-426614174101"
 PLAYER_ID = "123e4567-e89b-42d3-a456-426614174102"
 EVIDENCE_ID = "123e4567-e89b-42d3-a456-426614174103"
+OPPONENT_PLAYER_ID = "123e4567-e89b-42d3-a456-426614174105"
+OPPONENT_REPORT_ID = "123e4567-e89b-42d3-a456-426614174106"
 SHA256 = "a" * 64
 SECTION_KEYS = (
     "overview",
@@ -211,6 +213,65 @@ def test_report_claim_rejects_placeholder_values_and_unsafe_canonical_data() -> 
                 "unavailable_reason": "telemetry_missing",
             }
         )
+
+
+def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() -> None:
+    """Catch the useful player analysis being buried below the raw evidence ledger."""
+    report = _report()
+    economy = ReportSectionDTO(
+        key="economy",
+        title="Economy",
+        availability=AvailabilityDTO(state="available"),
+        claims=(
+            ReportClaimDTO(
+                **{
+                    **_claim("economy").model_dump(),
+                    "claim_id": "economy.cash_change_total",
+                    "label": "Cash change",
+                    "display_value": "-300",
+                    "unit": "credits",
+                    "evidence": (ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="derived"),),
+                }
+            ),
+        ),
+    )
+    player_report = _replace_report(
+        report,
+        players=(
+            ReplayPlayerDisplayDTO(
+                replay_player_public_id=PLAYER_ID,
+                report_public_id=REPORT_ID,
+                display_name="Leex279",
+                slot=1,
+                faction="China",
+                result="won",
+            ),
+            ReplayPlayerDisplayDTO(
+                replay_player_public_id=OPPONENT_PLAYER_ID,
+                report_public_id=OPPONENT_REPORT_ID,
+                display_name="Fox27",
+                slot=2,
+                faction="GLA",
+                result="lost",
+            ),
+        ),
+        sections=tuple(economy if section.key == "economy" else section for section in report.sections),
+    )
+
+    with _client(_ReportPort(player_report)) as client:
+        response = client.get(
+            f"/replays/{REPLAY_ID}/reports/{REPORT_ID}",
+            headers={"host": "localhost", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    assert response.text.index("Match insights") < response.text.index("Quality and availability")
+    assert "Cash Change" in response.text
+    assert "-300" in response.text
+    assert "Partial analysis:" in response.text
+    assert "frames 0-30 of 3600" in response.text
+    assert f'/replays/{REPLAY_ID}/reports/{OPPONENT_REPORT_ID}' in response.text
+    assert f'/replays/{REPLAY_ID}/reports/{REPORT_ID}/map' in response.text
 
     with pytest.raises(ValidationError, match="absolute paths are not canonical report values"):
         ReportClaimDTO(

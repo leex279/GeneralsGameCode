@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+from pathlib import Path
 
 from generals_replay_analyzer.web.ports import EvidenceDetailDTO, EvidenceQueryDTO
 
@@ -87,6 +88,28 @@ def test_claim_evidence_is_a_native_report_scoped_link_with_optional_drawer_enha
     assert all(attrs.get("hx-get") == expected for attrs in links)
     assert all(attrs.get("hx-target") == "closest details" for attrs in links)
     assert any(tag == "summary" for tag, _attrs in parser.tags)
+
+
+def test_report_claim_values_wrap_inside_the_fixed_report_viewport() -> None:
+    """Catch bounded canonical claim text widening the immutable report beyond the viewport."""
+    html = _render_report(timeline_available=False)
+    css = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/static/css/app.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert '<strong class="report-claim-value">10</strong>' in html
+    assert ".report-claim-value { overflow-wrap: anywhere; word-break: break-word; }" in css
+
+
+def test_report_timeline_table_has_a_keyboard_scroll_region() -> None:
+    """Catch a wide frame table forcing the whole fixed report beyond a mobile viewport."""
+    html = _render_report(timeline_available=True)
+    css = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/static/css/app.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert '<div class="wide-table-scroll" role="region" aria-label="Replay timeline table" tabindex="0">' in html
+    assert ".wide-table-scroll { max-width: 100%; overflow-x: auto;" in css
 
 
 def test_evidence_deep_link_has_one_heading_typed_source_and_native_back_link() -> None:

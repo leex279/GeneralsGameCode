@@ -17,7 +17,9 @@ from generals_replay_analyzer.web.ports import (
     InferredAssessmentEvidenceDTO,
     ObservedCommandEvidenceDTO,
     ObservedTelemetryEvidenceDTO,
+    ReplayPlayerDisplayDTO,
     ReplayReportDTO,
+    ReportClaimDTO,
     ReportSectionDTO,
     TimelineChartDTO,
 )
@@ -31,9 +33,64 @@ class ReplayReportViewModel(BaseModel):
     report: ReplayReportDTO
     timeline: TimelineChartDTO
     jump_sections: tuple[ReportSectionDTO, ...]
+    selected_player: ReplayPlayerDisplayDTO | None
+    highlight_claims: tuple[ReportClaimDTO, ...]
+    highlight_scope_label: str | None
     duration_label: str
     source_mode_label: str
     ollama_status_label: str
+
+
+_HIGHLIGHT_PRIORITIES = (
+    "cash_change_total",
+    "supply_collected_total",
+    "tracked_income_total",
+    "completed_composition",
+    "completed_order_count",
+    "queued_order_count",
+    "cancelled_order_count",
+    "supported_order_action_count",
+    "first_build",
+)
+
+
+def _highlight_rank(claim: ReportClaimDTO) -> tuple[int, str]:
+    identity = f"{claim.claim_id} {claim.label}".casefold()
+    for rank, token in enumerate(_HIGHLIGHT_PRIORITIES):
+        if token in identity:
+            return rank, claim.claim_id
+    return len(_HIGHLIGHT_PRIORITIES), claim.claim_id
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Lead player reports with bounded evidence-backed match highlights. (#TBD)
+def _highlight_claims(report: ReplayReportDTO) -> tuple[ReportClaimDTO, ...]:
+    if report.version.replay_player_public_id is None:
+        return ()
+    candidates = (
+        claim
+        for section in report.sections
+        for claim in section.claims
+        if claim.availability != "unavailable"
+        and claim.display_value is not None
+        and len(claim.display_value) <= 160
+        and not claim.display_value.startswith("Oversize ")
+        and any(evidence.tier == "derived" for evidence in claim.evidence)
+    )
+    return tuple(sorted(candidates, key=_highlight_rank)[:8])
+
+
+def _highlight_scope_label(report: ReplayReportDTO, highlights: tuple[ReportClaimDTO, ...]) -> str | None:
+    frame_ends = tuple(claim.frame_window[1] for claim in highlights if claim.frame_window is not None)
+    if report.duration_frames is None or not frame_ends:
+        return None
+    evidence_end = max(frame_ends)
+    if evidence_end >= report.duration_frames:
+        return None
+    return (
+        f"Current derived values cover frames 0-{evidence_end} of {report.duration_frames} "
+        f"({evidence_end / 30:.1f}s of {report.duration_frames / 30 / 60:.1f}m). "
+        "Treat them as early-match signals, not full-match conclusions."
+    )
 
 
 # TheSuperHackers @feature Leex 23/08/2026 Refuse cross-report chart data before rendering evidence links. (#TBD)
@@ -60,10 +117,22 @@ def replay_report_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> R
         if report.ollama.status == "not_requested"
         else f"Ollama {report.ollama.status.replace('_', ' ')}"
     )
+    selected_player = next(
+        (
+            player
+            for player in report.players
+            if player.replay_player_public_id == report.version.replay_player_public_id
+        ),
+        None,
+    )
+    highlight_claims = _highlight_claims(report)
     return ReplayReportViewModel(
         report=report,
         timeline=timeline,
         jump_sections=jump_sections,
+        selected_player=selected_player,
+        highlight_claims=highlight_claims,
+        highlight_scope_label=_highlight_scope_label(report, highlight_claims),
         duration_label=duration_label,
         source_mode_label=source_mode_label,
         ollama_status_label=ollama_status_label,

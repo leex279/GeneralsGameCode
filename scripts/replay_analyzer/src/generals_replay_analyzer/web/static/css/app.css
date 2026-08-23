@@ -89,6 +89,19 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .command-index { color: var(--cc-amber); font-family: var(--cc-mono); font-size: 0.75rem; }
 .dashboard-layout { display: grid; gap: var(--cc-space-4); grid-template-columns: minmax(0, 2fr) minmax(18rem, 0.8fr); }
 .workspace-panel, .operations-rail, .library-panel, .results-panel { background: var(--cc-surface-1); border: 1px solid var(--cc-rule); }
+/* TheSuperHackers @bugfix Leex 23/08/2026 Keep immutable canonical report values inside the viewport. (#TBD) */
+.report-claim-value { overflow-wrap: anywhere; word-break: break-word; }
+/* TheSuperHackers @feature Leex 23/08/2026 Keep match highlights scannable across desktop and mobile. (#TBD) */
+.insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: var(--cc-space-3); }
+.insight-card { display: grid; gap: var(--cc-space-2); padding: var(--cc-space-4); border: 1px solid var(--cc-rule); background: var(--cc-surface-2); }
+.insight-card > span, .insight-card > small { color: var(--cc-muted); }
+.insight-card > strong { font-size: clamp(1.25rem, 3vw, 2rem); }
+.analysis-scope-warning { border-left: 3px solid var(--cc-amber); color: var(--cc-muted); margin: var(--cc-space-3); padding: var(--cc-space-2) var(--cc-space-3); }
+.player-analysis-links { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: var(--cc-space-3); margin-top: var(--cc-space-4); }
+.player-analysis-links a { display: grid; gap: var(--cc-space-1); padding: var(--cc-space-3); border: 1px solid var(--cc-rule); color: inherit; text-decoration: none; }
+.player-analysis-links a:hover, .player-analysis-links a:focus-visible, .player-analysis-links a[aria-current="page"] { border-color: var(--cc-amber); background: var(--cc-surface-2); }
+/* TheSuperHackers @bugfix Leex 23/08/2026 Contain wide evidence tables in labelled keyboard scroll regions. (#TBD) */
+.wide-table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
 .dashboard-section + .dashboard-section { border-top: 1px solid var(--cc-rule); }
 .dashboard-table { border-collapse: collapse; min-width: 920px; width: 100%; }
 .dashboard-table th, .dashboard-table td { border-top: 1px solid var(--cc-rule); font-size: 0.8125rem; padding: var(--cc-space-3); text-align: left; }

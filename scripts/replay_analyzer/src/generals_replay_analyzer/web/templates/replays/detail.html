@@ -25,6 +25,41 @@
     </dl>
   </section>
 
+  <!-- TheSuperHackers @feature Leex 23/08/2026 Put useful player analysis before the full evidence ledger. (#TBD) -->
+  <section id="match-insights" class="workspace-panel" aria-labelledby="match-insights-title">
+    <div class="section-heading">
+      <div>
+        <span class="eyebrow">Useful first</span>
+        <h2 id="match-insights-title">Match insights{% if report_view.selected_player %}: {{ report_view.selected_player.display_name }}{% endif %}</h2>
+      </div>
+      <a class="button" href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map">Open match map</a>
+    </div>
+    {% if report_view.highlight_scope_label %}<p class="analysis-scope-warning"><strong>Partial analysis:</strong> {{ report_view.highlight_scope_label }}</p>{% endif %}
+    {% if report_view.highlight_claims %}
+      <div class="insight-grid" aria-label="Evidence-backed player highlights">
+        {% for claim in report_view.highlight_claims %}
+          <article class="insight-card">
+            <span>{{ claim.label|replace(".", " / ")|replace("_", " ")|title }}</span>
+            <strong class="report-claim-value">{{ claim.display_value }}{% if claim.unit %} {{ claim.unit|replace("_", " ") }}{% endif %}</strong>
+            <small>{{ claim.section|replace("_", " ") }} Â· {{ claim.availability }}</small>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p>Choose a player to see the derived economy, production, activity, and opening analysis. The replay-wide report remains the evidence ledger for the whole match.</p>
+    {% endif %}
+    <nav class="player-analysis-links" aria-label="Player analysis">
+      {% for player in report.players %}
+        {% if player.report_public_id %}
+          <a{% if player.replay_player_public_id == report.version.replay_player_public_id %} aria-current="page"{% endif %} href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ player.report_public_id }}">
+            <strong>{{ player.display_name }}</strong>
+            <span>{{ player.faction or "Faction unavailable" }}{% if player.result %} Â· {{ player.result }}{% endif %}</span>
+          </a>
+        {% endif %}
+      {% endfor %}
+    </nav>
+  </section>
+
   <section class="workspace-panel" aria-labelledby="quality-title">
     <div class="section-heading"><div><span class="eyebrow">Read before analysis</span><h2 id="quality-title">Quality and availability</h2></div></div>
     <p>Lifecycle: {{ report.lifecycle.lifecycle_state }}. Parser: {{ report.lifecycle.parser_completion_status or "unavailable" }}. Telemetry: {{ report.lifecycle.telemetry_status or "unavailable" }}.</p>
@@ -63,7 +98,7 @@
         </div>
       </form>
       <div data-report-timeline data-source="/api/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/charts/timeline" role="img" aria-label="Replay event timeline"></div>
-      <table><caption>Timeline data in authoritative replay frames</caption><thead><tr><th scope="col">Series</th><th scope="col">Frame or interval</th><th scope="col">Event</th><th scope="col">Value</th></tr></thead><tbody>{% for series in report_view.timeline.series %}{% for point in series.points %}<tr><th scope="row">{{ series.label }}</th><td>{{ point.frame }}</td><td>{{ point.label }}</td><td>{% if point.value is not none %}{{ point.value }}{% else %}—{% endif %}</td></tr>{% endfor %}{% for interval in series.intervals %}<tr><th scope="row">{{ series.label }}</th><td>{{ interval.frame_start }}–{{ interval.frame_end }}</td><td>{{ interval.label }}</td><td>—</td></tr>{% endfor %}{% endfor %}</tbody></table>
+      <div class="wide-table-scroll" role="region" aria-label="Replay timeline table" tabindex="0"><table><caption>Timeline data in authoritative replay frames</caption><thead><tr><th scope="col">Series</th><th scope="col">Frame or interval</th><th scope="col">Event</th><th scope="col">Value</th></tr></thead><tbody>{% for series in report_view.timeline.series %}{% for point in series.points %}<tr><th scope="row">{{ series.label }}</th><td>{{ point.frame }}</td><td>{{ point.label }}</td><td>{% if point.value is not none %}{{ point.value }}{% else %}—{% endif %}</td></tr>{% endfor %}{% for interval in series.intervals %}<tr><th scope="row">{{ series.label }}</th><td>{{ interval.frame_start }}–{{ interval.frame_end }}</td><td>{{ interval.label }}</td><td>—</td></tr>{% endfor %}{% endfor %}</tbody></table></div>
     {% endif %}
   </section>
 
@@ -76,7 +111,7 @@
         {% for claim in section.claims %}
           <article>
             <h4>{{ claim.label }}</h4>
-            {% if claim.availability == "unavailable" %}<p>Unavailable: {{ claim.unavailable_reason }}</p>{% else %}<p><strong>{{ claim.display_value }}</strong>{% if claim.unit %} {{ claim.unit }}{% endif %}</p>{% endif %}
+            {% if claim.availability == "unavailable" %}<p>Unavailable: {{ claim.unavailable_reason }}</p>{% else %}<p><strong class="report-claim-value">{{ claim.display_value }}</strong>{% if claim.unit %} {{ claim.unit }}{% endif %}</p>{% endif %}
             {% for evidence in claim.evidence %}
               <details class="evidence-drawer" data-evidence-public-id="{{ evidence.public_id }}">
                 <summary>Evidence tier: {{ evidence.tier }}</summary>

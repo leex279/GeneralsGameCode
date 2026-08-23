@@ -372,10 +372,18 @@ class IdentityLandingDTO(TimestampedWebDTO):
 class ReplayPlayerDisplayDTO(WebDTO):
     """A replay-local player presentation value, not a canonical identity record."""
 
+    replay_player_public_id: PublicId | None = None
+    report_public_id: PublicId | None = None
     display_name: str = Field(min_length=1, max_length=256)
     slot: int = Field(ge=1, le=16)
     faction: str | None = Field(default=None, min_length=1, max_length=64)
     result: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_report_link(self) -> Self:
+        if (self.replay_player_public_id is None) != (self.report_public_id is None):
+            raise ValueError("player report navigation requires both public identities")
+        return self
 
 
 class ReplayProvenanceDTO(WebDTO):

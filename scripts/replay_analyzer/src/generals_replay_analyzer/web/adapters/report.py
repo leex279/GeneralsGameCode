@@ -275,8 +275,13 @@ class AnalyticsReportAdapter:
         )
         available_claims = tuple(claim for section in sections for claim in section.claims)
         overall = _section_availability(available_claims)
+        report_ids_by_player = {
+            item.document.replay_player_public_id: item.document.report_public_id for item in graph.player_reports
+        }
         players = tuple(
             ReplayPlayerDisplayDTO(
+                replay_player_public_id=item.public_id,
+                report_public_id=report_ids_by_player.get(item.public_id),
                 display_name=item.display_name,
                 slot=item.slot,
                 faction=item.faction,

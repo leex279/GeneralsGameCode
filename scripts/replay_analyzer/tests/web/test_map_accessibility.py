@@ -146,6 +146,15 @@ def test_map_chart_has_bounded_responsive_geometry_and_accessible_time_sliders()
     assert "max-height:" in stylesheet
 
 
+def test_map_evidence_tables_have_labelled_keyboard_scroll_regions() -> None:
+    response = _scene_client(_ScenePort()).get(f"/replays/{REPLAY_ID}/reports/{REPORT_ID}/map")
+    stylesheet = Path("src/generals_replay_analyzer/web/static/css/app.css").read_text(encoding="utf-8")
+
+    assert response.status_code == 200
+    assert '<div class="wide-table-scroll" role="region" aria-label="Map evidence tables" tabindex="0">' in response.text
+    assert ".wide-table-scroll { max-width: 100%; overflow-x: auto;" in stylesheet
+
+
 def test_map_javascript_reports_missing_echarts_instead_of_leaving_loading_status() -> None:
     source = Path("src/generals_replay_analyzer/web/static/js/map.js").read_text(encoding="utf-8")
 
