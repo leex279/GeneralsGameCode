@@ -284,6 +284,31 @@ def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidenc
     json_url = profile_json_url(port.profile)
     assert "report_public_id=" in json_url and "report_public=" not in json_url
     assert REPORT_ID in fixed.text
+    assert fixed.text.index("Recent analyzed matches") < fixed.text.index("Identity and data")
+    assert 'class="player-insight-grid"' in fixed.text
+    assert '<details class="workspace-panel technical-evidence profile-identity">' in fixed.text
+
+
+def test_one_match_profile_explains_the_sample_requirement_once_without_empty_rows() -> None:
+    profile = _full_profile().model_copy(
+        update={
+            "insights": (),
+            "availability": AvailabilityDTO(
+                state="partial",
+                reason_codes=("minimum_sample_not_met",),
+            ),
+        }
+    )
+    port = _PlayerPort(profile)
+
+    with _client(port) as client:
+        resolution = client.get(f"/players/{PLAYER_ID}", headers={"accept": "text/html"}, follow_redirects=False)
+        fixed = client.get(resolution.headers["location"], headers={"accept": "text/html"})
+
+    assert fixed.status_code == 200
+    assert fixed.text.count("More analyzed matches are needed") == 1
+    assert "minimum_sample_not_met" not in fixed.text.split("Identity and data", 1)[0]
+    assert "Unavailable:</td>" not in fixed.text
 
 
 def test_unavailable_profile_and_invalid_queries_fail_closed_without_fixed_reads() -> None:

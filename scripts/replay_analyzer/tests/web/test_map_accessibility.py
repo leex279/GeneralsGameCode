@@ -73,6 +73,9 @@ def test_fixed_map_page_keeps_essential_evidence_semantic_without_javascript() -
     ):
         assert phrase in response.text
     assert "The chart is an enhancement" in response.text
+    assert "Map evidence at a glance" in response.text
+    assert 'class="workspace-panel spatial-briefing"' in response.text
+    assert response.text.index("Map evidence at a glance") < response.text.index("Authoritative map status")
     assert f"/api/maps/{MAP_ID}/rasters/" in response.text
     assert "/static/vendor/echarts.min.js" in response.text
     assert "/static/js/map.js" in response.text

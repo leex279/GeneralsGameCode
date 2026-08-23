@@ -162,9 +162,12 @@
     chart.setOption({
       animation: false,
       aria: {enabled: true, description: "Accepted spatial facts in the selected supplied coordinate display."},
+      backgroundColor: "transparent",
+      color: ["#7fc6f5", "#a9d05a", "#f0966e", "#4a9fd8", "#bfe3ff"],
+      textStyle: {color: "#9bb4c4", fontFamily: "Cascadia Mono, Consolas, monospace"},
       ...axisOptions(scene, display),
-      tooltip: {trigger: "item"},
-      legend: {type: "scroll"},
+      tooltip: {trigger: "item", backgroundColor: "#0d1a24", borderColor: "#31536a", textStyle: {color: "#eaf6ff"}},
+      legend: {type: "scroll", textStyle: {color: "#9bb4c4"}},
       series,
     });
     // TheSuperHackers @fix Leex 23/08/2026 Restore the authored map name after ECharts rewrites ARIA attributes. (#TBD)

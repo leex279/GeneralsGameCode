@@ -129,7 +129,10 @@ def test_review_hardening_keeps_controls_readable_and_unavailable_non_failure() 
 
 def test_strategy_report_has_tactical_panels_and_matching_chart_palette() -> None:
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
-    script = package_resource("web/static/js/report.js").read_text(encoding="utf-8")
+    scripts = tuple(
+        package_resource(f"web/static/js/{name}.js").read_text(encoding="utf-8")
+        for name in ("report", "compare", "map")
+    )
 
     for selector in (
         ".report-hero",
@@ -144,9 +147,10 @@ def test_strategy_report_has_tactical_panels_and_matching_chart_palette() -> Non
     ):
         assert selector in css
     assert "clip-path: polygon" in css
-    assert "#7fc6f5" in script
-    assert "#a9d05a" in script
-    assert "#f0966e" in script
+    for script in scripts:
+        assert "#7fc6f5" in script
+        assert "#a9d05a" in script
+        assert "#f0966e" in script
 
 
 def test_command_dialog_restores_the_actual_invoker_and_mobile_uses_the_menu() -> None:

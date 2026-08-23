@@ -118,6 +118,9 @@ def test_fixed_result_and_json_use_compare_only_and_support_etag_304() -> None:
         cached = client.get(api_url, headers={"if-none-match": data.headers["etag"]})
 
     assert html.status_code == 200 and "Comparison Evidence" in html.text
+    assert "What this comparison means" in html.text
+    assert '<details class="technical-evidence comparison-method">' in html.text
+    assert html.text.index("What this comparison means") < html.text.index("Immutable bindings")
     assert "Collection Rate" in html.text and "Sample 8" in html.text
     assert "Charts are optional" in html.text
     assert 'src="/static/vendor/echarts.min.js"' in html.text

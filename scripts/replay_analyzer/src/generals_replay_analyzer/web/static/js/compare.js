@@ -3,6 +3,8 @@
 
   const allowedKinds = new Set(["players", "matches", "openings", "strategies", "time_periods"]);
   const allowedMetricKinds = new Set(["scalar", "distribution", "categorical_share", "timing_band", "transition", "trend"]);
+  const chartPalette = ["#7fc6f5", "#f0966e", "#a9d05a", "#4a9fd8"];
+  const axisStyle = {axisLine: {lineStyle: {color: "#31536a"}}, splitLine: {lineStyle: {color: "#1a2f41"}}};
 
   const announce = (message) => {
     const region = document.querySelector("#app-feedback");
@@ -35,9 +37,12 @@
     chart.setOption({
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       aria: {enabled: true},
+      backgroundColor: "transparent",
+      color: chartPalette,
+      textStyle: {color: "#9bb4c4", fontFamily: "Cascadia Mono, Consolas, monospace"},
       tooltip: {show: false},
-      xAxis: {type: "category", data: comparable.map((metric) => metric.label)},
-      yAxis: {type: "value"},
+      xAxis: {type: "category", data: comparable.map((metric) => metric.label), ...axisStyle},
+      yAxis: {type: "value", ...axisStyle},
       series: [
         {name: "Left", type: "bar", data: comparable.map((metric) => metric.left.raw_value)},
         {name: "Right", type: "bar", data: comparable.map((metric) => metric.right.raw_value)},
@@ -58,9 +63,12 @@
     chart.setOption({
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       aria: {enabled: true},
+      backgroundColor: "transparent",
+      color: chartPalette,
+      textStyle: {color: "#9bb4c4", fontFamily: "Cascadia Mono, Consolas, monospace"},
       tooltip: {show: false},
-      xAxis: {type: "category", data: values.map((insight) => insight.label)},
-      yAxis: {type: "value"},
+      xAxis: {type: "category", data: values.map((insight) => insight.label), ...axisStyle},
+      yAxis: {type: "value", ...axisStyle},
       series: [{name: "Raw Value", type: "bar", data: values.map((insight) => insight.raw_value)}],
     });
     element.setAttribute("role", "img");

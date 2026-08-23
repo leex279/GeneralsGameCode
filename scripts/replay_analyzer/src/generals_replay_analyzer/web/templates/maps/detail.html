@@ -10,6 +10,22 @@
     <a href="{{ map_view.fixed_report_href }}">Back to fixed report</a>
   </header>
 
+  <!-- TheSuperHackers @feature Leex 23/08/2026 Summarize only observed spatial collections before exposing map internals. (#TBD) -->
+  <section class="workspace-panel spatial-briefing" aria-labelledby="spatial-briefing-title">
+    <div class="section-heading"><div><span class="eyebrow">Observed spatial facts</span><h2 id="spatial-briefing-title">Map evidence at a glance</h2></div><span>{{ map_view.scene.query.frame_start }}â€“{{ map_view.scene.query.frame_end }} frames</span></div>
+    <div class="spatial-briefing-grid">
+      {% if map_view.scene.starts %}<article><strong>{{ map_view.scene.starts|length }}</strong><span>verified start{% if map_view.scene.starts|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.starts[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.resources %}<article><strong>{{ map_view.scene.resources|length }}</strong><span>resource location{% if map_view.scene.resources|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.resources[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.structures %}<article><strong>{{ map_view.scene.structures|length }}</strong><span>observed structure{% if map_view.scene.structures|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.structures[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.samples %}<article><strong>{{ map_view.scene.samples|length }}</strong><span>position sample{% if map_view.scene.samples|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.samples[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.orders %}<article><strong>{{ map_view.scene.orders|length }}</strong><span>map order{% if map_view.scene.orders|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.orders[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.routes %}<article><strong>{{ map_view.scene.routes|length }}</strong><span>validated route{% if map_view.scene.routes|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.routes[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.engagements %}<article><strong>{{ map_view.scene.engagements|length }}</strong><span>engagement{% if map_view.scene.engagements|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.engagements[0].evidence) }}</article>{% endif %}
+      {% if map_view.scene.casualties %}<article><strong>{{ map_view.scene.casualties|length }}</strong><span>observed casualty event{% if map_view.scene.casualties|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.casualties[0].evidence) }}</article>{% endif %}
+    </div>
+    {% if not map_view.scene.starts and not map_view.scene.resources and not map_view.scene.structures and not map_view.scene.samples and not map_view.scene.orders and not map_view.scene.routes and not map_view.scene.engagements and not map_view.scene.casualties %}<p>No spatial facts are available inside this report's evidence horizon.</p>{% endif %}
+  </section>
+
   <section class="quality-banner" aria-labelledby="map-quality-heading">
     <h2 id="map-quality-heading">Report and map quality</h2>
     <p>Lifecycle: {{ map_view.scene.terminal_quality.lifecycle }}. Availability: {{ map_view.scene.availability.state }}.</p>
