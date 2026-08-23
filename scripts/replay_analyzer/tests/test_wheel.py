@@ -297,7 +297,19 @@ def _run(
     arguments: list[str], working_directory: Path, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run one isolated wheel-install command while retaining useful failure output."""
-    return subprocess.run(arguments, check=True, cwd=working_directory, text=True, capture_output=True, env=environment)
+    try:
+        return subprocess.run(
+            arguments,
+            check=True,
+            cwd=working_directory,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise AssertionError(
+            f"subprocess failed with exit code {exc.returncode}: stdout={exc.stdout!r}; stderr={exc.stderr!r}"
+        ) from exc
 
 
 def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Path) -> None:
@@ -392,16 +404,24 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
     environment = os.environ.copy()
     environment["TEST_DATABASE_PATH"] = str(database_path)
     environment["TEST_PROMPT_SHA256"] = hashlib.sha256(
-        _source_resource("generals_replay_analyzer/data/strategy-report-v1.txt").read_bytes()
+        _source_resource("generals_replay_analyzer/data/strategy-report-v1.txt")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
     ).hexdigest()
     environment["TEST_RESPONSE_SCHEMA_SHA256"] = hashlib.sha256(
-        _source_resource("generals_replay_analyzer/data/strategy-report-response-v1.schema.json").read_bytes()
+        _source_resource("generals_replay_analyzer/data/strategy-report-response-v1.schema.json")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
     ).hexdigest()
     environment["TEST_REPORT_TEMPLATE_SHA256"] = hashlib.sha256(
-        _source_resource("generals_replay_analyzer/data/replay-report-v1.html").read_bytes()
+        _source_resource("generals_replay_analyzer/data/replay-report-v1.html")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
     ).hexdigest()
     environment["TEST_REPORT_SCHEMA_SHA256"] = hashlib.sha256(
-        _source_resource("generals_replay_analyzer/data/replay-report-v1.schema.json").read_bytes()
+        _source_resource("generals_replay_analyzer/data/replay-report-v1.schema.json")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
     ).hexdigest()
     environment["PYTHONPATH"] = str(Path(sysconfig.get_paths()["purelib"]))
     result = _run([str(environment_python), "-c", migration_script], tmp_path, environment)

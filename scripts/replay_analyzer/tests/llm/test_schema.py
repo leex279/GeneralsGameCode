@@ -109,6 +109,12 @@ def test_packaged_resources_have_exact_versions_and_byte_digests() -> None:
     assert document["additionalProperties"] is False
 
 
+def test_llm_resource_newlines_are_canonical_across_windows_checkouts() -> None:
+    windows_payload = b"first\r\nsecond\r\n"
+
+    assert schema_module._canonicalize_text_resource(windows_payload) == b"first\nsecond\n"
+
+
 def test_resource_dtos_reject_forged_version_digest_or_bytes() -> None:
     prompt = load_prompt()
     schema = load_response_schema()

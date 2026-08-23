@@ -158,11 +158,17 @@ class ValidatedResponse:
         object.__setattr__(self, "digest", digest)
 
 
+# TheSuperHackers @fix Leex 23/08/2026 Preserve pinned LLM resource identities across Windows Git checkouts. (#TBD)
+def _canonicalize_text_resource(content: bytes) -> bytes:
+    return content.replace(b"\r\n", b"\n")
+
+
 def _resource_bytes(name: str, expected_digest: str) -> bytes:
     try:
         content = resources.files("generals_replay_analyzer").joinpath("data", name).read_bytes()
     except (FileNotFoundError, OSError):
         raise ResponseValidationError("resource_unavailable") from None
+    content = _canonicalize_text_resource(content)
     if hashlib.sha256(content).hexdigest() != expected_digest:
         raise ResponseValidationError("resource_digest_mismatch")
     return content
