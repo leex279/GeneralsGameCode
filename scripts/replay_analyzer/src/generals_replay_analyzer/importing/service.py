@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from ..config import AnalyzerSettings
 from ..db.models import Job, JobDependency, ManagedAsset, Replay, Source
@@ -56,6 +56,8 @@ from .stages import (
     MANAGE_COPY_VERSION,
     PARSE,
     PARSE_VERSION,
+    RECONCILE_IDENTITIES,
+    RECONCILE_IDENTITIES_VERSION,
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
     STAGES,
@@ -78,6 +80,7 @@ _STAGE_VERSIONS = MappingProxyType(
         PARSE: PARSE_VERSION,
         TELEMETRY: TELEMETRY_VERSION,
         IMPORT_OBSERVATIONS: IMPORT_OBSERVATIONS_VERSION,
+        RECONCILE_IDENTITIES: RECONCILE_IDENTITIES_VERSION,
         DERIVE_FEATURES: DERIVE_FEATURES_VERSION,
         ASSESS_STRATEGIES: ASSESS_STRATEGIES_VERSION,
         ANALYZE_LLM: ANALYZE_LLM_VERSION,
@@ -89,6 +92,7 @@ _BUILT_IN_STAGES = frozenset({DISCOVER, HASH, MANAGE_COPY, PARSE, TELEMETRY})
 _DIRECT_DEPENDENCY_STAGES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         IMPORT_OBSERVATIONS: frozenset({PARSE, TELEMETRY}),
+        RECONCILE_IDENTITIES: frozenset({IMPORT_OBSERVATIONS}),
         DERIVE_FEATURES: frozenset({IMPORT_OBSERVATIONS}),
         ASSESS_STRATEGIES: frozenset({DERIVE_FEATURES}),
         ANALYZE_LLM: frozenset({ASSESS_STRATEGIES}),
@@ -452,7 +456,7 @@ class ImportService:
     def worker_control_port(self) -> WorkerControlPort:
         """Return the versioned lifecycle boundary used by an external worker."""
         return _MaterializingWorkerControlAdapter(
-            self._materialize_ready_observation_jobs,
+            self._materialize_ready_jobs,
             self._worker_lifecycle(),
         )
 
@@ -521,8 +525,7 @@ class ImportService:
             raise ValueError("run limit must be positive")
         completed: list[JobDTO] = []
         for _ in range(limit):
-            if IMPORT_OBSERVATIONS in self._registered_future_stages:
-                self._materialize_ready_observation_jobs()
+            self._materialize_ready_jobs()
             claimed = self._jobs.claim(
                 worker_id,
                 self._handlers,
@@ -1211,6 +1214,68 @@ class ImportService:
                     if winner is None:
                         raise
                     self._coalesce_provisional_job(session, candidate, winner)
+
+    def _materialize_ready_jobs(self) -> None:
+        if IMPORT_OBSERVATIONS in self._registered_future_stages:
+            self._materialize_ready_observation_jobs()
+        if RECONCILE_IDENTITIES in self._registered_future_stages:
+            self._materialize_identity_reconciliation_jobs()
+
+    # TheSuperHackers @feature Leex 23/08/2026 Bound legacy identity repair to durable jobs without rewriting succeeded imports. (#TBD)
+    def _materialize_identity_reconciliation_jobs(self) -> None:
+        reconciliation_job = aliased(Job)
+        reconciled_observation_ids = (
+            select(JobDependency.depends_on_job_id)
+            .join(reconciliation_job, reconciliation_job.id == JobDependency.job_id)
+            .where(
+                reconciliation_job.stage == RECONCILE_IDENTITIES,
+                reconciliation_job.component_version == RECONCILE_IDENTITIES_VERSION,
+            )
+        )
+        with self._session_factory.begin() as session:
+            candidates = tuple(
+                session.scalars(
+                    select(Job)
+                    .where(
+                        Job.stage == IMPORT_OBSERVATIONS,
+                        Job.component_version == IMPORT_OBSERVATIONS_VERSION,
+                        Job.status == "succeeded",
+                        Job.replay_id.is_not(None),
+                        Job.id.not_in(reconciled_observation_ids),
+                    )
+                    .order_by(Job.id)
+                    .limit(100)
+                )
+            )
+            for observation in candidates:
+                assert observation.replay_id is not None
+                replay = session.get(Replay, observation.replay_id)
+                if replay is None:
+                    continue
+                identity = {
+                    "identity_reconciliation_version": RECONCILE_IDENTITIES_VERSION,
+                    "observation_job_key": observation.idempotency_key,
+                    "observation_job_public_id": observation.public_id,
+                }
+                job = self._jobs.ensure_job(
+                    session,
+                    JobSpec(
+                        RECONCILE_IDENTITIES,
+                        RECONCILE_IDENTITIES_VERSION,
+                        content_key(
+                            RECONCILE_IDENTITIES,
+                            RECONCILE_IDENTITIES_VERSION,
+                            replay.sha256,
+                            identity,
+                        ),
+                        {
+                            "observation_job_public_id": observation.public_id,
+                            "replay_sha256": replay.sha256,
+                        },
+                        replay.id,
+                    ),
+                )
+                self._jobs.ensure_dependency(session, job.id, observation.id)
 
     def _coalesce_provisional_job(self, session: Session, loser: Job, winner: Job) -> None:
         if loser.id == winner.id:

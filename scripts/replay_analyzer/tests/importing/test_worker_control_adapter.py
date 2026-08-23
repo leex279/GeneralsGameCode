@@ -57,7 +57,7 @@ def test_external_claim_materializes_before_delegating_default_and_selected_clai
     ) -> None:
         events.append(("claim", selector))
 
-    monkeypatch.setattr(service, "_materialize_ready_observation_jobs", materialize)  # type: ignore[attr-defined]
+    monkeypatch.setattr(service, "_materialize_ready_jobs", materialize)  # type: ignore[attr-defined]
     monkeypatch.setattr(JobLifecycleService, "claim_next", claim)  # type: ignore[attr-defined]
     worker = service.worker_control_port()
     selected = JobClaimSelectorDTO(

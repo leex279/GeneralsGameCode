@@ -69,6 +69,7 @@ def test_public_factory_registers_the_exact_production_stage_set(
         "import_observations",
         "manage_copy",
         "parse",
+        "reconcile_identities",
         "render_report",
     )
     assert PRODUCTION_EXTRACTOR_NAMES == (

@@ -188,7 +188,11 @@ def _context() -> StageExecutionContext:
     [
         (IdentityBusyError("database at C:\\private\\identity.sqlite is locked"), "identity_resolution_busy", True),
         (IdentityInvariantError("provider-token=secret"), "identity_resolution_failed", False),
-        (IdentityResolutionContractError("wrong run C:\\private\\trace"), "identity_resolution_failed", False),
+        (
+            IdentityResolutionContractError("wrong run C:\\private\\trace"),
+            "identity_resolution_contract_invalid",
+            False,
+        ),
     ],
 )
 def test_identity_failures_are_sanitized_and_stop_before_telemetry(
@@ -217,7 +221,11 @@ def test_identity_failures_are_sanitized_and_stop_before_telemetry(
     assert failure.value.code == code
     assert failure.value.retryable is retryable
     assert failure.value.message == (
-        "player identity resolution is busy" if retryable else "player identity resolution failed"
+        "player identity resolution is busy"
+        if retryable
+        else "player identity resolution contract is invalid"
+        if code == "identity_resolution_contract_invalid"
+        else "player identity resolution failed"
     )
     assert failure.value.details is None
     assert calls == ["parser"]
