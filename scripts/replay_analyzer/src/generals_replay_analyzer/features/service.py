@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol, TypeAlias, cast
@@ -66,6 +66,12 @@ class RegisteredExtractor(Protocol):
 ObservationPolicy: TypeAlias = Literal["target_player", "replay_wide_telemetry"]
 
 
+# TheSuperHackers @fix Leex 23/08/2026 Bound evidence lookup parameters for full-match telemetry on SQLite. (#TBD)
+def _evidence_id_batches(public_ids: tuple[str, ...], batch_size: int = 500) -> Iterator[tuple[str, ...]]:
+    for offset in range(0, len(public_ids), batch_size):
+        yield public_ids[offset : offset + batch_size]
+
+
 class ExtractorObservationPolicy(Protocol):
     observation_policy: ObservationPolicy
 
@@ -100,6 +106,7 @@ class FeatureSetReceipt:
     cache_key: str
     cache_hit: bool
     features: tuple[FeatureValue, ...]
+    derived_evidence: tuple[EvidenceRef, ...] = ()
 
 
 def _now() -> datetime:
@@ -377,7 +384,9 @@ class FeatureExtractionService:
             event.event_type in ("players_initialized", "entity_sample") for event, _ in event_rows
         )
         if requires_exact_player_mapping:
-            players, projected_slots = self._selected_telemetry_players(session, replay, telemetry, event_rows)
+            players, projected_slots, engine_player_indices = self._selected_telemetry_players(
+                session, replay, telemetry, event_rows
+            )
             if replay_player is not None and replay_player.public_id not in players.values():
                 raise FeatureExtractionError("telemetry player mapping does not include the requested parser player")
         else:
@@ -387,13 +396,15 @@ class FeatureExtractionService:
                 if item.player_index is not None
             }
             projected_slots = None
+            engine_player_indices = frozenset(players)
         spatial_projection = self._validated_spatial_projection(session, replay, telemetry, event_rows)
         evidence_by_sequence = {event.sequence: evidence.public_id for event, evidence in event_rows}
         entity_rows = tuple(
             session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id)).all()
         )
         if projected_slots is not None and any(
-            item.initial_owner_player_index is not None and item.initial_owner_player_index not in players
+            item.initial_owner_player_index is not None
+            and item.initial_owner_player_index not in engine_player_indices
             for item in entity_rows
         ):
             raise FeatureExtractionError("telemetry entity owner mapping is invalid")
@@ -409,7 +420,14 @@ class FeatureExtractionService:
         }
         observations = []
         for event, evidence in event_rows:
-            facts = self._event_facts(event, players, entities, replay_player, projected_slots)
+            facts = self._event_facts(
+                event,
+                players,
+                entities,
+                replay_player,
+                projected_slots,
+                engine_player_indices,
+            )
             if event.event_type == "manifest" and spatial_projection is not None:
                 facts["validated_spatial_projection"] = spatial_projection
             if (
@@ -441,7 +459,7 @@ class FeatureExtractionService:
         replay: Replay,
         telemetry: TelemetryRun,
         event_rows: tuple[Row[tuple[TelemetryEvent, EvidenceItem]], ...],
-    ) -> tuple[dict[int, str], list[dict[str, object]]]:
+    ) -> tuple[dict[int, str], list[dict[str, object]], frozenset[int]]:
         parser_run_id = _mapping(telemetry.settings_json).get("parser_run_id")
         if type(parser_run_id) is not str or not parser_run_id:
             raise FeatureExtractionError("telemetry player mapping has no selected parser run")
@@ -503,7 +521,21 @@ class FeatureExtractionService:
             )
         if not players:
             raise FeatureExtractionError("telemetry player mapping has no resolved selected parser slots")
-        return players, sorted(projected_slots, key=lambda item: cast(int, item["slot_index"]))
+        raw_engine_player_indices = _mapping(initialization_events[0].payload_json).get("engine_player_indices")
+        if raw_engine_player_indices is None:
+            engine_player_indices = frozenset(players)
+        elif (
+            type(raw_engine_player_indices) is not list
+            or any(type(value) is not int or value < 0 for value in raw_engine_player_indices)
+            or len(raw_engine_player_indices) != len(set(raw_engine_player_indices))
+        ):
+            raise FeatureExtractionError("telemetry engine player domain is invalid")
+        else:
+            engine_player_indices = frozenset(cast(list[int], raw_engine_player_indices))
+        if not set(players).issubset(engine_player_indices):
+            raise FeatureExtractionError("telemetry player mapping escapes the declared engine player domain")
+        # TheSuperHackers @fix Leex 23/08/2026 Preserve declared neutral/system owners without mapping them to replay players. (#TBD)
+        return players, sorted(projected_slots, key=lambda item: cast(int, item["slot_index"])), engine_player_indices
 
     # TheSuperHackers @fix Leex 22/08/2026 Authorize spatial facts through one exact persisted telemetry identity graph. (#TBD)
     def _validated_spatial_projection(
@@ -702,10 +734,13 @@ class FeatureExtractionService:
         entities: Mapping[int, tuple[str, str | None, str | None]],
         replay_player: ReplayPlayer | None,
         projected_slots: list[dict[str, object]] | None = None,
+        engine_player_indices: frozenset[int] | None = None,
     ) -> dict[str, object]:
         facts = _mapping(event.payload_json)
         event_type = event.event_type
         player_index = facts.get("player_index")
+        # TheSuperHackers @fix Leex 23/08/2026 Retain declared neutral engine events without attributing them to competitors. (#TBD)
+        valid_engine_players = frozenset(players) if engine_player_indices is None else engine_player_indices
         if event_type.startswith("construction_"):
             owner_player_index = facts.get("owner_player_index")
             responsible_player_index = facts.get("responsible_player_index")
@@ -754,7 +789,9 @@ class FeatureExtractionService:
                 facts["item_name"] = facts.get("upgrade_name")
                 facts["production_identity"] = f"upgrade:{facts.get('upgrade_queue_id', facts.get('upgrade_name'))}"
         elif event_type in ("cash_changed", "supply_collected"):
-            if projected_slots is not None and (type(player_index) is not int or player_index not in players):
+            if projected_slots is not None and (
+                type(player_index) is not int or player_index not in valid_engine_players
+            ):
                 raise FeatureExtractionError("telemetry economy owner mapping is invalid")
             if projected_slots is not None and event_type == "supply_collected":
                 source_object_id = facts.get("source_object_id")
@@ -825,7 +862,7 @@ class FeatureExtractionService:
                 raise FeatureExtractionError("telemetry entity sample object identity is invalid")
             if projected_slots is not None and object_id not in entities:
                 raise FeatureExtractionError("telemetry entity sample object identity is unknown")
-            if owner is not None and (type(owner) is not int or owner not in players):
+            if owner is not None and (type(owner) is not int or owner not in valid_engine_players):
                 raise FeatureExtractionError("telemetry entity sample owner mapping is invalid")
             owner_public_id = players.get(owner) if owner is not None else None
             facts["object_key"] = f"object:{object_id}"
@@ -938,7 +975,31 @@ class FeatureExtractionService:
                 feature_set.cache_key,
                 cache_hit,
                 values,
+                self._receipt_derived_evidence(session, feature_set),
             )
+
+    # TheSuperHackers @fix Leex 23/08/2026 Expose each persisted derived feature citation for bounded downstream claims. (#TBD)
+    def _receipt_derived_evidence(
+        self,
+        session: Session,
+        feature_set: FeatureSet,
+    ) -> tuple[EvidenceRef, ...]:
+        rows = session.execute(
+            select(EvidenceItem)
+            .join(Feature, Feature.evidence_item_id == EvidenceItem.id)
+            .where(Feature.feature_set_id == feature_set.id)
+            .order_by(Feature.name, Feature.scope_type, Feature.scope_key, Feature.frame_start, Feature.frame_end)
+        )
+        return tuple(
+            EvidenceRef(
+                evidence.public_id,
+                cast(object, evidence.tier),  # type: ignore[arg-type]
+                evidence.source_kind,
+                evidence.source_key,
+                _schema_label(evidence.source_kind, evidence.schema_version),
+            )
+            for evidence in rows.scalars()
+        )
 
     def _receipt_values(self, session: Session, feature_set: FeatureSet) -> tuple[FeatureValue, ...]:
         rows = session.scalars(
@@ -1032,6 +1093,7 @@ class FeatureExtractionService:
                     winner.cache_key,
                     True,
                     self._receipt_values(session, winner),
+                    self._receipt_derived_evidence(session, winner),
                 )
                 session.commit()
                 return receipt
@@ -1070,6 +1132,7 @@ class FeatureExtractionService:
                 values,
                 {item.ref.public_id: item.ref for item in context.observed},
             )
+            derived_evidence = self._receipt_derived_evidence(session, feature_set)
             feature_set.status = "succeeded"
             feature_set.completed_at = _now()
             session.commit()
@@ -1081,6 +1144,7 @@ class FeatureExtractionService:
                 key,
                 False,
                 values,
+                derived_evidence,
             )
         except FeatureExtractionError:
             session.rollback()
@@ -1115,14 +1179,16 @@ class FeatureExtractionService:
                 raise FeatureExtractionError(
                     "feature evidence cannot be both supporting and contradicting"
                 )
-        evidence_rows = {
-            item.public_id: item
-            for item in session.scalars(
-                select(EvidenceItem).where(
-                    EvidenceItem.public_id.in_(tuple(authorized_evidence))
-                )
-            ).all()
-        }
+        evidence_rows: dict[str, EvidenceItem] = {}
+        for public_ids in _evidence_id_batches(tuple(authorized_evidence)):
+            evidence_rows.update(
+                {
+                    item.public_id: item
+                    for item in session.scalars(
+                        select(EvidenceItem).where(EvidenceItem.public_id.in_(public_ids))
+                    ).all()
+                }
+            )
         if set(evidence_rows) != set(authorized_evidence):
             raise ValueError("feature evidence reference does not exist")
         for public_id, ref in authorized_evidence.items():

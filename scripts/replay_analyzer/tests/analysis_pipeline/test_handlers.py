@@ -1146,6 +1146,45 @@ def test_assess_namespaces_longitudinal_claim_ids_that_collide_with_feature_name
     )
 
 
+def test_assess_uses_derived_feature_citation_when_raw_inputs_exceed_provider_cap() -> None:
+    observed = tuple(
+        EvidenceRef(
+            f"00000000-0000-4000-8000-{index:012d}",
+            "observed",
+            "telemetry_event",
+            f"observed-evidence:telemetry_event:v2:sequence-{index}",
+            "telemetry_event-v2",
+        )
+        for index in range(1, 34)
+    )
+    derived = EvidenceRef(
+        "00000000-0000-4000-8000-000000000034",
+        "derived",
+        "feature",
+        "feature:economy-cash-change-total",
+        "feature-v1",
+    )
+    feature = FeatureValue(
+        name="economy.cash_change_total",
+        value_type="integer",
+        raw_value=10000,
+        unit="credits",
+        scope=FeatureScope("replay", REPLAY_ID),
+        window=FeatureWindow(0, 100),
+        quality="complete",
+        quality_reason=None,
+        input_evidence=observed,
+    )
+
+    claims = AssessStrategiesHandler._claims(
+        (SimpleNamespace(features=(feature,), derived_evidence=(derived,)),),
+        (),
+    )
+
+    assert len(claims) == 1
+    assert claims[0].evidence_ids == (derived.public_id,)
+
+
 def test_analyze_llm_closes_transport_and_returns_successful_unavailable_fallback(
     tmp_path: Path,
 ) -> None:

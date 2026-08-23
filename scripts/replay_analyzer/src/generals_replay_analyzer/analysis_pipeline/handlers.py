@@ -30,7 +30,7 @@ from ..importing.stages import (
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
 )
-from ..llm.evidence_bundle import EvidenceClaim, build_evidence_bundle
+from ..llm.evidence_bundle import MAX_CITATIONS_PER_CLAIM, EvidenceClaim, build_evidence_bundle
 from ..llm.provider import CancellationSignal, OllamaClientConfig, OllamaTransport
 from ..llm.service import AnalysisOutcome, AnalysisRequest
 from ..longitudinal.segments import (
@@ -520,11 +520,28 @@ class AssessStrategiesHandler:
             for ref in assessment.supporting_evidence + assessment.contradicting_evidence:
                 refs[ref.public_id] = ref
         authorized = tuple(sorted(refs.values(), key=lambda ref: ref.public_id))
-        claims = [
-            EvidenceClaim.from_feature(value, authorized_evidence=authorized)
-            for value in values
-            if value.input_evidence + value.supporting_evidence + value.contradicting_evidence
-        ]
+        claims: list[EvidenceClaim] = []
+        for receipt in receipts:
+            derived_evidence = getattr(receipt, "derived_evidence", ())
+            if derived_evidence and len(derived_evidence) != len(receipt.features):
+                raise PipelineCodecError("derived feature citation selection is incomplete")
+            for index, value in enumerate(receipt.features):
+                value_refs = value.input_evidence + value.supporting_evidence + value.contradicting_evidence
+                if not value_refs:
+                    continue
+                unique_count = len({ref.public_id for ref in value_refs})
+                if unique_count <= MAX_CITATIONS_PER_CLAIM:
+                    claims.append(EvidenceClaim.from_feature(value, authorized_evidence=authorized))
+                    continue
+                if not derived_evidence:
+                    raise PipelineCodecError("oversize feature claim has no derived citation")
+                # TheSuperHackers @fix Leex 23/08/2026 Cite the persisted feature node when full-match raw provenance exceeds the provider envelope. (#TBD)
+                claims.append(
+                    EvidenceClaim.from_derived_feature(
+                        value,
+                        evidence=derived_evidence[index],
+                    )
+                )
         claims.extend(
             EvidenceClaim.from_rule_assessment(assessment, authorized_evidence=authorized)
             for assessment in assessments

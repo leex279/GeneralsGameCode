@@ -598,6 +598,26 @@ def test_citation_cap_applies_after_cross_role_deduplication(
             EvidenceClaim.from_feature(feature, authorized_evidence=refs)
 
 
+def test_oversize_feature_can_cite_its_persisted_derived_evidence(
+    public_ids: tuple[str, ...],
+) -> None:
+    refs = tuple(_observed_ref(public_ids[index]) for index in range(33))
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(feature, input_evidence=refs)
+    derived = EvidenceRef(
+        public_ids[33],
+        "derived",
+        "feature",
+        "feature:cash-change-total",
+        "feature-v1",
+    )
+
+    claim = EvidenceClaim.from_derived_feature(feature, evidence=derived)
+
+    assert claim.evidence_ids == (derived.public_id,)
+    assert thaw_canonical(claim.value)["name"] == feature.name  # type: ignore[index]
+
+
 def test_feature_factory_reowns_forged_task6_value(public_ids: tuple[str, ...]) -> None:
     attacker: list[object] = [1]
     feature, observed = _feature(public_ids[0], FrozenMapping((("samples", attacker),)))

@@ -956,6 +956,20 @@ class TelemetryObservationImporter:
                 self._add_issue(
                     session, replay, run, "telemetry_truncated", "warning", {"final_frame": complete.final_frame}, now
                 )
+            # TheSuperHackers @fix Leex 23/08/2026 Retain useful degraded traces without promoting them to verified evidence. (#TBD)
+            if attempt.replay_quality != "complete" or attempt.strategy_analysis_scope != "full":
+                self._add_issue(
+                    session,
+                    replay,
+                    run,
+                    "telemetry_quality_degraded",
+                    "warning",
+                    {
+                        "replay_quality": attempt.replay_quality,
+                        "strategy_analysis_scope": attempt.strategy_analysis_scope,
+                    },
+                    now,
+                )
             replay.updated_at = now
             run.status = "succeeded"
             session.flush()
@@ -1066,14 +1080,16 @@ class TelemetryObservationImporter:
                 select(ReplayQualityIssue.telemetry_run_id).where(
                     ReplayQualityIssue.replay_id == replay.id,
                     ReplayQualityIssue.telemetry_run_id.is_not(None),
-                    ReplayQualityIssue.issue_code.in_({"crc_mismatch", "telemetry_truncated", "version_mismatch"}),
+                    ReplayQualityIssue.issue_code.in_(
+                        {"crc_mismatch", "telemetry_quality_degraded", "telemetry_truncated", "version_mismatch"}
+                    ),
                     ReplayQualityIssue.resolved_at.is_(None),
                 )
             )
         )
         if succeeded_telemetry_ids - degraded_telemetry_ids:
             candidates.add("engine_verified")
-        if issue_codes & {"parser_truncated", "telemetry_truncated"}:
+        if issue_codes & {"parser_truncated", "telemetry_quality_degraded", "telemetry_truncated"}:
             candidates.add("partial")
         succeeded_parser = int(
             session.scalar(

@@ -1589,6 +1589,39 @@ def test_complete_crc_and_truncation_import_full_rows_with_distinct_lifecycle(
             assert issue is not None and issue.issue_code == issue_code
 
 
+def test_successful_degraded_telemetry_imports_rows_without_claiming_engine_verification(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    """Keep mechanics-only full traces useful while preserving their non-authoritative quality."""
+    replay_sha256 = _replay(session_factory, settings, "6" * 64)
+    run_id = "623e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v1_bundle(settings.data_root / "runs" / run_id, run_id)
+    attempt = replace(
+        _attempt(session_factory, settings, trace, run_id),
+        replay_quality="partial",
+        strategy_analysis_scope="mechanics_only",
+    )
+
+    result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
+
+    assert result.status == "succeeded" and result.event_count == 7
+    with session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        issue = session.scalar(
+            select(ReplayQualityIssue).where(
+                ReplayQualityIssue.telemetry_run_id == run.id,
+                ReplayQualityIssue.issue_code == "telemetry_quality_degraded",
+            )
+        )
+        assert replay is not None and replay.lifecycle_state == "partial"
+        assert run is not None and run.status == "succeeded"
+        assert issue is not None and issue.details_json == {
+            "replay_quality": "partial",
+            "strategy_analysis_scope": "mechanics_only",
+        }
+
+
 def test_unsupported_lifecycle_precedes_later_crc_quality_evidence(
     session_factory: sessionmaker[Session], settings: AnalyzerSettings
 ) -> None:

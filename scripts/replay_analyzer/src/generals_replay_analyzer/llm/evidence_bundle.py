@@ -291,6 +291,33 @@ class EvidenceClaim:
         return cls._create(feature.name, "feature", projection, quality, reason, evidence_ids)
 
     @classmethod
+    def from_derived_feature(
+        cls,
+        feature: FeatureValue,
+        *,
+        evidence: FeatureEvidenceRef,
+    ) -> EvidenceClaim:
+        """Cite a persisted derived feature whose database graph retains every raw input."""
+        if type(feature) is not FeatureValue or type(evidence) is not FeatureEvidenceRef:
+            raise EvidenceBundleError("invalid_source_dto")
+        quality, reason = _feature_quality(feature)
+        if any(ref.tier != "observed" for ref in feature.input_evidence):
+            raise EvidenceBundleError("unauthorized_evidence")
+        if evidence.tier != "derived" or evidence.source_kind != "feature":
+            raise EvidenceBundleError("unauthorized_evidence")
+        # TheSuperHackers @fix Leex 23/08/2026 Bound provider citations through the persisted derived feature provenance node. (#TBD)
+        evidence_ids = _authorize_refs((evidence,), (evidence,))
+        projection = {
+            "name": feature.name,
+            "value_type": feature.value_type,
+            "raw_value": feature.raw_value,
+            "unit": feature.unit,
+            "scope": {"scope_type": feature.scope.scope_type, "scope_key": feature.scope.scope_key},
+            "window": {"frame_start": feature.window.frame_start, "frame_end": feature.window.frame_end},
+        }
+        return cls._create(feature.name, "feature", projection, quality, reason, evidence_ids)
+
+    @classmethod
     def from_feature_quality(
         cls,
         feature: FeatureValue,

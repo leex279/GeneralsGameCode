@@ -18,7 +18,6 @@ from uuid import UUID
 from map_asset_support import write_test_map_asset  # type: ignore[import-not-found]
 from telemetry.test_economy_production_contract import (  # type: ignore[import-not-found]
     ENGINE_IDENTITY,
-    RUN_ID,
     _object_created,
     _production,
     _record,
@@ -426,8 +425,10 @@ def _write_fixture_trace(trace_root: Path, pinned_replay: Path) -> Path:
 
 
 class _FixtureTelemetryAcquirer:
-    def __init__(self, trace: Path) -> None:
+    def __init__(self, trace: Path, *, replay_quality: str = "complete", strategy_analysis_scope: str = "full") -> None:
         self._trace = trace
+        self._replay_quality = replay_quality
+        self._strategy_analysis_scope = strategy_analysis_scope
 
     def acquire(self, replay: Path, replay_sha256: str) -> TelemetryArtifact:
         del replay, replay_sha256
@@ -437,10 +438,10 @@ class _FixtureTelemetryAcquirer:
             raise AssertionError("fixture telemetry is missing its catalog")
         catalog_path = self._trace.parent / catalog.path
         return TelemetryArtifact(
-            RUN_ID,
+            str(bundle.manifest.run_id),
             "success",
-            "complete",
-            "full",
+            self._replay_quality,
+            self._strategy_analysis_scope,
             self._trace,
             catalog_path,
             bundle.map_member_paths,
@@ -448,7 +449,7 @@ class _FixtureTelemetryAcquirer:
             None,
             None,
             0,
-            ENGINE_IDENTITY,
+            bundle.manifest.payload.engine_build,
             "d" * 64,
             (AcquisitionDiagnostic("fixture", "deterministic offline browser evidence"),),
         )
@@ -472,6 +473,9 @@ def build_populated_fixture(
     environment: Mapping[str, str],
     *,
     project_root: Path,
+    telemetry_trace: Path | None = None,
+    telemetry_replay_quality: str = "complete",
+    telemetry_strategy_analysis_scope: str = "full",
 ) -> PopulatedFixtureResult:
     """Build one populated external database without an engine, Ollama, or direct ORM seeding."""
     root = runtime_root.resolve()
@@ -529,7 +533,11 @@ def build_populated_fixture(
 
     try:
         factory = create_session_factory(engine)
-        trace = _write_fixture_trace(root / "telemetry-source", pinned_replay)
+        trace = (
+            _write_fixture_trace(root / "telemetry-source", pinned_replay)
+            if telemetry_trace is None
+            else telemetry_trace.resolve(strict=True)
+        )
         bundle = load_validated_telemetry_bundle(trace)
         service = create_production_import_service(
             factory,
@@ -537,7 +545,11 @@ def build_populated_fixture(
             ContentAddressedStore(runtime.settings.managed_replay_directory),
             ContentAddressedStore(runtime.settings.cache_directory / "artifacts"),
             parser=parse_replay,
-            telemetry_acquirer=_FixtureTelemetryAcquirer(trace),
+            telemetry_acquirer=_FixtureTelemetryAcquirer(
+                trace,
+                replay_quality=telemetry_replay_quality,
+                strategy_analysis_scope=telemetry_strategy_analysis_scope,
+            ),
             clock=lambda: _NOW,
             parser_version="browser-fixture-parser-v1",
             telemetry_acquirer_version="browser-fixture-telemetry-v1",

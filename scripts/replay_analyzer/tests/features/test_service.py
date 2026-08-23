@@ -51,6 +51,7 @@ from generals_replay_analyzer.features.service import (
     ExtractFeaturesRequest,
     FeatureExtractionError,
     FeatureExtractionService,
+    _evidence_id_batches,
 )
 
 
@@ -69,6 +70,15 @@ def feature_engine(tmp_path: Path) -> Engine:
 @pytest.fixture
 def feature_factory(feature_engine: Engine) -> sessionmaker[Session]:
     return create_session_factory(feature_engine)
+
+
+def test_evidence_id_batches_stay_below_sqlite_bind_limit() -> None:
+    public_ids = tuple(f"evidence-{index}" for index in range(1_201))
+
+    batches = tuple(_evidence_id_batches(public_ids))
+
+    assert tuple(len(batch) for batch in batches) == (500, 500, 201)
+    assert tuple(public_id for batch in batches for public_id in batch) == public_ids
 
 
 def _seed_replay(
@@ -754,6 +764,9 @@ def test_service_reuses_immutable_success_and_persists_direct_same_replay_links(
     assert second.feature_set_public_id == first.feature_set_public_id
     assert second.cache_key == first.cache_key
     assert tuple(value.name for value in second.features) == tuple(sorted(value.name for value in second.features))
+    assert len(first.derived_evidence) == len(first.features) == 3
+    assert second.derived_evidence == first.derived_evidence
+    assert all(ref.tier == "derived" and ref.source_kind == "feature" for ref in first.derived_evidence)
     with feature_factory() as session:
         assert session.scalar(select(func.count()).select_from(FeatureSet).where(FeatureSet.status == "succeeded")) == 1
         assert session.scalar(select(func.count()).select_from(Feature)) == 3
@@ -1480,6 +1493,7 @@ def _seed_replay_wide_observations(
     slots: object | None = None,
     include_conflicting_parser: bool = True,
     entity_owner_player_index: int = 0,
+    engine_player_indices: object | None = None,
 ) -> tuple[str, str, str, str, dict[str, str]]:
     replay, target, _ = _seed_replay(factory, finalize=False)
     peer = "00000000-0000-4000-8000-000000000501"
@@ -1590,7 +1604,7 @@ def _seed_replay_wide_observations(
                 "players_initialized",
                 {
                     "slots": resolved_slots,
-                    "engine_player_indices": [0, 1],
+                    "engine_player_indices": [0, 1] if engine_player_indices is None else engine_player_indices,
                     "game_data_catalog": {"path": "C:\\private\\catalog.json"},
                     "private_locator": "must-not-survive",
                 },
@@ -2119,6 +2133,47 @@ def test_replay_wide_supply_projection_rejects_unmapped_engine_owner(
         )
 
 
+def test_replay_wide_economy_projection_allows_declared_neutral_engine_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="cash_changed",
+        payload_json={"player_index": 1, "delta": 10000.0, "balance": 10000.0},
+    )
+
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {2: "00000000-0000-4000-8000-000000000302"},
+        {},
+        None,
+        [],
+        frozenset({1, 2}),
+    )
+
+    assert facts["replay_player_public_id"] is None
+
+
+def test_replay_wide_entity_sample_allows_declared_neutral_engine_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="entity_sample",
+        payload_json={"object_id": 77, "owner_player_index": 1, "position": {"x": 1.0, "y": 2.0}},
+    )
+
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {2: "00000000-0000-4000-8000-000000000302"},
+        {77: ("NeutralStructure", None, "00000000-0000-4000-8000-000000000777")},
+        None,
+        [],
+        frozenset({1, 2}),
+    )
+
+    assert facts["owner_scope_key"] is None
+    assert facts["replay_player_public_id"] is None
+
+
 @pytest.mark.parametrize("source_object_id", ("77", True, -1, 99))
 def test_replay_wide_supply_projection_rejects_malformed_or_unknown_source_object(
     feature_factory: sessionmaker[Session], source_object_id: object
@@ -2434,3 +2489,21 @@ def test_replay_wide_context_rejects_unmapped_persisted_entity_owner(
         FeatureExtractionService(feature_factory, extractors=(cast(object, extractor),)).extract(
             _request(replay, target, "context_capture")
         )
+
+
+def test_replay_wide_context_allows_declared_neutral_engine_entity_owner(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(
+        feature_factory,
+        entity_owner_player_index=2,
+        engine_player_indices=[0, 1, 2],
+    )
+    extractor = _context_capture_extractor("replay_wide_telemetry")
+
+    receipts = FeatureExtractionService(
+        feature_factory,
+        extractors=(cast(object, extractor),),
+    ).extract(_request(replay, target, "context_capture"))
+
+    assert len(receipts) == 1 and receipts[0].cache_hit is False
