@@ -157,6 +157,15 @@ def _overlaps(left: FeatureWindow, right: FeatureWindow) -> bool:
     return left.frame_start <= right.frame_end and right.frame_start <= left.frame_end
 
 
+# TheSuperHackers @feature Leex 23/08/2026 Match exact templates nested in immutable feature values. (#TBD)
+def _canonical_contains(raw: object, expected: str) -> bool:
+    if type(raw) is str:
+        return raw == expected
+    if isinstance(raw, tuple):
+        return any(_canonical_contains(item, expected) for item in raw)
+    return False
+
+
 def _predicate_value(predicate: FeaturePredicate, raw: object) -> bool:
     expected = predicate.expected_value
     if predicate.operator == "eq":
@@ -191,8 +200,8 @@ def _predicate_value(predicate: FeaturePredicate, raw: object) -> bool:
     if predicate.operator == "gte":
         return cast(int | float, raw) >= cast(int | float, expected)
     if predicate.operator == "contains":
-        return cast(str, expected) in cast(str, raw)
-    return cast(str, expected) not in cast(str, raw)
+        return _canonical_contains(raw, cast(str, expected))
+    return not _canonical_contains(raw, cast(str, expected))
 
 
 def _evaluate_predicate(

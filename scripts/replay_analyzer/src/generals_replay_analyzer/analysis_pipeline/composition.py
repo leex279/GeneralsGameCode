@@ -73,7 +73,7 @@ def create_production_import_service(
         extractors=extractors,
         registry=SPATIAL_REGISTRY,
     )
-    strategies = StrategyAssessmentService(session_factory)
+    strategies = StrategyAssessmentService(session_factory, data_root=settings.data_root)
     longitudinal = LongitudinalAnalysisService(session_factory, analyzer_settings=settings)
     reports = ReportService(session_factory, settings=settings)
     observation = ObservationImportHandler(

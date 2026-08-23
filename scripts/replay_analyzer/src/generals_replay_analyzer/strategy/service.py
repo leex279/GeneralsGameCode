@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.resources import files
 from importlib.resources.abc import Traversable
+from pathlib import Path
 from typing import cast
 from uuid import NAMESPACE_URL, uuid5
 
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,10 +25,12 @@ from generals_replay_analyzer.db.models import (
     Feature,
     FeatureEvidence,
     FeatureSet,
+    ManagedAsset,
     ParserRun,
     Replay,
     ReplayPlayer,
     StrategyAssessment,
+    TelemetryEvent,
     TelemetryRun,
 )
 from generals_replay_analyzer.features.base import (
@@ -35,6 +43,7 @@ from generals_replay_analyzer.features.evidence import (
     CanonicalValue,
     DerivedEvidence,
     EvidenceRef,
+    ObservedEvidence,
     freeze_canonical,
     thaw_canonical,
 )
@@ -44,8 +53,20 @@ from generals_replay_analyzer.strategy.candidates import (
     strategy_cache_identity,
     strategy_definition_digests,
 )
-from generals_replay_analyzer.strategy.rules import RuleAssessment, StrategyContext, StrategyFeature
+from generals_replay_analyzer.strategy.rules import CatalogProof, RuleAssessment, StrategyContext, StrategyFeature
 from generals_replay_analyzer.strategy.taxonomy import StrategyTaxonomy, default_taxonomy, load_taxonomy
+
+
+def _catalog_schema() -> object:
+    filename = "game-data-catalog-v1.schema.json"
+    packaged = files("generals_replay_analyzer").joinpath("data", filename)
+    source = Path(__file__).resolve().parents[3] / "contracts" / filename
+    resource = packaged if packaged.is_file() else source
+    return json.loads(resource.read_text(encoding="utf-8"))
+
+
+_CATALOG_SCHEMA = _catalog_schema()
+_CATALOG_VALIDATOR = Draft202012Validator(_CATALOG_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -107,15 +128,59 @@ def _details_mapping(details: CanonicalValue) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _mapping(value: object) -> dict[str, object] | None:
+    return cast(dict[str, object], value) if isinstance(value, dict) else None
+
+
+def _reject_nonstandard_constant(value: str) -> object:
+    raise ValueError(f"non-standard numeric constant {value}")
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"nonfinite number {value}")
+    return parsed
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Reverify managed catalog semantics before strategy use. (#TBD)
+def _catalog_document(data_root: Path, asset: ManagedAsset) -> dict[str, object] | None:
+    if asset.kind != "telemetry_catalog" or asset.media_type != "application/json":
+        return None
+    candidate = data_root.joinpath(*asset.relative_path.split("/"))
+    try:
+        resolved = candidate.resolve(strict=True)
+        payload = resolved.read_bytes()
+    except OSError:
+        return None
+    if resolved != candidate or data_root not in resolved.parents:
+        return None
+    if len(payload) != asset.size_bytes or hashlib.sha256(payload).hexdigest() != asset.sha256:
+        return None
+    try:
+        decoded = json.loads(
+            payload,
+            parse_constant=_reject_nonstandard_constant,
+            parse_float=_parse_finite_float,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(decoded, dict) or next(_CATALOG_VALIDATOR.iter_errors(decoded), None) is not None:
+        return None
+    return cast(dict[str, object], decoded)
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Persist deterministic strategy results through one short immutable transaction. (#TBD)
 class StrategyAssessmentService:
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         *,
+        data_root: Path | None = None,
         taxonomy_resource: Traversable | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._data_root = None if data_root is None else data_root.resolve(strict=True)
         self._taxonomy_resource = taxonomy_resource
 
     def assess_rule_candidates(
@@ -178,6 +243,137 @@ class StrategyAssessmentService:
             raise ValueError("feature set public IDs must be unique")
         if feature_set_public_ids != tuple(sorted(feature_set_public_ids)):
             raise ValueError("feature set public IDs must be sorted")
+
+    @staticmethod
+    def _telemetry_owner(session: Session, feature_set_ids: tuple[int, ...]) -> int | None:
+        owners = tuple(
+            value
+            for value in session.scalars(
+                select(EvidenceItem.telemetry_run_id)
+                .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
+                .join(Feature, Feature.id == FeatureEvidence.feature_id)
+                .where(
+                    Feature.feature_set_id.in_(feature_set_ids),
+                    EvidenceItem.telemetry_run_id.is_not(None),
+                )
+                .distinct()
+            ).all()
+            if value is not None
+        )
+        if len(owners) > 1:
+            raise ValueError("strategy features have mixed authoritative telemetry owners")
+        return owners[0] if owners else None
+
+    # TheSuperHackers @feature Leex 23/08/2026 Bind named strategies to imported faction, map, and catalog proof. (#TBD)
+    def _applicability_context(
+        self,
+        session: Session,
+        replay: Replay,
+        replay_player: ReplayPlayer | None,
+        telemetry_run_id: int | None,
+    ) -> tuple[
+        str | None,
+        EvidenceRef | None,
+        str | None,
+        EvidenceRef | None,
+        str | None,
+        EvidenceRef | None,
+        CatalogProof | None,
+    ]:
+        unavailable = (None, None, None, None, None, None, None)
+        if self._data_root is None or replay_player is None or telemetry_run_id is None:
+            return unavailable
+        telemetry = session.get(TelemetryRun, telemetry_run_id)
+        if telemetry is None or telemetry.replay_id != replay.id or telemetry.status != "succeeded":
+            return unavailable
+        rows = tuple(
+            session.execute(
+                select(TelemetryEvent, EvidenceItem)
+                .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                .where(
+                    TelemetryEvent.telemetry_run_id == telemetry.id,
+                    TelemetryEvent.event_type.in_(("manifest", "players_initialized")),
+                )
+                .order_by(TelemetryEvent.sequence, EvidenceItem.public_id)
+            ).all()
+        )
+        manifests = tuple(row for row in rows if row[0].event_type == "manifest")
+        player_snapshots = tuple(row for row in rows if row[0].event_type == "players_initialized")
+        if len(manifests) != 1 or len(player_snapshots) != 1:
+            return unavailable
+        manifest, manifest_evidence = manifests[0]
+        players, players_evidence = player_snapshots[0]
+        manifest_payload = _mapping(manifest.payload_json)
+        players_payload = _mapping(players.payload_json)
+        if manifest_payload is None or players_payload is None:
+            return unavailable
+        slots = players_payload.get("slots")
+        if not isinstance(slots, list):
+            return unavailable
+        resolved_slots = tuple(
+            cast(dict[str, object], slot)
+            for slot in slots
+            if isinstance(slot, dict)
+            and slot.get("occupied") is True
+            and slot.get("resolution_status") == "resolved"
+            and type(slot.get("faction_template_name")) is str
+        )
+        selected_slots = tuple(slot for slot in resolved_slots if slot.get("slot_index") == replay_player.slot_index)
+        opponent_slots = tuple(slot for slot in resolved_slots if slot.get("slot_index") != replay_player.slot_index)
+        if len(selected_slots) != 1 or len(opponent_slots) != 1:
+            return unavailable
+        player_faction = cast(str, selected_slots[0]["faction_template_name"])
+        opponent_faction = cast(str, opponent_slots[0]["faction_template_name"])
+        map_identity = manifest_payload.get("map_identity")
+        catalog_reference = _mapping(manifest_payload.get("game_data_catalog"))
+        asset = None if telemetry.catalog_asset_id is None else session.get(ManagedAsset, telemetry.catalog_asset_id)
+        if type(map_identity) is not str or catalog_reference is None or asset is None:
+            return unavailable
+        if (
+            catalog_reference.get("sha256") != asset.sha256
+            or catalog_reference.get("engine_data_identity") != telemetry.engine_build
+        ):
+            return unavailable
+        catalog = _catalog_document(self._data_root, asset)
+        if catalog is None or catalog.get("engine_data_identity") != telemetry.engine_build:
+            return unavailable
+        entries = catalog.get("thing_templates")
+        if not isinstance(entries, list):
+            return unavailable
+        factions = tuple(
+            (cast(str, entry["name"]), cast(str | None, entry["faction"]))
+            for entry in entries
+            if isinstance(entry, dict) and type(entry.get("name")) is str
+        )
+        categories = tuple(
+            (cast(str, entry["name"]), tuple(cast(list[str], entry["category_tags"])))
+            for entry in entries
+            if isinstance(entry, dict)
+            and type(entry.get("name")) is str
+            and isinstance(entry.get("category_tags"), list)
+        )
+        manifest_ref = _evidence_ref(manifest_evidence)
+        players_ref = _evidence_ref(players_evidence)
+        proof = CatalogProof(
+            catalog_identity=asset.sha256,
+            evidence=ObservedEvidence(
+                manifest_ref,
+                manifest.frame,
+                "catalog_manifest",
+                freeze_canonical({"catalog_identity": asset.sha256}),
+            ),
+            factions_by_template=factions,
+            category_tags_by_template=categories,
+        )
+        return (
+            player_faction,
+            players_ref,
+            opponent_faction,
+            players_ref,
+            map_identity,
+            manifest_ref,
+            proof,
+        )
 
     def _build_context(
         self,
@@ -265,6 +461,16 @@ class StrategyAssessmentService:
                 "feature_set_public_ids": list(feature_set_public_ids),
                 "feature_sets": settings,
             }
+            telemetry_owner = self._telemetry_owner(session, tuple(item.id for item in selected))
+            (
+                player_faction,
+                player_faction_evidence,
+                opponent_faction,
+                opponent_faction_evidence,
+                map_identity,
+                map_identity_evidence,
+                catalog,
+            ) = self._applicability_context(session, replay, replay_player, telemetry_owner)
             return StrategyContext(
                 replay_public_id=replay.public_id,
                 replay_sha256=replay.sha256,
@@ -272,13 +478,13 @@ class StrategyAssessmentService:
                 scope=scope,
                 window=window,
                 final_frame=final_frame,
-                player_faction_template_name=None,
-                player_faction_evidence=None,
-                opponent_faction_template_name=None,
-                opponent_faction_evidence=None,
-                map_identity=None,
-                map_identity_evidence=None,
-                catalog=None,
+                player_faction_template_name=player_faction,
+                player_faction_evidence=player_faction_evidence,
+                opponent_faction_template_name=opponent_faction,
+                opponent_faction_evidence=opponent_faction_evidence,
+                map_identity=map_identity,
+                map_identity_evidence=map_identity_evidence,
+                catalog=catalog,
                 features=tuple(features),
                 settings=freeze_canonical(context_settings),
             )

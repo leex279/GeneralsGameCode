@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -23,10 +25,12 @@ from generals_replay_analyzer.db.models import (
     Feature,
     FeatureEvidence,
     FeatureSet,
+    ManagedAsset,
     ParserRun,
     Replay,
     ReplayPlayer,
     StrategyAssessment,
+    TelemetryEvent,
     TelemetryRun,
 )
 from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence
@@ -137,9 +141,15 @@ class _PermutingApplicabilityService(_InjectedApplicabilityService):
 
 
 @pytest.fixture
-def strategy_engine(tmp_path: Path) -> Engine:
-    database = tmp_path / "external-data-root" / "library.sqlite3"
-    database.parent.mkdir()
+def strategy_data_root(tmp_path: Path) -> Path:
+    root = tmp_path / "external-data-root"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def strategy_engine(strategy_data_root: Path) -> Engine:
+    database = strategy_data_root / "library.sqlite3"
     upgrade_database(database)
     engine = create_database_engine(database)
     try:
@@ -165,6 +175,8 @@ def _seed_feature_set(
     feature_evidence_tier: Literal["observed", "derived", "inferred"] = "derived",
     input_evidence_tier: Literal["observed", "derived", "inferred"] = "observed",
     telemetry_parser_run_id: str | None = None,
+    include_opponent: bool = False,
+    complete_runs: bool = True,
 ) -> tuple[str, str, str]:
     now = datetime(2026, 8, 22, tzinfo=UTC)
     identity = feature_set_public_id[-12:]
@@ -218,6 +230,21 @@ def _seed_feature_set(
             observed_json={"faction": "FactionAmerica"},
         )
         session.add(player)
+        if include_opponent:
+            session.add(
+                ReplayPlayer(
+                    public_id="00000000-0000-4000-8000-000000000307",
+                    replay_id=replay.id,
+                    parser_run_id=parser.id,
+                    slot_index=1,
+                    slot_kind="human",
+                    original_name="Opponent",
+                    normalized_name="opponent",
+                    player_index=1,
+                    faction="FactionChina",
+                    observed_json={"faction": "FactionChina"},
+                )
+            )
         session.flush()
         telemetry = TelemetryRun(
             run_id=str(uuid5(NAMESPACE_URL, f"telemetry:{identity}")),
@@ -293,16 +320,17 @@ def _seed_feature_set(
         session.flush()
         session.add(FeatureEvidence(feature_id=feature.id, evidence_item_id=observed.id, role="input"))
         session.commit()
-        parser.status = "succeeded"
-        parser.completion_status = "complete"
-        parser.result_sha256 = "b" * 64
-        parser.completed_at = now
-        telemetry.status = "succeeded"
-        telemetry.final_frame = 300
-        telemetry.command_count = 0
-        telemetry.trace_sha256 = "e" * 64
-        telemetry.completed_at = now
-        session.commit()
+        if complete_runs:
+            parser.status = "succeeded"
+            parser.completion_status = "complete"
+            parser.result_sha256 = "b" * 64
+            parser.completed_at = now
+            telemetry.status = "succeeded"
+            telemetry.final_frame = 300
+            telemetry.command_count = 0
+            telemetry.trace_sha256 = "e" * 64
+            telemetry.completed_at = now
+            session.commit()
     return replay_public_id, player_public_id, feature_set_public_id
 
 
@@ -410,6 +438,177 @@ def _seed_applicability(
         ),
     )
     return catalog, refs[1], refs[2], refs[3]
+
+
+def _catalog_template(
+    ordinal: int,
+    name: str,
+    faction: str,
+    *category_tags: str,
+    configured_build_time_seconds: object = 0.0,
+) -> dict[str, object]:
+    return {
+        "ordinal": ordinal,
+        "name": name,
+        "faction": faction,
+        "kind_of_flags": [],
+        "behavior_modules": [],
+        "build_cost": 0,
+        "configured_build_time_seconds": configured_build_time_seconds,
+        "prerequisites": [],
+        "locomotor_sets": [],
+        "production_capable": False,
+        "weapon_sets": [],
+        "derived_weapon_names": [],
+        "category_tags": list(category_tags),
+    }
+
+
+def _seed_persisted_applicability(
+    factory: sessionmaker[Session],
+    data_root: Path,
+    *,
+    catalog_build_time: object = 0.0,
+) -> tuple[str, str]:
+    catalog = {
+        "schema_version": 1,
+        "type": "game_data_catalog",
+        "engine_data_identity": "fixture",
+        "weapon_scope": "referenced_by_thing_templates",
+        "locomotor_scope": "referenced_by_thing_templates",
+        "thing_templates": [
+            _catalog_template(
+                0,
+                "AmericaTankDozer",
+                "FactionAmerica",
+                "builder",
+                configured_build_time_seconds=catalog_build_time,
+            ),
+            _catalog_template(1, "ChinaDozer", "FactionChina", "builder"),
+        ],
+        "upgrades": [],
+        "sciences": [],
+        "weapons": [],
+        "locomotors": [],
+    }
+    catalog_bytes = json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    catalog_sha256 = hashlib.sha256(catalog_bytes).hexdigest()
+    relative_path = f"assets/game-data-catalog-v1-{catalog_sha256}.json"
+    catalog_path = data_root / Path(*relative_path.split("/"))
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_bytes(catalog_bytes)
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+    manifest_public_id = "00000000-0000-4000-8000-000000000905"
+    players_public_id = "00000000-0000-4000-8000-000000000906"
+    with factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == REPLAY))
+        player = session.scalar(select(ReplayPlayer).where(ReplayPlayer.public_id == PLAYER))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id))  # type: ignore[union-attr]
+        assert replay is not None and player is not None and telemetry is not None
+        parser = session.get(ParserRun, player.parser_run_id)
+        assert parser is not None
+        asset = ManagedAsset(
+            public_id="00000000-0000-4000-8000-000000000308",
+            sha256=catalog_sha256,
+            kind="telemetry_catalog",
+            relative_path=relative_path,
+            size_bytes=len(catalog_bytes),
+            media_type="application/json",
+            created_at=now,
+        )
+        session.add(asset)
+        session.flush()
+        telemetry.catalog_asset_id = asset.id
+        catalog_reference = {
+            "type": "game_data_catalog",
+            "path": catalog_path.name,
+            "sha256": catalog_sha256,
+            "engine_data_identity": "fixture",
+        }
+        manifest_payload = {
+            "engine_build": "fixture",
+            "replay_version": "1.04",
+            "map_identity": "maps/test/map.ini",
+            "initial_seed": 4,
+            "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False, "order_coverage": []},
+            "game_data_catalog": catalog_reference,
+            "map_asset": None,
+        }
+        slots = [
+            {
+                "slot_index": index,
+                "slot_state": "human" if index < 2 else "open",
+                "occupied": index < 2,
+                "resolution_status": "resolved" if index < 2 else "not_applicable",
+                "replay_name": ("Player", "Opponent")[index] if index < 2 else None,
+                "player_index": index if index < 2 else None,
+                "team_id": index if index < 2 else None,
+                "faction_template_name": ("FactionAmerica", "FactionChina")[index] if index < 2 else None,
+                "color": index if index < 2 else None,
+                "start_position_status": "unknown" if index < 2 else "not_applicable",
+                "start_position": None,
+                "controller": "human" if index < 2 else None,
+                "is_human": index < 2,
+                "is_header_local_slot": index == 0,
+                "is_resolved_local_player": True if index == 0 else False if index == 1 else None,
+            }
+            for index in range(8)
+        ]
+        players_payload = {
+            "header_local_slot_index": 0,
+            "slots": slots,
+            "engine_player_indices": [0, 1],
+            "game_data_catalog": catalog_reference,
+        }
+        for sequence, event_type, payload, public_id in (
+            (0, "manifest", manifest_payload, manifest_public_id),
+            (1, "players_initialized", players_payload, players_public_id),
+        ):
+            evidence = EvidenceItem(
+                public_id=public_id,
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                telemetry_run_id=telemetry.id,
+                tier="observed",
+                source_kind="telemetry_event",
+                source_key=f"telemetry:{telemetry.run_id}:sequence:{sequence}",
+                schema_version=2,
+                created_at=now,
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(
+                TelemetryEvent(
+                    telemetry_run_id=telemetry.id,
+                    sequence=sequence,
+                    frame=0,
+                    logic_time_seconds=0.0,
+                    schema_version=2,
+                    event_type=event_type,
+                    payload_json=payload,
+                    raw_record_json={
+                        "schema_version": 2,
+                        "run_id": telemetry.run_id,
+                        "sequence": sequence,
+                        "frame": 0,
+                        "logic_time_seconds": 0.0,
+                        "event_type": event_type,
+                        "payload": payload,
+                    },
+                    evidence_item_id=evidence.id,
+                )
+            )
+        parser.status = "succeeded"
+        parser.completion_status = "complete"
+        parser.result_sha256 = "b" * 64
+        parser.completed_at = now
+        telemetry.status = "succeeded"
+        telemetry.final_frame = 300
+        telemetry.command_count = 0
+        telemetry.trace_sha256 = "e" * 64
+        telemetry.completed_at = now
+        session.commit()
+    return manifest_public_id, players_public_id
 
 
 def _add_secondary_feature_inputs(factory: sessionmaker[Session]) -> None:
@@ -568,6 +767,87 @@ def test_named_service_persists_exact_applicability_feature_and_contradiction_ro
         )
     assert sum(role == "supporting" for role, _ in roles) == 8
     assert sum(role == "contradicting" for role, _ in roles) == 2
+
+
+def test_service_builds_named_strategy_applicability_from_persisted_telemetry(
+    strategy_factory: sessionmaker[Session],
+    strategy_data_root: Path,
+    taxonomy_resource: Callable[[dict[str, Any] | bytes | None], MemoryResource],
+) -> None:
+    """Catch production strategy assessment discarding imported faction, map, and catalog proof."""
+    _seed_feature_set(strategy_factory, include_opponent=True, complete_runs=False)
+    _add_named_feature(
+        strategy_factory,
+        sequence=11,
+        name="production.completed_count",
+        value_type="integer",
+        raw_value=3,
+        unit="count",
+    )
+    _add_named_feature(
+        strategy_factory,
+        sequence=12,
+        name="combat.applied_damage_taken",
+        value_type="real",
+        raw_value=75.0,
+        unit="damage",
+    )
+    manifest_public_id, players_public_id = _seed_persisted_applicability(
+        strategy_factory,
+        strategy_data_root,
+    )
+
+    receipt = StrategyAssessmentService(
+        strategy_factory,
+        data_root=strategy_data_root,
+        taxonomy_resource=taxonomy_resource(),
+    ).assess_rule_candidates(REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY)
+
+    assert tuple(item.strategy_id for item in receipt.assessments) == ("catalog_proven_pressure",)
+    assessment = receipt.assessments[0]
+    assert assessment.quality == "available"
+    assert {manifest_public_id, players_public_id} <= {
+        reference.public_id for reference in assessment.supporting_evidence
+    }
+
+
+def test_nonfinite_managed_catalog_cannot_enable_a_named_strategy(
+    strategy_factory: sessionmaker[Session],
+    strategy_data_root: Path,
+    taxonomy_resource: Callable[[dict[str, Any] | bytes | None], MemoryResource],
+) -> None:
+    """Catch a hash-valid JavaScript NaN token passing catalog validation."""
+    _seed_feature_set(strategy_factory, include_opponent=True, complete_runs=False)
+    _add_named_feature(
+        strategy_factory,
+        sequence=11,
+        name="production.completed_count",
+        value_type="integer",
+        raw_value=3,
+        unit="count",
+    )
+    _add_named_feature(
+        strategy_factory,
+        sequence=12,
+        name="combat.applied_damage_taken",
+        value_type="real",
+        raw_value=75.0,
+        unit="damage",
+    )
+    _seed_persisted_applicability(
+        strategy_factory,
+        strategy_data_root,
+        catalog_build_time=float("nan"),
+    )
+
+    receipt = StrategyAssessmentService(
+        strategy_factory,
+        data_root=strategy_data_root,
+        taxonomy_resource=taxonomy_resource(),
+    ).assess_rule_candidates(REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY)
+
+    assert tuple(item.strategy_id for item in receipt.assessments) == ("unknown_or_mixed",)
+    assert receipt.assessments[0].quality == "unavailable"
 
 
 def test_exact_cache_hit_is_idempotent_and_input_change_retains_history(

@@ -15,7 +15,12 @@ from generals_replay_analyzer.strategy.rules import (
     StrategyFeature,
     evaluate_rule,
 )
-from generals_replay_analyzer.strategy.taxonomy import StrategyDefinition, default_taxonomy, load_taxonomy
+from generals_replay_analyzer.strategy.taxonomy import (
+    FeaturePredicate,
+    StrategyDefinition,
+    default_taxonomy,
+    load_taxonomy,
+)
 
 from .conftest import MemoryResource
 
@@ -150,6 +155,50 @@ def test_named_rule_links_derived_and_direct_evidence_and_uses_the_fixed_score_f
     assert details["formula_version"] == "strategy-rule-score-v1"  # type: ignore[index]
     assert details["score_kind"] == "transparent_rule_score_not_probability"  # type: ignore[index]
     assert "probability" not in str(details).replace("transparent_rule_score_not_probability", "")
+
+
+def test_contains_predicate_finds_an_exact_template_inside_a_canonical_build_sequence(
+    registry: FeatureRegistry,
+    evidence_ref: Callable[..., EvidenceRef],
+    strategy_feature: Callable[..., object],
+    taxonomy_resource: Callable[[dict[str, object] | bytes | None], MemoryResource],
+) -> None:
+    """Catch strategy membership falling back to shallow container comparison."""
+    definition = replace(
+        _named_definition(registry, taxonomy_resource),
+        required=(
+            FeaturePredicate(
+                "strategy_center_completed",
+                "build.completed_sequence",
+                "contains",
+                "AmericaStrategyCenter",
+                "json",
+                ("player",),
+                3,
+            ),
+        ),
+        supporting=(),
+        contradicting=(),
+    )
+    sequence = strategy_feature(
+        name="build.completed_sequence",
+        raw_value=(
+            {"frame": 180, "template_name": "AmericaSupplyCenter"},
+            {"frame": 900, "template_name": "AmericaStrategyCenter"},
+        ),
+        unit="json",
+        sequence=11,
+    )
+
+    result = evaluate_rule(
+        definition,
+        _context(evidence_ref=evidence_ref, features=(sequence,)),  # type: ignore[arg-type]
+        registry,
+    )
+
+    assert result.quality == "available"
+    assert result.rule_score == 1.0
+    assert thaw_canonical(result.details)["predicates"][0]["state"] == "matched"  # type: ignore[index]
 
 
 def test_partial_feature_produces_an_exact_partial_rule_score(
