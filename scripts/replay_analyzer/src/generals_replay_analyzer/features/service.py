@@ -314,6 +314,8 @@ class FeatureExtractionService:
                 catalog_identity=catalog_identity,
                 observed=tuple(observations),
                 settings=request.settings,
+                parser_run_public_id=None if parser is None else parser.run_id,
+                telemetry_run_public_id=None if telemetry is None else telemetry.run_id,
             )
 
     def _parser_observations(
@@ -1129,6 +1131,7 @@ class FeatureExtractionService:
                 replay,
                 replay_player,
                 feature_set,
+                context,
                 values,
                 {item.ref.public_id: item.ref for item in context.observed},
             )
@@ -1162,6 +1165,7 @@ class FeatureExtractionService:
         replay: Replay,
         replay_player: ReplayPlayer | None,
         feature_set: FeatureSet,
+        context: FeatureContext,
         values: tuple[FeatureValue, ...],
         authorized_evidence: Mapping[str, EvidenceRef],
     ) -> None:
@@ -1210,6 +1214,27 @@ class FeatureExtractionService:
             for row in evidence_rows.values()
             if row.telemetry_run_id is not None
         }
+        # TheSuperHackers @bugfix Leex 23/08/2026 Preserve the selected run owner when unavailable features have no event citations. (#TBD)
+        if not parser_run_ids and context.parser_run_public_id is not None:
+            parser_run_id = session.scalar(
+                select(ParserRun.id).where(
+                    ParserRun.replay_id == replay.id,
+                    ParserRun.run_id == context.parser_run_public_id,
+                )
+            )
+            if parser_run_id is None:
+                raise ValueError("feature context parser owner is unavailable")
+            parser_run_ids.add(parser_run_id)
+        if not telemetry_run_ids and context.telemetry_run_public_id is not None:
+            telemetry_run_id = session.scalar(
+                select(TelemetryRun.id).where(
+                    TelemetryRun.replay_id == replay.id,
+                    TelemetryRun.run_id == context.telemetry_run_public_id,
+                )
+            )
+            if telemetry_run_id is None:
+                raise ValueError("feature context telemetry owner is unavailable")
+            telemetry_run_ids.add(telemetry_run_id)
         if len(parser_run_ids) > 1 or len(telemetry_run_ids) > 1:
             raise ValueError("feature evidence has mixed authoritative run owners")
         if not parser_run_ids and not telemetry_run_ids:

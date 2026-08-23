@@ -299,7 +299,7 @@ def _seed_request(tmp_path: Path):
             replay_id=replay.id,
             parser_run_id=parser.id,
             tier="observed",
-            source_kind="telemetry",
+            source_kind="telemetry_event",
             source_key="event:opening",
             schema_version=2,
             created_at=now,
@@ -307,7 +307,7 @@ def _seed_request(tmp_path: Path):
         session.add(evidence)
         session.commit()
 
-    ref = EvidenceRef(evidence_public_id, "observed", "telemetry", "event:opening", "telemetry-v2")
+    ref = EvidenceRef(evidence_public_id, "observed", "telemetry_event", "event:opening", "telemetry-v2")
     deterministic = RuleAssessment(
         strategy_id="oil_grab",
         phase="opening",

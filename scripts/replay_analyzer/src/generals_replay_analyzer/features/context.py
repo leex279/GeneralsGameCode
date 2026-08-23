@@ -45,6 +45,8 @@ class FeatureContext:
     catalog_identity: str | None
     observed: tuple[ObservedEvidence, ...]
     settings: CanonicalValue
+    parser_run_public_id: str | None = None
+    telemetry_run_public_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.cache_schema != "feature-context-v1":

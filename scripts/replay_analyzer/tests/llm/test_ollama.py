@@ -136,7 +136,7 @@ def _tracked_response(
 
 
 def _request(public_ids: tuple[str, ...]) -> StructuredRequest:
-    ref = EvidenceRef(public_ids[0], "observed", "telemetry", "event:opening", "telemetry-v2")
+    ref = EvidenceRef(public_ids[0], "observed", "telemetry_event", "event:opening", "telemetry-v2")
     assessment = RuleAssessment(
         strategy_id="oil_grab",
         phase="opening",

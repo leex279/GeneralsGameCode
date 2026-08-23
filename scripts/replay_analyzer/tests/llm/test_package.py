@@ -122,7 +122,7 @@ from generals_replay_analyzer.strategy.rules import RuleAssessment
 async def main():
     replay_id = "00000000-0000-0000-0000-000000000001"
     evidence_id = "00000000-0000-0000-0000-000000000002"
-    ref = EvidenceRef(evidence_id, "observed", "telemetry", "event:opening", "telemetry-v2")
+    ref = EvidenceRef(evidence_id, "observed", "telemetry_event", "event:opening", "telemetry-v2")
     rule = RuleAssessment(
         strategy_id="oil_grab",
         phase="opening",

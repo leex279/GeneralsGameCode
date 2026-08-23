@@ -26,8 +26,8 @@ from generals_replay_analyzer.strategy.rules import RuleAssessment
 
 
 def _bundle(public_ids: tuple[str, ...]):
-    rule_ref = EvidenceRef(public_ids[0], "observed", "telemetry", "event:opening", "telemetry-v2")
-    feature_ref = EvidenceRef(public_ids[1], "observed", "telemetry", "event:income", "telemetry-v2")
+    rule_ref = EvidenceRef(public_ids[0], "observed", "telemetry_event", "event:opening", "telemetry-v2")
+    feature_ref = EvidenceRef(public_ids[1], "observed", "telemetry_event", "event:income", "telemetry-v2")
     rule = RuleAssessment(
         strategy_id="oil_grab",
         phase="opening",
@@ -245,7 +245,7 @@ def test_resource_error_traceback_suppresses_secret_source_path(monkeypatch: pyt
 
 
 def test_prompt_injection_remains_bounded_cited_data(public_ids: tuple[str, ...]) -> None:
-    ref = EvidenceRef(public_ids[0], "observed", "telemetry", "event:text", "telemetry-v2")
+    ref = EvidenceRef(public_ids[0], "observed", "telemetry_event", "event:text", "telemetry-v2")
     feature = FeatureValue(
         name="adversarial",
         value_type="text",
