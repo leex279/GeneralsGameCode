@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import TypeVar
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
+from starlette.responses import Response
 
 from generals_replay_analyzer.web.ports import DiagnosticDTO
 
 _LOGGER = logging.getLogger(__name__)
+_ResponseT = TypeVar("_ResponseT", bound=Response)
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-    "img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    "img-src 'self'; connect-src 'self'; form-action 'self'; object-src 'none'; "
+    "base-uri 'none'; frame-ancestors 'none'"
 )
+PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
 _TITLES = {
     400: "Bad Request",
     403: "Forbidden",
@@ -51,9 +56,14 @@ class PublicProblem(Exception):
         self.diagnostics = tuple(diagnostics)
 
 
-def apply_security_headers(response: JSONResponse) -> JSONResponse:
+# TheSuperHackers @feature Leex 23/08/2026 Apply one browser-isolation policy to every local response. (#TBD)
+def apply_security_headers(response: _ResponseT) -> _ResponseT:
     response.headers["content-security-policy"] = CONTENT_SECURITY_POLICY
     response.headers["x-content-type-options"] = "nosniff"
+    response.headers["referrer-policy"] = "no-referrer"
+    response.headers["x-frame-options"] = "DENY"
+    response.headers["cross-origin-opener-policy"] = "same-origin"
+    response.headers["permissions-policy"] = PERMISSIONS_POLICY
     return response
 
 

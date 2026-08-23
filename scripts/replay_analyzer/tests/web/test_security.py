@@ -127,9 +127,16 @@ def test_security_headers_apply_to_success_and_problem_responses() -> None:
     for response in (success, problem):
         assert response.headers["content-security-policy"] == (
             "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-            "img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            "img-src 'self'; connect-src 'self'; form-action 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'"
         )
         assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["cross-origin-opener-policy"] == "same-origin"
+        assert response.headers["permissions-policy"] == (
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        )
     assert problem.status_code == 404
     assert problem.headers["content-type"].startswith("application/problem+json")
 
@@ -182,7 +189,8 @@ def test_unhandled_failure_logs_correlation_id_but_leaks_no_path_secret_or_excep
     assert response.headers["x-correlation-id"]
     assert response.headers["content-security-policy"] == (
         "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-        "img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        "img-src 'self'; connect-src 'self'; form-action 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'"
     )
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "secret-token" not in body

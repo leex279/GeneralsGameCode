@@ -22,7 +22,7 @@ from starlette.responses import Response
 
 from generals_replay_analyzer.web.bootstrap import BootstrapSettings
 from generals_replay_analyzer.web.dependencies import WebApplicationPortFactory
-from generals_replay_analyzer.web.errors import CONTENT_SECURITY_POLICY, install_problem_handlers, problem_response
+from generals_replay_analyzer.web.errors import apply_security_headers, install_problem_handlers, problem_response
 from generals_replay_analyzer.web.resources import package_resource
 from generals_replay_analyzer.web.routes import dashboard, evidence, health, identity, imports, jobs, replays, reports
 
@@ -184,9 +184,7 @@ class LocalRequestSecurityMiddleware(BaseHTTPMiddleware):
             )
         else:
             response = await call_next(request)
-        response.headers["content-security-policy"] = CONTENT_SECURITY_POLICY
-        response.headers["x-content-type-options"] = "nosniff"
-        return response
+        return apply_security_headers(response)
 
     def _csrf_accepts(self, request: Request) -> bool:
         header_token = request.headers.get("x-csrf-token")

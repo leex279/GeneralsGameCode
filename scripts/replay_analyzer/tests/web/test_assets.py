@@ -129,9 +129,12 @@ def test_package_static_mount_serves_local_assets_and_rejects_traversal_without_
     assert stylesheet.headers["content-type"].startswith("text/css")
     assert stylesheet.headers["content-security-policy"] == (
         "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
-        "img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        "img-src 'self'; connect-src 'self'; form-action 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'"
     )
     assert stylesheet.headers["x-content-type-options"] == "nosniff"
+    assert stylesheet.headers["referrer-policy"] == "no-referrer"
+    assert stylesheet.headers["x-frame-options"] == "DENY"
     assert traversal.status_code == 404
     assert encoded_traversal.status_code == 404
     assert missing.status_code == 404
