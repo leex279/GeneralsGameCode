@@ -1157,6 +1157,7 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayEconomy.h
         Include/Common/ReplayEntityLifecycle.h
         Include/Common/ReplayMovementSampler.h
+        Include/Common/ReplayVisibilitySampler.h
         Include/Common/ReplayOutcome.h
         Include/Common/ReplayParseDump.h
         Include/Common/ReplayTelemetry.h
@@ -1166,6 +1167,7 @@ if(NOT IS_VS6_BUILD)
         Source/Common/ReplayEconomy.cpp
         Source/Common/ReplayEntityLifecycle.cpp
         Source/Common/ReplayMovementSampler.cpp
+        Source/Common/ReplayVisibilitySampler.cpp
         Source/Common/ReplayOutcome.cpp
         Source/Common/ReplayParseDump.cpp
         Source/Common/ReplayTelemetry.cpp
