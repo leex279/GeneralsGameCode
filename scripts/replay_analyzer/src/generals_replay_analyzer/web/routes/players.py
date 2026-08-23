@@ -303,8 +303,8 @@ def player_profile_json(
     return Response(body, media_type="application/json", headers={"etag": f'"{etag}"'})
 
 
-def _issue_csrf(request: Request) -> tuple[str, str]:
-    token = request.app.state.form_csrf_token_registry.issue()
+def _issue_csrf(request: Request, action_path: str, cookie: str | None = None) -> tuple[str, str]:
+    token = request.app.state.form_csrf_token_registry.issue(action_path, cookie)
     return token.hidden_value, token.cookie_value
 
 
@@ -373,12 +373,34 @@ def player_identity(
                 detail="Identity invalidation state is invalid",
             )
         invalidation_status = (operation_id, invalidation_state, invalidation_reason_code)
-    hidden, cookie = _issue_csrf(request)
+    merge_token, cookie = _issue_csrf(
+        request, "/players/identity/previews/merge", request.cookies.get("_csrf")
+    )
+    split_token, cookie = _issue_csrf(request, "/players/identity/previews/split", cookie)
+    inverse_tokens: dict[str, str] = {}
+    invalidation_tokens: dict[str, str] = {}
+    for operation in audit.operations:
+        if operation.inverse_allowed:
+            hidden, cookie = _issue_csrf(request, "/players/identity/previews/inverse", cookie)
+            inverse_tokens[operation.operation_public_id] = hidden
+        hidden, cookie = _issue_csrf(
+            request,
+            f"/players/{player_id}/identity/invalidation/{operation.operation_public_id}/retry",
+            cookie,
+        )
+        invalidation_tokens[operation.operation_public_id] = hidden
     response = template_response(
         request,
         "players/identity.html",
         _shell(audit.availability),
-        context={"audit": audit, "csrf_token": hidden, "invalidation_status": invalidation_status},
+        context={
+            "audit": audit,
+            "merge_csrf_token": merge_token,
+            "split_csrf_token": split_token,
+            "inverse_csrf_tokens": inverse_tokens,
+            "invalidation_csrf_tokens": invalidation_tokens,
+            "invalidation_status": invalidation_status,
+        },
     )
     _set_csrf_cookie(response, cookie)
     return response
@@ -407,7 +429,7 @@ async def _identity_form(request: Request) -> dict[str, list[str]]:
     if request.headers.get("x-csrf-token") is None:
         tokens = values.get("_csrf", [])
         if len(tokens) != 1 or not request.app.state.form_csrf_token_registry.consume(
-            request.cookies.get("_csrf"), tokens[0]
+            request.cookies.get("_csrf"), tokens[0], request.url.path
         ):
             raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
     return values
@@ -493,23 +515,60 @@ def _affected_player(draft: IdentityDraftDTO) -> str:
     return draft.expected_revisions[0].player_public_id
 
 
-@router.post("/players/identity/previews/{operation}", summary="Preview identity change")
-async def preview_identity(
-    operation: str,
-    request: Request,
-    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
-) -> Response:
+# TheSuperHackers @fix Leex 23/08/2026 Build validated identity forms before opening application-port scopes. (#TBD)
+async def _validated_identity_preview(operation: str, request: Request) -> IdentityDraftDTO:
+    operation_map = {"merge": "merge_players", "split": "split_alias", "inverse": "inverse"}
+    try:
+        kind = cast(IdentityOperationKind, operation_map[operation])
+        return _draft(kind, await _identity_form(request))
+    except (KeyError, ValueError, ValidationError):
+        raise PublicProblem(
+            status=422,
+            code="invalid_identity_preview",
+            detail="Identity preview is invalid",
+        ) from None
+
+
+async def _validated_identity_execution(operation: str, request: Request) -> ExecuteIdentityChangeDTO:
     operation_map = {"merge": "merge_players", "split": "split_alias", "inverse": "inverse"}
     try:
         kind = cast(IdentityOperationKind, operation_map[operation])
         values = await _identity_form(request)
-        draft = _draft(kind, values)
-    except (KeyError, ValueError, ValidationError):
-        return problem_response(
-            422, title="Invalid identity preview", code="invalid_identity_preview", detail="Identity preview is invalid"
+        return ExecuteIdentityChangeDTO(
+            draft=_draft(kind, values),
+            expected_before_snapshot_digest=_one(values, "expected_before_snapshot_digest"),
+            operator_label=_one(values, "operator_label"),
+            reason=_one(values, "reason"),
         )
+    except (KeyError, ValueError, ValidationError):
+        raise PublicProblem(
+            status=422,
+            code="invalid_identity_execution",
+            detail="Identity execution is invalid",
+        ) from None
+
+
+async def _validated_identity_retry(request: Request) -> None:
+    values = await _identity_form(request)
+    if set(values) != {"_csrf"} and request.headers.get("x-csrf-token") is None:
+        raise PublicProblem(
+            status=422,
+            code="invalid_identity_invalidation_retry",
+            detail="Identity invalidation retry is invalid",
+        )
+
+
+@router.post("/players/identity/previews/{operation}", summary="Preview identity change")
+async def preview_identity(
+    operation: str,
+    request: Request,
+    draft: Annotated[IdentityDraftDTO, Depends(_validated_identity_preview)],
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
     preview = _identity_port(port).preview(draft)
-    hidden, cookie = _issue_csrf(request)
+    hidden, cookie = _issue_csrf(
+        request, f"/players/identity/{operation}", request.cookies.get("_csrf")
+    )
     response = template_response(
         request,
         "players/_identity_confirmation.html",
@@ -529,27 +588,10 @@ async def preview_identity(
 @router.post("/players/identity/{operation}", summary="Execute confirmed identity change")
 async def execute_identity(
     operation: str,
-    request: Request,
+    command: Annotated[ExecuteIdentityChangeDTO, Depends(_validated_identity_execution)],
     port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
 ) -> Response:
-    operation_map = {"merge": "merge_players", "split": "split_alias", "inverse": "inverse"}
-    try:
-        kind = cast(IdentityOperationKind, operation_map[operation])
-        values = await _identity_form(request)
-        draft = _draft(kind, values)
-        command = ExecuteIdentityChangeDTO(
-            draft=draft,
-            expected_before_snapshot_digest=_one(values, "expected_before_snapshot_digest"),
-            operator_label=_one(values, "operator_label"),
-            reason=_one(values, "reason"),
-        )
-    except (KeyError, ValueError, ValidationError):
-        return problem_response(
-            422,
-            title="Invalid identity execution",
-            code="invalid_identity_execution",
-            detail="Identity execution is invalid",
-        )
+    draft = command.draft
     receipt = _identity_port(port).execute(command)
     location = _invalidation_location(
         _affected_player(draft),
@@ -566,13 +608,12 @@ async def execute_identity(
 async def retry_identity_invalidation(
     player_public_id: str,
     operation_public_id: str,
-    request: Request,
+    _csrf_guard: Annotated[None, Depends(_validated_identity_retry)],
     port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
 ) -> Response:
     try:
         player_id = _public_id(player_public_id)
         operation_id = _public_id(operation_public_id)
-        await _identity_form(request)
     except (ValueError, ValidationError):
         return problem_response(
             422,

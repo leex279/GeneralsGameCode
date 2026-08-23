@@ -2,10 +2,12 @@
   <h1 id="import-dialog-title">Import replay</h1>
   <p>Choose a configured replay root or provide an upload after opaque ingress is available.</p>
   <form method="dialog"><button type="submit" autofocus aria-label="Close import dialog">Close</button></form>
-  <form action="/imports/uploads" method="post" enctype="multipart/form-data">
+  <form action="/imports/uploads" method="post">
+    <input type="hidden" name="_csrf" value="{{ upload_csrf_token }}">
     <label for="upload-file">Replay upload (.rep, maximum 64 MiB)</label>
     <input id="upload-file" name="upload" type="file" accept=".rep" disabled aria-describedby="upload-status">
     <p id="upload-status">Upload unavailable: opaque_ingress_handoff_pending.</p>
+    <button type="submit" disabled aria-disabled="true">Upload unavailable</button>
   </form>
   <form action="/imports/root-selections" method="post">
     {% if csrf_token %}<input type="hidden" name="_csrf" value="{{ csrf_token }}">{% endif %}

@@ -161,7 +161,7 @@ def test_merge_preview_is_read_only_and_shows_exact_impact_before_confirmation()
     """Catch preview mutating identity or hiding revisions, consequences, and invalidation work."""
     port = _IdentityPort()
     registry = OneTimeFormTokenRegistry()
-    issued = registry.issue()
+    issued = registry.issue("/players/identity/previews/merge")
     app = FastAPI()
     app.add_exception_handler(PublicProblem, _public_problem)
     app.state.form_csrf_token_registry = registry
@@ -216,6 +216,39 @@ def test_identity_preview_rejects_missing_csrf_before_port_invocation() -> None:
     assert port.previews == [] and port.executions == []
 
 
+def test_wrong_identity_form_token_is_rejected_before_resolving_the_port_dependency() -> None:
+    port = _IdentityPort()
+    dependency_calls: list[str] = []
+    registry = OneTimeFormTokenRegistry()
+    issued = registry.issue("/players/identity/previews/merge")
+    app = FastAPI()
+    app.add_exception_handler(PublicProblem, _public_problem)
+    app.state.form_csrf_token_registry = registry
+    app.include_router(router)
+
+    def override_port() -> object:
+        dependency_calls.append("opened")
+        return port
+
+    app.dependency_overrides[application_port] = override_port
+    with TestClient(app) as client:
+        client.cookies.set("_csrf", issued.cookie_value)
+        response = client.post(
+            "/players/identity/previews/merge",
+            data={
+                "_csrf": "wrong-token",
+                "target_player_public_id": TARGET_ID,
+                "source_player_public_id": SOURCE_ID,
+                "expected_revision": "4",
+                "source_expected_revision": "2",
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_rejected"
+    assert dependency_calls == []
+
+
 def test_identity_audit_issues_confirmation_controls_and_keeps_inverse_explicit() -> None:
     """Catch append-only audit history losing revision, reason, or keyboard-reachable inverse controls."""
     port = _WorkflowPort()
@@ -236,6 +269,9 @@ def test_identity_audit_issues_confirmation_controls_and_keeps_inverse_explicit(
     assert "Ensure/retry invalidation" in response.text
     assert "operator label is audit text, not authentication" in response.text.lower()
     assert response.cookies.get("_csrf")
+    tokens = re.findall(r'name="_csrf" value="([^"]+)"', response.text)
+    assert len(tokens) > 1
+    assert len(tokens) == len(set(tokens))
 
 
 def test_split_and_inverse_previews_preserve_explicit_membership_and_revision() -> None:
@@ -248,7 +284,7 @@ def test_split_and_inverse_previews_preserve_explicit_membership_and_revision() 
     app.dependency_overrides[application_port] = lambda: port
 
     with TestClient(app) as client:
-        split_token = registry.issue()
+        split_token = registry.issue("/players/identity/previews/split")
         client.cookies.set("_csrf", split_token.cookie_value)
         split = client.post(
             "/players/identity/previews/split",
@@ -261,7 +297,7 @@ def test_split_and_inverse_previews_preserve_explicit_membership_and_revision() 
                 "new_display_name": "Leex tournament account",
             },
         )
-        inverse_token = registry.issue()
+        inverse_token = registry.issue("/players/identity/previews/inverse")
         client.cookies.clear()
         client.cookies.set("_csrf", inverse_token.cookie_value)
         inverse = client.post(
@@ -286,7 +322,7 @@ def test_confirmed_merge_executes_once_and_requires_durable_invalidation_receipt
     """Catch the route mutating identity without one coordinator-owned durable invalidation receipt."""
     port = _WorkflowPort()
     registry = OneTimeFormTokenRegistry()
-    issued = registry.issue()
+    issued = registry.issue("/players/identity/merge")
     app = FastAPI()
     app.state.form_csrf_token_registry = registry
     app.include_router(router)
@@ -330,7 +366,11 @@ def test_audit_page_recovers_a_lost_execute_response_with_csrf_and_idempotent_re
 
     with TestClient(app) as client:
         audit = client.get(f"/players/{TARGET_ID}/identity", headers={"accept": "text/html"})
-        hidden = re.search(r'name="_csrf" value="([^"]+)"', audit.text)
+        hidden = re.search(
+            rf'action="/players/{TARGET_ID}/identity/invalidation/{OPERATION_ID}/retry".*?'
+            r'name="_csrf" value="([^"]+)"',
+            audit.text,
+        )
         assert hidden is not None
         first = client.post(
             f"/players/{TARGET_ID}/identity/invalidation/{OPERATION_ID}/retry",
@@ -340,7 +380,11 @@ def test_audit_page_recovers_a_lost_execute_response_with_csrf_and_idempotent_re
         refreshed = client.get(first.headers["location"], headers={"accept": "text/html"})
         assert "Invalidation already_queued" in refreshed.text
         assert OPERATION_ID in refreshed.text
-        second_hidden = re.search(r'name="_csrf" value="([^"]+)"', refreshed.text)
+        second_hidden = re.search(
+            rf'action="/players/{TARGET_ID}/identity/invalidation/{OPERATION_ID}/retry".*?'
+            r'name="_csrf" value="([^"]+)"',
+            refreshed.text,
+        )
         assert second_hidden is not None
         second = client.post(
             f"/players/{TARGET_ID}/identity/invalidation/{OPERATION_ID}/retry",
@@ -398,7 +442,7 @@ def test_execute_redirect_surfaces_durable_retry_required_with_reason() -> None:
 
     port = _RetryRequiredPort()
     registry = OneTimeFormTokenRegistry()
-    issued = registry.issue()
+    issued = registry.issue("/players/identity/merge")
     app = FastAPI()
     app.state.form_csrf_token_registry = registry
     app.include_router(router)
@@ -439,7 +483,7 @@ def test_identity_routes_fail_closed_for_invalid_ids_operations_and_missing_capa
     with TestClient(app) as client:
         invalid_id = client.get("/players/not-a-uuid/identity")
         missing = client.get(f"/players/{TARGET_ID}/identity")
-        issued = registry.issue()
+        issued = registry.issue("/players/identity/previews/fuzzy")
         client.cookies.set("_csrf", issued.cookie_value)
         invalid_operation = client.post(
             "/players/identity/previews/fuzzy",
@@ -465,7 +509,7 @@ def test_identity_execution_preserves_typed_conflict_validation_and_busy_status(
 
     port = _ErrorPort()
     registry = OneTimeFormTokenRegistry()
-    issued = registry.issue()
+    issued = registry.issue("/players/identity/merge")
     app = FastAPI()
     app.add_exception_handler(PublicProblem, _public_problem)
     app.state.form_csrf_token_registry = registry

@@ -153,10 +153,16 @@ class _JobPort:
 class _JobPortFactory:
     def __init__(self, port: _JobPort) -> None:
         self.port = port
+        self.created = 0
+        self.closed = 0
 
     @contextmanager
     def __call__(self) -> Iterator[_JobPort]:
-        yield self.port
+        self.created += 1
+        try:
+            yield self.port
+        finally:
+            self.closed += 1
 
 
 def _client(port: _JobPort) -> TestClient:
@@ -286,3 +292,80 @@ def test_rendered_job_action_uses_one_time_native_csrf_without_javascript() -> N
     assert accepted.status_code == 200
     assert replayed.status_code == 403
     assert len(port.retries) == 1
+
+
+def test_rendered_job_tokens_are_distinct_and_bound_to_the_exact_post_action() -> None:
+    port = _JobPort(_summary(state="failed", retryable=True))
+    headers = {"host": "localhost", "origin": "http://localhost"}
+    with _client(port) as client:
+        detail = client.get(f"/jobs/{JOB_ID}", headers={"host": "localhost"})
+        retry = re.search(rf'action="/jobs/{JOB_ID}/retry".*?name="_csrf" value="([^"]+)"', detail.text)
+        cancel = re.search(rf'action="/jobs/{JOB_ID}/cancel".*?name="_csrf" value="([^"]+)"', detail.text)
+        assert retry is not None and cancel is not None
+        assert retry.group(1) != cancel.group(1)
+
+        crossed = client.post(
+            f"/jobs/{JOB_ID}/cancel",
+            data={"expected_revision": "3", "_csrf": retry.group(1)},
+            headers=headers,
+        )
+        accepted = client.post(
+            f"/jobs/{JOB_ID}/retry",
+            data={"expected_revision": "3", "_csrf": retry.group(1)},
+            headers=headers,
+        )
+
+    assert crossed.status_code == 403
+    assert accepted.status_code == 200
+    assert port.cancellations == []
+    assert len(port.retries) == 1
+
+
+def test_wrong_job_form_token_is_rejected_before_opening_the_port_scope() -> None:
+    port = _JobPort(_summary(state="failed", retryable=True))
+    factory = _JobPortFactory(port)
+    app = create_app(
+        object(),
+        port_factory=factory,
+        bootstrapper=RecordingBootstrapper(),
+        csrf_validator=_TokenValidator(),
+    )
+    with TestClient(app) as client:
+        detail = client.get(f"/jobs/{JOB_ID}", headers={"host": "localhost"})
+        scopes_before_post = factory.created
+        response = client.post(
+            f"/jobs/{JOB_ID}/retry",
+            data={"expected_revision": "3", "_csrf": "wrong-token"},
+            headers={"host": "localhost", "origin": "http://localhost"},
+        )
+
+    assert detail.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_rejected"
+    assert factory.created == scopes_before_post
+    assert factory.closed == factory.created
+
+
+def test_job_forms_reuse_the_valid_session_cookie_across_tabs() -> None:
+    port = _JobPort(_summary(state="failed", retryable=True))
+    with _client(port) as client:
+        first = client.get(f"/jobs/{JOB_ID}", headers={"host": "localhost"})
+        first_token = re.search(
+            rf'action="/jobs/{JOB_ID}/retry".*?name="_csrf" value="([^"]+)"', first.text
+        )
+        first_cookie = client.cookies.get("_csrf")
+        second = client.get(f"/jobs/{JOB_ID}", headers={"host": "localhost"})
+        second_token = re.search(
+            rf'action="/jobs/{JOB_ID}/retry".*?name="_csrf" value="([^"]+)"', second.text
+        )
+        second_cookie = client.cookies.get("_csrf")
+        assert first_token is not None and second_token is not None
+        response = client.post(
+            f"/jobs/{JOB_ID}/retry",
+            data={"expected_revision": "3", "_csrf": first_token.group(1)},
+            headers={"host": "localhost", "origin": "http://localhost"},
+        )
+
+    assert first_cookie == second_cookie
+    assert first_token.group(1) != second_token.group(1)
+    assert response.status_code == 200

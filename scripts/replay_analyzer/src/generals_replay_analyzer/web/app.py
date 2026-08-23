@@ -60,13 +60,20 @@ class RejectAllCsrfValidator:
 
 @dataclass(frozen=True)
 class IssuedFormToken:
-    """One double-submit token represented as a signed cookie and matching hidden nonce."""
+    """One action nonce carried under a signed native-form session cookie."""
 
     cookie_value: str
     hidden_value: str
 
 
-# TheSuperHackers @feature Leex 22/08/2026 Bind bounded one-time native form tokens to signed same-origin cookies. (#0)
+@dataclass(frozen=True)
+class _RegisteredFormToken:
+    expires_at: float
+    session_nonce: str
+    action_path: str
+
+
+# TheSuperHackers @fix Leex 23/08/2026 Bind bounded one-time form nonces to exact actions under one signed session. (#TBD)
 class OneTimeFormTokenRegistry:
     """Concurrency-safe registry for short-lived form nonces with atomic one-time consumption."""
 
@@ -75,7 +82,7 @@ class OneTimeFormTokenRegistry:
 
     def __init__(self) -> None:
         self._secret = secrets.token_bytes(32)
-        self._tokens: OrderedDict[str, float] = OrderedDict()
+        self._tokens: OrderedDict[str, _RegisteredFormToken] = OrderedDict()
         from threading import Lock
 
         self._lock = Lock()
@@ -85,42 +92,75 @@ class OneTimeFormTokenRegistry:
 
     def _discard_expired(self, now: float) -> None:
         while self._tokens:
-            nonce, expires_at = next(iter(self._tokens.items()))
-            if expires_at > now:
+            nonce, token = next(iter(self._tokens.items()))
+            if token.expires_at > now:
                 return
             self._tokens.pop(nonce)
 
-    def issue(self) -> IssuedFormToken:
-        nonce = secrets.token_urlsafe(32)
+    def _valid_session_nonce(self, cookie_value: str | None) -> str | None:
+        if cookie_value is None:
+            return None
+        session_nonce, separator, supplied_signature = cookie_value.partition(".")
+        if (
+            not separator
+            or not session_nonce
+            or not supplied_signature
+            or not session_nonce.isascii()
+            or not supplied_signature.isascii()
+            or not hmac.compare_digest(supplied_signature, self._signature(session_nonce))
+        ):
+            return None
+        return session_nonce
+
+    def issue(self, action_path: str, cookie_value: str | None = None) -> IssuedFormToken:
+        if not action_path.startswith("/") or not action_path.isascii():
+            raise ValueError("form action must be an absolute local path")
+        session_nonce = self._valid_session_nonce(cookie_value) if self.has_valid_cookie(cookie_value) else None
+        session_nonce = session_nonce or secrets.token_urlsafe(32)
+        hidden_nonce = secrets.token_urlsafe(32)
         with self._lock:
             now = time.monotonic()
             self._discard_expired(now)
-            self._tokens[nonce] = now + self._TTL_SECONDS
+            self._tokens[hidden_nonce] = _RegisteredFormToken(
+                expires_at=now + self._TTL_SECONDS,
+                session_nonce=session_nonce,
+                action_path=action_path,
+            )
             while len(self._tokens) > self._MAX_TOKENS:
                 self._tokens.popitem(last=False)
-        return IssuedFormToken(cookie_value=f"{nonce}.{self._signature(nonce)}", hidden_value=nonce)
+        return IssuedFormToken(
+            cookie_value=f"{session_nonce}.{self._signature(session_nonce)}",
+            hidden_value=hidden_nonce,
+        )
 
     def has_valid_cookie(self, cookie_value: str | None) -> bool:
-        if cookie_value is None:
-            return False
-        nonce, separator, supplied_signature = cookie_value.partition(".")
-        if not separator or not nonce or not supplied_signature or not nonce.isascii() or not supplied_signature.isascii():
-            return False
-        if not hmac.compare_digest(supplied_signature, self._signature(nonce)):
+        session_nonce = self._valid_session_nonce(cookie_value)
+        if session_nonce is None:
             return False
         with self._lock:
             self._discard_expired(time.monotonic())
-            return nonce in self._tokens
+            return any(token.session_nonce == session_nonce for token in self._tokens.values())
 
-    def consume(self, cookie_value: str | None, hidden_value: str | None) -> bool:
-        if hidden_value is None or not hidden_value.isascii() or not self.has_valid_cookie(cookie_value):
-            return False
-        nonce, _separator, _signature = (cookie_value or "").partition(".")
-        if not hmac.compare_digest(nonce, hidden_value):
+    def consume(
+        self,
+        cookie_value: str | None,
+        hidden_value: str | None,
+        action_path: str,
+    ) -> bool:
+        session_nonce = self._valid_session_nonce(cookie_value)
+        if session_nonce is None or hidden_value is None or not hidden_value.isascii() or not action_path.isascii():
             return False
         with self._lock:
             self._discard_expired(time.monotonic())
-            return self._tokens.pop(nonce, None) is not None
+            token = self._tokens.get(hidden_value)
+            if (
+                token is None
+                or not hmac.compare_digest(token.session_nonce, session_nonce)
+                or not hmac.compare_digest(token.action_path, action_path)
+            ):
+                return False
+            self._tokens.pop(hidden_value)
+            return True
 
 
 def _form_csrf_token(request: Request) -> str | None:
@@ -166,6 +206,7 @@ def _valid_local_origin(value: str | None, *, expected_host: str) -> bool:
     return parsed.netloc.casefold() == expected_host.casefold()
 
 
+# TheSuperHackers @fix Leex 23/08/2026 Reject missing or duplicate raw Host fields before all other request checks. (#TBD)
 class LocalRequestSecurityMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: Any, *, csrf_validator: CsrfValidator, form_token_registry: OneTimeFormTokenRegistry) -> None:
         super().__init__(app)
@@ -174,9 +215,10 @@ class LocalRequestSecurityMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request.state.correlation_id = uuid4().hex
-        host = request.headers.get("host", "")
+        host_values = [value.decode("latin-1") for name, value in request.scope.get("headers", ()) if name.lower() == b"host"]
+        host = host_values[0] if len(host_values) == 1 else ""
         response: Response
-        if not _valid_local_host(host):
+        if len(host_values) != 1 or not _valid_local_host(host):
             response = problem_response(
                 403,
                 title="Forbidden",

@@ -11,14 +11,38 @@ from starlette.responses import JSONResponse, Response
 from generals_replay_analyzer.web.dependencies import (
     RootImportForm,
     application_port,
-    csrf_guarded_application_port,
     validated_root_import_form,
 )
-from generals_replay_analyzer.web.errors import problem_response
+from generals_replay_analyzer.web.errors import PublicProblem, problem_response
 from generals_replay_analyzer.web.ports import ImportSubmissionDTO, RootImportCommandDTO, WebApplicationPort
 from generals_replay_analyzer.web.presentation.shell import accepts_html, replay_library_shell, template_response
 
 router = APIRouter(tags=["imports"])
+
+
+async def _csrf_guarded_root_import_form(
+    request: Request,
+    root_import_form: Annotated[RootImportForm, Depends(validated_root_import_form)],
+) -> RootImportForm:
+    if request.headers.get("x-csrf-token") is None and not request.app.state.form_csrf_token_registry.consume(
+        request.cookies.get("_csrf"), root_import_form.csrf_token, request.url.path
+    ):
+        raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
+    return root_import_form
+
+
+# TheSuperHackers @fix Leex 23/08/2026 Consume the unavailable upload form's exact token before route dispatch. (#TBD)
+async def _csrf_guarded_upload_form(request: Request) -> None:
+    if request.headers.get("x-csrf-token") is not None:
+        return
+    form = await request.form()
+    if set(form) != {"_csrf"} or len(form.getlist("_csrf")) != 1:
+        raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
+    token = form.get("_csrf")
+    if not isinstance(token, str) or not request.app.state.form_csrf_token_registry.consume(
+        request.cookies.get("_csrf"), token, request.url.path
+    ):
+        raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
 
 
 @router.get("/imports/dialog", summary="Replay import dialog")
@@ -29,24 +53,32 @@ def import_dialog(request: Request, port: Annotated[WebApplicationPort, Depends(
     roots = port.import_roots()
     availability = next((root.availability for root in roots if root.availability.state != "available"), None)
     shell_availability = availability or (roots[0].availability if roots else _NO_ROOTS_AVAILABILITY)
-    issued_token = request.app.state.form_csrf_token_registry.issue()
+    upload_token = request.app.state.form_csrf_token_registry.issue(
+        "/imports/uploads", request.cookies.get("_csrf")
+    )
+    root_token = request.app.state.form_csrf_token_registry.issue(
+        "/imports/root-selections", upload_token.cookie_value
+    )
     response = template_response(
         request,
         "imports/dialog.html",
         replay_library_shell(shell_availability),
         context={
             "roots": roots,
-            "csrf_token": issued_token.hidden_value,
+            "csrf_token": root_token.hidden_value,
+            "upload_csrf_token": upload_token.hidden_value,
             "has_available_roots": any(root.availability.state == "available" for root in roots),
         },
     )
-    response.set_cookie("_csrf", issued_token.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")
+    response.set_cookie("_csrf", upload_token.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")
     return response
 
 
 @router.post("/imports/uploads", summary="Replay upload unavailable")
 # TheSuperHackers @feature Leex 22/08/2026 Keep multipart bytes outside web routes until opaque ingress composition is accepted. (#0)
-def upload_without_ingress() -> Response:
+def upload_without_ingress(
+    _csrf_guard: Annotated[None, Depends(_csrf_guarded_upload_form)],
+) -> Response:
     return problem_response(
         503,
         title="Import upload unavailable",
@@ -58,8 +90,9 @@ def upload_without_ingress() -> Response:
 @router.post("/imports/root-selections", summary="Import configured replay")
 # TheSuperHackers @feature Leex 22/08/2026 Submit only root public IDs and safe relative names through the command port. (#0)
 def submit_root_selection(
-    port: Annotated[WebApplicationPort, Depends(csrf_guarded_application_port)],
-    root_import_form: Annotated[RootImportForm, Depends(validated_root_import_form)],
+    request: Request,
+    root_import_form: Annotated[RootImportForm, Depends(_csrf_guarded_root_import_form)],
+    port: Annotated[WebApplicationPort, Depends(application_port)],
 ) -> Response:
     try:
         command = RootImportCommandDTO(

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from generals_replay_analyzer.web.app import create_app, validate_loopback_host, validate_port
+from generals_replay_analyzer.web import app as web_app
+from generals_replay_analyzer.web.app import OneTimeFormTokenRegistry, create_app, validate_loopback_host, validate_port
 from generals_replay_analyzer.web.errors import PublicProblem
 
 from .conftest import CountingPortFactory, RecordingBootstrapper
@@ -61,6 +64,80 @@ def test_local_host_headers_are_allowed(host: str) -> None:
         response = client.get("/health/live", headers={"host": host})
 
     assert response.status_code == 200
+
+
+def test_duplicate_conflicting_host_headers_are_rejected_before_origin_and_csrf() -> None:
+    app = _secured_app(csrf_validator=TokenValidator())
+    messages: list[dict[str, Any]] = []
+    request_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    async def call() -> None:
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/health/live",
+                "raw_path": b"/health/live",
+                "query_string": b"",
+                "headers": [(b"host", b"localhost"), (b"host", b"example.test")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 80),
+            },
+            receive,
+            send,
+        )
+
+    asyncio.run(call())
+
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body = b"".join(message.get("body", b"") for message in messages)
+    assert start["status"] == 403
+    assert b'"code":"host_rejected"' in body
+
+
+def test_form_registry_binds_distinct_tokens_to_exact_actions_under_one_cookie() -> None:
+    registry = OneTimeFormTokenRegistry()
+    retry = registry.issue("/jobs/one/retry")
+    cancel = registry.issue("/jobs/one/cancel", retry.cookie_value)
+
+    assert retry.cookie_value == cancel.cookie_value
+    assert retry.hidden_value != cancel.hidden_value
+    assert not registry.consume(retry.cookie_value, retry.hidden_value, "/jobs/one/cancel")
+    assert registry.consume(retry.cookie_value, retry.hidden_value, "/jobs/one/retry")
+    assert registry.consume(cancel.cookie_value, cancel.hidden_value, "/jobs/one/cancel")
+
+
+def test_form_registry_expires_tokens_and_caps_outstanding_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [100.0]
+    monkeypatch.setattr(web_app.time, "monotonic", lambda: now[0])
+    registry = OneTimeFormTokenRegistry()
+    expired = registry.issue("/settings/preview")
+    now[0] += 601
+
+    assert not registry.has_valid_cookie(expired.cookie_value)
+    assert not registry.consume(expired.cookie_value, expired.hidden_value, "/settings/preview")
+
+    issued = registry.issue("/settings/preview", expired.cookie_value)
+    assert issued.cookie_value != expired.cookie_value
+    first = issued
+    for _index in range(256):
+        issued = registry.issue("/settings/preview", issued.cookie_value)
+
+    assert not registry.consume(first.cookie_value, first.hidden_value, "/settings/preview")
+    assert registry.consume(issued.cookie_value, issued.hidden_value, "/settings/preview")
 
 
 @pytest.mark.parametrize(

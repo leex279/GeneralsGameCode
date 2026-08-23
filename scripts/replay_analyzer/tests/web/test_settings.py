@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 import pytest
@@ -381,6 +382,9 @@ def test_settings_get_reads_only_snapshot_and_renders_safe_identity() -> None:
     assert "a" * 64 in response.text
     assert "Ollama is optional" in response.text
     assert response.cookies.get("_csrf")
+    tokens = re.findall(r'name="_csrf" value="([^"]+)"', response.text)
+    assert len(tokens) > 1
+    assert len(tokens) == len(set(tokens))
 
 
 def test_settings_preview_normalizes_one_change_without_writing() -> None:

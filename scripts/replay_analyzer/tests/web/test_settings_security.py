@@ -105,6 +105,38 @@ def test_native_form_csrf_rejection_happens_before_port_call() -> None:
     assert port.calls == []
 
 
+def test_wrong_settings_form_token_is_rejected_before_resolving_the_port_dependency() -> None:
+    port = _SecurityPort()
+    dependency_calls: list[str] = []
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.include_router(settings.router)
+    registry = OneTimeFormTokenRegistry()
+    app.state.form_csrf_token_registry = registry
+    issued = registry.issue("/settings/preview")
+
+    def override_port() -> object:
+        dependency_calls.append("opened")
+        return port
+
+    app.dependency_overrides[application_port] = override_port
+    with TestClient(app) as client:
+        client.cookies.set("_csrf", issued.cookie_value)
+        response = client.post(
+            "/settings/preview",
+            data={
+                "_csrf": "wrong-token",
+                "expected_revision": "0",
+                "setting_key": "import_mode",
+                "setting_value": "copy",
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_rejected"
+    assert dependency_calls == []
+
+
 def test_unknown_repeated_and_oversize_form_values_fail_before_port_call() -> None:
     """Catch scalar collapse, extra fields, or unbounded candidates at the form boundary."""
     candidates = (

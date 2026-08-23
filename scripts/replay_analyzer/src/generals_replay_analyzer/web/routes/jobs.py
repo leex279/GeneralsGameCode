@@ -79,10 +79,18 @@ def job_detail(
 
 
 def _detail_response(request: Request, detail: object, mutation: object | None = None) -> Response:
-    issued_token = request.app.state.form_csrf_token_registry.issue()
-    context = {"job": detail, "csrf_token": issued_token.hidden_value, "mutation": mutation}
+    job_public_id = detail.summary.job_public_id  # type: ignore[attr-defined]
+    retry = request.app.state.form_csrf_token_registry.issue(
+        f"/jobs/{job_public_id}/retry", request.cookies.get("_csrf")
+    )
+    cancel = request.app.state.form_csrf_token_registry.issue(f"/jobs/{job_public_id}/cancel", retry.cookie_value)
+    context = {
+        "job": detail,
+        "csrf_tokens": {"retry": retry.hidden_value, "cancel": cancel.hidden_value},
+        "mutation": mutation,
+    }
     response = template_response(request, "jobs/detail.html", jobs_shell(detail.availability), context=context)  # type: ignore[attr-defined]
-    response.set_cookie("_csrf", issued_token.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")
+    response.set_cookie("_csrf", retry.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")
     return response
 
 
@@ -96,7 +104,9 @@ async def _expected_revision(request: Request) -> int:
         raise ValueError("invalid revision form")
     if request.headers.get("x-csrf-token") is None:
         token = tokens[0] if tokens and isinstance(tokens[0], str) else None
-        if not request.app.state.form_csrf_token_registry.consume(request.cookies.get("_csrf"), token):
+        if not request.app.state.form_csrf_token_registry.consume(
+            request.cookies.get("_csrf"), token, request.url.path
+        ):
             raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
     value = form.get("expected_revision")
     if not isinstance(value, str) or not value.isdecimal():
@@ -107,14 +117,27 @@ async def _expected_revision(request: Request) -> int:
     return revision
 
 
+# TheSuperHackers @fix Leex 23/08/2026 Validate job forms before opening application-port scopes. (#TBD)
+async def _validated_expected_revision(request: Request) -> int:
+    try:
+        return await _expected_revision(request)
+    except ValueError:
+        raise PublicProblem(
+            status=422,
+            code="invalid_job_revision",
+            detail="Job mutation request is invalid",
+        ) from None
+
+
 @router.post("/jobs/{job_public_id}/retry", summary="Retry analysis job")
 async def retry_job(
     request: Request,
     job_public_id: str,
+    expected_revision: Annotated[int, Depends(_validated_expected_revision)],
     port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
 ) -> Response:
     try:
-        command = RetryJobCommandDTO(job_public_id=_public_id(job_public_id), expected_revision=await _expected_revision(request))
+        command = RetryJobCommandDTO(job_public_id=_public_id(job_public_id), expected_revision=expected_revision)
     except (ValueError, ValidationError):
         return problem_response(422, title="Invalid retry request", code="invalid_job_revision", detail="Job retry request is invalid")
     mutation = port.retry_job(command)
@@ -125,10 +148,11 @@ async def retry_job(
 async def cancel_job(
     request: Request,
     job_public_id: str,
+    expected_revision: Annotated[int, Depends(_validated_expected_revision)],
     port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
 ) -> Response:
     try:
-        command = CancelJobCommandDTO(job_public_id=_public_id(job_public_id), expected_revision=await _expected_revision(request))
+        command = CancelJobCommandDTO(job_public_id=_public_id(job_public_id), expected_revision=expected_revision)
     except (ValueError, ValidationError):
         return problem_response(422, title="Invalid cancel request", code="invalid_job_revision", detail="Job cancel request is invalid")
     mutation = port.cancel_job(command)

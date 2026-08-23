@@ -238,7 +238,11 @@ def test_persisted_audit_recovers_a_lost_adapter_execute_response_through_the_we
     try:
         with TestClient(app) as client:
             audit = client.get(f"/players/{_id(1)}/identity", headers={"accept": "text/html"})
-            hidden = re.search(r'name="_csrf" value="([^"]+)"', audit.text)
+            hidden = re.search(
+                rf'action="/players/{_id(1)}/identity/invalidation/'
+                rf'{receipt.operation.operation_public_id}/retry".*?name="_csrf" value="([^"]+)"',
+                audit.text,
+            )
             assert hidden is not None
             assert receipt.operation.operation_public_id in audit.text
             response = client.post(

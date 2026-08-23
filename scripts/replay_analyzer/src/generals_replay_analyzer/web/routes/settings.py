@@ -24,7 +24,7 @@ from generals_replay_analyzer.web.ports import (
     WebApplicationPort,
 )
 from generals_replay_analyzer.web.presentation.shell import accepts_html, template_response
-from generals_replay_analyzer.web.viewmodels.settings import settings_shell, settings_view
+from generals_replay_analyzer.web.viewmodels.settings import SettingsPageViewModel, settings_shell, settings_view
 
 router = APIRouter(tags=["settings"])
 _INTEGER = re.compile(r"[0-9]+", re.ASCII)
@@ -57,9 +57,24 @@ def _diagnostics_port(port: WebApplicationPort) -> DiagnosticsCommandPort:
     return cast(DiagnosticsCommandPort, port)
 
 
-def _issue_csrf(request: Request) -> tuple[str, str]:
-    token = request.app.state.form_csrf_token_registry.issue()
+def _issue_csrf(request: Request, action_path: str, cookie: str | None = None) -> tuple[str, str]:
+    token = request.app.state.form_csrf_token_registry.issue(action_path, cookie)
     return token.hidden_value, token.cookie_value
+
+
+def _page_csrf_tokens(request: Request, view: SettingsPageViewModel) -> tuple[dict[str, str], dict[str, str], str]:
+    preview_tokens: dict[str, str] = {}
+    diagnostic_tokens: dict[str, str] = {}
+    cookie = request.cookies.get("_csrf")
+    for control in view.controls:
+        if control.setting.editable:
+            hidden, cookie = _issue_csrf(request, "/settings/preview", cookie)
+            preview_tokens[control.setting.key] = hidden
+    for diagnostic in view.diagnostics:
+        hidden, cookie = _issue_csrf(request, f"/settings/diagnostics/{diagnostic.kind}", cookie)
+        diagnostic_tokens[diagnostic.kind] = hidden
+    assert cookie is not None
+    return preview_tokens, diagnostic_tokens, cookie
 
 
 def _set_csrf_cookie(response: Response, cookie: str) -> None:
@@ -81,7 +96,7 @@ async def _form(request: Request, allowed: frozenset[str]) -> dict[str, list[str
     if request.headers.get("x-csrf-token") is None:
         tokens = values.get("_csrf", [])
         if len(tokens) != 1 or not request.app.state.form_csrf_token_registry.consume(
-            request.cookies.get("_csrf"), tokens[0]
+            request.cookies.get("_csrf"), tokens[0], request.url.path
         ):
             raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
     return values
@@ -127,71 +142,26 @@ def _html_or_problem(request: Request) -> Response | None:
     )
 
 
-@router.get("/settings", summary="Analyzer settings")
-# TheSuperHackers @feature Leex 23/08/2026 Render immutable configuration identity without active diagnostic side effects. (#TBD)
-def settings_page(
-    request: Request,
-    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
-) -> Response:
-    negotiation = _html_or_problem(request)
-    if negotiation is not None:
-        return negotiation
-    snapshot = _query_port(port).get_settings()
-    hidden, cookie = _issue_csrf(request)
-    response = template_response(
-        request,
-        "settings/index.html",
-        settings_shell(snapshot),
-        context={"settings": settings_view(snapshot), "csrf_token": hidden, "mutation": None},
-    )
-    _set_csrf_cookie(response, cookie)
-    return response
-
-
-@router.post("/settings/preview", summary="Preview analyzer settings")
-async def preview_settings(
-    request: Request,
-    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
-) -> Response:
-    negotiation = _html_or_problem(request)
-    if negotiation is not None:
-        return negotiation
+# TheSuperHackers @fix Leex 23/08/2026 Build validated settings commands before opening application-port scopes. (#TBD)
+async def _validated_preview_command(request: Request) -> SettingsPreviewCommandDTO:
     try:
         values = await _form(
             request,
             frozenset({"_csrf", "expected_revision", "setting_key", "setting_value"}),
         )
-        command = SettingsPreviewCommandDTO(
+        return SettingsPreviewCommandDTO(
             expected_revision=_integer(_one(values, "expected_revision")),
             changes=_changes(values),
         )
     except (ValueError, ValidationError):
-        return problem_response(
-            422,
-            title="Invalid settings preview",
+        raise PublicProblem(
+            status=422,
             code="invalid_settings_preview",
             detail="Settings preview is invalid",
-        )
-    impact = _query_port(port).preview_settings(command)
-    hidden, cookie = _issue_csrf(request)
-    response = template_response(
-        request,
-        "settings/_impact.html",
-        settings_shell(_query_port(port).get_settings()),
-        context={"impact": impact, "csrf_token": hidden},
-    )
-    _set_csrf_cookie(response, cookie)
-    return response
+        ) from None
 
 
-@router.post("/settings/apply", summary="Apply confirmed analyzer settings")
-async def apply_settings(
-    request: Request,
-    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
-) -> Response:
-    negotiation = _html_or_problem(request)
-    if negotiation is not None:
-        return negotiation
+async def _validated_apply_command(request: Request) -> ApplySettingsCommandDTO:
     try:
         values = await _form(
             request,
@@ -208,26 +178,107 @@ async def apply_settings(
         )
         if _one(values, "confirm_invalidating_change") != "true":
             raise ValueError("confirmation")
-        command = ApplySettingsCommandDTO(
+        return ApplySettingsCommandDTO(
             expected_revision=_integer(_one(values, "expected_revision")),
             changes=_changes(values),
             expected_impact_digest=_one(values, "expected_impact_digest"),
             confirm_invalidating_change=True,
         )
     except (ValueError, ValidationError):
-        return problem_response(
-            422,
-            title="Invalid settings change",
+        raise PublicProblem(
+            status=422,
             code="invalid_settings_change",
             detail="Settings change is invalid",
+        ) from None
+
+
+async def _validated_diagnostic_command(kind: str, request: Request) -> DiagnosticCommandDTO:
+    if kind not in _DIAGNOSTIC_KINDS:
+        raise PublicProblem(status=422, code="invalid_diagnostic_kind", detail="Diagnostic action is invalid")
+    try:
+        values = await _form(request, frozenset({"_csrf", "expected_settings_revision"}))
+        return DiagnosticCommandDTO(
+            kind=cast(DiagnosticKind, kind),
+            expected_settings_revision=_integer(_one(values, "expected_settings_revision")),
         )
+    except (ValueError, ValidationError):
+        raise PublicProblem(
+            status=422,
+            code="invalid_diagnostic_command",
+            detail="Diagnostic action is invalid",
+        ) from None
+
+
+@router.get("/settings", summary="Analyzer settings")
+# TheSuperHackers @feature Leex 23/08/2026 Render immutable configuration identity without active diagnostic side effects. (#TBD)
+def settings_page(
+    request: Request,
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
+    negotiation = _html_or_problem(request)
+    if negotiation is not None:
+        return negotiation
+    snapshot = _query_port(port).get_settings()
+    view = settings_view(snapshot)
+    preview_tokens, diagnostic_tokens, cookie = _page_csrf_tokens(request, view)
+    response = template_response(
+        request,
+        "settings/index.html",
+        settings_shell(snapshot),
+        context={
+            "settings": view,
+            "preview_csrf_tokens": preview_tokens,
+            "diagnostic_csrf_tokens": diagnostic_tokens,
+            "mutation": None,
+        },
+    )
+    _set_csrf_cookie(response, cookie)
+    return response
+
+
+@router.post("/settings/preview", summary="Preview analyzer settings")
+async def preview_settings(
+    request: Request,
+    command: Annotated[SettingsPreviewCommandDTO, Depends(_validated_preview_command)],
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
+    negotiation = _html_or_problem(request)
+    if negotiation is not None:
+        return negotiation
+    impact = _query_port(port).preview_settings(command)
+    hidden, cookie = _issue_csrf(request, "/settings/apply", request.cookies.get("_csrf"))
+    response = template_response(
+        request,
+        "settings/_impact.html",
+        settings_shell(_query_port(port).get_settings()),
+        context={"impact": impact, "csrf_token": hidden},
+    )
+    _set_csrf_cookie(response, cookie)
+    return response
+
+
+@router.post("/settings/apply", summary="Apply confirmed analyzer settings")
+async def apply_settings(
+    request: Request,
+    command: Annotated[ApplySettingsCommandDTO, Depends(_validated_apply_command)],
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
+    negotiation = _html_or_problem(request)
+    if negotiation is not None:
+        return negotiation
     mutation = _command_port(port).apply_settings(command)
-    hidden, cookie = _issue_csrf(request)
+    view = settings_view(mutation.snapshot)
+    preview_tokens, diagnostic_tokens, cookie = _page_csrf_tokens(request, view)
     response = template_response(
         request,
         "settings/index.html",
         settings_shell(mutation.snapshot),
-        context={"settings": settings_view(mutation.snapshot), "csrf_token": hidden, "mutation": mutation},
+        context={
+            "settings": view,
+            "preview_csrf_tokens": preview_tokens,
+            "diagnostic_csrf_tokens": diagnostic_tokens,
+            "mutation": mutation,
+        },
     )
     _set_csrf_cookie(response, cookie)
     return response
@@ -237,34 +288,12 @@ async def apply_settings(
 async def run_diagnostic(
     kind: str,
     request: Request,
+    command: Annotated[DiagnosticCommandDTO, Depends(_validated_diagnostic_command)],
     port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
 ) -> Response:
     negotiation = _html_or_problem(request)
     if negotiation is not None:
         return negotiation
-    if kind not in _DIAGNOSTIC_KINDS:
-        return problem_response(
-            422,
-            title="Invalid diagnostic",
-            code="invalid_diagnostic_kind",
-            detail="Diagnostic action is invalid",
-        )
-    try:
-        values = await _form(
-            request,
-            frozenset({"_csrf", "expected_settings_revision"}),
-        )
-        command = DiagnosticCommandDTO(
-            kind=cast(DiagnosticKind, kind),
-            expected_settings_revision=_integer(_one(values, "expected_settings_revision")),
-        )
-    except (ValueError, ValidationError):
-        return problem_response(
-            422,
-            title="Invalid diagnostic",
-            code="invalid_diagnostic_command",
-            detail="Diagnostic action is invalid",
-        )
     result = _diagnostics_port(port).run_diagnostic(command)
     snapshot = _query_port(port).get_settings()
     return template_response(

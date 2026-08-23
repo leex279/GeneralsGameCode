@@ -219,7 +219,11 @@ def test_rendered_root_form_issues_a_server_token_that_a_native_post_can_submit(
 
     with _client(port) as client:
         dialog = client.get("/imports/dialog", headers={"host": "localhost"})
-        token = re.search(r'name="_csrf" value="([^"]+)"', dialog.text)
+        token = re.search(
+            r'action="/imports/root-selections".*?name="_csrf" value="([^"]+)"',
+            dialog.text,
+            re.DOTALL,
+        )
         assert token is not None
         response = client.post(
             "/imports/root-selections",
@@ -244,7 +248,11 @@ def test_missing_or_wrong_rendered_form_token_is_rejected_before_the_port() -> N
 
     with TestClient(app) as client:
         dialog = client.get("/imports/dialog", headers={"host": "localhost"})
-        token = re.search(r'name="_csrf" value="([^"]+)"', dialog.text)
+        token = re.search(
+            r'action="/imports/root-selections".*?name="_csrf" value="([^"]+)"',
+            dialog.text,
+            re.DOTALL,
+        )
         assert token is not None
         scopes_before_post = factory.created
         missing = client.post(
@@ -311,7 +319,11 @@ def test_exact_rendered_token_is_consumed_once_under_concurrent_native_posts() -
     headers = {"host": "localhost", "origin": "http://localhost"}
     with TestClient(app) as client:
         dialog = client.get("/imports/dialog", headers={"host": "localhost"})
-        token = re.search(r'name="_csrf" value="([^"]+)"', dialog.text)
+        token = re.search(
+            r'action="/imports/root-selections".*?name="_csrf" value="([^"]+)"',
+            dialog.text,
+            re.DOTALL,
+        )
         assert token is not None
         cookie = client.cookies.get("_csrf")
         assert cookie is not None
@@ -513,3 +525,25 @@ def test_upload_remains_controlled_unavailable_without_an_opaque_ingress_handoff
     assert response.status_code == 503
     assert response.json()["code"] == "opaque_ingress_handoff_pending"
     assert port.root_commands == []
+
+
+def test_upload_form_uses_its_own_one_time_exact_action_token_before_truthful_503() -> None:
+    port = _ImportPort()
+    headers = {"host": "localhost", "origin": "http://localhost"}
+    with _client(port) as client:
+        dialog = client.get("/imports/dialog", headers={"host": "localhost"})
+        upload = re.search(
+            r'action="/imports/uploads".*?name="_csrf" value="([^"]+)"', dialog.text, re.DOTALL
+        )
+        root = re.search(
+            r'action="/imports/root-selections".*?name="_csrf" value="([^"]+)"', dialog.text, re.DOTALL
+        )
+        assert upload is not None and root is not None
+        crossed = client.post("/imports/uploads", data={"_csrf": root.group(1)}, headers=headers)
+        accepted = client.post("/imports/uploads", data={"_csrf": upload.group(1)}, headers=headers)
+        replayed = client.post("/imports/uploads", data={"_csrf": upload.group(1)}, headers=headers)
+
+    assert crossed.status_code == 403
+    assert accepted.status_code == 503
+    assert accepted.json()["code"] == "opaque_ingress_handoff_pending"
+    assert replayed.status_code == 403

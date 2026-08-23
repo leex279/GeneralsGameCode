@@ -544,7 +544,7 @@ def native_form_csrf_guard(
     if request.headers.get("x-csrf-token") is not None:
         return
     registry = request.app.state.form_csrf_token_registry
-    if registry.consume(request.cookies.get("_csrf"), root_import_form.csrf_token):
+    if registry.consume(request.cookies.get("_csrf"), root_import_form.csrf_token, request.url.path):
         return
     raise PublicProblem(status=403, code="csrf_rejected", detail="The request CSRF token was rejected")
 
