@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from generals_replay_analyzer.comparison.service import (
     ComparisonDefinition,
@@ -50,6 +51,141 @@ def _value(raw: float | None, *, unit: str = "frames", sample_count: int = 5) ->
         availability="available" if raw is not None else "unavailable",
         evidence_public_ids=(),
     )
+
+
+def _add_cross_faction_match_subject(
+    session: Session,
+    *,
+    ordinal: int,
+    faction: str,
+    now: datetime,
+) -> str:
+    base = 800 + ordinal * 50
+    player = Player(
+        public_id=_id(base),
+        display_name=f"Cross faction {ordinal}",
+        identity_revision=1,
+        updated_at=now,
+        created_at=now,
+    )
+    session.add(player)
+    session.flush()
+    replay = Replay(
+        public_id=_id(base + 1),
+        sha256=str(ordinal + 1) * 64,
+        replay_name="hidden.rep",
+        version_string="1.04",
+        version_number=104,
+        frame_count=100,
+        start_time=1_700_010_000 + ordinal * 100,
+        end_time=1_700_010_100 + ordinal * 100,
+        exe_crc=1,
+        ini_crc=2,
+        map_crc=3,
+        map_name="TD",
+        seed=4,
+        header_json={"patch_identity": "1.04"},
+        lifecycle_state="engine_verified",
+        updated_at=now,
+        created_at=now,
+    )
+    session.add(replay)
+    session.flush()
+    parser = ParserRun(
+        run_id=_id(base + 2),
+        replay_id=replay.id,
+        parser_version="v1",
+        schema_version=1,
+        input_sha256=str(ordinal + 3) * 64,
+        result_sha256=str(ordinal + 5) * 64,
+        status="running",
+        completion_status="complete",
+        command_stream_offset=1,
+        end_offset=2,
+        warnings_json=[],
+        started_at=now,
+        completed_at=now,
+    )
+    session.add(parser)
+    session.flush()
+    replay_player = ReplayPlayer(
+        public_id=_id(base + 3),
+        replay_id=replay.id,
+        parser_run_id=parser.id,
+        player_id=player.id,
+        slot_index=0,
+        slot_kind="human",
+        original_name=player.display_name,
+        faction=faction,
+        result="win" if ordinal == 0 else "loss",
+        observed_json={},
+    )
+    session.add(replay_player)
+    session.flush()
+    feature_set = FeatureSet(
+        public_id=_id(base + 4),
+        replay_id=replay.id,
+        replay_player_id=replay_player.id,
+        extractor_name="fixture",
+        extractor_version="v1",
+        input_digest=str(ordinal + 6) * 64,
+        cache_key=str(ordinal + 7) * 64,
+        status="running",
+        settings_json={},
+        completed_at=now,
+        created_at=now,
+    )
+    session.add(feature_set)
+    session.flush()
+    for offset, (name, value, unit) in enumerate(
+        (
+            ("economy.cash_change_total", float(-300 - ordinal * 200), "credits"),
+            ("activity.supported_order_action_count", float(20 + ordinal), "count"),
+        )
+    ):
+        evidence = EvidenceItem(
+            public_id=_id(base + 10 + offset),
+            replay_id=replay.id,
+            tier="derived",
+            source_kind="fixture",
+            source_key=f"cross-faction:{ordinal}:{offset}",
+            schema_version=1,
+            created_at=now,
+        )
+        session.add(evidence)
+        session.flush()
+        session.add(
+            Feature(
+                public_id=_id(base + 20 + offset),
+                feature_set_id=feature_set.id,
+                evidence_item_id=evidence.id,
+                name=name,
+                value_type="real",
+                real_value=value,
+                unit=unit,
+                scope_type="player",
+                scope_key=replay_player.public_id,
+                replay_player_id=replay_player.id,
+                frame_start=0,
+                frame_end=100,
+                quality="available",
+                details_json={},
+            )
+        )
+    feature_set.status = "succeeded"
+    report = Report(
+        public_id=_id(base + 30),
+        replay_id=replay.id,
+        replay_player_id=replay_player.id,
+        report_version="replay-report-v1",
+        input_digest=str(ordinal + 8) * 64,
+        cache_key=("9" if ordinal == 0 else "a") * 64,
+        report_json={"schema_version": "replay-report-v1"},
+        created_at=now,
+    )
+    session.add(report)
+    parser.status = "succeeded"
+    return report.public_id
 
 
 def test_exact_aligned_values_produce_a_service_owned_difference() -> None:
@@ -225,6 +361,64 @@ def test_player_selection_resolves_complete_immutable_longitudinal_bindings(tmp_
         assert resolved.fixed_query.left.segment_digest == resolved.fixed_query.left.segment_digest.lower()  # type: ignore[union-attr]
         assert resolved.fixed_query.left.statistics_algorithm_versions == ("median-bootstrap-v1",)  # type: ignore[union-attr]
         assert resolved.fixed_query.metric_definitions[0].definition_version == "cash-v1"
+    finally:
+        engine.dispose()
+
+
+def test_match_comparison_declares_only_faction_neutral_economy_cross_faction(tmp_path: Path) -> None:
+    path = tmp_path / "cross-faction.sqlite3"
+    upgrade_database(path)
+    engine = create_database_engine(path)
+    factory = create_session_factory(engine)
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    try:
+        with factory.begin() as session:
+            left_report = _add_cross_faction_match_subject(
+                session,
+                ordinal=0,
+                faction="USA",
+                now=now,
+            )
+            right_report = _add_cross_faction_match_subject(
+                session,
+                ordinal=1,
+                faction="GLA",
+                now=now,
+            )
+        service = ReplayComparisonService(factory, minimum_sample_size=1)
+        economy = service.resolve(
+            ComparisonSelection(
+                "matches",
+                left_report,
+                right_report,
+                False,
+                ("economy.cash_change_total",),
+                1,
+            )
+        )
+        assert economy.state == "resolved", economy.reason_codes
+        assert economy.fixed_query is not None
+        assert economy.fixed_query.metric_definitions[0].faction_comparability == "declared_cross_faction"
+        economy_result = service.compare(economy.fixed_query)
+        assert economy_result.state == "comparable"
+        assert economy_result.metrics[0].value.derived_difference == 200.0
+
+        activity = service.resolve(
+            ComparisonSelection(
+                "matches",
+                left_report,
+                right_report,
+                False,
+                ("activity.supported_order_action_count",),
+                1,
+            )
+        )
+        assert activity.state == "resolved"
+        assert activity.fixed_query is not None
+        assert activity.fixed_query.metric_definitions[0].faction_comparability == "same_faction_only"
+        activity_result = service.compare(activity.fixed_query)
+        assert activity_result.state == "not_comparable"
+        assert activity_result.metrics[0].value.reason_codes == ("faction_mismatch",)
     finally:
         engine.dispose()
 

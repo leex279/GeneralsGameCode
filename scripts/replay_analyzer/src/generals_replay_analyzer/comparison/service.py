@@ -30,7 +30,17 @@ from generals_replay_analyzer.db.models import (
 
 ComparisonKind = Literal["players", "matches", "openings", "strategies", "time_periods"]
 ComparisonState = Literal["comparable", "partial", "not_comparable", "unavailable"]
+FactionComparability = Literal["same_faction_only", "declared_cross_faction"]
 _COMPARISON_NAMESPACE = UUID("78942fb7-97ae-5d0f-9f07-83436e3f5956")
+
+# TheSuperHackers @feature Leex 23/08/2026 Declare the faction-neutral cash-change metric comparable across faction boundaries. (#TBD)
+_DECLARED_CROSS_FACTION_DEFINITIONS = frozenset({"economy.cash_change_total"})
+
+
+def _faction_comparability(definition_id: str) -> FactionComparability:
+    if definition_id in _DECLARED_CROSS_FACTION_DEFINITIONS:
+        return "declared_cross_faction"
+    return "same_faction_only"
 
 
 def _digest(value: object) -> str:
@@ -70,7 +80,7 @@ class ComparisonDefinition:
     unit: str | None
     scope_type: str
     window_policy_version: str
-    faction_comparability: Literal["same_faction_only", "declared_cross_faction"]
+    faction_comparability: FactionComparability
     definition_kind: Literal["feature", "opening", "strategy", "trend", "match_metric"] = "feature"
     taxonomy_version: str | None = None
 
@@ -582,7 +592,7 @@ class ReplayComparisonService:
                 cast(str | None, item.get("unit")),
                 scope,
                 "inclusive-frame-window-v1",
-                "same_faction_only",
+                _faction_comparability(name),
                 definition_kind,
                 cast(str | None, item.get("taxonomy_version")),
             )
@@ -631,7 +641,7 @@ class ReplayComparisonService:
                     next(iter(units)),
                     next(iter(scopes)),
                     "inclusive-frame-window-v1",
-                    "same_faction_only",
+                    _faction_comparability(name),
                     "match_metric",
                 )
             )
