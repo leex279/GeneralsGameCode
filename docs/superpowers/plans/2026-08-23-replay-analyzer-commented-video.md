@@ -33,16 +33,20 @@
 - Create: `scripts/replay_analyzer/src/generals_replay_analyzer/video/camera.py`
 - Create: `scripts/replay_analyzer/tests/video/test_contracts.py`
 - Create: `scripts/replay_analyzer/tests/video/test_camera.py`
-- Modify: `scripts/replay_analyzer/pyproject.toml`
 
 **Interfaces:**
-- Produces frozen Pydantic contracts `CameraPlanV1`, `CameraSegmentV1`, `EvidenceCitationV1`, `EvidenceHorizonV1`, and `VideoSettingsV1`.
-- Produces `CameraPlanService.create(report: PublishedReportGraphDTO, scene: MapSceneReadModel) -> CameraPlanV1` from the existing report/spatial read models.
+- Produces frozen Pydantic contracts `CameraPlanAuthorityV1`, `CameraPlanV1`, `CameraSegmentV1`, `EvidenceCitationV1`, `EvidenceHorizonV1`, and `VideoSettingsV1`.
+- `CameraPlanAuthorityV1` binds the accepted replay/report to the authoritative telemetry run, telemetry trace SHA-256, replay-wide map identity/hash, and accepted evidence horizon; none of these values may be inferred from a presentation DTO.
+- Produces `CameraPlanService.create(authority: CameraPlanAuthorityV1, report: PublishedReportGraphDTO, scene: MapSceneReadModel) -> CameraPlanV1` from the existing report/spatial read models.
+- The scene must be the unfiltered replay-wide scene for the authority's replay and map. Validate the complete scene schema, replay/map identity, bounds, coordinate system, and source hashes before using it. Empty optional scene overlays do not make a replay partial and may not shorten the evidence horizon.
+- Camera candidates come from cited report evidence positions. The scene supplies authoritative map bounds/context and optional overlays; it is not assumed to contain populated engagement or route arrays.
+- Segments use inclusive, gapless intervals: the first starts at frame `0`, the last ends at the accepted inclusive horizon, and each next segment starts at `previous.end_frame + 1`.
+- Accepted transition kinds in v1 are exactly `cut` and `ease`. Every segment carries `transition_frames`; `cut` requires zero and `ease` requires a positive value that fits inside the destination segment. There is no `track` transition in v1.
 - Canonical serialization is `model_dump_json(indent=None, by_alias=True, exclude_none=True)` over an already deterministically sorted model.
 
 - [ ] **Step 1: Write failing contract tests**
 
-Assert schema version `1`, 30 Hz integer frames, stable IDs, sorted non-overlapping segments, start frame zero, terminal end frame equal to the accepted horizon, finite/bounded camera values, accepted transition kinds, and evidence references present in the fixed report.
+Assert schema version `1`, 30 Hz integer frames, stable IDs, inclusive gapless segments, start frame zero, terminal end frame equal to the accepted horizon, finite/bounded camera values, the exact `cut|ease` transition contract, and evidence references present in the fixed report. Reject mismatched telemetry run/trace, replay/map identity or source hash; a filtered/player-specific scene; incomplete scene schema; a citation outside the accepted horizon; and an attempt to derive the horizon from missing scene overlays.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
@@ -52,7 +56,7 @@ Expected: collection fails because the `video` package does not exist.
 
 - [ ] **Step 3: Implement minimal contracts and deterministic priority selection**
 
-Select candidates in the closed priority order `engagement`, `damage`, `attack_order`, `milestone`, `resource_contest`, `base_context`; then sort by `(start_frame, priority, evidence_public_id)`. Apply fixed dwell/cooldown constants, preserve map coordinates exactly, and reject rather than silently clamp invalid positions.
+Validate authority and the full replay-wide scene before selection. Select cited report-evidence positions in the closed priority order `engagement`, `damage`, `attack_order`, `milestone`, `resource_contest`, `base_context`; then sort by `(start_frame, priority, evidence_public_id)`. Apply fixed dwell/cooldown constants, synthesize base-context coverage for gaps, preserve valid map coordinates exactly, and reject rather than silently clamp invalid positions. Emit only inclusive gapless segments and `cut|ease` transitions with validated `transition_frames`.
 
 - [ ] **Step 4: Verify determinism and static gates**
 
@@ -65,7 +69,7 @@ Run: `uv run --project . mypy --strict src/generals_replay_analyzer/video`
 - [ ] **Step 5: Commit and push**
 
 ```powershell
-git add scripts/replay_analyzer/src/generals_replay_analyzer/video scripts/replay_analyzer/tests/video scripts/replay_analyzer/pyproject.toml
+git add scripts/replay_analyzer/src/generals_replay_analyzer/video scripts/replay_analyzer/tests/video
 git commit -m "feat(video): Add evidence-backed camera plans"
 git push
 ```
