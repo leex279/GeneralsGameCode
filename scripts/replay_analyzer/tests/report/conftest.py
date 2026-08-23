@@ -29,6 +29,10 @@ from generals_replay_analyzer.db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
+from generals_replay_analyzer.importing.evidence_identity import (
+    parser_command_evidence_identity,
+    telemetry_event_evidence_identity,
+)
 from generals_replay_analyzer.longitudinal.segments import LongitudinalEvidenceDTO, LongitudinalMemberDTO
 
 
@@ -59,8 +63,11 @@ def report_database(tmp_path: Path) -> SeededReportDatabase:
     now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     replay_public_id = stable_uuid("replay")
     replay_player_public_id = stable_uuid("replay-player")
-    observed_public_id = stable_uuid("observed")
-    parser_observed_public_id = stable_uuid("parser-observed")
+    parser_identity = parser_command_evidence_identity(replay_public_id, "parser-v1", 10)
+    telemetry_run_public_id = stable_uuid("telemetry")
+    telemetry_identity = telemetry_event_evidence_identity(telemetry_run_public_id, 0)
+    observed_public_id = telemetry_identity.public_id
+    parser_observed_public_id = parser_identity.public_id
     derived_public_id = stable_uuid("derived")
     analysis_run_id = stable_uuid("analysis-run")
     inferred_source_key = f"analysis-run:{analysis_run_id}:pressure"
@@ -133,7 +140,7 @@ def report_database(tmp_path: Path) -> SeededReportDatabase:
         session.add(player)
         session.flush()
         telemetry = TelemetryRun(
-            run_id=stable_uuid("telemetry"),
+            run_id=telemetry_run_public_id,
             replay_id=replay.id,
             schema_version=2,
             engine_build="zh-1.04",
@@ -156,7 +163,7 @@ def report_database(tmp_path: Path) -> SeededReportDatabase:
             parser_run_id=parser.id,
             tier="observed",
             source_kind="parser_command",
-            source_key="command:0",
+            source_key=parser_identity.source_key,
             schema_version=1,
             created_at=now,
         )
@@ -166,7 +173,7 @@ def report_database(tmp_path: Path) -> SeededReportDatabase:
             telemetry_run_id=telemetry.id,
             tier="observed",
             source_kind="telemetry_event",
-            source_key="event:economy:0",
+            source_key=telemetry_identity.source_key,
             schema_version=2,
             created_at=now,
         )
