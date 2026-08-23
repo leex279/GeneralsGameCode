@@ -212,5 +212,5 @@ def test_production_request_factory_serves_the_persisted_fixed_report(
         )
 
     assert response.status_code == 200, response.text
-    assert "Report analysis" in response.text
+    assert "Replay analysis" in response.text
     assert published.player_report_id in response.text

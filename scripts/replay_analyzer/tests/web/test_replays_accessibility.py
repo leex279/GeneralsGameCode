@@ -59,7 +59,13 @@ def test_import_dialog_has_labelled_native_controls_and_no_inline_behavior() -> 
     dialog = next(attrs for tag, attrs in parser.tags if tag == "dialog")
     assert dialog["role"] == "dialog"
     assert dialog["aria-labelledby"] == "import-dialog-title"
-    assert any(tag == "button" and "autofocus" in attrs and attrs.get("aria-label") == "Close import dialog" for tag, attrs in parser.tags)
+    assert any(
+        tag == "a"
+        and attrs.get("href") == "/replays"
+        and "autofocus" not in attrs
+        and attrs.get("aria-label") == "Close import dialog"
+        for tag, attrs in parser.tags
+    )
     assert any(tag == "input" and attrs.get("id") == "upload-file" and "disabled" in attrs for tag, attrs in parser.tags)
     assert "opaque_ingress_handoff_pending" in html
     assert "<noscript>" in html

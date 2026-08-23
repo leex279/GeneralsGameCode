@@ -204,7 +204,7 @@ def test_library_displays_player_identity_separately_from_labelled_provenance() 
     assert "leex279" in response.text and "FOX27" in response.text
     assert "Provenance disclosure" in response.text
     assert "Strata match token: 3133811" in response.text
-    assert "Strata user token: source-token" in response.text
+    assert "Strata source token: source-token" in response.text
     assert 'data-replay-public-id="' + REPLAY_ID + '"' in response.text
     assert "content_sha256" not in response.text
 
