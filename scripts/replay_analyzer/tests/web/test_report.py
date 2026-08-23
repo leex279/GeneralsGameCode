@@ -216,7 +216,7 @@ def test_report_claim_rejects_placeholder_values_and_unsafe_canonical_data() -> 
 
 
 def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() -> None:
-    """Catch the useful player analysis being buried below the raw evidence ledger."""
+    """Catch strategy, coaching, and build order being buried below the evidence ledger."""
     report = _report()
     economy = ReportSectionDTO(
         key="economy",
@@ -226,10 +226,51 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
             ReportClaimDTO(
                 **{
                     **_claim("economy").model_dump(),
-                    "claim_id": "economy.cash_change_total",
-                    "label": "Cash change",
-                    "display_value": "-300",
-                    "unit": "credits",
+                        "claim_id": "feature:economy.supply_collection_rate:fixture",
+                        "label": "economy.supply_collection_rate",
+                        "raw_value": 1_350.0,
+                        "display_value": "1350",
+                        "unit": "credits_per_minute",
+                        "evidence": (ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="derived"),),
+                }
+            ),
+        ),
+    )
+    build_order = ReportSectionDTO(
+        key="opening_build_order",
+        title="Opening build order",
+        availability=AvailabilityDTO(state="available"),
+        claims=(
+            ReportClaimDTO(
+                **{
+                    **_claim("opening_build_order").model_dump(),
+                    "claim_id": "feature:build.completed_sequence:fixture",
+                    "label": "build.completed_sequence",
+                    "raw_value": [{"frame": 45, "template_name": "AmericaPowerPlant"}],
+                    "display_value": "1 completed structure",
+                    "unit": "json",
+                    "evidence": (ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="derived"),),
+                }
+            ),
+        ),
+    )
+    strategy = ReportSectionDTO(
+        key="strategy_phases",
+        title="Strategy phases",
+        availability=AvailabilityDTO(state="available"),
+        claims=(
+            ReportClaimDTO(
+                **{
+                    **_claim("strategy_phases").model_dump(),
+                    "claim_id": "strategy:usa_humvee_pressure:fixture",
+                    "label": "usa_humvee_pressure",
+                    "raw_value": {
+                        "confidence": 1.0,
+                        "phase": "early",
+                        "strategy_label": "usa_humvee_pressure",
+                    },
+                    "display_value": "Humvee pressure",
+                    "unit": None,
                     "evidence": (ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="derived"),),
                 }
             ),
@@ -255,7 +296,16 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
                 result="lost",
             ),
         ),
-        sections=tuple(economy if section.key == "economy" else section for section in report.sections),
+        sections=tuple(
+            economy
+            if section.key == "economy"
+            else build_order
+            if section.key == "opening_build_order"
+            else strategy
+            if section.key == "strategy_phases"
+            else section
+            for section in report.sections
+        ),
     )
 
     with _client(_ReportPort(player_report)) as client:
@@ -265,11 +315,19 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
         )
 
     assert response.status_code == 200
-    assert response.text.index("Match insights") < response.text.index("Quality and availability")
-    assert "Cash Change" in response.text
-    assert "-300" in response.text
-    assert "Partial analysis:" in response.text
-    assert "frames 0-30 of 3600" in response.text
+    for first, second in (
+        ('id="what-happened"', 'id="strategy"'),
+        ('id="strategy"', 'id="worth-reviewing"'),
+        ('id="worth-reviewing"', 'id="report-timeline"'),
+        ('id="report-timeline"', 'id="build-order"'),
+        ('id="build-order"', 'id="technical-evidence"'),
+    ):
+        assert response.text.index(first) < response.text.index(second)
+    assert "Humvee pressure" in response.text
+    assert "Supply income" in response.text
+    assert "1,350 supplies/min" in response.text
+    assert "Power Plant" in response.text
+    assert '<details id="technical-evidence" class="workspace-panel technical-evidence">' in response.text
     assert f'/replays/{REPLAY_ID}/reports/{OPPONENT_REPORT_ID}' in response.text
     assert f'/replays/{REPLAY_ID}/reports/{REPORT_ID}/map' in response.text
 
@@ -449,8 +507,8 @@ def test_latest_report_route_rejects_cross_scope_port_resolution(resolution: Rep
     assert response.json()["code"] == "report_identity_mismatch"
 
 
-def test_fixed_report_route_renders_all_sections_after_quality_and_uses_exact_port_query() -> None:
-    """Catch fixed report navigation dropping sections, querying a different report, or burying quality."""
+def test_fixed_report_route_keeps_all_sections_inside_collapsed_provenance_and_uses_exact_query() -> None:
+    """Catch fixed navigation dropping raw sections or exposing them before player analysis."""
     port = _ReportPort(_report())
     with _client(port) as client:
         response = client.get(
@@ -461,7 +519,7 @@ def test_fixed_report_route_renders_all_sections_after_quality_and_uses_exact_po
     assert response.status_code == 200
     assert port.report_queries == [FixedReportQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)]
     assert port.timeline_queries == [TimelineChartQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)]
-    assert response.text.index("Quality and availability") < response.text.index("Report analysis")
+    assert response.text.index("What happened") < response.text.index("Technical evidence and provenance")
     for key in SECTION_KEYS:
         assert f'id="section-{key}"' in response.text
     assert 'src="/static/vendor/echarts.min.js"' in response.text
@@ -653,5 +711,9 @@ def test_terminal_quality_failures_are_prominent_before_analysis(
         )
 
     assert response.status_code == 200
-    assert response.text.index(issue_code) < response.text.index("Report analysis")
+    assert response.text.index(issue_message) < response.text.index("Technical evidence and provenance")
+    assert response.text.index(issue_code) > response.text.index("Technical evidence and provenance")
     assert issue_message in response.text
+    assert "Opening-only analysis:" in response.text
+    assert "Recorded result:" not in response.text
+    assert "<em>won</em>" not in response.text

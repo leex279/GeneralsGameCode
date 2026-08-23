@@ -2,135 +2,130 @@
 {% block content %}
 {% if report_view %}
   {% set report = report_view.report %}
-  <header class="page-heading">
+  {% set coaching = report_view.coaching %}
+  <header class="page-heading report-heading">
     <div>
-      <span class="eyebrow">Library / Fixed replay report</span>
+      <span class="eyebrow">Replay analysis / {{ coaching.horizon.status }}</span>
       <h1>{{ report.replay_label }}</h1>
-      <p>Report {{ report.version.report_version }} · <code>{{ report.fixed_report.report_public_id }}</code></p>
+      <p>{{ report.map_name or "Map unavailable" }} · Patch {{ report.patch or "unavailable" }} · {{ report_view.duration_label }}</p>
     </div>
-    <a class="button" href="/replays">Back to library</a>
+    <div class="page-actions">
+      <a class="button" href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map">Open match map</a>
+      <a class="button" href="/replays">Back to library</a>
+    </div>
   </header>
 
-  <section class="workspace-panel" aria-labelledby="replay-identity-title">
-    <div class="section-heading"><div><span class="eyebrow">Replay identity</span><h2 id="replay-identity-title">Match record</h2></div></div>
-    <dl class="status-ledger">
-      <div><dt>Players</dt><dd>{% for player in report.players %}{{ player.display_name }}{% if player.faction %} / {{ player.faction }}{% endif %}{% if not loop.last %} vs {% endif %}{% endfor %}</dd></div>
-      <div><dt>Result</dt><dd>{{ report.result or "Result unavailable" }}</dd></div>
-      <div><dt>Map</dt><dd>{{ report.map_name or "Map unavailable" }}</dd></div>
-      <div><dt>Patch</dt><dd>{{ report.patch or "Patch unavailable" }}</dd></div>
-      <div><dt>Duration</dt><dd>{{ report_view.duration_label }}</dd></div>
-      <div><dt>Quality</dt><dd>{{ report.terminal_quality.lifecycle }}</dd></div>
-      <div><dt>Source mode</dt><dd>{{ report_view.source_mode_label }}</dd></div>
-      <div><dt>Evidence coverage</dt><dd>{{ report.availability.state }}</dd></div>
-    </dl>
-  </section>
-
-  <!-- TheSuperHackers @feature Leex 23/08/2026 Put useful player analysis before the full evidence ledger. (#TBD) -->
-  <section id="match-insights" class="workspace-panel" aria-labelledby="match-insights-title">
+  <!-- TheSuperHackers @feature Leex 23/08/2026 Lead the report with the evidence horizon and player matchup. (#TBD) -->
+  <section class="workspace-panel report-hero" aria-labelledby="match-status-title">
     <div class="section-heading">
-      <div>
-        <span class="eyebrow">Useful first</span>
-        <h2 id="match-insights-title">Match insights{% if report_view.selected_player %}: {{ report_view.selected_player.display_name }}{% endif %}</h2>
-      </div>
-      <a class="button" href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map">Open match map</a>
+      <div><span class="eyebrow">Evidence horizon</span><h2 id="match-status-title">{{ coaching.horizon.title }}</h2></div>
+      <span class="status-chip" data-status="{{ coaching.horizon.status }}">{{ coaching.horizon.status }}</span>
     </div>
-    {% if report_view.highlight_scope_label %}<p class="analysis-scope-warning"><strong>Partial analysis:</strong> {{ report_view.highlight_scope_label }}</p>{% endif %}
-    {% if report_view.highlight_claims %}
-      <div class="insight-grid" aria-label="Evidence-backed player highlights">
-        {% for claim in report_view.highlight_claims %}
-          <article class="insight-card">
-            <span>{{ claim.label|replace(".", " / ")|replace("_", " ")|title }}</span>
-            <strong class="report-claim-value">{{ claim.display_value }}{% if claim.unit %} {{ claim.unit|replace("_", " ") }}{% endif %}</strong>
-            <small>{{ claim.section|replace("_", " ") }} Â· {{ claim.availability }}</small>
-          </article>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p>Choose a player to see the derived economy, production, activity, and opening analysis. The replay-wide report remains the evidence ledger for the whole match.</p>
-    {% endif %}
-    <nav class="player-analysis-links" aria-label="Player analysis">
+    <p>{{ coaching.horizon.description }}</p>
+    <div class="versus-grid" aria-label="Match players">
       {% for player in report.players %}
-        {% if player.report_public_id %}
-          <a{% if player.replay_player_public_id == report.version.replay_player_public_id %} aria-current="page"{% endif %} href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ player.report_public_id }}">
-            <strong>{{ player.display_name }}</strong>
-            <span>{{ player.faction or "Faction unavailable" }}{% if player.result %} Â· {{ player.result }}{% endif %}</span>
-          </a>
-        {% endif %}
+        <article class="player-match-card{% if player.replay_player_public_id == report.version.replay_player_public_id %} is-selected{% endif %}">
+          <span>Player {{ player.slot }}</span><strong>{{ player.display_name }}</strong><small>{{ player.faction or "Faction unavailable" }}</small>
+          {% if coaching.horizon.status == "complete" and player.result %}<em>{{ player.result }}</em>{% endif %}
+          {% if player.report_public_id %}<a href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ player.report_public_id }}"{% if player.replay_player_public_id == report.version.replay_player_public_id %} aria-current="page"{% endif %}>View player analysis</a>{% endif %}
+        </article>
+        {% if not loop.last %}<span class="versus-mark" aria-hidden="true">VS</span>{% endif %}
       {% endfor %}
-    </nav>
-  </section>
-
-  <section class="workspace-panel" aria-labelledby="quality-title">
-    <div class="section-heading"><div><span class="eyebrow">Read before analysis</span><h2 id="quality-title">Quality and availability</h2></div></div>
-    <p>Lifecycle: {{ report.lifecycle.lifecycle_state }}. Parser: {{ report.lifecycle.parser_completion_status or "unavailable" }}. Telemetry: {{ report.lifecycle.telemetry_status or "unavailable" }}.</p>
-    <p>{{ report_view.ollama_status_label }}{% if report.ollama.diagnostic_codes %}. Diagnostics: {{ report.ollama.diagnostic_codes|join(", ") }}{% endif %}.</p>
-    {% if report.warnings %}<ul class="notice-list">{% for warning in report.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}
-    {% if report.terminal_quality.issues %}<ul class="notice-list">{% for issue in report.terminal_quality.issues %}<li><strong>{{ issue.code }}</strong><span>{{ issue.message }}</span></li>{% endfor %}</ul>{% endif %}
+    </div>
+    {% if coaching.horizon.status != "complete" %}<p class="analysis-scope-warning"><strong>Opening-only analysis:</strong> result and later phases are not established.</p>{% endif %}
   </section>
 
   <nav class="command-strip" aria-label="Jump to report section">
-    <a href="#report-overview"><span class="command-index">01</span><span>Overview</span></a>
-    {% if report_view.timeline.availability.state != "unavailable" %}<a href="#report-timeline"><span class="command-index">02</span><span>Timeline</span></a>{% endif %}
-    {% for section in report_view.jump_sections %}<a href="#section-{{ section.key }}"><span>{{ section.title }}</span></a>{% endfor %}
-    <a href="#report-evidence"><span>Evidence</span></a>
+    <a href="#what-happened"><span class="command-index">01</span><span>What happened</span></a>
+    <a href="#strategy"><span class="command-index">02</span><span>Strategy</span></a>
+    {% if coaching.prompts %}<a href="#worth-reviewing"><span class="command-index">03</span><span>Worth reviewing</span></a>{% endif %}
+    <a href="#report-timeline"><span>Timeline</span></a>
+    {% if coaching.build_order %}<a href="#build-order"><span>Build order</span></a>{% endif %}
+    <a href="#technical-evidence"><span>Technical evidence</span></a>
   </nav>
 
+  <section id="what-happened" class="workspace-panel report-summary" aria-labelledby="what-happened-title">
+    <div class="section-heading"><div><span class="eyebrow">Player summary</span><h2 id="what-happened-title">What happened</h2></div></div>
+    <p class="lead-analysis">{{ coaching.summary }}</p>
+    {% if coaching.highlights %}
+      <div class="insight-grid" aria-label="Evidence-backed player highlights">
+        {% for highlight in coaching.highlights %}
+          <article class="insight-card">
+            <span>{{ highlight.title }}</span><strong class="report-claim-value">{{ highlight.value }}</strong><small>{{ highlight.explanation }}</small>
+            <div class="evidence-links">{% for evidence in highlight.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">View {{ evidence.tier }} evidence</a>{% endfor %}</div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}<p>No supported headline metrics are available inside this report's evidence horizon.</p>{% endif %}
+  </section>
+
+  <section id="strategy" class="workspace-panel" aria-labelledby="strategy-title">
+    <div class="section-heading"><div><span class="eyebrow">Observed game plan</span><h2 id="strategy-title">Strategy</h2></div></div>
+    {% if coaching.strategies %}
+      <div class="strategy-grid">
+        {% for strategy in coaching.strategies %}
+          <article class="strategy-card">
+            <span>{{ strategy.phase_label }} · {{ strategy.quality }}</span><h3>{{ strategy.title }}</h3><p>{{ strategy.player_label }}{% if strategy.faction_label %} · {{ strategy.faction_label }}{% endif %}</p>
+            {% if strategy.evidence_score is not none %}<small>Rule evidence score {{ "%.2f"|format(strategy.evidence_score) }} — transparent rule match, not a win probability.</small>{% endif %}
+            <div class="evidence-links">{% for evidence in strategy.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Why this strategy?</a>{% endfor %}</div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}<p>A named strategy was not established from the available evidence. The build order and measured signals below remain reviewable.</p>{% endif %}
+  </section>
+
+  {% if coaching.prompts %}
+    <section id="worth-reviewing" class="workspace-panel" aria-labelledby="worth-reviewing-title">
+      <div class="section-heading"><div><span class="eyebrow">Questions, not invented verdicts</span><h2 id="worth-reviewing-title">Worth reviewing</h2></div></div>
+      <ol class="review-prompt-list">{% for prompt in coaching.prompts %}<li><p>{{ prompt.text }}</p>{% for evidence in prompt.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Open supporting evidence</a>{% endfor %}</li>{% endfor %}</ol>
+    </section>
+  {% endif %}
+
   <section id="report-timeline" class="workspace-panel" aria-labelledby="timeline-title">
-    <div class="section-heading"><div><span class="eyebrow">Frame timebase · 30 FPS</span><h2 id="timeline-title">Timeline</h2></div></div>
+    <div class="section-heading"><div><span class="eyebrow">Frame timebase · 30 FPS</span><h2 id="timeline-title">Match timeline</h2></div></div>
     {% if report_view.timeline.availability.state == "unavailable" %}
       <p>Timeline unavailable. Reason: {{ report_view.timeline.availability.reason_codes|join(", ") }}</p>
     {% else %}
-      <form class="library-filters" data-timeline-controls aria-label="Timeline controls">
-        <div class="filter-grid">
-          <fieldset>
-            <legend>Time axis</legend>
-            <label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label>
-            <label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis disabled> Seconds</label>
-          </fieldset>
-          <fieldset>
-            <legend>Players</legend>
-            {% for player in report_view.timeline.available_players %}<label for="timeline-player-{{ loop.index }}"><input id="timeline-player-{{ loop.index }}" type="checkbox" value="{{ player.public_id }}" data-timeline-player checked disabled> {{ player.label }}</label>{% endfor %}
-          </fieldset>
-          <fieldset>
-            <legend>Event families</legend>
-            {% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}
-          </fieldset>
-        </div>
-      </form>
+      <form class="library-filters" data-timeline-controls aria-label="Timeline controls"><div class="filter-grid">
+        <fieldset><legend>Time axis</legend><label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label><label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis disabled> Seconds</label></fieldset>
+        <fieldset><legend>Players</legend>{% for player in report_view.timeline.available_players %}<label for="timeline-player-{{ loop.index }}"><input id="timeline-player-{{ loop.index }}" type="checkbox" value="{{ player.public_id }}" data-timeline-player checked disabled> {{ player.label }}</label>{% endfor %}</fieldset>
+        <fieldset><legend>Event families</legend>{% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}</fieldset>
+      </div></form>
       <div data-report-timeline data-source="/api/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/charts/timeline" role="img" aria-label="Replay event timeline"></div>
       <div class="wide-table-scroll" role="region" aria-label="Replay timeline table" tabindex="0"><table><caption>Timeline data in authoritative replay frames</caption><thead><tr><th scope="col">Series</th><th scope="col">Frame or interval</th><th scope="col">Event</th><th scope="col">Value</th></tr></thead><tbody>{% for series in report_view.timeline.series %}{% for point in series.points %}<tr><th scope="row">{{ series.label }}</th><td>{{ point.frame }}</td><td>{{ point.label }}</td><td>{% if point.value is not none %}{{ point.value }}{% else %}—{% endif %}</td></tr>{% endfor %}{% for interval in series.intervals %}<tr><th scope="row">{{ series.label }}</th><td>{{ interval.frame_start }}–{{ interval.frame_end }}</td><td>{{ interval.label }}</td><td>—</td></tr>{% endfor %}{% endfor %}</tbody></table></div>
     {% endif %}
   </section>
 
-  <section id="report-overview" aria-labelledby="analysis-title">
-    <div class="section-heading"><div><span class="eyebrow">Immutable report</span><h2 id="analysis-title">Report analysis</h2></div></div>
-    {% for section in report.sections %}
-      <section id="section-{{ section.key }}" class="workspace-panel" aria-labelledby="title-{{ section.key }}">
-        <div class="section-heading"><h3 id="title-{{ section.key }}">{{ section.title }}</h3><span>{{ section.availability.state }}</span></div>
-        {% if not section.claims %}<p>{{ section.availability.reason_codes|join(", ") or "No claims supplied" }}</p>{% endif %}
-        {% for claim in section.claims %}
-          <article>
-            <h4>{{ claim.label }}</h4>
-            {% if claim.availability == "unavailable" %}<p>Unavailable: {{ claim.unavailable_reason }}</p>{% else %}<p><strong class="report-claim-value">{{ claim.display_value }}</strong>{% if claim.unit %} {{ claim.unit }}{% endif %}</p>{% endif %}
-            {% for evidence in claim.evidence %}
-              <details class="evidence-drawer" data-evidence-public-id="{{ evidence.public_id }}">
-                <summary>Evidence tier: {{ evidence.tier }}</summary>
-                <p><code>{{ evidence.public_id }}</code></p>
-                <a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-get="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-select="#evidence-source" hx-target="closest details" hx-swap="innerHTML">Open evidence detail</a>
-              </details>
-            {% endfor %}
-          </article>
-        {% endfor %}
-      </section>
-    {% endfor %}
-  </section>
-  <section id="report-evidence" class="workspace-panel" aria-labelledby="evidence-summary-title"><h2 id="evidence-summary-title">Evidence</h2><p>Every available claim above links to its report-scoped evidence record.</p></section>
+  {% if coaching.build_order %}
+    <section id="build-order" class="workspace-panel" aria-labelledby="build-order-title">
+      <div class="section-heading"><div><span class="eyebrow">Observed completions</span><h2 id="build-order-title">Build order</h2></div></div>
+      <ol class="build-order-list">{% for step in coaching.build_order %}<li><time>{{ step.time_label }}</time><strong>{{ step.structure_label }}</strong><span>{{ step.player_label }}</span>{% for evidence in step.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Evidence</a>{% endfor %}</li>{% endfor %}</ol>
+    </section>
+  {% endif %}
+
+  {% if coaching.local_model_summary %}<section class="workspace-panel" aria-labelledby="local-interpretation-title"><div class="section-heading"><div><span class="eyebrow">Optional local model</span><h2 id="local-interpretation-title">Local interpretation</h2></div></div><p>{{ coaching.local_model_summary }}</p></section>{% endif %}
+
+  {% if coaching.limitations %}<section id="limitations" class="workspace-panel" aria-labelledby="limitations-title"><div class="section-heading"><div><span class="eyebrow">Truth boundary</span><h2 id="limitations-title">Limitations</h2></div></div><ul class="notice-list">{% for limitation in coaching.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul></section>{% endif %}
+
+  <details id="technical-evidence" class="workspace-panel technical-evidence">
+    <summary><span>Technical evidence and provenance</span><small>Schemas, lifecycle, raw claims, and source records</small></summary>
+    <div class="technical-evidence-body">
+      <dl class="status-ledger"><div><dt>Report identity</dt><dd><code>{{ report.fixed_report.report_public_id }}</code></dd></div><div><dt>Report version</dt><dd>{{ report.version.report_version }}</dd></div><div><dt>Source mode</dt><dd>{{ report_view.source_mode_label }}</dd></div><div><dt>Lifecycle</dt><dd>{{ report.lifecycle.lifecycle_state }}</dd></div><div><dt>Parser</dt><dd>{{ report.lifecycle.parser_completion_status or "unavailable" }}</dd></div><div><dt>Telemetry</dt><dd>{{ report.lifecycle.telemetry_status or "unavailable" }}</dd></div><div><dt>Ollama</dt><dd>{{ report_view.ollama_status_label }}</dd></div></dl>
+      <p>Parser: {{ report.lifecycle.parser_completion_status or "unavailable" }} · Telemetry: {{ report.lifecycle.telemetry_status or "unavailable" }}</p>
+      {% if report.terminal_quality.issues %}<ul class="notice-list">{% for issue in report.terminal_quality.issues %}<li><strong>{{ issue.code }}</strong><span>{{ issue.message }}</span></li>{% endfor %}</ul>{% endif %}
+      {% if report.ollama.diagnostic_codes %}<p>Ollama diagnostics: {{ report.ollama.diagnostic_codes|join(", ") }}</p>{% endif %}
+      {% for section in report.sections %}
+        <section id="section-{{ section.key }}" aria-labelledby="title-{{ section.key }}"><div class="section-heading"><h3 id="title-{{ section.key }}">{{ section.title }}</h3><span>{{ section.availability.state }}</span></div>
+          {% if not section.claims %}<p>{{ section.availability.reason_codes|join(", ") or "No claims supplied" }}</p>{% endif %}
+          {% for claim in section.claims %}<article class="technical-claim"><h4>{{ claim.label }}</h4>{% if claim.availability == "unavailable" %}<p>Unavailable: {{ claim.unavailable_reason }}</p>{% else %}<p><strong class="report-claim-value">{{ claim.display_value }}</strong>{% if claim.unit %} {{ claim.unit }}{% endif %}</p>{% endif %}{% for evidence in claim.evidence %}<details class="evidence-drawer" data-evidence-public-id="{{ evidence.public_id }}"><summary>Evidence tier: {{ evidence.tier }}</summary><p><code>{{ evidence.public_id }}</code></p><a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-get="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" hx-select="#evidence-source" hx-target="closest details" hx-swap="innerHTML">Open evidence detail</a></details>{% endfor %}</article>{% endfor %}
+        </section>
+      {% endfor %}
+    </div>
+  </details>
 {% else %}
   <header class="page-heading"><div><span class="eyebrow">Library / Report</span><h1>Replay report unavailable</h1><p>{{ resolution.reason_code }}</p></div><a class="button" href="/replays">Back to library</a></header>
   {% if resolution.pipeline %}<section class="workspace-panel"><h2>Pipeline state</h2><p>{{ resolution.pipeline.stage }} / {{ resolution.pipeline.state }}</p></section>{% endif %}
 {% endif %}
   <noscript><p>Charts are optional. All available timeline values remain in the table above.</p></noscript>
-  <script src="/static/vendor/htmx.min.js" defer></script>
-  <script src="/static/vendor/echarts.min.js" defer></script>
-  <script src="/static/js/report.js" defer></script>
+  <script src="/static/vendor/htmx.min.js" defer></script><script src="/static/vendor/echarts.min.js" defer></script><script src="/static/js/report.js" defer></script>
 {% endblock %}
