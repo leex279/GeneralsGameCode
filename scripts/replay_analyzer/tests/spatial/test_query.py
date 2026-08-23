@@ -29,6 +29,7 @@ from generals_replay_analyzer.db.models import (
     ParserRun,
     Replay,
     ReplayPlayer,
+    Report,
     TelemetryEvent,
     TelemetryRun,
 )
@@ -37,6 +38,7 @@ from generals_replay_analyzer.report.query import FixedReportQuery, ReportGraphN
 from generals_replay_analyzer.spatial.query import (
     MapRasterReadQuery,
     MapSceneContractError,
+    MapSceneIndexReadQuery,
     MapSceneQueryService,
     MapSceneReadQuery,
     RasterUnavailableError,
@@ -83,6 +85,16 @@ def test_downsampling_retains_entity_endpoints_and_forced_events_at_integer_midp
         "returned_sample_count": 100,
         "budget_exceeded_by_mandatory": False,
     }
+
+
+def test_scene_index_query_rejects_unbounded_or_empty_page_inputs() -> None:
+    # Break caught: allowing a direct caller to bypass the bounded database page contract.
+    with pytest.raises(ValueError):
+        MapSceneIndexReadQuery(page=0)
+    with pytest.raises(ValueError):
+        MapSceneIndexReadQuery(page_size=101)
+    with pytest.raises(ValueError):
+        MapSceneIndexReadQuery(search="")
 
 
 def test_downsampling_soft_cap_returns_every_mandatory_sample_without_duplicates() -> None:
@@ -180,8 +192,33 @@ class _ReportAuthority:
         return self.graph
 
 
+class _CountingReportAuthority:
+    def __init__(self, replay_id: str, evidence_ids: tuple[str, ...], player_id: str) -> None:
+        self.replay_id = replay_id
+        self.evidence_ids = evidence_ids
+        self.player_id = player_id
+        self.calls: list[FixedReportQuery] = []
+
+    def get_report(self, query: FixedReportQuery) -> object:
+        self.calls.append(query)
+        if query.replay_public_id != self.replay_id:
+            raise ReportGraphNotFoundError("missing")
+        return _ReportAuthority(
+            query.replay_public_id,
+            query.report_public_id,
+            self.evidence_ids,
+            self.player_id,
+        ).graph
+
+
 def _seed_query_service(
-    tmp_path: Path, *, combat_x: float = 10.0, out_of_bounds_sample_x: float = 25.0
+    tmp_path: Path,
+    *,
+    combat_x: float = 10.0,
+    out_of_bounds_sample_x: float = 25.0,
+    duplicate_manifest: bool = False,
+    map_display_name: str = "Tournament Desert",
+    corrupt_projection: bool = False,
 ) -> tuple[MapSceneQueryService, dict[str, str]]:
     settings = AnalyzerSettings(data_root=tmp_path / "map-query-data")
     settings.ensure_directories()
@@ -194,6 +231,7 @@ def _seed_query_service(
     sample_evidence_id = _uuid("sample-evidence")
     combat_evidence_id = _uuid("combat-evidence")
     oob_evidence_id = _uuid("oob-evidence")
+    duplicate_manifest_evidence_id = _uuid("duplicate-manifest-evidence")
     manifest_asset_id = _uuid("manifest-asset")
     projection = {
         "amphibious_passable": [True, True, True, True],
@@ -223,6 +261,8 @@ def _seed_query_service(
         },
         "zone_ids": [1, 0, 1, 1],
     }
+    if corrupt_projection:
+        projection["pathing"]["bounds"]["maximum_exclusive"]["x"] = 21.0
     with factory() as session:
         manifest_asset = ManagedAsset(
             public_id=manifest_asset_id,
@@ -241,7 +281,7 @@ def _seed_query_service(
             schema_version=2,
             engine_data_identity="zh-1.04-catalog",
             map_identity="maps/tournament-desert.map",
-            display_name="Tournament Desert",
+            display_name=map_display_name,
             exporter_version="zero-hour-replay-map-export-v2",
             min_x=0.0,
             min_y=0.0,
@@ -334,12 +374,15 @@ def _seed_query_service(
         session.add(telemetry)
         session.flush()
         evidence_rows = []
-        for public_id, sequence in (
+        evidence_specs = [
             (manifest_evidence_id, 0),
             (sample_evidence_id, 1),
             (combat_evidence_id, 2),
             (oob_evidence_id, 3),
-        ):
+        ]
+        if duplicate_manifest:
+            evidence_specs.append((duplicate_manifest_evidence_id, 99))
+        for public_id, sequence in evidence_specs:
             evidence_rows.append(
                 EvidenceItem(
                     public_id=public_id,
@@ -398,7 +441,22 @@ def _seed_query_service(
             raw_record_json={},
             evidence_item_id=evidence_rows[3].id,
         )
-        session.add_all((manifest_event, sample_event, combat_event, oob_event))
+        events = [manifest_event, sample_event, combat_event, oob_event]
+        if duplicate_manifest:
+            events.append(
+                TelemetryEvent(
+                    telemetry_run_id=telemetry.id,
+                    sequence=99,
+                    frame=0,
+                    logic_time_seconds=0.0,
+                    schema_version=2,
+                    event_type="manifest",
+                    payload_json={"engine_build": telemetry.engine_build},
+                    raw_record_json={},
+                    evidence_item_id=evidence_rows[4].id,
+                )
+            )
+        session.add_all(events)
         session.flush()
         entity = Entity(
             public_id=_uuid("entity-row"),
@@ -506,13 +564,20 @@ def _seed_query_service(
         _ReportAuthority(
             ids["replay"],
             ids["report"],
-            (manifest_evidence_id, sample_evidence_id, combat_evidence_id, oob_evidence_id),
+            (
+                manifest_evidence_id,
+                sample_evidence_id,
+                combat_evidence_id,
+                oob_evidence_id,
+                *((duplicate_manifest_evidence_id,) if duplicate_manifest else ()),
+            ),
             ids["player:0"],
         ),
     )
     ids["manifest_evidence"] = manifest_evidence_id
     ids["sample_evidence"] = sample_evidence_id
     ids["combat_evidence"] = combat_evidence_id
+    ids["duplicate_manifest_evidence"] = duplicate_manifest_evidence_id
     return service, ids
 
 
@@ -538,6 +603,298 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert payload["engagements"] == []
     assert payload["casualties"][0]["frame"] == 40
     assert "ignored/private/manifest.json" not in repr(payload)
+
+
+def test_listed_scene_window_resolves_against_authoritative_telemetry(tmp_path: Path) -> None:
+    # Break caught: advertising replay metadata beyond the fixed report's telemetry authority.
+    service, ids = _seed_query_service(tmp_path)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        replay.frame_count = 180
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="1" * 64,
+                cache_key="2" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    index = thaw_canonical(service.list_scenes(MapSceneIndexReadQuery()).payload)
+    assert isinstance(index, dict)
+    [listed] = index["items"]
+    advertised = listed["frame_window"]
+    scene = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(
+                listed["replay_public_id"],
+                listed["report_public_id"],
+                advertised["frame_start"],
+                advertised["frame_end"],
+            )
+        ).payload
+    )
+
+    assert isinstance(scene, dict)
+    assert advertised == scene["available_frame_window"] == {"frame_start": 0, "frame_end": 120}
+    with pytest.raises(ValueError, match="available frame window"):
+        service.get_scene(MapSceneReadQuery(ids["replay"], ids["report"], 0, 121))
+
+
+def test_scene_index_fails_closed_on_duplicate_report_bound_manifest(tmp_path: Path) -> None:
+    # Break caught: advertising a candidate that detail rejects because manifest authority is ambiguous.
+    service, ids = _seed_query_service(tmp_path, duplicate_manifest=True)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="3" * 64,
+                cache_key="4" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(MapSceneContractError, match="selected map index candidate scene is unresolved"):
+        service.list_scenes(MapSceneIndexReadQuery())
+
+
+def test_scene_index_does_not_mask_poisoned_report_as_absent(tmp_path: Path) -> None:
+    # Break caught: silently dropping a persisted report whose fixed report graph cannot be resolved.
+    service, ids = _seed_query_service(tmp_path)
+    poison_report_id = _uuid("poison-report")
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=poison_report_id,
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="5" * 64,
+                cache_key="6" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(MapSceneContractError, match="fixed report is unresolved"):
+        service.list_scenes(MapSceneIndexReadQuery())
+
+
+def test_scene_index_bounds_authority_validation_to_selected_database_page(tmp_path: Path) -> None:
+    # Break caught: validating every persisted report before slicing one requested page.
+    service, ids = _seed_query_service(tmp_path)
+    report_ids = tuple(_uuid(f"page-report:{index}") for index in range(6))
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        for index, report_id in enumerate(report_ids):
+            session.add(
+                Report(
+                    public_id=report_id,
+                    replay_id=replay.id,
+                    report_version="replay-report-v1",
+                    input_digest=f"{index + 10:064x}",
+                    cache_key=f"{index + 20:064x}",
+                    report_json={},
+                    created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+                )
+            )
+        session.commit()
+    authority = _CountingReportAuthority(
+        ids["replay"],
+        (ids["manifest_evidence"], ids["sample_evidence"], ids["combat_evidence"]),
+        ids["player:0"],
+    )
+    bounded = MapSceneQueryService(service.session_factory, authority)
+
+    page = thaw_canonical(bounded.list_scenes(MapSceneIndexReadQuery(page=2, page_size=2)).payload)
+
+    assert isinstance(page, dict)
+    assert page["total_items"] == 6
+    assert len(page["items"]) == 2
+    assert len(authority.calls) == 2
+    assert {call.report_public_id for call in authority.calls} == set(sorted(report_ids)[2:4])
+
+    authority.calls.clear()
+    empty = thaw_canonical(
+        bounded.list_scenes(MapSceneIndexReadQuery(search="no such map")).payload
+    )
+    assert isinstance(empty, dict)
+    assert empty["total_items"] == 0
+    assert authority.calls == []
+
+    unavailable = thaw_canonical(
+        bounded.list_scenes(MapSceneIndexReadQuery(availability="available")).payload
+    )
+    assert isinstance(unavailable, dict)
+    assert unavailable["total_items"] == 0
+    assert authority.calls == []
+
+
+def test_scene_index_search_preserves_unicode_casefold_semantics(tmp_path: Path) -> None:
+    # Break caught: delegating Unicode search to SQLite's ASCII-only lower() implementation.
+    service, ids = _seed_query_service(tmp_path, map_display_name="Große Straße")
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="7" * 64,
+                cache_key="8" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    page = thaw_canonical(
+        service.list_scenes(MapSceneIndexReadQuery(search="STRASSE")).payload
+    )
+
+    assert isinstance(page, dict)
+    assert page["total_items"] == 1
+    assert [item["map_display_name"] for item in page["items"]] == ["Große Straße"]
+
+
+def test_scene_index_search_fails_closed_above_lightweight_candidate_cap(tmp_path: Path) -> None:
+    # Break caught: scanning an unbounded report collection to implement Python casefold search.
+    service, ids = _seed_query_service(tmp_path)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        for index in range(1001):
+            session.add(
+                Report(
+                    public_id=_uuid(f"search-cap-report:{index}"),
+                    replay_id=replay.id,
+                    report_version="replay-report-v1",
+                    input_digest=f"{index + 100:064x}",
+                    cache_key=f"{index + 1200:064x}",
+                    report_json={},
+                    created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+                )
+            )
+        session.commit()
+    authority = _CountingReportAuthority(
+        ids["replay"],
+        (ids["manifest_evidence"], ids["sample_evidence"], ids["combat_evidence"]),
+        ids["player:0"],
+    )
+
+    with pytest.raises(MapSceneContractError, match="search candidate limit exceeded"):
+        MapSceneQueryService(service.session_factory, authority).list_scenes(
+            MapSceneIndexReadQuery(search="Tournament")
+        )
+    assert authority.calls == []
+
+
+def test_scene_index_huge_offset_skips_hydration_and_preserves_collection_availability(
+    tmp_path: Path,
+) -> None:
+    # Break caught: reporting no completed scenes when only the requested page is empty.
+    service, ids = _seed_query_service(tmp_path)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="9" * 64,
+                cache_key="a" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    authority = _CountingReportAuthority(
+        ids["replay"],
+        (ids["manifest_evidence"], ids["sample_evidence"], ids["combat_evidence"]),
+        ids["player:0"],
+    )
+
+    page = thaw_canonical(
+        MapSceneQueryService(service.session_factory, authority)
+        .list_scenes(MapSceneIndexReadQuery(page=2**63, page_size=100))
+        .payload
+    )
+
+    assert isinstance(page, dict)
+    assert page["total_items"] == 1
+    assert page["items"] == []
+    assert page["availability"] == {
+        "state": "partial",
+        "reason_codes": ["requested_page_empty"],
+        "evidence_references": [],
+    }
+    assert authority.calls == []
+
+
+def test_scene_index_normalizes_corrupt_projection_failure(tmp_path: Path) -> None:
+    # Break caught: leaking a raw validated-projection ValueError from a selected report row.
+    service, ids = _seed_query_service(tmp_path, corrupt_projection=True)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="b" * 64,
+                cache_key="c" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(MapSceneContractError, match="selected map index candidate scene is unresolved"):
+        service.list_scenes(MapSceneIndexReadQuery())
+
+
+def test_scene_index_normalizes_missing_telemetry_authority(tmp_path: Path) -> None:
+    # Break caught: leaking a selected report's internal authority failure instead of one index error.
+    service, ids = _seed_query_service(tmp_path)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="d" * 64,
+                cache_key="e" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    missing = MapSceneQueryService(
+        service.session_factory,
+        _ReportAuthority(ids["replay"], ids["report"], (), ids["player:0"]),
+    )
+
+    with pytest.raises(MapSceneContractError, match="selected map index candidate scene is unresolved"):
+        missing.list_scenes(MapSceneIndexReadQuery())
 
 
 def test_pathability_raster_is_stable_png_and_terrain_is_explicitly_unavailable(tmp_path: Path) -> None:

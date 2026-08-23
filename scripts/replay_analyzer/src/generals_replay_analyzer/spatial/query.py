@@ -8,11 +8,11 @@ import math
 import struct
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.db.models import (
@@ -62,6 +62,7 @@ _SAMPLE_REASONS = frozenset(
     {"lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"}
 )
 _FORCED_REASONS = frozenset({"lifecycle_forced", "order_forced", "state_forced"})
+_MAP_SCENE_SEARCH_CANDIDATE_LIMIT = 1000
 _RESOURCE_KINDS = frozenset(
     {"supply_source", "supply_warehouse", "capturable", "tech_building", "cash_generator", "oil_income"}
 )
@@ -148,6 +149,16 @@ class MapSceneIndexReadQuery:
     page_size: int = 25
     search: str | None = None
     availability: Literal["available", "partial", "unavailable"] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.page) is not int or self.page < 1:
+            raise ValueError("map scene index page must be positive")
+        if type(self.page_size) is not int or not 1 <= self.page_size <= 100:
+            raise ValueError("map scene index page size must be from 1 through 100")
+        if self.search is not None and (
+            type(self.search) is not str or not 1 <= len(self.search) <= 256
+        ):
+            raise ValueError("map scene index search must contain from 1 through 256 characters")
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +373,19 @@ class MapSceneQueryService:
             if existing != reference.tier:
                 raise MapSceneContractError("report evidence membership is internally inconsistent")
         return tiers
+
+    @staticmethod
+    def _available_frame_end(replay: Replay, telemetry: TelemetryRun) -> int:
+        return min(
+            replay.frame_count,
+            telemetry.final_frame if telemetry.final_frame is not None else replay.frame_count,
+        )
+
+    @staticmethod
+    def _bounded_page_offset(total: int, page: int, page_size: int) -> int:
+        if total == 0 or page > ((total - 1) // page_size) + 1:
+            return total
+        return (page - 1) * page_size
 
     def _authority(
         self, session: Session, query: MapSceneReadQuery, graph: Any
@@ -694,12 +718,23 @@ class MapSceneQueryService:
         if type(query) is not MapSceneReadQuery:
             raise TypeError("query must be a MapSceneReadQuery")
         graph = self._report_graph(query)
+        return self._get_scene(query, graph)
+
+    def _get_scene(
+        self,
+        query: MapSceneReadQuery,
+        graph: Any,
+        *,
+        canonical_index_window: bool = False,
+    ) -> MapSceneReadModel:
         with self._session_factory() as session:
             replay, map_row, parser, telemetry, document, report_evidence_ids = self._authority(
                 session, query, graph
             )
-            available_end = min(replay.frame_count, telemetry.final_frame if telemetry.final_frame is not None else replay.frame_count)
-            if query.frame_end > available_end:
+            available_end = self._available_frame_end(replay, telemetry)
+            if canonical_index_window:
+                query = replace(query, frame_start=0, frame_end=available_end)
+            elif query.frame_end > available_end:
                 raise ValueError("map scene query exceeds the available frame window")
             manifest = self._manifest_evidence(session, telemetry, report_evidence_ids)
             projection = self._projection(session, map_row, manifest)
@@ -970,42 +1005,119 @@ class MapSceneQueryService:
     def list_scenes(self, query: MapSceneIndexReadQuery) -> MapSceneIndexReadModel:
         if type(query) is not MapSceneIndexReadQuery:
             raise TypeError("query must be a MapSceneIndexReadQuery")
-        with self._session_factory() as session:
-            rows = tuple(
-                session.execute(
-                    select(Report, Replay, Map)
-                    .join(Replay, Replay.id == Report.replay_id)
-                    .join(Map, Map.id == Replay.map_id)
-                    .order_by(Replay.public_id, Report.public_id)
-                )
-            )
+        rows: tuple[tuple[Report, Replay, Map], ...] = ()
+        total = 0
+        if query.availability in (None, "partial"):
+            with self._session_factory() as session:
+                if query.search:
+                    candidates = tuple(
+                        session.execute(
+                            select(
+                                Report.id,
+                                Map.display_name,
+                                Replay.map_name,
+                                Replay.replay_name,
+                            )
+                            .select_from(Report)
+                            .join(Replay, Replay.id == Report.replay_id)
+                            .join(Map, Map.id == Replay.map_id)
+                            .order_by(Replay.public_id, Report.public_id)
+                            .limit(_MAP_SCENE_SEARCH_CANDIDATE_LIMIT + 1)
+                        ).tuples()
+                    )
+                    if len(candidates) > _MAP_SCENE_SEARCH_CANDIDATE_LIMIT:
+                        raise MapSceneContractError(
+                            "map scene search candidate limit exceeded"
+                        )
+                    term = query.search.casefold()
+                    matching_ids = [
+                        report_id
+                        for report_id, display_name, map_name, replay_name in candidates
+                        if term in f"{display_name or map_name} {replay_name}".casefold()
+                    ]
+                    total = len(matching_ids)
+                    offset = self._bounded_page_offset(total, query.page, query.page_size)
+                    selected_ids = matching_ids[offset : offset + query.page_size]
+                    if selected_ids:
+                        rows = tuple(
+                            session.execute(
+                                select(Report, Replay, Map)
+                                .join(Replay, Replay.id == Report.replay_id)
+                                .join(Map, Map.id == Replay.map_id)
+                                .where(Report.id.in_(selected_ids))
+                                .order_by(Replay.public_id, Report.public_id)
+                            ).tuples()
+                        )
+                else:
+                    total = session.scalar(
+                        select(func.count(Report.id))
+                        .select_from(Report)
+                        .join(Replay, Replay.id == Report.replay_id)
+                        .join(Map, Map.id == Replay.map_id)
+                    ) or 0
+                    offset = self._bounded_page_offset(total, query.page, query.page_size)
+                    if offset < total:
+                        rows = tuple(
+                            session.execute(
+                                select(Report, Replay, Map)
+                                .join(Replay, Replay.id == Report.replay_id)
+                                .join(Map, Map.id == Replay.map_id)
+                                .order_by(Replay.public_id, Report.public_id)
+                                .offset(offset)
+                                .limit(query.page_size)
+                            ).tuples()
+                        )
         items: list[dict[str, object]] = []
         for report, replay, map_row in rows:
+            scene_query = MapSceneReadQuery(replay.public_id, report.public_id, 0, 0)
             try:
-                graph = self._report_authority.get_report(FixedReportQuery(replay.public_id, report.public_id))
-            except (ReportGraphNotFoundError, ReportGraphAmbiguousError, ReportGraphContractError):
-                continue
+                graph = self._report_graph(scene_query)
+            except (
+                ReportGraphNotFoundError,
+                ReportGraphAmbiguousError,
+                ReportGraphContractError,
+            ) as error:
+                raise MapSceneContractError(
+                    "selected map index candidate fixed report is unresolved"
+                ) from error
+            try:
+                scene = _mapping(
+                    _thaw(
+                        self._get_scene(
+                            scene_query,
+                            graph,
+                            canonical_index_window=True,
+                        ).payload
+                    ),
+                    "canonical map scene",
+                )
+                frame_window = _mapping(
+                    scene.get("available_frame_window"), "available frame window"
+                )
+            except (MapSceneContractError, ValueError) as error:
+                raise MapSceneContractError(
+                    "selected map index candidate scene is unresolved"
+                ) from error
             identity_players = tuple(getattr(getattr(graph, "identity", None), "players", ()))
-            item = {
+            item: dict[str, object] = {
                 "replay_public_id": replay.public_id,
                 "report_public_id": report.public_id,
                 "map_public_id": map_row.public_id,
                 "map_display_name": map_row.display_name or replay.map_name,
                 "report_version": report.report_version,
-                "frame_window": {"frame_start": 0, "frame_end": replay.frame_count},
+                "frame_window": frame_window,
                 "players": [
                     {"public_id": player.public_id, "label": player.display_name} for player in identity_players
                 ],
                 "availability": _availability("partial", ("terrain_grid_not_persisted",)),
             }
-            if query.search and query.search.casefold() not in f"{item['map_display_name']} {replay.replay_name}".casefold():
-                continue
-            if query.availability and query.availability != "partial":
-                continue
             items.append(item)
-        total = len(items)
-        start = (query.page - 1) * query.page_size
-        page_items = items[start : start + query.page_size]
+        if items:
+            availability = _availability("partial", ("terrain_grid_not_persisted",))
+        elif total:
+            availability = _availability("partial", ("requested_page_empty",))
+        else:
+            availability = _availability("unavailable", ("no_completed_map_scenes",))
         payload = {
             "query": {
                 "page": query.page,
@@ -1013,11 +1125,11 @@ class MapSceneQueryService:
                 "search": query.search,
                 "availability": query.availability,
             },
-            "items": page_items,
+            "items": items,
             "page": query.page,
             "page_size": query.page_size,
             "total_items": total,
-            "availability": _availability("partial" if items else "unavailable", ("terrain_grid_not_persisted",) if items else ("no_completed_map_scenes",)),
+            "availability": availability,
         }
         return MapSceneIndexReadModel(freeze_canonical(payload))
 
