@@ -4,14 +4,16 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from time import perf_counter
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 
 from generals_replay_analyzer.db.models import (
     AnalysisRun,
     AssessmentEvidence,
+    EconomyEvent,
     EvidenceItem,
     Feature,
     FeatureEvidence,
@@ -25,6 +27,7 @@ from generals_replay_analyzer.db.models import (
     ReplayPlayer,
     Report,
     StrategyAssessment,
+    TelemetryEvent,
     TelemetryRun,
 )
 from generals_replay_analyzer.report.model import ReportRequest, document_to_mapping
@@ -40,6 +43,100 @@ def _service(database: SeededReportDatabase) -> ReportService:
         settings=database.settings,
         store=ContentAddressedStore(database.settings.cache_directory / "reports"),
     )
+
+
+def test_report_feature_assembly_query_count_is_bounded_by_batches(
+    report_database: SeededReportDatabase,
+) -> None:
+    factory = report_database.session_factory
+    engine = factory.kw["bind"]  # type: ignore[attr-defined]
+    selected: list[str] = []
+
+    def count_selects(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selected.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_selects)
+    try:
+        request = ReportRequest(
+            report_database.replay_public_id,
+            report_database.replay_player_public_id,
+            include_validated_ollama=False,
+            publish=False,
+        )
+        _service(report_database).create(request)
+        baseline = len(selected)
+        selected.clear()
+        with factory() as session:  # type: ignore[operator]
+            replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+            feature_set = session.scalar(select(Feature.feature_set_id).limit(1))
+            telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id))
+            replay_player_id = session.scalar(
+                select(ReplayPlayer.id).where(
+                    ReplayPlayer.public_id == report_database.replay_player_public_id
+                )
+            )
+            observed = session.scalar(
+                select(EvidenceItem).where(EvidenceItem.public_id == report_database.observed_evidence_id)
+            )
+            assert (
+                replay is not None
+                and feature_set is not None
+                and telemetry is not None
+                and replay_player_id is not None
+                and observed is not None
+            )
+            for index in range(12):
+                evidence = EvidenceItem(
+                    public_id=stable_uuid(f"bounded-feature-evidence-{index}"),
+                    replay_id=replay.id,
+                    telemetry_run_id=telemetry.id,
+                    tier="derived",
+                    source_kind="feature",
+                    source_key=f"feature:bounded:{index}",
+                    schema_version=1,
+                    created_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC),
+                )
+                session.add(evidence)
+                session.flush()
+                feature = Feature(
+                    public_id=stable_uuid(f"bounded-feature-{index}"),
+                    feature_set_id=feature_set,
+                    evidence_item_id=evidence.id,
+                    name=f"bounded_feature_{index}",
+                    value_type="integer",
+                    integer_value=index,
+                    scope_type="player",
+                    scope_key=report_database.replay_player_public_id,
+                    replay_player_id=replay_player_id,
+                    frame_start=0,
+                    frame_end=1200,
+                    quality="available",
+                    details_json={"index": index},
+                )
+                session.add(feature)
+                session.flush()
+                session.add(FeatureEvidence(feature_id=feature.id, evidence_item_id=observed.id, role="input"))
+            session.commit()
+
+        selected.clear()
+        started = perf_counter()
+        receipt = _service(report_database).create(request)
+        elapsed = perf_counter() - started
+        expanded = len(selected)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_selects)
+
+    assert len(tuple(value for value in receipt.document.derived if value.section == "features")) == 13
+    assert expanded <= baseline + 2
+    assert elapsed < 5.0
 
 
 def _full_llm_response(
@@ -209,6 +306,207 @@ def test_requested_player_uses_exact_successful_parser_telemetry_graph_not_arbit
         report_database.parser_observed_evidence_id,
         report_database.observed_evidence_id,
     }
+
+
+def test_report_rejects_a_succeeded_feature_telemetry_branch_from_another_parser_before_writes(
+    report_database: SeededReportDatabase,
+) -> None:
+    now = datetime(2026, 8, 22, 14, 15, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_telemetry_runs_succeeded_no_update"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id))
+        assert replay is not None and telemetry is not None
+        other_parser = ParserRun(
+            run_id=stable_uuid("report-cross-branch-parser"),
+            replay_id=replay.id,
+            parser_version="parser-cross-branch-v1",
+            schema_version=1,
+            input_sha256=replay.sha256,
+            result_sha256="9" * 64,
+            status="succeeded",
+            completion_status="complete",
+            warnings_json=[],
+            started_at=now,
+            completed_at=now,
+        )
+        session.add(other_parser)
+        telemetry.settings_json = {"parser_run_id": other_parser.run_id}
+
+    with pytest.raises(ReportContractError, match="parser.*telemetry|telemetry.*parser"):
+        _service(report_database).create(
+            ReportRequest(
+                report_database.replay_public_id,
+                report_database.replay_player_public_id,
+                publish=True,
+            )
+        )
+
+    with report_database.session_factory() as session:  # type: ignore[operator]
+        assert session.scalar(select(func.count()).select_from(Report)) == 0
+
+
+def test_player_telemetry_ownership_uses_the_exact_resolved_initialization_mapping(
+    report_database: SeededReportDatabase,
+) -> None:
+    now = datetime(2026, 8, 22, 14, 30, tzinfo=UTC)
+    with report_database.session_factory() as session:  # type: ignore[operator]
+        session.execute(text("DROP TRIGGER trg_replay_players_succeeded_no_observation_update"))
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_insert"))
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_update"))
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_insert"))
+        player = session.scalar(
+            select(ReplayPlayer).where(
+                ReplayPlayer.public_id == report_database.replay_player_public_id
+            )
+        )
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.status == "succeeded"))
+        event_row = session.scalar(
+            select(TelemetryEvent).where(
+                TelemetryEvent.evidence_item_id
+                == select(EvidenceItem.id)
+                .where(EvidenceItem.public_id == report_database.observed_evidence_id)
+                .scalar_subquery()
+            )
+        )
+        assert player is not None and telemetry is not None and event_row is not None
+        # Legacy parser indices may conflict with the accepted telemetry mapping;
+        # the resolved players_initialized slot mapping remains authoritative.
+        player.player_index = 99
+        event_row.payload_json = {"player_index": 7, "cash": 9000}
+        initialization_evidence = EvidenceItem(
+            public_id=stable_uuid("players-initialized-evidence"),
+            replay_id=player.replay_id,
+            telemetry_run_id=telemetry.id,
+            tier="observed",
+            source_kind="telemetry_event",
+            source_key="telemetry:players-initialized:exact-mapping",
+            schema_version=2,
+            created_at=now,
+        )
+        session.add(initialization_evidence)
+        session.flush()
+        session.add(
+            TelemetryEvent(
+                telemetry_run_id=telemetry.id,
+                sequence=1,
+                frame=0,
+                logic_time_seconds=0.0,
+                schema_version=2,
+                event_type="players_initialized",
+                payload_json={
+                    "slots": [
+                        {
+                            "slot_index": player.slot_index,
+                            "resolution_status": "resolved",
+                            "player_index": 7,
+                        }
+                    ]
+                },
+                raw_record_json={"event_type": "players_initialized"},
+                evidence_item_id=initialization_evidence.id,
+            )
+        )
+        session.commit()
+
+    receipt = _service(report_database).create(
+        ReportRequest(
+            report_database.replay_public_id,
+            report_database.replay_player_public_id,
+            publish=False,
+        )
+    )
+
+    assert report_database.observed_evidence_id in {
+        reference.public_id
+        for value in receipt.document.derived
+        for reference in value.evidence
+    }
+
+
+@pytest.mark.parametrize(
+    "initialization_payload",
+    (
+        {"slots": "malformed"},
+        {
+            "slots": [
+                {
+                    "slot_index": 0,
+                    "resolution_status": "unresolved",
+                    "player_index": 0,
+                }
+            ]
+        },
+    ),
+)
+def test_typed_economy_ownership_never_falls_back_when_initialization_mapping_is_invalid(
+    report_database: SeededReportDatabase,
+    initialization_payload: object,
+) -> None:
+    now = datetime(2026, 8, 22, 14, 45, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_insert"))
+        session.execute(text("DROP TRIGGER trg_economy_events_succeeded_no_insert"))
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_insert"))
+        player = session.scalar(
+            select(ReplayPlayer).where(ReplayPlayer.public_id == report_database.replay_player_public_id)
+        )
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.status == "succeeded"))
+        event_row = session.scalar(
+            select(TelemetryEvent).where(
+                TelemetryEvent.evidence_item_id
+                == select(EvidenceItem.id)
+                .where(EvidenceItem.public_id == report_database.observed_evidence_id)
+                .scalar_subquery()
+            )
+        )
+        assert player is not None and telemetry is not None and event_row is not None
+        session.add(
+            EconomyEvent(
+                telemetry_run_id=telemetry.id,
+                telemetry_event_id=event_row.id,
+                replay_id=player.replay_id,
+                replay_player_id=player.id,
+                frame=event_row.frame,
+                event_type="economy_sample",
+                balance_after=9000,
+                payload_json={"player_index": 0, "cash": 9000},
+            )
+        )
+        initialization_evidence = EvidenceItem(
+            public_id=stable_uuid(f"invalid-initialization-{initialization_payload!r}"),
+            replay_id=player.replay_id,
+            telemetry_run_id=telemetry.id,
+            tier="observed",
+            source_kind="telemetry_event",
+            source_key=f"telemetry:invalid-initialization:{initialization_payload!r}",
+            schema_version=2,
+            created_at=now,
+        )
+        session.add(initialization_evidence)
+        session.flush()
+        session.add(
+            TelemetryEvent(
+                telemetry_run_id=telemetry.id,
+                sequence=1,
+                frame=0,
+                logic_time_seconds=0.0,
+                schema_version=2,
+                event_type="players_initialized",
+                payload_json=initialization_payload,
+                raw_record_json={"event_type": "players_initialized"},
+                evidence_item_id=initialization_evidence.id,
+            )
+        )
+
+    with pytest.raises(ReportContractError, match="owned"):
+        _service(report_database).create(
+            ReportRequest(
+                report_database.replay_public_id,
+                report_database.replay_player_public_id,
+                publish=False,
+            )
+        )
 
 
 @pytest.mark.parametrize("target", ["feature", "assessment"])

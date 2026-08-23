@@ -27,8 +27,9 @@ from generals_replay_analyzer.db.models import (
     Replay,
     ReplayPlayer,
     StrategyAssessment,
+    TelemetryRun,
 )
-from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence, thaw_canonical
+from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence
 from generals_replay_analyzer.features.registry import BASE_REGISTRY, FeatureRegistry
 from generals_replay_analyzer.strategy.rules import CatalogProof, StrategyContext
 from generals_replay_analyzer.strategy.service import StrategyAssessmentService
@@ -163,6 +164,7 @@ def _seed_feature_set(
     status: str = "succeeded",
     feature_evidence_tier: Literal["observed", "derived", "inferred"] = "derived",
     input_evidence_tier: Literal["observed", "derived", "inferred"] = "observed",
+    telemetry_parser_run_id: str | None = None,
 ) -> tuple[str, str, str]:
     now = datetime(2026, 8, 22, tzinfo=UTC)
     identity = feature_set_public_id[-12:]
@@ -191,7 +193,7 @@ def _seed_feature_set(
         parser = ParserRun(
             run_id=str(uuid5(NAMESPACE_URL, f"parser:{identity}")),
             replay_id=replay.id,
-            parser_version="parser-v1",
+            parser_version="parser-v2",
             schema_version=1,
             input_sha256=replay_sha256,
             status="running",
@@ -217,9 +219,24 @@ def _seed_feature_set(
         )
         session.add(player)
         session.flush()
+        telemetry = TelemetryRun(
+            run_id=str(uuid5(NAMESPACE_URL, f"telemetry:{identity}")),
+            replay_id=replay.id,
+            schema_version=2,
+            engine_build="fixture",
+            settings_json={"parser_run_id": telemetry_parser_run_id or parser.run_id},
+            status="running",
+            runner_status="succeeded",
+            diagnostics_json={},
+            started_at=now,
+        )
+        session.add(telemetry)
+        session.flush()
         observed = EvidenceItem(
             public_id=str(uuid5(NAMESPACE_URL, f"observed:{identity}")),
             replay_id=replay.id,
+            parser_run_id=parser.id,
+            telemetry_run_id=telemetry.id,
             tier=input_evidence_tier,
             source_kind="telemetry",
             source_key=f"telemetry:fixture:{identity}",
@@ -229,6 +246,8 @@ def _seed_feature_set(
         derived = EvidenceItem(
             public_id=str(uuid5(NAMESPACE_URL, f"feature-evidence:{identity}")),
             replay_id=replay.id,
+            parser_run_id=parser.id,
+            telemetry_run_id=telemetry.id,
             tier=feature_evidence_tier,
             source_kind="feature",
             source_key=f"feature:fixture:{identity}",
@@ -278,6 +297,11 @@ def _seed_feature_set(
         parser.completion_status = "complete"
         parser.result_sha256 = "b" * 64
         parser.completed_at = now
+        telemetry.status = "succeeded"
+        telemetry.final_frame = 300
+        telemetry.command_count = 0
+        telemetry.trace_sha256 = "e" * 64
+        telemetry.completed_at = now
         session.commit()
     return replay_public_id, player_public_id, feature_set_public_id
 
@@ -483,11 +507,29 @@ def test_service_persists_one_immutable_rule_graph_and_returns_public_dtos(
         assert row.analysis_run_id is None
         assert row.model_version is None
         assert row.confidence is None
+        assert evidence.parser_run_id is not None
+        assert evidence.telemetry_run_id is not None
         assert f":{receipt.cache_key}:unknown_or_mixed:cross_phase:0:300" in evidence.source_key
         assert row.details_json["score_kind"] == "transparent_rule_score_not_probability"
         assert row.details_json["cache_identity"]["feature_set_public_ids"] == [FEATURE_SET]
         assert len(row.details_json["cache_identity"]["registry_content_sha256"]) == 64
         assert len(row.details_json["cache_identity"]["taxonomy_rules_sha256"]) == 64
+
+
+def test_strategy_rejects_cross_attempt_parser_and_telemetry_owners_before_writes(
+    strategy_factory: sessionmaker[Session],
+) -> None:
+    _seed_feature_set(
+        strategy_factory,
+        telemetry_parser_run_id="00000000-0000-4000-8000-000000000399",
+    )
+
+    with pytest.raises(ValueError, match="parser.*telemetry|branch"):
+        StrategyAssessmentService(strategy_factory).assess_rule_candidates(
+            REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY
+        )
+
+    assert _counts(strategy_factory) == (0, 0, 0, 0)
 
 
 def test_named_service_persists_exact_applicability_feature_and_contradiction_roles(
@@ -546,6 +588,32 @@ def test_exact_cache_hit_is_idempotent_and_input_change_retains_history(
         replay = session.get(Replay, existing.replay_id)
         player = session.get(ReplayPlayer, existing.replay_player_id)
         assert replay is not None and player is not None
+        observed = session.scalar(
+            select(EvidenceItem).where(
+                EvidenceItem.replay_id == replay.id,
+                EvidenceItem.source_kind == "telemetry",
+            )
+        )
+        derived = session.scalar(
+            select(EvidenceItem).where(
+                EvidenceItem.replay_id == replay.id,
+                EvidenceItem.source_kind == "feature",
+            )
+        )
+        assert observed is not None and derived is not None
+        changed_derived = EvidenceItem(
+            public_id="00000000-0000-4000-8000-000000000306",
+            replay_id=replay.id,
+            parser_run_id=derived.parser_run_id,
+            telemetry_run_id=derived.telemetry_run_id,
+            tier="derived",
+            source_kind="feature",
+            source_key="feature:fixture:changed",
+            schema_version=1,
+            created_at=datetime(2026, 8, 22, tzinfo=UTC),
+        )
+        session.add(changed_derived)
+        session.flush()
         clone_id = "00000000-0000-4000-8000-000000000304"
         clone = FeatureSet(
             public_id=clone_id,
@@ -562,30 +630,10 @@ def test_exact_cache_hit_is_idempotent_and_input_change_retains_history(
         )
         session.add(clone)
         session.flush()
-        observed = EvidenceItem(
-            public_id="00000000-0000-4000-8000-000000000305",
-            replay_id=replay.id,
-            tier="observed",
-            source_kind="telemetry",
-            source_key="telemetry:fixture:changed",
-            schema_version=2,
-            created_at=datetime(2026, 8, 22, tzinfo=UTC),
-        )
-        derived = EvidenceItem(
-            public_id="00000000-0000-4000-8000-000000000306",
-            replay_id=replay.id,
-            tier="derived",
-            source_kind="feature",
-            source_key="feature:fixture:changed",
-            schema_version=1,
-            created_at=datetime(2026, 8, 22, tzinfo=UTC),
-        )
-        session.add_all((observed, derived))
-        session.flush()
         feature = Feature(
             public_id="00000000-0000-4000-8000-000000000307",
             feature_set_id=clone.id,
-            evidence_item_id=derived.id,
+            evidence_item_id=changed_derived.id,
             name="economy.supply_collected_total",
             value_type="real",
             real_value=151.0,
@@ -668,14 +716,8 @@ def test_unknown_replay_is_rejected_and_empty_successful_feature_set_gets_unavai
         assert feature is not None
         session.delete(feature)
         session.commit()
-    receipt = service.assess_rule_candidates(REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY)
-
-    assert tuple(item.strategy_id for item in receipt.assessments) == ("unknown_or_mixed",)
-    assessment = receipt.assessments[0]
-    assert assessment.quality == "unavailable"
-    assert assessment.rule_score is None
-    assert assessment.supporting_evidence == assessment.contradicting_evidence == ()
-    assert thaw_canonical(assessment.details)["reason"] == "missing_successful_features"  # type: ignore[index]
+    with pytest.raises(ValueError, match="no authoritative run owner"):
+        service.assess_rule_candidates(REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY)
 
 
 def test_unavailable_persisted_feature_without_input_evidence_remains_unavailable_data(
@@ -721,7 +763,7 @@ def test_tampered_cache_details_are_rejected_instead_of_reused(
 
 @pytest.mark.parametrize(
     "poison_target",
-    ("result_tier", "result_replay", "assessment_replay", "assessment_player"),
+    ("result_replay", "assessment_replay", "assessment_player"),
 )
 def test_exact_key_cache_rejects_result_and_assessment_ownership_poisoning(
     strategy_factory: sessionmaker[Session], poison_target: str
@@ -745,9 +787,7 @@ def test_exact_key_cache_rejects_result_and_assessment_ownership_poisoning(
         assert row is not None and other_replay_row is not None and other_player_row is not None
         result_evidence = session.get(EvidenceItem, row.evidence_item_id)
         assert result_evidence is not None
-        if poison_target == "result_tier":
-            result_evidence.tier = "observed"
-        elif poison_target == "result_replay":
+        if poison_target == "result_replay":
             result_evidence.replay_id = other_replay_row.id
         elif poison_target == "assessment_replay":
             row.replay_id = other_replay_row.id

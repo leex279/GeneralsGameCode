@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from typing import Literal, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.analysis_pipeline.codecs import (
@@ -27,6 +27,10 @@ from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db.models import (
     AnalysisRun,
     AssessmentEvidence,
+    CombatEvent,
+    EconomyEvent,
+    Entity,
+    EntitySample,
     EvidenceItem,
     Feature,
     FeatureEvidence,
@@ -40,6 +44,7 @@ from generals_replay_analyzer.db.models import (
     ManagedAsset,
     ParserRun,
     Player,
+    ProductionEvent,
     Replay,
     ReplayCommand,
     ReplayPlayer,
@@ -53,6 +58,8 @@ from generals_replay_analyzer.importing.evidence_identity import (
     telemetry_event_evidence_identity,
     validate_observed_evidence_identity,
 )
+from generals_replay_analyzer.importing.jobs import StageFailure
+from generals_replay_analyzer.importing.service import _dependency_identity, _dependency_output
 from generals_replay_analyzer.importing.stages import (
     ANALYZE_LLM,
     ANALYZE_LLM_VERSION,
@@ -62,10 +69,22 @@ from generals_replay_analyzer.importing.stages import (
     DERIVE_FEATURES_VERSION,
     IMPORT_OBSERVATIONS,
     IMPORT_OBSERVATIONS_VERSION,
+    PARSE,
+    PARSE_VERSION,
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
+    TELEMETRY,
+    TELEMETRY_VERSION,
     content_key,
     input_digest,
+)
+from generals_replay_analyzer.importing.telemetry_import import (
+    _attempt_from_dependency,
+    _attempt_from_failed_dependency,
+    _attempt_settings,
+    _failed_dependency_error,
+    _succeeded_dependency_output,
+    _validated_parser_dependency,
 )
 from generals_replay_analyzer.llm.evidence_bundle import EvidenceBundle
 from generals_replay_analyzer.llm.schema import (
@@ -243,6 +262,8 @@ class _SubjectSelection:
 class _ValidatedGraph:
     entries: tuple[_ReportEntry, ...]
     subjects: tuple[_SubjectSelection, ...]
+    parser_run_id: str
+    telemetry_run_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,15 +625,26 @@ class ReportQueryService:
                     matching_jobs.append(job)
             if not matching_jobs:
                 raise ReportGraphContractError("published report has no exact successful render stage graph")
-            if len(matching_jobs) != 1:
+            # TheSuperHackers @bugfix Leex 23/08/2026 Accept only fully validated equivalent report claimants. (#TBD)
+            validated_claims = tuple(
+                self._validate_render_graph(session, replay, job)
+                for job in sorted(matching_jobs, key=lambda item: item.public_id)
+            )
+            validated = validated_claims[0]
+            if any(candidate != validated for candidate in validated_claims[1:]):
                 raise ReportGraphAmbiguousError("multiple render stage graphs claim the exact report")
-            validated = self._validate_render_graph(session, replay, matching_jobs[0])
             published: list[PublishedReportDTO] = []
             matched_requested = 0
             for entry in validated.entries:
                 report = self._report_for_entry(session, replay, entry)
                 item = self._load_report(session, replay, report, entry, resources)
-                self._validate_evidence_index(session, replay, item.document)
+                self._validate_evidence_index(
+                    session,
+                    replay,
+                    item.document,
+                    validated.parser_run_id,
+                    validated.telemetry_run_id,
+                )
                 published.append(item)
                 matched_requested += int(report.id == requested.id)
             if matched_requested != 1:
@@ -626,21 +658,46 @@ class ReportQueryService:
                 "report-output-v1",
                 replay.public_id,
                 requested.public_id,
-                self._replay_identity(session, replay),
+                self._replay_identity(session, replay, validated.subjects),
                 replay_wide[0],
                 players,
             )
             return graph, validated.subjects
 
     @staticmethod
-    def _replay_identity(session: Session, replay: Replay) -> ReportReplayIdentityDTO:
+    def _replay_identity(
+        session: Session,
+        replay: Replay,
+        subjects: tuple[_SubjectSelection, ...],
+    ) -> ReportReplayIdentityDTO:
+        subject_ids = tuple(
+            sorted(
+                item.replay_player_public_id
+                for item in subjects
+                if item.replay_player_public_id is not None
+            )
+        )
         rows = tuple(
             session.scalars(
                 select(ReplayPlayer)
-                .where(ReplayPlayer.replay_id == replay.id)
+                .where(
+                    ReplayPlayer.replay_id == replay.id,
+                    ReplayPlayer.public_id.in_(subject_ids),
+                    ReplayPlayer.slot_kind.in_(("human", "ai")),
+                )
                 .order_by(ReplayPlayer.slot_index, ReplayPlayer.public_id)
             )
         )
+        parser_ids = {row.parser_run_id for row in rows}
+        parser = None if len(parser_ids) != 1 else session.get(ParserRun, next(iter(parser_ids)))
+        if (
+            len(rows) != len(subject_ids)
+            or parser is None
+            or parser.replay_id != replay.id
+            or parser.status != "succeeded"
+            or parser.completion_status != "complete"
+        ):
+            raise ReportGraphContractError("report identity is outside one occupied parser authority")
         players: list[ReportPlayerIdentityDTO] = []
         for row in rows:
             observed = row.observed_json if isinstance(row.observed_json, Mapping) else {}
@@ -685,6 +742,11 @@ class ReportQueryService:
         )
 
     def _validate_render_graph(self, session: Session, replay: Replay, job: Job) -> _ValidatedGraph:
+        if isinstance(job.input_json, Mapping) and set(job.input_json) == {
+            "replay_public_id",
+            "replay_sha256",
+        }:
+            return self._validate_legacy_render_graph(session, replay, job)
         result = self._exact_result(session, job)
         if job.output_json != result.output_json:
             raise ReportGraphContractError("render job and immutable stage result disagree")
@@ -764,7 +826,7 @@ class ReportQueryService:
                 subjects = tuple(self._selection(item, None) for item in assess)
         except PipelineCodecError as exc:
             raise ReportGraphContractError("report dependency output is invalid") from exc
-        self._validate_job_identity_chain(
+        telemetry_run_id = self._validate_job_identity_chain(
             session,
             replay,
             job,
@@ -779,7 +841,434 @@ class ReportQueryService:
         actual = tuple((item.replay_player_public_id, item.analysis_run_id) for item in entries)
         if actual != expected:
             raise ReportGraphContractError("render report entries disagree with the exact analysis graph")
-        return _ValidatedGraph(entries, subjects)
+        return _ValidatedGraph(
+            entries,
+            subjects,
+            cast(str, input_value["parser_run_id"]),
+            telemetry_run_id,
+        )
+
+    def _validate_legacy_render_graph(self, session: Session, replay: Replay, job: Job) -> _ValidatedGraph:
+        result = self._exact_result(session, job)
+        if job.output_json != result.output_json:
+            raise ReportGraphContractError("render job and immutable stage result disagree")
+        replay_input = {
+            "replay_public_id": replay.public_id,
+            "replay_sha256": replay.sha256,
+        }
+        if job.input_json != replay_input:
+            raise ReportGraphContractError("legacy render report input is not bound to the exact replay")
+        assess = self._dependency(session, replay, job)
+        if assess.stage != ASSESS_STRATEGIES or assess.component_version != ASSESS_STRATEGIES_VERSION:
+            raise ReportGraphContractError("legacy report graph requires one assessment dependency")
+        derive = self._dependency(session, replay, assess)
+        if derive.stage != DERIVE_FEATURES or derive.component_version != DERIVE_FEATURES_VERSION:
+            raise ReportGraphContractError("legacy assessment is not bound to one derive-features stage")
+        observation = self._dependency(session, replay, derive)
+        if observation.stage != IMPORT_OBSERVATIONS or observation.component_version != IMPORT_OBSERVATIONS_VERSION:
+            raise ReportGraphContractError("legacy derive-features is not bound to one observation stage")
+        for stage_job in (observation, derive, assess):
+            stage_result = self._exact_result(session, stage_job)
+            if stage_job.output_json != stage_result.output_json:
+                raise ReportGraphContractError("legacy analysis job and immutable stage result disagree")
+        if derive.input_json != replay_input or assess.input_json != replay_input:
+            raise ReportGraphContractError("legacy analysis input is not bound to the exact replay")
+        branch_recipe, telemetry_run_id = self._validate_observation_authority(
+            session, replay, observation
+        )
+        identities = (
+            (
+                derive,
+                DERIVE_FEATURES,
+                DERIVE_FEATURES_VERSION,
+                {"derive_features_version": DERIVE_FEATURES_VERSION, "observations": dict(branch_recipe)},
+            ),
+            (
+                assess,
+                ASSESS_STRATEGIES,
+                ASSESS_STRATEGIES_VERSION,
+                {"assess_strategies_version": ASSESS_STRATEGIES_VERSION, "observations": dict(branch_recipe)},
+            ),
+            (
+                job,
+                RENDER_REPORT,
+                RENDER_REPORT_VERSION,
+                {"render_report_version": RENDER_REPORT_VERSION, "observations": dict(branch_recipe)},
+            ),
+        )
+        if any(
+            stage_job.idempotency_key != content_key(stage, version, replay.sha256, identity)
+            for stage_job, stage, version, identity in identities
+        ):
+            raise ReportGraphContractError("legacy analysis stage identity is invalid")
+        try:
+            assess_output = decode_assessment_output(assess.output_json)
+        except PipelineCodecError as exc:
+            raise ReportGraphContractError("legacy assessment output is invalid") from exc
+        successful_llm = tuple(
+            session.scalars(
+                select(Job)
+                .join(JobDependency, Job.id == JobDependency.job_id)
+                .where(
+                    JobDependency.depends_on_job_id == assess.id,
+                    Job.stage == ANALYZE_LLM,
+                    Job.component_version == ANALYZE_LLM_VERSION,
+                    Job.status == "succeeded",
+                )
+                .order_by(Job.public_id)
+            )
+        )
+        if len(successful_llm) > 1:
+            raise ReportGraphContractError("legacy LLM analysis graph is ambiguous")
+        if successful_llm:
+            llm = successful_llm[0]
+            if (
+                llm.input_json != replay_input
+                or llm.idempotency_key
+                != content_key(
+                    ANALYZE_LLM,
+                    ANALYZE_LLM_VERSION,
+                    replay.sha256,
+                    {"analyze_llm_version": ANALYZE_LLM_VERSION, "observations": dict(branch_recipe)},
+                )
+            ):
+                raise ReportGraphContractError("legacy LLM stage identity is invalid")
+            llm_result = self._exact_result(session, llm)
+            if llm.output_json != llm_result.output_json:
+                raise ReportGraphContractError("legacy LLM job and immutable stage result disagree")
+            try:
+                llm_output = decode_llm_output(llm.output_json)
+            except PipelineCodecError as exc:
+                raise ReportGraphContractError("legacy LLM output is invalid") from exc
+            by_player = {item.replay_player_public_id: item for item in assess_output}
+            if set(by_player) != {item.replay_player_public_id for item in llm_output}:
+                raise ReportGraphContractError("legacy LLM and assessment subjects disagree")
+            subjects = tuple(
+                self._selection(by_player[item.replay_player_public_id], item.analysis_run_id)
+                for item in llm_output
+            )
+        else:
+            subjects = tuple(self._selection(item, None) for item in assess_output)
+        self._validate_subject_rows(session, replay, subjects)
+        entries = self._report_entries(result.output_json)
+        expected = tuple((item.replay_player_public_id, item.analysis_run_id) for item in subjects)
+        actual = tuple((item.replay_player_public_id, item.analysis_run_id) for item in entries)
+        if actual != expected:
+            raise ReportGraphContractError("legacy render report entries disagree with the exact analysis graph")
+        return _ValidatedGraph(
+            entries,
+            subjects,
+            cast(str, cast(Mapping[str, object], observation.output_json)["parser_run_id"]),
+            telemetry_run_id,
+        )
+
+    def _validate_observation_authority(
+        self, session: Session, replay: Replay, observation: Job
+    ) -> tuple[Mapping[str, object], str | None]:
+        input_json = observation.input_json
+        output_json = observation.output_json
+        if not isinstance(input_json, Mapping) or not isinstance(output_json, Mapping):
+            raise ReportGraphContractError("legacy observation identity is invalid")
+        if set(output_json) != {
+            "idempotency_key",
+            "parser_run_id",
+            "parser_command_count",
+            "telemetry_run_id",
+            "telemetry_event_count",
+        }:
+            raise ReportGraphContractError("legacy observation output does not use the production schema")
+        parser_command_count = output_json.get("parser_command_count")
+        telemetry_event_count = output_json.get("telemetry_event_count")
+        if (
+            output_json.get("idempotency_key") != observation.idempotency_key
+            or type(parser_command_count) is not int
+            or parser_command_count < 0
+            or type(telemetry_event_count) is not int
+            or telemetry_event_count < 0
+        ):
+            raise ReportGraphContractError("legacy observation output identity is invalid")
+        branch_recipe = input_json.get("branch_recipe")
+        selected_digest = input_json.get("selected_dependency_digest")
+        parser_run_id = output_json.get("parser_run_id")
+        observation_telemetry_run_id = output_json.get("telemetry_run_id")
+        if "telemetry_run_id" not in output_json:
+            raise ReportGraphContractError("legacy observation telemetry identity is missing")
+        if observation_telemetry_run_id is not None:
+            try:
+                observation_telemetry_run_id = _uuid(
+                    observation_telemetry_run_id,
+                    "legacy telemetry_run_id",
+                )
+            except ValueError as exc:
+                raise ReportGraphContractError("legacy telemetry run identity is invalid") from exc
+        if (
+            not isinstance(branch_recipe, Mapping)
+            or set(branch_recipe) != {"import_observations_version", "import_mode", "parse", "telemetry"}
+            or branch_recipe.get("import_observations_version") != IMPORT_OBSERVATIONS_VERSION
+            or branch_recipe.get("import_mode") not in {"copy", "reference"}
+        ):
+            raise ReportGraphContractError("legacy observation branch recipe is invalid")
+        import_mode = branch_recipe["import_mode"]
+        parse_identity = branch_recipe.get("parse")
+        telemetry_identity = branch_recipe.get("telemetry")
+        if (
+            not isinstance(parse_identity, Mapping)
+            or set(parse_identity) != {"import_mode", "parse_version", "parser_version"}
+            or parse_identity.get("import_mode") != import_mode
+            or parse_identity.get("parse_version") != PARSE_VERSION
+            or type(parse_identity.get("parser_version")) is not str
+            or not parse_identity.get("parser_version")
+            or (
+                telemetry_identity is not None
+                and (
+                    not isinstance(telemetry_identity, Mapping)
+                    or set(telemetry_identity) != {"acquirer_version", "import_mode", "telemetry_version"}
+                    or telemetry_identity.get("import_mode") != import_mode
+                    or telemetry_identity.get("telemetry_version") != TELEMETRY_VERSION
+                    or type(telemetry_identity.get("acquirer_version")) is not str
+                    or not telemetry_identity.get("acquirer_version")
+                )
+            )
+        ):
+            raise ReportGraphContractError("legacy observation branch recipe is invalid")
+        provisional_key = content_key(
+            IMPORT_OBSERVATIONS,
+            IMPORT_OBSERVATIONS_VERSION,
+            replay.sha256,
+            dict(branch_recipe),
+        )
+        if (
+            input_json.get("replay_public_id") != replay.public_id
+            or input_json.get("replay_sha256") != replay.sha256
+            or input_json.get("dependency_identity_bound") is not True
+            or input_json.get("provisional_idempotency_key") != provisional_key
+            or not _sha256(selected_digest)
+        ):
+            raise ReportGraphContractError("legacy observation identity is invalid")
+        try:
+            parser_run_id = _uuid(parser_run_id, "legacy parser_run_id")
+        except ValueError as exc:
+            raise ReportGraphContractError("legacy parser run identity is invalid") from exc
+        parser = session.scalar(select(ParserRun).where(ParserRun.run_id == parser_run_id))
+        if (
+            parser is None
+            or parser.replay_id != replay.id
+            or parser.parser_version != parse_identity["parser_version"]
+            or parser.input_sha256 != replay.sha256
+            or parser.status != "succeeded"
+            or parser.completion_status != "complete"
+            or parser.completed_at is None
+            or parser.result_sha256 is None
+        ):
+            raise ReportGraphContractError("legacy parser run is not authoritative")
+        dependencies = list(
+            session.scalars(
+                select(Job)
+                .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
+                .where(JobDependency.job_id == observation.id)
+            )
+        )
+        dependencies.sort(key=lambda item: (0 if item.stage == PARSE else 1, item.component_version, item.public_id))
+        expected_stages = {PARSE, TELEMETRY} if telemetry_identity is not None else {PARSE}
+        if (
+            {dependency.stage for dependency in dependencies} != expected_stages
+            or len(dependencies) != len(expected_stages)
+            or any(
+                dependency.replay_id != replay.id
+                or dependency.component_version
+                != (PARSE_VERSION if dependency.stage == PARSE else TELEMETRY_VERSION)
+                for dependency in dependencies
+            )
+        ):
+            raise ReportGraphContractError("legacy observation dependencies do not match the selected branch")
+        selected = {dependency.stage: dependency for dependency in dependencies}
+        parse_job = selected[PARSE]
+        expected_stage_input = {
+            "replay_public_id": replay.public_id,
+            "replay_sha256": replay.sha256,
+            "import_mode": import_mode,
+        }
+        try:
+            parse_dependency = _dependency_output(parse_job)
+            parse_output = _succeeded_dependency_output(parse_dependency)
+            parser_version = _validated_parser_dependency(parse_output, replay.sha256)
+        except (TypeError, ValueError, StageFailure) as exc:
+            raise ReportGraphContractError("legacy selected parser output is invalid") from exc
+        warnings = parser.warnings_json
+        if not isinstance(warnings, list) or any(
+            not isinstance(item, Mapping) or not isinstance(item.get("code"), str)
+            for item in warnings
+        ):
+            raise ReportGraphContractError("legacy parser run warnings are invalid")
+        expected_warning_codes = tuple(sorted({cast(str, item["code"]) for item in warnings}))
+        command_count = int(
+            session.scalar(
+                select(func.count()).select_from(ReplayCommand).where(ReplayCommand.parser_run_id == parser.id)
+            )
+            or 0
+        )
+        if parser_command_count != command_count:
+            raise ReportGraphContractError(
+                "legacy observation parser command count is not authoritative"
+            )
+        if (
+            parse_job.status != "succeeded"
+            or parse_job.output_json != self._exact_result(session, parse_job).output_json
+            or parser_version != parser.parser_version
+            or parse_output.get("completion_status") != parser.completion_status
+            or parse_output.get("command_count") != command_count
+            or parse_output.get("warning_codes") != expected_warning_codes
+            or parse_output.get("command_stream_offset") != parser.command_stream_offset
+            or parse_output.get("end_offset") != parser.end_offset
+            or parse_job.idempotency_key
+            != content_key(PARSE, PARSE_VERSION, replay.sha256, dict(parse_identity))
+            or parse_job.input_json != expected_stage_input
+        ):
+            raise ReportGraphContractError("legacy selected parser does not match its branch recipe")
+        telemetry_job = selected.get(TELEMETRY)
+        if telemetry_identity is not None:
+            assert telemetry_job is not None
+            telemetry_parents = set(
+                session.scalars(
+                    select(JobDependency.depends_on_job_id).where(JobDependency.job_id == telemetry_job.id)
+                )
+            )
+            if (
+                telemetry_job.idempotency_key
+                != content_key(TELEMETRY, TELEMETRY_VERSION, replay.sha256, dict(telemetry_identity))
+                or telemetry_job.input_json != expected_stage_input
+                or telemetry_parents != {parse_job.id}
+            ):
+                raise ReportGraphContractError("legacy selected telemetry does not match its parser branch")
+            try:
+                telemetry_dependency = _dependency_output(telemetry_job)
+                attempt = None
+                expected_telemetry_status = None
+                if telemetry_dependency.status == "succeeded":
+                    telemetry_output = _succeeded_dependency_output(telemetry_dependency)
+                    if telemetry_job.output_json != self._exact_result(session, telemetry_job).output_json:
+                        raise ReportGraphContractError(
+                            "legacy telemetry job and immutable stage result disagree"
+                        )
+                    attempt = _attempt_from_dependency(telemetry_output)
+                    expected_telemetry_status = "succeeded"
+                else:
+                    if telemetry_job.output_json is not None or session.scalar(
+                        select(func.count()).select_from(JobStageResult).where(
+                            JobStageResult.job_id == telemetry_job.id
+                        )
+                    ):
+                        raise ReportGraphContractError(
+                            "legacy failed telemetry claims a successful output"
+                        )
+                    failure_code, _failure_message, failure_details = _failed_dependency_error(
+                        telemetry_dependency
+                    )
+                    if failure_code == "dependency_failed":
+                        if output_json.get("telemetry_run_id") is not None:
+                            raise ReportGraphContractError(
+                                "legacy dependency-failed telemetry cannot claim a run"
+                            )
+                    else:
+                        attempt = _attempt_from_failed_dependency(
+                            telemetry_dependency,
+                            failure_code,
+                            failure_details,
+                        )
+                        expected_telemetry_status = "failed"
+            except ReportGraphContractError:
+                raise
+            except (TypeError, ValueError, StageFailure) as exc:
+                raise ReportGraphContractError("legacy selected telemetry output is invalid") from exc
+            if attempt is not None:
+                attempt = replace(attempt, parser_run_id=parser.run_id)
+                telemetry = session.scalar(
+                    select(TelemetryRun).where(TelemetryRun.run_id == attempt.run_id)
+                )
+                if (
+                    telemetry is None
+                    or telemetry.replay_id != replay.id
+                    or telemetry.status != expected_telemetry_status
+                    or telemetry.completed_at is None
+                    or telemetry.runner_status != attempt.runner_status
+                    or telemetry.strategy_analysis_scope != attempt.strategy_analysis_scope
+                    or telemetry.process_exit_code != attempt.process_exit_code
+                    or telemetry.engine_build != (attempt.engine_build or "unavailable")
+                    or telemetry.engine_executable_sha256 != attempt.engine_executable_sha256
+                    or telemetry.diagnostics_json != [dict(item) for item in attempt.diagnostics]
+                    or telemetry.settings_json != _attempt_settings(attempt, observation.idempotency_key)
+                    or output_json.get("telemetry_run_id") != telemetry.run_id
+                ):
+                    raise ReportGraphContractError("legacy telemetry run is not authoritative")
+                actual_telemetry_event_count = int(
+                    session.scalar(
+                        select(func.count()).select_from(TelemetryEvent).where(
+                            TelemetryEvent.telemetry_run_id == telemetry.id
+                        )
+                    )
+                    or 0
+                )
+                if expected_telemetry_status == "failed":
+                    child_count = actual_telemetry_event_count + sum(
+                        int(session.scalar(statement) or 0)
+                        for statement in (
+                            select(func.count()).select_from(Entity).where(Entity.telemetry_run_id == telemetry.id),
+                            select(func.count()).select_from(EntitySample).where(
+                                EntitySample.telemetry_run_id == telemetry.id
+                            ),
+                            select(func.count()).select_from(ProductionEvent).where(
+                                ProductionEvent.telemetry_run_id == telemetry.id
+                            ),
+                            select(func.count()).select_from(EconomyEvent).where(
+                                EconomyEvent.telemetry_run_id == telemetry.id
+                            ),
+                            select(func.count()).select_from(CombatEvent).where(
+                                CombatEvent.telemetry_run_id == telemetry.id
+                            ),
+                            select(func.count()).select_from(EvidenceItem).where(
+                                EvidenceItem.telemetry_run_id == telemetry.id
+                            ),
+                        )
+                    )
+                    if child_count:
+                        raise ReportGraphContractError(
+                            "legacy failed telemetry cannot claim materialized observations"
+                        )
+                if telemetry_event_count != actual_telemetry_event_count:
+                    raise ReportGraphContractError(
+                        "legacy observation telemetry event count is not authoritative"
+                    )
+            elif telemetry_event_count != 0:
+                raise ReportGraphContractError(
+                    "legacy dependency-failed telemetry cannot claim materialized events"
+                )
+        elif output_json.get("telemetry_run_id") is not None:
+            raise ReportGraphContractError("legacy parser-only branch cannot claim telemetry")
+        elif telemetry_event_count != 0:
+            raise ReportGraphContractError("legacy parser-only branch cannot claim telemetry events")
+        if output_json.get("parser_run_id") != parser.run_id:
+            raise ReportGraphContractError("legacy observation output disagrees with parser authority")
+        try:
+            dependency_identities = [_dependency_identity(dependency) for dependency in dependencies]
+        except (TypeError, ValueError, StageFailure) as exc:
+            raise ReportGraphContractError("legacy observation dependency identity is invalid") from exc
+        selected_identity = {
+            "replay_sha256": replay.sha256,
+            "branch_recipe": dict(branch_recipe),
+            "dependencies": dependency_identities,
+        }
+        if (
+            selected_digest != input_digest(selected_identity)
+            or observation.idempotency_key
+            != content_key(
+                IMPORT_OBSERVATIONS,
+                IMPORT_OBSERVATIONS_VERSION,
+                replay.sha256,
+                selected_identity,
+            )
+        ):
+            raise ReportGraphContractError("legacy observation materialization identity is invalid")
+        return branch_recipe, observation_telemetry_run_id
 
     @staticmethod
     def _dependency(session: Session, replay: Replay, job: Job) -> Job:
@@ -809,17 +1298,22 @@ class ReportQueryService:
         scope: IdentityAnalysisScope,
         assess: Job,
         llm: Job | None,
-    ) -> None:
+    ) -> str | None:
         derive = self._dependency(session, replay, assess)
         if derive.stage != DERIVE_FEATURES or derive.component_version != DERIVE_FEATURES_VERSION:
             raise ReportGraphContractError("assessment is not bound to one derive-features stage")
         observation = self._dependency(session, replay, derive)
         if observation.stage != IMPORT_OBSERVATIONS or observation.component_version != IMPORT_OBSERVATIONS_VERSION:
             raise ReportGraphContractError("derive-features is not bound to one observation stage")
+        observation_input = observation.input_json
         observation_output = observation.output_json
+        if not isinstance(observation_input, Mapping) or not isinstance(observation_output, Mapping):
+            raise ReportGraphContractError("report dependency digest disagrees with observation authority")
+        _branch_recipe, telemetry_run_id = self._validate_observation_authority(
+            session, replay, observation
+        )
         if (
-            not isinstance(observation_output, Mapping)
-            or observation_output.get("selected_dependency_digest") != report_input["selected_dependency_digest"]
+            observation_input.get("selected_dependency_digest") != report_input["selected_dependency_digest"]
             or observation_output.get("parser_run_id") != report_input["parser_run_id"]
         ):
             raise ReportGraphContractError("report dependency digest disagrees with observation authority")
@@ -876,6 +1370,7 @@ class ReportQueryService:
             RENDER_REPORT, RENDER_REPORT_VERSION, replay.sha256, report_identity
         ):
             raise ReportGraphContractError("render report stage identity is invalid")
+        return telemetry_run_id
 
     @staticmethod
     def _selection(item: PlayerAssessmentSelection, analysis_run_id: str | None) -> _SubjectSelection:
@@ -1317,7 +1812,14 @@ class ReportQueryService:
             raise ReportGraphContractError("evidence source does not select one immutable report claim")
         return matches[0]
 
-    def _validate_evidence_index(self, session: Session, replay: Replay, document: ReportDocument) -> None:
+    def _validate_evidence_index(
+        self,
+        session: Session,
+        replay: Replay,
+        document: ReportDocument,
+        selected_parser_run_id: str,
+        selected_telemetry_run_id: str | None,
+    ) -> None:
         index = self._document_evidence_index(document)
         rows = (
             tuple(session.scalars(select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(index)))))
@@ -1327,6 +1829,23 @@ class ReportQueryService:
         by_public_id = {row.public_id: row for row in rows}
         if set(by_public_id) != set(index):
             raise ReportGraphContractError("report cites unavailable evidence")
+        parser = session.scalar(
+            select(ParserRun).where(
+                ParserRun.replay_id == replay.id,
+                ParserRun.run_id == selected_parser_run_id,
+                ParserRun.status == "succeeded",
+                ParserRun.completion_status == "complete",
+            )
+        )
+        if parser is None:
+            raise ReportGraphContractError("report evidence has no authoritative parser")
+        telemetry = (
+            None
+            if selected_telemetry_run_id is None
+            else session.scalar(
+                select(TelemetryRun).where(TelemetryRun.run_id == selected_telemetry_run_id)
+            )
+        )
         for public_id, tier in index.items():
             row = by_public_id[public_id]
             if (
@@ -1335,8 +1854,22 @@ class ReportQueryService:
                 or row.source_kind not in _EVIDENCE_SOURCE_KINDS[tier]
                 or row.schema_version < 1
                 or (tier != "observed" and row.schema_version != 1)
+                or (row.parser_run_id is not None and row.parser_run_id != parser.id)
+                or (
+                    row.telemetry_run_id is not None
+                    and (
+                        telemetry is None
+                        or row.telemetry_run_id != telemetry.id
+                        or telemetry.replay_id != replay.id
+                        or telemetry.status != "succeeded"
+                        or not isinstance(telemetry.settings_json, Mapping)
+                        or telemetry.settings_json.get("parser_run_id") != parser.run_id
+                    )
+                )
             ):
-                raise ReportGraphContractError("report evidence source, tier, or version is invalid")
+                raise ReportGraphContractError(
+                    "report evidence source, tier, version, parser, or telemetry authority is invalid"
+                )
 
     def _evidence_source(
         self,

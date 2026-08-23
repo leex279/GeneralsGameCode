@@ -36,20 +36,28 @@ from generals_replay_analyzer.analysis_pipeline.identity_scope import (
     IdentityAnalysisScope,
 )
 from generals_replay_analyzer.config import AnalyzerSettings
-from generals_replay_analyzer.db.models import ParserRun, Player, Replay, ReplayPlayer
+from generals_replay_analyzer.db.models import EvidenceItem, ParserRun, Player, Replay, ReplayPlayer
+from generals_replay_analyzer.features.base import FeatureScope, FeatureValue, FeatureWindow
+from generals_replay_analyzer.features.evidence import EvidenceRef
 from generals_replay_analyzer.identity.audit import identity_cache_digest
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.service import StageDependencyOutput, StageExecutionContext
 from generals_replay_analyzer.llm.evidence_bundle import build_evidence_bundle
 from generals_replay_analyzer.llm.provider import OllamaClientConfig
 from generals_replay_analyzer.llm.service import AnalysisOutcome, DeterministicFallback
+from generals_replay_analyzer.longitudinal.segments import LongitudinalResultDTO
 
 REPLAY_ID = "00000000-0000-4000-8000-000000000231"
 REPLAY_SHA = "b" * 64
 PARSER_RUN_ID = "00000000-0000-4000-8000-000000000232"
 
 
-def _seed_players(session_factory: sessionmaker[Session], clock: datetime) -> tuple[str, str]:
+def _seed_players(
+    session_factory: sessionmaker[Session],
+    clock: datetime,
+    *,
+    extra_slots: tuple[tuple[int, str, str], ...] = (),
+) -> tuple[str, str]:
     players = (
         "00000000-0000-4000-8000-000000000242",
         "00000000-0000-4000-8000-000000000241",
@@ -124,13 +132,37 @@ def _seed_players(session_factory: sessionmaker[Session], clock: datetime) -> tu
                     observed_json={},
                 )
             )
+        for slot_index, slot_kind, public_id in extra_slots:
+            occupied = slot_kind in {"human", "ai"}
+            session.add(
+                ReplayPlayer(
+                    public_id=public_id,
+                    replay_id=replay.id,
+                    parser_run_id=parser.id,
+                    player_id=None,
+                    slot_index=slot_index,
+                    slot_kind=slot_kind,
+                    original_name=f"Player {slot_index}" if occupied else None,
+                    normalized_name=f"player-{slot_index}" if occupied else None,
+                    player_index=slot_index if occupied else None,
+                    team_id=None,
+                    faction="China" if occupied else None,
+                    color=None,
+                    start_position=slot_index if occupied else None,
+                    result=None,
+                    observed_json={},
+                )
+            )
         session.flush()
         parser.status = "succeeded"
     return tuple(sorted(players))  # type: ignore[return-value]
 
 
 def _seed_unresolved_players(
-    session_factory: sessionmaker[Session], clock: datetime
+    session_factory: sessionmaker[Session],
+    clock: datetime,
+    *,
+    extra_slots: tuple[tuple[int, str, str], ...] = (),
 ) -> tuple[str, str]:
     players = (
         "00000000-0000-4000-8000-000000000246",
@@ -193,6 +225,26 @@ def _seed_unresolved_players(
                     faction="China",
                     color=None,
                     start_position=index,
+                    result=None,
+                    observed_json={},
+                )
+            )
+        for slot_index, slot_kind, public_id in extra_slots:
+            session.add(
+                ReplayPlayer(
+                    public_id=public_id,
+                    replay_id=replay.id,
+                    parser_run_id=parser.id,
+                    player_id=None,
+                    slot_index=slot_index,
+                    slot_kind=slot_kind,
+                    original_name=None,
+                    normalized_name=None,
+                    player_index=None,
+                    team_id=None,
+                    faction=None,
+                    color=None,
+                    start_position=None,
                     result=None,
                     observed_json={},
                 )
@@ -297,6 +349,45 @@ def test_derive_features_iterates_players_in_public_id_order(
         *((public_id, PRODUCTION_EXTRACTOR_NAMES) for public_id in expected),
     )
     assert tuple(item.replay_player_public_id for item in decode_feature_output(output)) == (None, *expected)
+
+
+def test_full_replay_derive_excludes_unoccupied_slots_but_keeps_every_occupied_parser_subject(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    unresolved_ai = "00000000-0000-4000-8000-000000000240"
+    resolved = _seed_players(
+        session_factory,
+        clock,
+        extra_slots=(
+            (2, "closed", "00000000-0000-4000-8000-000000000243"),
+            (3, "open", "00000000-0000-4000-8000-000000000244"),
+            (4, "ai", unresolved_ai),
+        ),
+    )
+    calls: list[str | None] = []
+
+    class Features:
+        def extract(self, request: object) -> tuple[object, ...]:
+            replay_player_public_id = request.replay_player_public_id  # type: ignore[attr-defined]
+            calls.append(replay_player_public_id)
+            return (SimpleNamespace(feature_set_public_id=str(uuid4())),)
+
+    output = DeriveFeaturesHandler(session_factory, Features()).__call__(  # type: ignore[arg-type]
+        _context(
+            "derive_features",
+            "import_observations",
+            _observation_output(),
+            input_value={
+                "identity_scope": _identity_scope(session_factory, resolved, kind="full_replay"),
+                "parser_run_id": PARSER_RUN_ID,
+                "parser_version": "parser-v1",
+            },
+        )
+    )
+
+    expected = (None, unresolved_ai, *resolved)
+    assert tuple(calls) == expected
+    assert tuple(item.replay_player_public_id for item in decode_feature_output(output)) == expected
 
 
 def test_identity_invalidation_derives_only_bound_players_and_skips_replay_wide_work(
@@ -943,6 +1034,118 @@ def test_assess_requests_the_complete_fixed_production_longitudinal_output_set(
     assert output[0].longitudinal_status == "succeeded"
 
 
+def test_assess_namespaces_longitudinal_claim_ids_that_collide_with_feature_names(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    clock: datetime,
+) -> None:
+    replay_player_ids = _seed_players(session_factory, clock)
+    replay_player_id = replay_player_ids[0]
+    evidence_public_id = "00000000-0000-4000-8000-000000000295"
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == REPLAY_ID))
+        replay_player = session.scalar(
+            select(ReplayPlayer).where(ReplayPlayer.public_id == replay_player_id)
+        )
+        assert replay is not None and replay_player is not None and replay_player.player_id is not None
+        canonical_player = session.get(Player, replay_player.player_id)
+        assert canonical_player is not None
+        canonical_player_id = canonical_player.public_id
+        session.add(
+            EvidenceItem(
+                public_id=evidence_public_id,
+                replay_id=replay.id,
+                parser_run_id=None,
+                telemetry_run_id=None,
+                tier="derived",
+                source_kind="longitudinal_corpus",
+                source_key="longitudinal:economy-cash-change-total",
+                schema_version=1,
+                created_at=clock,
+            )
+        )
+    feature_set_id = "00000000-0000-4000-8000-000000000296"
+    feature = FeatureValue(
+        name="economy.cash_change_total",
+        value_type="integer",
+        raw_value=-300,
+        unit="credits",
+        scope=FeatureScope("player", replay_player_id, replay_player_public_id=replay_player_id),
+        window=FeatureWindow(0, 20),
+        quality="complete",
+        quality_reason=None,
+        input_evidence=(
+            EvidenceRef(
+                "00000000-0000-4000-8000-000000000297",
+                "observed",
+                "telemetry_event",
+                "observed-evidence:telemetry_event:v1:sequence-8",
+                "2",
+            ),
+        ),
+    )
+
+    class Features:
+        def extract(self, _request: object) -> tuple[object, ...]:
+            return (SimpleNamespace(feature_set_public_id=feature_set_id, features=(feature,)),)
+
+    class Strategies:
+        def assess_rule_candidates(self, *_args: object) -> object:
+            return SimpleNamespace(cache_key="d" * 64, assessments=())
+
+    class Longitudinal:
+        def analyze(self, _request: object) -> object:
+            return SimpleNamespace(
+                run_id="00000000-0000-4000-8000-000000000298",
+                results=(
+                    LongitudinalResultDTO(
+                        public_id="00000000-0000-4000-8000-000000000299",
+                        result_name="economy.cash_change_total",
+                        result_kind="metric",
+                        sample_count=1,
+                        missing_count=0,
+                        quality="complete",
+                        reason=None,
+                        statistics={"median": -300.0},
+                        members=(),
+                        evidence_public_id=evidence_public_id,
+                    ),
+                ),
+            )
+
+    output = decode_assessment_output(
+        AssessStrategiesHandler(  # type: ignore[arg-type]
+            session_factory,
+            AnalyzerSettings(
+                data_root=tmp_path / "longitudinal-claim-collision",
+                minimum_longitudinal_sample_size=1,
+            ),
+            Features(),
+            Strategies(),
+            Longitudinal(),
+        )(
+            _context(
+                "assess_strategies",
+                "derive_features",
+                encode_feature_output(
+                    (
+                        PlayerFeatureSelection(
+                            replay_player_id,
+                            canonical_player_id,
+                            (feature_set_id,),
+                        ),
+                    )
+                ),
+            )
+        )
+    )
+
+    assert tuple(claim.claim_id for claim in output[0].evidence_bundle.claims) == (
+        "economy.cash_change_total",
+        "longitudinal:economy.cash_change_total",
+    )
+
+
 def test_analyze_llm_closes_transport_and_returns_successful_unavailable_fallback(
     tmp_path: Path,
 ) -> None:
@@ -1315,7 +1518,14 @@ def test_render_report_rejects_wrong_planned_parser_version_before_publication(
 def test_render_report_accepts_exact_unresolved_subjects_from_the_planned_parser_run(
     session_factory: sessionmaker[Session], clock: datetime
 ) -> None:
-    replay_player_ids = _seed_unresolved_players(session_factory, clock)
+    replay_player_ids = _seed_unresolved_players(
+        session_factory,
+        clock,
+        extra_slots=(
+            (2, "closed", "00000000-0000-4000-8000-000000000247"),
+            (3, "open", "00000000-0000-4000-8000-000000000248"),
+        ),
+    )
     scope = IdentityAnalysisScope("full_replay", ()).to_json()
     subjects = (
         PlayerAssessmentSelection(

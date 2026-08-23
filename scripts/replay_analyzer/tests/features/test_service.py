@@ -79,6 +79,7 @@ def _seed_replay(
     replay_player_public_id: str = "00000000-0000-4000-8000-000000000302",
     parser_run_id: str = "00000000-0000-4000-8000-000000000303",
     telemetry_run_id: str = "00000000-0000-4000-8000-000000000304",
+    telemetry_parser_run_id: str | None = None,
     finalize: bool = True,
 ) -> tuple[str, str, tuple[str, ...]]:
     now = datetime(2026, 8, 22, tzinfo=UTC)
@@ -129,7 +130,7 @@ def _seed_replay(
         parser = ParserRun(
             run_id=parser_run_id,
             replay_id=replay.id,
-            parser_version="parser-v1",
+            parser_version="parser-v2",
             schema_version=1,
             input_sha256=replay_sha256,
             status="running",
@@ -155,7 +156,7 @@ def _seed_replay(
             replay_id=replay.id,
             schema_version=2,
             engine_build="fixture",
-            settings_json={},
+            settings_json={"parser_run_id": telemetry_parser_run_id or parser_run_id},
             status="running",
             runner_status="succeeded",
             diagnostics_json={},
@@ -336,6 +337,8 @@ def _attach_spatial_projection(
         replay = session.scalar(select(Replay).where(Replay.public_id == replay_public_id))
         telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == telemetry_run_id))
         assert replay is not None and telemetry is not None
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))
+        assert parser is not None
         manifest_asset = ManagedAsset(
             public_id="00000000-0000-4000-8000-000000000401",
             sha256=manifest_sha256,
@@ -540,6 +543,10 @@ def _attach_spatial_projection(
         telemetry.command_count = 0
         telemetry.trace_sha256 = "c" * 64
         telemetry.completed_at = now
+        parser.status = "succeeded"
+        parser.completion_status = "complete"
+        parser.result_sha256 = "b" * 64
+        parser.completed_at = now
         return map_row.id, manifest_asset.id
 
 
@@ -750,6 +757,25 @@ def test_service_reuses_immutable_success_and_persists_direct_same_replay_links(
     with feature_factory() as session:
         assert session.scalar(select(func.count()).select_from(FeatureSet).where(FeatureSet.status == "succeeded")) == 1
         assert session.scalar(select(func.count()).select_from(Feature)) == 3
+        telemetry_id = session.scalar(
+            select(TelemetryRun.id).where(
+                TelemetryRun.run_id == "00000000-0000-4000-8000-000000000304"
+            )
+        )
+        parser_id = session.scalar(
+            select(ParserRun.id).where(
+                ParserRun.run_id == "00000000-0000-4000-8000-000000000303"
+            )
+        )
+        derived_owners = tuple(
+            session.execute(
+                select(EvidenceItem.parser_run_id, EvidenceItem.telemetry_run_id)
+                .join(Feature, Feature.evidence_item_id == EvidenceItem.id)
+                .order_by(Feature.public_id)
+            )
+        )
+        assert parser_id is not None and telemetry_id is not None
+        assert derived_owners == ((parser_id, telemetry_id),) * 3
         linked = session.execute(
             select(EvidenceItem.public_id, EvidenceItem.replay_id)
             .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
@@ -758,6 +784,64 @@ def test_service_reuses_immutable_success_and_persists_direct_same_replay_links(
         replay_id = session.scalar(select(Replay.id).where(Replay.public_id == replay))
         assert {public_id for public_id, _ in linked} <= set(evidence_ids)
         assert all(link_replay_id == replay_id for _, link_replay_id in linked)
+
+
+def test_persistence_rejects_ownerless_derived_feature_evidence_before_writes(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+
+    class OwnerlessExtractor:
+        name = "ownerless"
+        version = "ownerless-v1"
+        feature_names = ("build.completed_count",)
+
+        def extract(self, _context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(
+                self.name,
+                self.version,
+                (
+                    FeatureValue(
+                        "build.completed_count",
+                        "integer",
+                        1,
+                        "count",
+                        FeatureScope("player", player, player),
+                        FeatureWindow(0, 120),
+                        "complete",
+                        None,
+                        (),
+                    ),
+                ),
+            )
+
+    with pytest.raises(FeatureExtractionError, match="feature extraction failed") as caught:
+        FeatureExtractionService(
+            feature_factory,
+            extractors=(OwnerlessExtractor(),),
+        ).extract(_request(replay, player, "ownerless"))
+
+    assert caught.value.__cause__ is not None
+    assert str(caught.value.__cause__) == "available feature requires direct observed input evidence"
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Feature)) == 0
+        assert session.scalar(select(func.count()).select_from(EvidenceItem).where(EvidenceItem.tier == "derived")) == 0
+
+
+def test_extraction_rejects_cross_attempt_parser_and_telemetry_owners_before_writes(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(
+        feature_factory,
+        telemetry_parser_run_id="00000000-0000-4000-8000-000000000399",
+    )
+
+    with pytest.raises(FeatureExtractionError, match="parser.*telemetry|branch"):
+        FeatureExtractionService(feature_factory).extract(_request(replay, player, "build"))
+
+    with feature_factory() as session:
+        assert session.scalar(select(func.count()).select_from(FeatureSet)) == 0
+        assert session.scalar(select(func.count()).select_from(Feature)) == 0
 
 
 def test_build_template_uses_and_links_authoritative_object_creation_evidence(

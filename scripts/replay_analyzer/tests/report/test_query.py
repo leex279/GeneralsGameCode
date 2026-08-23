@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.analysis_pipeline.codecs import (
@@ -23,6 +25,7 @@ from generals_replay_analyzer.analysis_pipeline.identity_scope import (
 from generals_replay_analyzer.db.models import (
     AnalysisRun,
     AssessmentEvidence,
+    Entity,
     EvidenceItem,
     Feature,
     FeatureSet,
@@ -33,9 +36,12 @@ from generals_replay_analyzer.db.models import (
     ParserRun,
     Player,
     Replay,
+    ReplayCommand,
     ReplayPlayer,
     Report,
     StrategyAssessment,
+    TelemetryEvent,
+    TelemetryRun,
 )
 from generals_replay_analyzer.identity.audit import identity_cache_digest
 from generals_replay_analyzer.importing.stages import (
@@ -47,8 +53,12 @@ from generals_replay_analyzer.importing.stages import (
     DERIVE_FEATURES_VERSION,
     IMPORT_OBSERVATIONS,
     IMPORT_OBSERVATIONS_VERSION,
+    PARSE,
+    PARSE_VERSION,
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
+    TELEMETRY,
+    TELEMETRY_VERSION,
     content_key,
     input_digest,
 )
@@ -60,7 +70,12 @@ from generals_replay_analyzer.llm.schema import (
     RESPONSE_SCHEMA_VERSION,
 )
 from generals_replay_analyzer.report import query as report_query
-from generals_replay_analyzer.report.model import ReportRequest, document_to_mapping
+from generals_replay_analyzer.report.model import (
+    ReportDocument,
+    ReportEvidenceRef,
+    ReportRequest,
+    document_to_mapping,
+)
 from generals_replay_analyzer.report.query import (
     EvidenceQuery,
     FixedReportQuery,
@@ -114,10 +129,15 @@ def _job(
     replay_sha256: str,
     stage: str,
     input_json: dict[str, object],
-    output_json: dict[str, object],
+    output_json: dict[str, object] | None,
     now: datetime,
     component_version: str = "1",
     idempotency_key: str | None = None,
+    status: str = "succeeded",
+    retryable: bool = False,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    error_details_json: dict[str, object] | None = None,
 ) -> Job:
     return Job(
         public_id=public_id,
@@ -128,16 +148,19 @@ def _job(
             idempotency_key
             or f"{stage}:{component_version}:{replay_sha256}:{hashlib.sha256(public_id.encode('utf-8')).hexdigest()}"
         ),
-        status="succeeded",
+        status=status,
         priority=100,
         attempt_count=1,
         max_attempts=3,
         available_at=now,
         started_at=now,
-        completed_at=now,
+        completed_at=None if status in {"pending", "running"} else now,
         input_json=input_json,
         output_json=output_json,
-        retryable=False,
+        error_code=error_code,
+        error_message=error_message,
+        error_details_json=error_details_json,
+        retryable=retryable,
         created_at=now,
     )
 
@@ -152,6 +175,33 @@ def _stage_result(job: Job, output: dict[str, object], now: datetime, label: str
         output_json=output,
         created_at=now,
     )
+
+
+def _production_parse_output(session: Session, replay: Replay, parser: ParserRun) -> dict[str, object]:
+    warning_codes = tuple(
+        sorted(
+            {
+                item["code"]
+                for item in parser.warnings_json
+                if isinstance(item, dict) and isinstance(item.get("code"), str)
+            }
+        )
+    )
+    command_count = int(
+        session.scalar(
+            select(func.count()).select_from(ReplayCommand).where(ReplayCommand.parser_run_id == parser.id)
+        )
+        or 0
+    )
+    return {
+        "parser_version": parser.parser_version,
+        "content_sha256": replay.sha256,
+        "completion_status": parser.completion_status,
+        "command_count": command_count,
+        "warning_codes": warning_codes,
+        "command_stream_offset": parser.command_stream_offset,
+        "end_offset": parser.end_offset,
+    }
 
 
 def _empty_response() -> dict[str, object]:
@@ -270,12 +320,33 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
         feature_set = session.scalar(select(FeatureSet).where(FeatureSet.replay_player_id == player.id))
         feature = session.scalar(select(Feature).where(Feature.feature_set_id == feature_set.id))
         parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id))
         rule_evidence = session.scalar(select(EvidenceItem).where(EvidenceItem.source_kind == "strategy_rule"))
         longitudinal_evidence = session.scalar(
             select(EvidenceItem).where(EvidenceItem.source_kind == "longitudinal_corpus")
         )
-        assert replay is not None and player is not None and feature_set is not None and parser is not None
+        assert (
+            replay is not None
+            and player is not None
+            and feature_set is not None
+            and parser is not None
+            and telemetry is not None
+        )
         assert feature is not None and rule_evidence is not None and longitudinal_evidence is not None
+        if parser.command_stream_offset is None or parser.end_offset is None:
+            session.execute(text("DROP TRIGGER trg_parser_runs_succeeded_no_update"))
+            session.execute(
+                text("UPDATE parser_runs SET command_stream_offset = 0, end_offset = 1 WHERE id = :id"),
+                {"id": parser.id},
+            )
+            session.execute(
+                text(
+                    "CREATE TRIGGER trg_parser_runs_succeeded_no_update BEFORE UPDATE ON parser_runs "
+                    "WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, "
+                    "'successful observation run is immutable'); END"
+                )
+            )
+            session.expire(parser)
         canonical_player = session.get(Player, player.player_id)
         assert canonical_player is not None
         bundle = build_evidence_bundle(
@@ -333,13 +404,118 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
                 },
             ],
         }
+        branch_recipe = {
+            "import_observations_version": IMPORT_OBSERVATIONS_VERSION,
+            "import_mode": "copy",
+            "parse": {
+                "import_mode": "copy",
+                "parse_version": PARSE_VERSION,
+                "parser_version": parser.parser_version,
+            },
+            "telemetry": {
+                "acquirer_version": "fixture-telemetry",
+                "import_mode": "copy",
+                "telemetry_version": TELEMETRY_VERSION,
+            },
+        }
+        parse_input = {
+            "replay_public_id": replay.public_id,
+            "replay_sha256": replay.sha256,
+            "import_mode": "copy",
+        }
+        parse_output = _production_parse_output(session, replay, parser)
+        parse_job = _job(
+            public_id=stable_uuid("query-parse-job"),
+            replay_id=replay.id,
+            replay_sha256=replay.sha256,
+            stage=PARSE,
+            component_version=PARSE_VERSION,
+            idempotency_key=content_key(PARSE, PARSE_VERSION, replay.sha256, branch_recipe["parse"]),
+            input_json=parse_input,
+            output_json=parse_output,
+            now=now,
+        )
+        telemetry_output = {
+            "artifacts": [],
+            "diagnostics": [],
+            "engine_build": telemetry.engine_build,
+            "engine_executable_sha256": telemetry.engine_executable_sha256,
+            "exit_code": telemetry.process_exit_code,
+            "replay_quality": "complete",
+            "run_id": telemetry.run_id,
+            "runner_status": telemetry.runner_status,
+            "strategy_analysis_scope": "full",
+        }
+        telemetry_job = _job(
+            public_id=stable_uuid("query-telemetry-job"),
+            replay_id=replay.id,
+            replay_sha256=replay.sha256,
+            stage=TELEMETRY,
+            component_version=TELEMETRY_VERSION,
+            idempotency_key=content_key(
+                TELEMETRY,
+                TELEMETRY_VERSION,
+                replay.sha256,
+                cast(dict[str, object], branch_recipe["telemetry"]),
+            ),
+            input_json=parse_input,
+            output_json=telemetry_output,
+            now=now,
+        )
+        selected_identity = {
+            "replay_sha256": replay.sha256,
+            "branch_recipe": branch_recipe,
+            "dependencies": [
+                {
+                    "stage": PARSE,
+                    "component_version": PARSE_VERSION,
+                    "status": "succeeded",
+                    "input": {"import_mode": "copy", "replay_sha256": replay.sha256},
+                    "output": parse_output,
+                },
+                {
+                    "stage": TELEMETRY,
+                    "component_version": TELEMETRY_VERSION,
+                    "status": "succeeded",
+                    "input": {"import_mode": "copy", "replay_sha256": replay.sha256},
+                    "output": telemetry_output,
+                },
+            ],
+        }
+        selected_dependency_digest = input_digest(selected_identity)
+        observation_idempotency_key = content_key(
+            IMPORT_OBSERVATIONS,
+            IMPORT_OBSERVATIONS_VERSION,
+            replay.sha256,
+            selected_identity,
+        )
+        session.execute(text("DROP TRIGGER trg_telemetry_runs_succeeded_no_update"))
+        telemetry.strategy_analysis_scope = "full"
+        telemetry.settings_json = {
+            "replay_quality": "complete",
+            "attempt_engine_build": telemetry.engine_build,
+            "parser_run_id": parser.run_id,
+            "artifact_manifest": [],
+            "upstream_failure_code": None,
+            "upstream_quality_issue_code": None,
+            "upstream_failure_message": None,
+            "import_observations_idempotency_key": observation_idempotency_key,
+        }
+        session.flush()
+        session.execute(
+            text(
+                "CREATE TRIGGER trg_telemetry_runs_succeeded_no_update BEFORE UPDATE ON telemetry_runs "
+                "WHEN OLD.status = 'succeeded' BEGIN SELECT RAISE(ABORT, "
+                "'successful observation run is immutable'); END"
+            )
+        )
         base_input = {
             "analysis_plan_version": 1,
             "replay_public_id": replay.public_id,
             "replay_sha256": replay.sha256,
             "parser_run_id": parser.run_id,
             "parser_version": parser.parser_version,
-            "selected_dependency_digest": "a" * 64,
+            "selected_dependency_digest": selected_dependency_digest,
             "identity_scope": IdentityAnalysisScope(
                 "full_replay",
                 (
@@ -361,10 +537,26 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
             replay_sha256=replay.sha256,
             stage=IMPORT_OBSERVATIONS,
             component_version=IMPORT_OBSERVATIONS_VERSION,
-            input_json={"replay_public_id": replay.public_id},
+            idempotency_key=observation_idempotency_key,
+            input_json={
+                "replay_public_id": replay.public_id,
+                "replay_sha256": replay.sha256,
+                "branch_recipe": branch_recipe,
+                "dependency_identity_bound": True,
+                "provisional_idempotency_key": content_key(
+                    IMPORT_OBSERVATIONS,
+                    IMPORT_OBSERVATIONS_VERSION,
+                    replay.sha256,
+                    branch_recipe,
+                ),
+                "selected_dependency_digest": selected_dependency_digest,
+            },
             output_json={
+                "idempotency_key": observation_idempotency_key,
                 "parser_run_id": parser.run_id,
-                "selected_dependency_digest": base_input["selected_dependency_digest"],
+                "parser_command_count": 1,
+                "telemetry_run_id": telemetry.run_id,
+                "telemetry_event_count": 1,
             },
             now=now,
         )
@@ -458,19 +650,27 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
             output_json=report_output,
             now=now,
         )
-        session.add_all((observation_job, derive_job, assess_job, llm_job, report_job))
+        session.add_all((parse_job, telemetry_job, observation_job, derive_job, assess_job, llm_job, report_job))
         session.flush()
         session.add_all(
             (
+                JobDependency(job_id=observation_job.id, depends_on_job_id=parse_job.id, created_at=now),
+                JobDependency(job_id=observation_job.id, depends_on_job_id=telemetry_job.id, created_at=now),
+                JobDependency(job_id=telemetry_job.id, depends_on_job_id=parse_job.id, created_at=now),
                 JobDependency(job_id=derive_job.id, depends_on_job_id=observation_job.id, created_at=now),
                 JobDependency(job_id=assess_job.id, depends_on_job_id=derive_job.id, created_at=now),
                 JobDependency(job_id=llm_job.id, depends_on_job_id=assess_job.id, created_at=now),
                 JobDependency(job_id=report_job.id, depends_on_job_id=llm_job.id, created_at=now),
+                _stage_result(parse_job, parse_output, now, "query-parse-result"),
+                _stage_result(telemetry_job, telemetry_output, now, "query-telemetry-result"),
                 _stage_result(
                     observation_job,
                     {
+                        "idempotency_key": observation_idempotency_key,
                         "parser_run_id": parser.run_id,
-                        "selected_dependency_digest": base_input["selected_dependency_digest"],
+                        "parser_command_count": 1,
+                        "telemetry_run_id": telemetry.run_id,
+                        "telemetry_event_count": 1,
                     },
                     now,
                     "query-observation-result",
@@ -518,6 +718,547 @@ def _row_counts(factory: sessionmaker[Session]) -> tuple[int, int, int]:
             session.scalar(select(func.count()).select_from(Job)) or 0,
             session.scalar(select(func.count()).select_from(ManagedAsset)) or 0,
         )
+
+
+def _add_legacy_report_claimant(
+    session: Session,
+    original: Job,
+    now: datetime,
+    *,
+    label: str,
+    poison: str | None = None,
+) -> Job:
+    direct_id = session.scalar(select(JobDependency.depends_on_job_id).where(JobDependency.job_id == original.id))
+    assert direct_id is not None
+    direct = session.get(Job, direct_id)
+    assert direct is not None
+    if direct.stage == ANALYZE_LLM:
+        assess_id = session.scalar(select(JobDependency.depends_on_job_id).where(JobDependency.job_id == direct.id))
+        assert assess_id is not None
+        assess = session.get(Job, assess_id)
+    else:
+        assess = direct
+    assert assess is not None and isinstance(assess.output_json, dict)
+    derive_id = session.scalar(select(JobDependency.depends_on_job_id).where(JobDependency.job_id == assess.id))
+    assert derive_id is not None
+    derive = session.get(Job, derive_id)
+    assert derive is not None and isinstance(derive.output_json, dict)
+    observation_id = session.scalar(select(JobDependency.depends_on_job_id).where(JobDependency.job_id == derive.id))
+    assert observation_id is not None
+    observation = session.get(Job, observation_id)
+    assert observation is not None and isinstance(observation.output_json, dict)
+    parser_run_id = observation.output_json["parser_run_id"]
+    parser = session.scalar(select(ParserRun).where(ParserRun.run_id == parser_run_id))
+    assert parser is not None
+    import_mode = "reference" if poison == "parse_run_mismatch" else "copy"
+    telemetry_variant = poison if poison in {
+        "cross_branch",
+        "telemetry_success",
+        "telemetry_failed",
+        "telemetry_run_mismatch",
+        "telemetry_retryable",
+        "telemetry_nonterminal",
+        "telemetry_failure_mismatch",
+        "telemetry_dependency_failed",
+        "telemetry_dependency_failed_claims_run",
+        "observation_extra_key",
+        "observation_parser_count_mismatch",
+        "observation_telemetry_count_mismatch",
+    } else (
+        "telemetry_selected"
+        if poison in {None, "invalid_result", "divergent_assets"}
+        else None
+    )
+    branch_recipe = {
+        "import_mode": import_mode,
+        "import_observations_version": IMPORT_OBSERVATIONS_VERSION,
+        "parse": {
+            "import_mode": import_mode,
+            "parse_version": PARSE_VERSION,
+            "parser_version": parser.parser_version,
+        },
+        "telemetry": (
+            {
+                "acquirer_version": (
+                    "fixture-telemetry"
+                    if telemetry_variant == "telemetry_selected"
+                    else f"fixture-telemetry-{label}"
+                ),
+                "import_mode": import_mode,
+                "telemetry_version": TELEMETRY_VERSION,
+            }
+            if telemetry_variant is not None
+            else None
+        ),
+    }
+    if poison == "permissive_recipe":
+        branch_recipe["unexpected"] = "poison"
+    replay_input = dict(original.input_json)
+    replay_input = {
+        "replay_public_id": replay_input["replay_public_id"],
+        "replay_sha256": replay_input["replay_sha256"],
+    }
+    parse_input = {**replay_input, "import_mode": import_mode}
+    replay = session.get(Replay, original.replay_id)
+    assert replay is not None
+    parse_output = _production_parse_output(session, replay, parser)
+    if poison == "parse_run_mismatch":
+        parse_output["parser_version"] = "mismatched-parser-version"
+    legacy_parse = _job(
+        public_id=stable_uuid(f"{label}-parse"),
+        replay_id=original.replay_id,  # type: ignore[arg-type]
+        replay_sha256=cast(str, replay_input["replay_sha256"]),
+        stage=PARSE,
+        input_json=parse_input,
+        output_json=parse_output,
+        now=now,
+        idempotency_key=content_key(
+            PARSE,
+            PARSE_VERSION,
+            cast(str, replay_input["replay_sha256"]),
+            branch_recipe["parse"],
+        ),
+    )
+    existing_parse = session.scalar(select(Job).where(Job.idempotency_key == legacy_parse.idempotency_key))
+    parse_is_new = existing_parse is None
+    if existing_parse is not None:
+        legacy_parse = existing_parse
+        assert isinstance(legacy_parse.output_json, dict)
+        parse_output = dict(legacy_parse.output_json)
+    dependency_identity: dict[str, object] = {
+        "stage": PARSE,
+        "component_version": PARSE_VERSION,
+        "status": "succeeded",
+        "input": {key: value for key, value in parse_input.items() if key != "replay_public_id"},
+        "output": parse_output,
+    }
+    cross_parse = None
+    legacy_telemetry = None
+    telemetry_run = None
+    telemetry_parent = None
+    telemetry_observation_run_id = None
+    dependency_identities: list[dict[str, object]] = [dependency_identity]
+    if telemetry_variant is not None:
+        telemetry_parser_run_id = parser.run_id
+        telemetry_parent = legacy_parse
+        selected_telemetry_run_id = observation.output_json.get("telemetry_run_id")
+        selected_telemetry = (
+            None
+            if telemetry_variant != "telemetry_selected"
+            else session.scalar(
+                select(TelemetryRun).where(TelemetryRun.run_id == selected_telemetry_run_id)
+            )
+        )
+        if telemetry_variant == "telemetry_selected":
+            assert selected_telemetry is not None
+        telemetry_run_id = (
+            selected_telemetry.run_id
+            if selected_telemetry is not None
+            else stable_uuid(f"{label}-telemetry-run")
+        )
+        telemetry_observation_run_id = (
+            stable_uuid(f"{label}-mismatched-telemetry-run")
+            if telemetry_variant == "telemetry_run_mismatch"
+            else telemetry_run_id
+        )
+        telemetry_attempt = {
+            "artifacts": [],
+            "diagnostics": [],
+            "engine_build": (
+                selected_telemetry.engine_build
+                if selected_telemetry is not None
+                else "fixture-engine-v1"
+            ),
+            "engine_executable_sha256": (
+                selected_telemetry.engine_executable_sha256
+                if selected_telemetry is not None
+                else "e" * 64
+            ),
+            "exit_code": (
+                selected_telemetry.process_exit_code
+                if selected_telemetry is not None
+                else 0
+            ),
+            "replay_quality": "complete",
+            "run_id": telemetry_run_id,
+            "runner_status": "success",
+            "strategy_analysis_scope": "full",
+        }
+        telemetry_status = "succeeded"
+        telemetry_retryable = False
+        telemetry_error_code = None
+        telemetry_error_message = None
+        telemetry_error_details: dict[str, object] | None = None
+        cross_parse_identity = {
+            "import_mode": "copy",
+            "parse_version": PARSE_VERSION,
+            "parser_version": "cross-branch-parser",
+        }
+        if telemetry_variant == "cross_branch":
+            cross_parser = ParserRun(
+                run_id=stable_uuid(f"{label}-cross-parser-run"),
+                replay_id=replay.id,
+                parser_version="cross-branch-parser",
+                schema_version=1,
+                input_sha256=replay.sha256,
+                result_sha256="f" * 64,
+                status="succeeded",
+                completion_status="complete",
+                command_stream_offset=0,
+                end_offset=0,
+                warnings_json=[],
+                error_json=None,
+                started_at=now,
+                completed_at=now,
+            )
+            session.add(cross_parser)
+            session.flush()
+            telemetry_parser_run_id = cross_parser.run_id
+            cross_parse = _job(
+                public_id=stable_uuid(f"{label}-cross-parse"),
+                replay_id=original.replay_id,  # type: ignore[arg-type]
+                replay_sha256=cast(str, replay_input["replay_sha256"]),
+                stage=PARSE,
+                input_json=parse_input,
+                output_json=_production_parse_output(session, replay, cross_parser),
+                now=now,
+                idempotency_key=content_key(
+                    PARSE,
+                    PARSE_VERSION,
+                    cast(str, replay_input["replay_sha256"]),
+                    cross_parse_identity,
+                ),
+            )
+            telemetry_parent = cross_parse
+        if telemetry_variant in {
+            "telemetry_failed",
+            "telemetry_retryable",
+            "telemetry_failure_mismatch",
+            "telemetry_dependency_failed",
+            "telemetry_dependency_failed_claims_run",
+        }:
+            telemetry_attempt["runner_status"] = "crash"
+            telemetry_attempt["exit_code"] = 1
+            telemetry_status = "failed"
+            telemetry_retryable = telemetry_variant == "telemetry_retryable"
+            dependency_failed = telemetry_variant in {
+                "telemetry_dependency_failed",
+                "telemetry_dependency_failed_claims_run",
+            }
+            telemetry_error_code = "dependency_failed" if dependency_failed else "exporter_failure"
+            telemetry_error_message = (
+                "selected parser dependency failed"
+                if dependency_failed
+                else "telemetry acquisition did not succeed"
+            )
+            envelope_failure_code = (
+                "invalid_telemetry_artifact"
+                if telemetry_variant == "telemetry_failure_mismatch"
+                else telemetry_error_code
+            )
+            telemetry_error_details = (
+                {"dependency_stage": PARSE}
+                if dependency_failed
+                else {
+                    "failure_envelope": {
+                        "attempt": telemetry_attempt,
+                        "failure_code": envelope_failure_code,
+                        "failure_message": telemetry_error_message,
+                        "quality_issue_code": "exporter_failure",
+                        "type": "telemetry_artifact_failure",
+                        "version": 1,
+                    }
+                }
+            )
+            if telemetry_variant == "telemetry_dependency_failed":
+                telemetry_observation_run_id = None
+            telemetry_output = None
+            dependency_telemetry_evidence: dict[str, object] = {
+                "stage": TELEMETRY,
+                "component_version": TELEMETRY_VERSION,
+                "status": "failed",
+                "input": {key: value for key, value in parse_input.items() if key != "replay_public_id"},
+                "error": {
+                    "code": telemetry_error_code,
+                    "message": telemetry_error_message,
+                    "details": telemetry_error_details,
+                },
+            }
+        elif telemetry_variant == "telemetry_nonterminal":
+            telemetry_status = "pending"
+            telemetry_output = None
+            dependency_telemetry_evidence = {
+                "stage": TELEMETRY,
+                "component_version": TELEMETRY_VERSION,
+                "status": "pending",
+                "input": {key: value for key, value in parse_input.items() if key != "replay_public_id"},
+            }
+        else:
+            telemetry_output = telemetry_attempt
+            dependency_telemetry_evidence = {
+                "stage": TELEMETRY,
+                "component_version": TELEMETRY_VERSION,
+                "status": "succeeded",
+                "input": {key: value for key, value in parse_input.items() if key != "replay_public_id"},
+                "output": telemetry_output,
+            }
+        legacy_telemetry = _job(
+            public_id=stable_uuid(f"{label}-telemetry"),
+            replay_id=original.replay_id,  # type: ignore[arg-type]
+            replay_sha256=cast(str, replay_input["replay_sha256"]),
+            stage=TELEMETRY,
+            input_json=parse_input,
+            output_json=telemetry_output,
+            now=now,
+            status=telemetry_status,
+            retryable=telemetry_retryable,
+            error_code=telemetry_error_code,
+            error_message=telemetry_error_message,
+            error_details_json=telemetry_error_details,
+            idempotency_key=content_key(
+                TELEMETRY,
+                TELEMETRY_VERSION,
+                cast(str, replay_input["replay_sha256"]),
+                cast(dict[str, object], branch_recipe["telemetry"]),
+            ),
+        )
+        existing_telemetry = session.scalar(
+            select(Job).where(Job.idempotency_key == legacy_telemetry.idempotency_key)
+        )
+        telemetry_is_new = existing_telemetry is None
+        if existing_telemetry is not None:
+            legacy_telemetry = existing_telemetry
+        dependency_identities.append(dependency_telemetry_evidence)
+    selected_identity = {
+        "replay_sha256": replay_input["replay_sha256"],
+        "branch_recipe": branch_recipe,
+        "dependencies": dependency_identities,
+    }
+    selected_digest = input_digest(selected_identity)
+    legacy_observation_idempotency_key = content_key(
+        IMPORT_OBSERVATIONS,
+        IMPORT_OBSERVATIONS_VERSION,
+        cast(str, replay_input["replay_sha256"]),
+        selected_identity,
+    )
+    observation_output = {
+        "idempotency_key": legacy_observation_idempotency_key,
+        "parser_run_id": parser.run_id,
+        "parser_command_count": parse_output["command_count"],
+        "telemetry_run_id": telemetry_observation_run_id,
+        "telemetry_event_count": 1 if telemetry_variant == "telemetry_selected" else 0,
+    }
+    if poison == "observation_extra_key":
+        observation_output["unexpected"] = "poison"
+    elif poison == "observation_parser_count_mismatch":
+        observation_output["parser_command_count"] = cast(int, parse_output["command_count"]) + 1
+    elif poison == "observation_telemetry_count_mismatch":
+        observation_output["telemetry_event_count"] = 1
+    legacy_observation = _job(
+        public_id=stable_uuid(f"{label}-observation"),
+        replay_id=original.replay_id,  # type: ignore[arg-type]
+        replay_sha256=cast(str, replay_input["replay_sha256"]),
+        stage=IMPORT_OBSERVATIONS,
+        input_json={
+            **replay_input,
+            "branch_recipe": branch_recipe,
+            "dependency_identity_bound": True,
+            "provisional_idempotency_key": content_key(
+                IMPORT_OBSERVATIONS,
+                IMPORT_OBSERVATIONS_VERSION,
+                cast(str, replay_input["replay_sha256"]),
+                branch_recipe,
+            ),
+            "selected_dependency_digest": selected_digest,
+        },
+        output_json=observation_output,
+        now=now,
+        idempotency_key=legacy_observation_idempotency_key,
+    )
+    existing_observation = session.scalar(
+        select(Job).where(Job.idempotency_key == legacy_observation.idempotency_key)
+    )
+    observation_is_new = existing_observation is None
+    if existing_observation is not None:
+        legacy_observation = existing_observation
+        assert isinstance(legacy_observation.output_json, dict)
+        observation_output = dict(legacy_observation.output_json)
+    if telemetry_variant is not None and telemetry_variant not in {
+        "telemetry_selected",
+        "telemetry_dependency_failed",
+        "telemetry_dependency_failed_claims_run",
+        "telemetry_nonterminal",
+    }:
+        assert legacy_telemetry is not None and telemetry_parent is not None
+        failed_telemetry = telemetry_status == "failed"
+        telemetry_run = TelemetryRun(
+            run_id=telemetry_run_id,
+            replay_id=replay.id,
+            trace_asset_id=None,
+            catalog_asset_id=None,
+            map_asset_id=None,
+            map_id=None,
+            schema_version=0 if failed_telemetry else 1,
+            engine_build=cast(str, telemetry_attempt["engine_build"]),
+            engine_executable_sha256=cast(str, telemetry_attempt["engine_executable_sha256"]),
+            settings_json={
+                "replay_quality": telemetry_attempt["replay_quality"],
+                "attempt_engine_build": telemetry_attempt["engine_build"],
+                "parser_run_id": telemetry_parser_run_id,
+                "artifact_manifest": telemetry_attempt["artifacts"],
+                "upstream_failure_code": telemetry_error_code if failed_telemetry else None,
+                "upstream_quality_issue_code": "exporter_failure" if failed_telemetry else None,
+                "upstream_failure_message": telemetry_error_message if failed_telemetry else None,
+                "import_observations_idempotency_key": legacy_observation.idempotency_key,
+            },
+            status="failed" if failed_telemetry else "succeeded",
+            runner_status=cast(str, telemetry_attempt["runner_status"]),
+            strategy_analysis_scope=cast(str, telemetry_attempt["strategy_analysis_scope"]),
+            process_exit_code=cast(int, telemetry_attempt["exit_code"]),
+            final_frame=None if failed_telemetry else 0,
+            command_count=None if failed_telemetry else 0,
+            trace_sha256=None,
+            diagnostics_json=[],
+            started_at=now,
+            completed_at=now,
+        )
+    legacy_derive = _job(
+        public_id=stable_uuid(f"{label}-derive"),
+        replay_id=original.replay_id,  # type: ignore[arg-type]
+        replay_sha256=cast(str, replay_input["replay_sha256"]),
+        stage=DERIVE_FEATURES,
+        input_json=replay_input,
+        output_json=dict(derive.output_json),
+        now=now,
+        idempotency_key=content_key(
+            DERIVE_FEATURES,
+            DERIVE_FEATURES_VERSION,
+            cast(str, replay_input["replay_sha256"]),
+            {"derive_features_version": DERIVE_FEATURES_VERSION, "observations": branch_recipe},
+        ),
+    )
+    legacy_assess = _job(
+        public_id=stable_uuid(f"{label}-assess"),
+        replay_id=original.replay_id,  # type: ignore[arg-type]
+        replay_sha256=cast(str, replay_input["replay_sha256"]),
+        stage=ASSESS_STRATEGIES,
+        input_json=replay_input,
+        output_json=dict(assess.output_json),
+        now=now,
+        idempotency_key=content_key(
+            ASSESS_STRATEGIES,
+            ASSESS_STRATEGIES_VERSION,
+            cast(str, replay_input["replay_sha256"]),
+            {"assess_strategies_version": ASSESS_STRATEGIES_VERSION, "observations": branch_recipe},
+        ),
+    )
+    legacy_llm = None
+    if direct.stage == ANALYZE_LLM:
+        assert isinstance(direct.output_json, dict)
+        legacy_llm = _job(
+            public_id=stable_uuid(f"{label}-llm"),
+            replay_id=original.replay_id,  # type: ignore[arg-type]
+            replay_sha256=cast(str, replay_input["replay_sha256"]),
+            stage=ANALYZE_LLM,
+            input_json=replay_input,
+            output_json=dict(direct.output_json),
+            now=now,
+            idempotency_key=content_key(
+                ANALYZE_LLM,
+                ANALYZE_LLM_VERSION,
+                cast(str, replay_input["replay_sha256"]),
+                {"analyze_llm_version": ANALYZE_LLM_VERSION, "observations": branch_recipe},
+            ),
+        )
+    report_output = copy.deepcopy(original.output_json)
+    assert isinstance(report_output, dict)
+    if poison == "divergent_assets":
+        reports = report_output["reports"]
+        assert isinstance(reports, list) and len(reports) == 2
+        assert isinstance(reports[0], dict) and isinstance(reports[1], dict)
+        reports[0]["presentation_asset_public_id"] = reports[1]["presentation_asset_public_id"]
+    legacy_report = _job(
+        public_id=stable_uuid(f"{label}-report"),
+        replay_id=original.replay_id,  # type: ignore[arg-type]
+        replay_sha256=cast(str, replay_input["replay_sha256"]),
+        stage=RENDER_REPORT,
+        input_json=replay_input,
+        output_json=report_output,
+        now=now,
+        idempotency_key=content_key(
+            RENDER_REPORT,
+            RENDER_REPORT_VERSION,
+            cast(str, replay_input["replay_sha256"]),
+            {"render_report_version": RENDER_REPORT_VERSION, "observations": branch_recipe},
+        ),
+    )
+    jobs: list[object] = [legacy_derive, legacy_assess, legacy_report]
+    if observation_is_new:
+        jobs.append(legacy_observation)
+    if parse_is_new:
+        jobs.append(legacy_parse)
+    if cross_parse is not None:
+        jobs.append(cross_parse)
+    if legacy_telemetry is not None and telemetry_is_new:
+        jobs.append(legacy_telemetry)
+    if telemetry_run is not None:
+        jobs.append(telemetry_run)
+    if legacy_llm is not None:
+        jobs.append(legacy_llm)
+    session.add_all(jobs)
+    session.flush()
+    session.add_all(
+        (
+            JobDependency(job_id=legacy_derive.id, depends_on_job_id=legacy_observation.id, created_at=now),
+            JobDependency(job_id=legacy_assess.id, depends_on_job_id=legacy_derive.id, created_at=now),
+            JobDependency(job_id=legacy_report.id, depends_on_job_id=legacy_assess.id, created_at=now),
+            _stage_result(legacy_derive, dict(derive.output_json), now, f"{label}-derive-result"),
+            _stage_result(legacy_assess, dict(assess.output_json), now, f"{label}-assess-result"),
+            _stage_result(
+                legacy_report,
+                {"schema_version": "report-output-v1", "reports": []}
+                if poison == "invalid_result"
+                else report_output,
+                now,
+                f"{label}-report-result",
+            ),
+        )
+    )
+    if observation_is_new:
+        session.add(JobDependency(job_id=legacy_observation.id, depends_on_job_id=legacy_parse.id, created_at=now))
+        session.add(
+            _stage_result(legacy_observation, observation_output, now, f"{label}-observation-result")
+        )
+    if parse_is_new:
+        session.add(_stage_result(legacy_parse, parse_output, now, f"{label}-parse-result"))
+    if legacy_telemetry is not None and telemetry_is_new:
+        assert telemetry_parent is not None
+        session.add_all(
+            (
+                JobDependency(job_id=legacy_observation.id, depends_on_job_id=legacy_telemetry.id, created_at=now),
+                JobDependency(job_id=legacy_telemetry.id, depends_on_job_id=telemetry_parent.id, created_at=now),
+            )
+        )
+        if legacy_telemetry.status == "succeeded":
+            assert isinstance(legacy_telemetry.output_json, dict)
+            session.add(
+                _stage_result(
+                    legacy_telemetry,
+                    dict(legacy_telemetry.output_json),
+                    now,
+                    f"{label}-telemetry-result",
+                )
+            )
+    if cross_parse is not None:
+        assert isinstance(cross_parse.output_json, dict)
+        session.add(
+            _stage_result(cross_parse, dict(cross_parse.output_json), now, f"{label}-cross-parse-result")
+        )
+    if legacy_llm is not None:
+        assert isinstance(legacy_llm.output_json, dict)
+        session.add(JobDependency(job_id=legacy_llm.id, depends_on_job_id=legacy_assess.id, created_at=now))
+        session.add(_stage_result(legacy_llm, dict(legacy_llm.output_json), now, f"{label}-llm-result"))
+    return legacy_report
 
 
 def test_fixed_query_verifies_assets_and_aggregates_replay_and_players_without_writes(
@@ -792,7 +1533,7 @@ def test_published_sqlite_timestamp_is_normalized_to_aware_utc(
     assert graph.selected.created_at_utc.utcoffset() is not None
 
 
-def test_fixed_query_rejects_cross_replay_lookup_and_ambiguous_stage_graph(
+def test_fixed_query_accepts_structurally_identical_successful_stage_graph_claimants(
     report_database: SeededReportDatabase,
     published_graph: PublishedGraph,
 ) -> None:
@@ -806,25 +1547,409 @@ def test_fixed_query_rejects_cross_replay_lookup_and_ambiguous_stage_graph(
     with factory.begin() as session:
         original = session.scalar(select(Job).where(Job.stage == "render_report", Job.status == "succeeded"))
         assert original is not None and isinstance(original.output_json, dict)
-        duplicate = _job(
-            public_id=stable_uuid("query-ambiguous-report-job"),
-            replay_id=original.replay_id,  # type: ignore[arg-type]
-            replay_sha256="a" * 64,
-            stage="render_report",
-            input_json=dict(original.input_json),
-            output_json=dict(original.output_json),
-            now=now,
+        _add_legacy_report_claimant(session, original, now, label="query-equivalent-legacy")
+
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+
+    assert graph.selected.document.report_public_id == published_graph.player_report_id
+
+
+@pytest.mark.parametrize(
+    ("telemetry_variant", "expected_run_id"),
+    (
+        ("telemetry_success", "run"),
+        ("telemetry_failed", "run"),
+        ("telemetry_dependency_failed", None),
+    ),
+)
+def test_legacy_observation_authenticates_exact_production_telemetry_success_and_terminal_failure(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+    telemetry_variant: str,
+    expected_run_id: str | None,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    label = f"query-production-{telemetry_variant}"
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None and isinstance(original.output_json, dict)
+        _add_legacy_report_claimant(
+            session,
+            original,
+            datetime(2026, 8, 23, 10, 5, tzinfo=UTC),
+            label=label,
+            poison=telemetry_variant,
         )
-        session.add(duplicate)
+        replay = session.get(Replay, original.replay_id)
+        observation = session.scalar(
+            select(Job).where(Job.public_id == stable_uuid(f"{label}-observation"))
+        )
+        assert replay is not None and observation is not None
+        _branch, telemetry_run_id = published_graph.service._validate_observation_authority(
+            session, replay, observation
+        )
+
+    assert telemetry_run_id == (
+        stable_uuid(f"{label}-telemetry-run") if expected_run_id == "run" else None
+    )
+
+
+def test_report_identity_excludes_closed_slots_outside_the_exact_parser_subjects(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_replay_players_succeeded_no_insert"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        assert replay is not None
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))
+        assert parser is not None
+        session.add(
+            ReplayPlayer(
+                public_id=stable_uuid("query-closed-slot"),
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                slot_index=7,
+                slot_kind="closed",
+                original_name="Fabricated Closed Slot",
+                normalized_name="fabricated closed slot",
+                observed_json={},
+            )
+        )
+
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+
+    assert {player.public_id for player in graph.identity.players} == {
+        report_database.replay_player_public_id
+    }
+    assert "Fabricated Closed Slot" not in graph.identity.label
+
+
+def test_modern_report_rejects_cited_evidence_owned_by_a_different_parser_branch(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    now = datetime(2026, 8, 23, 10, 15, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_update"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        evidence = session.scalar(
+            select(EvidenceItem).where(EvidenceItem.public_id == published_graph.parser_evidence_id)
+        )
+        assert replay is not None and evidence is not None
+        other_parser = ParserRun(
+            run_id=stable_uuid("query-cross-branch-parser"),
+            replay_id=replay.id,
+            parser_version="query-cross-branch-v1",
+            schema_version=1,
+            input_sha256=replay.sha256,
+            result_sha256="8" * 64,
+            status="succeeded",
+            completion_status="complete",
+            warnings_json=[],
+            started_at=now,
+            completed_at=now,
+        )
+        session.add(other_parser)
         session.flush()
-        dependency_id = session.scalar(
-            select(JobDependency.depends_on_job_id).where(JobDependency.job_id == original.id)
+        evidence.parser_run_id = other_parser.id
+
+    with pytest.raises(ReportGraphContractError, match="evidence.*parser|parser.*evidence"):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
         )
-        assert dependency_id is not None
-        session.add(JobDependency(job_id=duplicate.id, depends_on_job_id=dependency_id, created_at=now))
-        session.add(_stage_result(duplicate, dict(original.output_json), now, "query-ambiguous-result"))
+
+
+@pytest.mark.parametrize(
+    "poison",
+    ("extra_key", "parser_command_count", "telemetry_event_count"),
+)
+def test_modern_report_rejects_nonproduction_observation_outputs(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+    poison: str,
+) -> None:
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_job_stage_results_no_update"))
+        observation = session.scalar(
+            select(Job).where(Job.stage == IMPORT_OBSERVATIONS, Job.status == "succeeded")
+        )
+        assert observation is not None and isinstance(observation.output_json, dict)
+        result = session.scalar(select(JobStageResult).where(JobStageResult.job_id == observation.id))
+        assert result is not None
+        output = dict(observation.output_json)
+        if poison == "extra_key":
+            output["unexpected"] = "poison"
+        else:
+            output[poison] = cast(int, output[poison]) + 1
+        observation.output_json = output
+        result.output_json = output
+
+    with pytest.raises(ReportGraphContractError, match="observation.*(schema|identity|count)"):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+
+
+@pytest.mark.parametrize("child_kind", ("telemetry_event", "entity"))
+def test_legacy_failed_telemetry_rejects_materialized_event_or_typed_child(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+    child_kind: str,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    label = f"query-failed-child-{child_kind}"
+    now = datetime(2026, 8, 23, 10, 18, tzinfo=UTC)
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None and isinstance(original.output_json, dict)
+        _add_legacy_report_claimant(
+            session,
+            original,
+            now,
+            label=label,
+            poison="telemetry_failed",
+        )
+        replay = session.get(Replay, original.replay_id)
+        failed_run = session.scalar(
+            select(TelemetryRun).where(TelemetryRun.run_id == stable_uuid(f"{label}-telemetry-run"))
+        )
+        parser_evidence = session.scalar(
+            select(EvidenceItem).where(EvidenceItem.public_id == published_graph.parser_evidence_id)
+        )
+        assert replay is not None and failed_run is not None and parser_evidence is not None
+        if child_kind == "telemetry_event":
+            session.add(
+                TelemetryEvent(
+                    telemetry_run_id=failed_run.id,
+                    sequence=0,
+                    frame=0,
+                    logic_time_seconds=0.0,
+                    schema_version=1,
+                    event_type="poison",
+                    payload_json={},
+                    raw_record_json={},
+                    evidence_item_id=parser_evidence.id,
+                )
+            )
+        else:
+            session.add(
+                Entity(
+                    public_id=stable_uuid(f"{label}-entity"),
+                    telemetry_run_id=failed_run.id,
+                    replay_id=replay.id,
+                    object_id=1,
+                    template_name="PoisonEntity",
+                    initial_owner_player_index=None,
+                    initial_team_id=None,
+                    kind_of_flags_json=[],
+                    creation_sequence=None,
+                    creation_frame=None,
+                    destruction_sequence=None,
+                    destruction_frame=None,
+                    observed_json={},
+                )
+            )
+
+    with pytest.raises(ReportGraphContractError, match="failed telemetry.*materialized"):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+
+
+def test_modern_evidence_authority_query_count_is_independent_of_evidence_count_on_the_exact_run(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+    factory = report_database.session_factory  # type: ignore[assignment]
+    now = datetime(2026, 8, 23, 10, 20, tzinfo=UTC)
+    with factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))  # type: ignore[union-attr]
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id))  # type: ignore[union-attr]
+        assert replay is not None and parser is not None and telemetry is not None
+        selected_parser_run_id = parser.run_id
+        selected_telemetry_run_id = telemetry.run_id
+        evidence_ids: list[str] = []
+        for index in range(8):
+            public_id = stable_uuid(f"query-batch-evidence-{index}")
+            session.add(
+                EvidenceItem(
+                    public_id=public_id,
+                    replay_id=replay.id,
+                    parser_run_id=parser.id,
+                    telemetry_run_id=telemetry.id,
+                    tier="derived",
+                    source_kind="feature",
+                    source_key=f"query-batch-feature:{index}",
+                    schema_version=1,
+                    created_at=now,
+                )
+            )
+            evidence_ids.append(public_id)
+
+    anchor = graph.selected.document.derived[0]
+
+    def with_evidence(count: int) -> ReportDocument:
+        values = tuple(
+            replace(
+                anchor,
+                claim_id=f"derived:query-batch:{index}",
+                evidence=(ReportEvidenceRef(public_id, "derived"),),
+            )
+            for index, public_id in enumerate(evidence_ids[:count])
+        )
+        return replace(
+            graph.selected.document,
+            evidence_availability=(),
+            observed=(),
+            derived=values,
+            inferred=(),
+        )
+
+    engine = factory.kw["bind"]
+
+    def select_count(document: ReportDocument) -> int:
+        selected: list[str] = []
+
+        def count_selects(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _many: bool,
+        ) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                selected.append(statement)
+
+        event.listen(engine, "before_cursor_execute", count_selects)
+        try:
+            with factory() as session:
+                replay = session.scalar(
+                    select(Replay).where(Replay.public_id == published_graph.replay_public_id)
+                )
+                assert replay is not None
+                published_graph.service._validate_evidence_index(
+                    session,
+                    replay,
+                    document,
+                    selected_parser_run_id,
+                    selected_telemetry_run_id,
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", count_selects)
+        return len(selected) - 1  # Exclude the replay lookup outside the authority validator.
+
+    one_count = select_count(with_evidence(1))
+    many_count = select_count(with_evidence(8))
+
+    assert one_count <= 3
+    assert many_count == one_count
+
+
+def test_modern_report_rejects_same_parser_evidence_from_a_different_telemetry_attempt(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    now = datetime(2026, 8, 23, 10, 25, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_update"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))  # type: ignore[union-attr]
+        evidence = session.scalar(
+            select(EvidenceItem).where(EvidenceItem.public_id == published_graph.telemetry_evidence_id)
+        )
+        assert replay is not None and parser is not None and evidence is not None
+        other_telemetry = TelemetryRun(
+            run_id=stable_uuid("query-same-parser-other-telemetry"),
+            replay_id=replay.id,
+            schema_version=2,
+            engine_build="query-other-engine-v1",
+            engine_executable_sha256="b" * 64,
+            settings_json={"parser_run_id": parser.run_id},
+            status="succeeded",
+            runner_status="success",
+            strategy_analysis_scope="full",
+            process_exit_code=0,
+            final_frame=1200,
+            command_count=0,
+            trace_sha256=None,
+            diagnostics_json=[],
+            started_at=now,
+            completed_at=now,
+        )
+        session.add(other_telemetry)
+        session.flush()
+        evidence.telemetry_run_id = other_telemetry.id
+
+    with pytest.raises(ReportGraphContractError, match="telemetry.*authority|authority.*telemetry"):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+
+
+def test_fixed_query_rejects_a_different_fully_validated_asset_claim(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None and isinstance(original.output_json, dict)
+        _add_legacy_report_claimant(
+            session,
+            original,
+            datetime(2026, 8, 23, 10, 0, tzinfo=UTC),
+            label="query-divergent-legacy",
+            poison="divergent_assets",
+        )
 
     with pytest.raises(ReportGraphAmbiguousError):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+
+
+@pytest.mark.parametrize(
+    "poison",
+    (
+        "invalid_result",
+        "permissive_recipe",
+        "cross_branch",
+        "parse_run_mismatch",
+        "telemetry_run_mismatch",
+        "telemetry_retryable",
+        "telemetry_nonterminal",
+        "telemetry_failure_mismatch",
+        "telemetry_dependency_failed_claims_run",
+    ),
+)
+def test_fixed_query_does_not_mask_an_invalid_successful_claimant(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+    poison: str,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None and isinstance(original.output_json, dict)
+        _add_legacy_report_claimant(
+            session,
+            original,
+            datetime(2026, 8, 23, 10, 0, tzinfo=UTC),
+            label=f"query-invalid-{poison}",
+            poison=poison,
+        )
+
+    with pytest.raises(ReportGraphContractError):
         published_graph.service.get_report(
             FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
         )

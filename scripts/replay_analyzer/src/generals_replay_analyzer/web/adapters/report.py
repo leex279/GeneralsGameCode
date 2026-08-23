@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from generals_replay_analyzer.report.model import ReportAvailability, ReportValue, thaw_report_value
 from generals_replay_analyzer.report.query import (
@@ -121,14 +122,26 @@ def _availability(
 
 def _display_value(value: object) -> str:
     if type(value) is bool:
-        return "Yes" if value else "No"
-    if type(value) is int:
-        return str(value)
-    if type(value) is float:
-        return f"{value:.3f}".rstrip("0").rstrip(".")
+        rendered = "Yes" if value else "No"
+    elif type(value) is int:
+        rendered = str(value)
+    elif type(value) is float:
+        rendered = f"{value:.3f}".rstrip("0").rstrip(".")
+    elif type(value) is str:
+        rendered = value
+    else:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(rendered) <= 2048:
+        return rendered
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
     if type(value) is str:
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"Oversize string (characters={len(value)},utf8_bytes={len(value.encode('utf-8'))},sha256={digest})"
+    if isinstance(value, Mapping):
+        return f"Oversize mapping (entries={len(value)},canonical_utf8_bytes={len(canonical)},sha256={digest})"
+    if isinstance(value, (list, tuple)):
+        return f"Oversize list (items={len(value)},canonical_utf8_bytes={len(canonical)},sha256={digest})"
+    return f"Oversize value (canonical_utf8_bytes={len(canonical)},sha256={digest})"
 
 
 def _report_section(value: ReportValue, tier: str) -> ReportSectionKey:

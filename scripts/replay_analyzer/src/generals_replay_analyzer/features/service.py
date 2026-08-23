@@ -234,12 +234,41 @@ class FeatureExtractionService:
                     .order_by(ParserRun.run_id.desc())
                     .limit(1)
                 )
-            telemetry = session.scalar(
-                select(TelemetryRun)
-                .where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
-                .order_by(TelemetryRun.run_id.desc())
-                .limit(1)
+            telemetry_rows = tuple(
+                session.scalars(
+                    select(TelemetryRun)
+                    .where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
+                    .order_by(TelemetryRun.run_id)
+                )
             )
+            if parser is not None:
+                matching_telemetry = tuple(
+                    row
+                    for row in telemetry_rows
+                    if _mapping(row.settings_json).get("parser_run_id") == parser.run_id
+                )
+                if telemetry_rows and not matching_telemetry:
+                    raise FeatureExtractionError(
+                        "telemetry player mapping does not select one parser and telemetry branch"
+                    )
+                if len(matching_telemetry) > 1:
+                    raise FeatureExtractionError("parser and telemetry branch is ambiguous")
+                telemetry = None if not matching_telemetry else matching_telemetry[0]
+            else:
+                if len(telemetry_rows) > 1:
+                    raise FeatureExtractionError("parser and telemetry branch is ambiguous")
+                telemetry = None if not telemetry_rows else telemetry_rows[0]
+                if telemetry is not None:
+                    selected_run_id = _mapping(telemetry.settings_json).get("parser_run_id")
+                    parser = session.scalar(
+                        select(ParserRun).where(
+                            ParserRun.replay_id == replay.id,
+                            ParserRun.run_id == selected_run_id,
+                            ParserRun.status == "succeeded",
+                        )
+                    )
+                    if parser is None:
+                        raise FeatureExtractionError("telemetry branch has no authoritative parser")
             scope = (
                 FeatureScope("player", replay_player.public_id, replay_player.public_id)
                 if replay_player is not None
@@ -1086,17 +1115,17 @@ class FeatureExtractionService:
                 raise FeatureExtractionError(
                     "feature evidence cannot be both supporting and contradicting"
                 )
-        refs = {
-            ref.public_id: ref
-            for ref in original_refs
-        }
         evidence_rows = {
             item.public_id: item
-            for item in session.scalars(select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(refs)))).all()
+            for item in session.scalars(
+                select(EvidenceItem).where(
+                    EvidenceItem.public_id.in_(tuple(authorized_evidence))
+                )
+            ).all()
         }
-        if set(evidence_rows) != set(refs):
+        if set(evidence_rows) != set(authorized_evidence):
             raise ValueError("feature evidence reference does not exist")
-        for public_id, ref in refs.items():
+        for public_id, ref in authorized_evidence.items():
             row = evidence_rows[public_id]
             if row.replay_id != replay.id:
                 raise ValueError("cross-replay feature evidence is forbidden")
@@ -1107,6 +1136,49 @@ class FeatureExtractionService:
                 or _schema_label(row.source_kind, row.schema_version) != ref.schema_version
             ):
                 raise ValueError("feature evidence identity mismatch")
+        parser_run_ids = {
+            row.parser_run_id for row in evidence_rows.values() if row.parser_run_id is not None
+        }
+        telemetry_run_ids = {
+            row.telemetry_run_id
+            for row in evidence_rows.values()
+            if row.telemetry_run_id is not None
+        }
+        if len(parser_run_ids) > 1 or len(telemetry_run_ids) > 1:
+            raise ValueError("feature evidence has mixed authoritative run owners")
+        if not parser_run_ids and not telemetry_run_ids:
+            raise ValueError("feature evidence has no authoritative run owner")
+        parser_run_id = next(iter(parser_run_ids), None)
+        telemetry_run_id = next(iter(telemetry_run_ids), None)
+        telemetry = None if telemetry_run_id is None else session.get(TelemetryRun, telemetry_run_id)
+        if telemetry is not None:
+            selected_parser_run_id = _mapping(telemetry.settings_json).get("parser_run_id")
+            selected_parser = session.scalar(
+                select(ParserRun).where(
+                    ParserRun.replay_id == replay.id,
+                    ParserRun.run_id == selected_parser_run_id,
+                    ParserRun.status == "succeeded",
+                    ParserRun.completion_status == "complete",
+                )
+            )
+            if (
+                telemetry.replay_id != replay.id
+                or telemetry.status != "succeeded"
+                or selected_parser is None
+                or (parser_run_id is not None and parser_run_id != selected_parser.id)
+            ):
+                raise ValueError("feature parser and telemetry evidence do not select one branch")
+            parser_run_id = selected_parser.id
+        elif parser_run_id is not None:
+            selected_parser = session.get(ParserRun, parser_run_id)
+            if (
+                selected_parser is None
+                or selected_parser.replay_id != replay.id
+                or selected_parser.status != "succeeded"
+                or selected_parser.completion_status != "complete"
+            ):
+                raise ValueError("feature parser evidence owner is not authoritative")
+        # TheSuperHackers @bugfix Leex 23/08/2026 Preserve authoritative predecessor runs on derived feature evidence. (#TBD)
         for value in values:
             source_key = (
                 f"feature:{feature_set.public_id}:{value.name}:{value.scope.scope_type}:{value.scope.scope_key}:"
@@ -1115,6 +1187,8 @@ class FeatureExtractionService:
             derived = EvidenceItem(
                 public_id=_uuid(f"evidence:{source_key}"),
                 replay_id=replay.id,
+                parser_run_id=parser_run_id,
+                telemetry_run_id=telemetry_run_id,
                 tier="derived",
                 source_kind="feature",
                 source_key=source_key,

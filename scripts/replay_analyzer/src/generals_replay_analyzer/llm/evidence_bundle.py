@@ -34,7 +34,8 @@ EVIDENCE_BUNDLE_VERSION: Literal["evidence-bundle-v1"] = "evidence-bundle-v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _KINDS = {"replay_context", "quality", "feature", "rule_candidate", "longitudinal"}
 _QUALITIES = {"complete", "partial", "unavailable"}
-_OBSERVED_SOURCE_KINDS = {"catalog", "map_manifest", "parser", "telemetry"}
+# TheSuperHackers @bugfix Leex 23/08/2026 Authorize only canonical persisted parser and telemetry evidence kinds. (#TBD)
+_OBSERVED_SOURCE_KINDS = {"catalog", "map_manifest", "parser_command", "telemetry_event"}
 _DERIVED_SOURCE_KINDS = {"feature", "longitudinal_corpus", "strategy_rule"}
 _FORBIDDEN_VALUE_KEYS = {
     "absolute_path",
@@ -386,8 +387,9 @@ class EvidenceClaim:
             "missing_count": result.missing_count,
             "statistics": result.statistics,
         }
+        # TheSuperHackers @bugfix Leex 23/08/2026 Namespace longitudinal bundle claims without changing persisted result identity. (#TBD)
         return cls._create(
-            result.result_name,
+            f"longitudinal:{result.result_name}",
             "longitudinal",
             projection,
             quality,

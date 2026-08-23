@@ -41,7 +41,7 @@ def _claim(public_id: str, **changes: object) -> EvidenceClaim:
         EvidenceRef(
             item,
             "observed",
-            "telemetry",
+            "telemetry_event",
             f"event:{index}:{item}",
             "telemetry-v2",
         )
@@ -373,7 +373,12 @@ def test_deep_value_is_rejected_with_typed_error_before_python_recursion(public_
     assert caught.value.code in {"evidence_bundle_oversize", "invalid_evidence_value"}
 
 
-def _observed_ref(public_id: str, *, source_kind: str = "telemetry", source_key: str | None = None) -> EvidenceRef:
+def _observed_ref(
+    public_id: str,
+    *,
+    source_kind: str = "telemetry_event",
+    source_key: str | None = None,
+) -> EvidenceRef:
     return EvidenceRef(
         public_id=public_id,
         tier="observed",
@@ -381,6 +386,35 @@ def _observed_ref(public_id: str, *, source_kind: str = "telemetry", source_key:
         source_key=source_key or f"event:{public_id}",
         schema_version="telemetry-v2",
     )
+
+
+@pytest.mark.parametrize("source_kind", ["parser_command", "telemetry_event"])
+def test_feature_factory_authorizes_persisted_observed_source_kinds(
+    public_ids: tuple[str, ...], source_kind: str
+) -> None:
+    ref = _observed_ref(
+        public_ids[0],
+        source_kind=source_kind,
+        source_key=f"observed-evidence:{source_kind}:v1:stable-identity",
+    )
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(feature, input_evidence=(ref,))
+
+    claim = EvidenceClaim.from_feature(feature, authorized_evidence=(ref,))
+
+    assert claim.evidence_ids == (public_ids[0],)
+
+
+@pytest.mark.parametrize("source_kind", ["parser", "telemetry", "unknown_observation"])
+def test_feature_factory_rejects_legacy_and_unknown_observed_source_kinds(
+    public_ids: tuple[str, ...], source_kind: str
+) -> None:
+    ref = _observed_ref(public_ids[0], source_kind=source_kind)
+    feature, _ = _feature(public_ids[0])
+    feature = dataclasses.replace(feature, input_evidence=(ref,))
+
+    with pytest.raises(EvidenceBundleError, match="unauthorized_evidence"):
+        EvidenceClaim.from_feature(feature, authorized_evidence=(ref,))
 
 
 def _feature(public_id: str, raw_value: object = 1250) -> tuple[FeatureValue, EvidenceRef]:

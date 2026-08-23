@@ -222,8 +222,11 @@ class ReportService:
 
             parser = self._select_parser(session, replay, replay_player)
             telemetry = self._select_telemetry(session, replay, replay_player, parser)
+            player_authority = self._player_evidence_authority(
+                session, replay_player, parser, telemetry
+            )
             observed, parser_evidence, telemetry_evidence = self._observed_values(
-                session, replay, replay_player, parser, telemetry
+                session, replay, replay_player, parser, telemetry, player_authority
             )
             availability = self._availability_values(parser, telemetry, parser_evidence, telemetry_evidence)
             issues = tuple(
@@ -242,8 +245,12 @@ class ReportService:
                 )
             )
             derived = (
-                *self._feature_values(session, replay.id, replay_player, parser, telemetry),
-                *self._strategy_values(session, replay.id, replay_player, parser, telemetry),
+                *self._feature_values(
+                    session, replay.id, replay_player, parser, telemetry, player_authority
+                ),
+                *self._strategy_values(
+                    session, replay.id, replay_player, parser, telemetry, player_authority
+                ),
                 *self._longitudinal_values(session, replay.id, replay_player),
             )
             ollama, inferred, analysis_id = self._ollama_values(
@@ -339,33 +346,45 @@ class ReportService:
         replay_player: ReplayPlayer | None,
         parser: ParserRun | None,
     ) -> TelemetryRun | None:
-        feature_query = (
-            select(Feature)
+        own_query = (
+            select(EvidenceItem.telemetry_run_id)
+            .join(Feature, Feature.evidence_item_id == EvidenceItem.id)
+            .join(FeatureSet, Feature.feature_set_id == FeatureSet.id)
+            .where(FeatureSet.replay_id == replay.id, FeatureSet.status == "succeeded")
+        )
+        linked_query = (
+            select(EvidenceItem.telemetry_run_id)
+            .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
+            .join(Feature, Feature.id == FeatureEvidence.feature_id)
             .join(FeatureSet, Feature.feature_set_id == FeatureSet.id)
             .where(FeatureSet.replay_id == replay.id, FeatureSet.status == "succeeded")
         )
         if replay_player is None:
-            feature_query = feature_query.where(FeatureSet.replay_player_id.is_(None))
+            own_query = own_query.where(FeatureSet.replay_player_id.is_(None))
+            linked_query = linked_query.where(FeatureSet.replay_player_id.is_(None))
         else:
-            feature_query = feature_query.where(FeatureSet.replay_player_id == replay_player.id)
-        telemetry_ids: set[int] = set()
-        for feature in session.scalars(feature_query):
-            own = session.get(EvidenceItem, feature.evidence_item_id)
-            if own is not None and own.telemetry_run_id is not None:
-                telemetry_ids.add(own.telemetry_run_id)
-            for linked in session.scalars(
-                select(EvidenceItem)
-                .join(FeatureEvidence, FeatureEvidence.evidence_item_id == EvidenceItem.id)
-                .where(FeatureEvidence.feature_id == feature.id)
-            ):
-                if linked.telemetry_run_id is not None:
-                    telemetry_ids.add(linked.telemetry_run_id)
+            own_query = own_query.where(FeatureSet.replay_player_id == replay_player.id)
+            linked_query = linked_query.where(FeatureSet.replay_player_id == replay_player.id)
+        telemetry_ids = {
+            telemetry_id
+            for telemetry_id in (*session.scalars(own_query), *session.scalars(linked_query))
+            if telemetry_id is not None
+        }
         if len(telemetry_ids) > 1:
             raise ReportContractError("successful feature graphs select multiple telemetry runs")
         if telemetry_ids:
             telemetry = session.get(TelemetryRun, next(iter(telemetry_ids)))
-            if telemetry is None or telemetry.replay_id != replay.id or telemetry.status != "succeeded":
-                raise ReportContractError("successful feature graph selects an invalid telemetry run")
+            if (
+                telemetry is None
+                or telemetry.replay_id != replay.id
+                or telemetry.status != "succeeded"
+                or parser is None
+                or not isinstance(telemetry.settings_json, Mapping)
+                or telemetry.settings_json.get("parser_run_id") != parser.run_id
+            ):
+                raise ReportContractError(
+                    "successful feature graph telemetry does not match its authoritative parser"
+                )
             return telemetry
         candidates = tuple(
             session.scalars(
@@ -389,6 +408,7 @@ class ReportService:
         replay_player: ReplayPlayer | None,
         parser: ParserRun | None,
         telemetry: TelemetryRun | None,
+        player_authority: frozenset[int] | None,
     ) -> tuple[tuple[ReportValue, ...], tuple[ReportEvidenceRef, ...], tuple[ReportEvidenceRef, ...]]:
         values: list[ReportValue] = []
         parser_refs: list[ReportEvidenceRef] = []
@@ -457,8 +477,8 @@ class ReportService:
                     raise ReportContractError("telemetry event evidence does not match the selected graph")
                 payload = _mapping(event.payload_json, label="telemetry event payload")
                 player_index = payload.get("player_index")
-                if replay_player is not None and not ReportService._telemetry_evidence_owned_by_player(
-                    session, event, replay_player
+                if replay_player is not None and (
+                    player_authority is None or evidence.id not in player_authority
                 ):
                     continue
                 ref = ReportEvidenceRef(evidence.public_id, "observed")
@@ -552,10 +572,12 @@ class ReportService:
         replay_player: ReplayPlayer | None,
         parser: ParserRun | None,
         telemetry: TelemetryRun | None,
+        player_authority: frozenset[int] | None,
     ) -> tuple[ReportValue, ...]:
         query = (
-            select(Feature)
+            select(Feature, FeatureSet, EvidenceItem)
             .join(FeatureSet, Feature.feature_set_id == FeatureSet.id)
+            .join(EvidenceItem, Feature.evidence_item_id == EvidenceItem.id)
             .where(FeatureSet.replay_id == replay_id, FeatureSet.status == "succeeded")
             .order_by(Feature.name, Feature.public_id)
         )
@@ -563,33 +585,31 @@ class ReportService:
             query = query.where(FeatureSet.replay_player_id == replay_player.id)
         else:
             query = query.where(FeatureSet.replay_player_id.is_(None))
-        rows = tuple(session.scalars(query))
+        rows = tuple(session.execute(query))
+        feature_ids = tuple(row.id for row, _feature_set, _own in rows)
+        linked_by_feature: dict[int, list[EvidenceItem]] = {feature_id: [] for feature_id in feature_ids}
+        if feature_ids:
+            for feature_id, item in session.execute(
+                select(FeatureEvidence.feature_id, EvidenceItem)
+                .join(EvidenceItem, FeatureEvidence.evidence_item_id == EvidenceItem.id)
+                .where(FeatureEvidence.feature_id.in_(feature_ids))
+                .order_by(FeatureEvidence.feature_id, FeatureEvidence.evidence_item_id)
+            ):
+                linked_by_feature[feature_id].append(item)
         output: list[ReportValue] = []
-        for row in rows:
-            own = session.get(EvidenceItem, row.evidence_item_id)
-            feature_set = session.get(FeatureSet, row.feature_set_id)
+        for row, feature_set, own in rows:
             if (
-                own is None
-                or own.replay_id != replay_id
+                own.replay_id != replay_id
                 or own.tier != "derived"
                 or own.source_kind != "feature"
-                or feature_set is None
                 or (telemetry is not None and own.telemetry_run_id != telemetry.id)
             ):
                 raise ReportContractError("successful feature is missing its derived public evidence")
-            linked_ids = session.scalars(
-                select(FeatureEvidence.evidence_item_id)
-                .where(FeatureEvidence.feature_id == row.id)
-                .order_by(FeatureEvidence.evidence_item_id)
-            )
             evidence = {ReportEvidenceRef(own.public_id, "derived")}
-            for evidence_id in linked_ids:
-                item = session.get(EvidenceItem, evidence_id)
-                if item is None:
-                    raise ReportContractError("successful feature has missing predecessor evidence")
+            for item in linked_by_feature[row.id]:
                 ReportService._validate_predecessor(item, replay_id, parser, telemetry, set())
                 if replay_player is not None:
-                    ReportService._validate_player_predecessor(session, item, replay_player)
+                    ReportService._validate_player_predecessor(item, player_authority)
                 evidence.add(ReportEvidenceRef(item.public_id, cast(ReportEvidenceTier, item.tier)))
             raw = _feature_raw(row)
             output.append(
@@ -625,9 +645,11 @@ class ReportService:
         replay_player: ReplayPlayer | None,
         parser: ParserRun | None,
         telemetry: TelemetryRun | None,
+        player_authority: frozenset[int] | None,
     ) -> tuple[ReportValue, ...]:
         query = (
-            select(StrategyAssessment)
+            select(StrategyAssessment, EvidenceItem)
+            .join(EvidenceItem, StrategyAssessment.evidence_item_id == EvidenceItem.id)
             .where(StrategyAssessment.replay_id == replay_id, StrategyAssessment.method == "rule")
             .order_by(StrategyAssessment.strategy_label, StrategyAssessment.public_id)
         )
@@ -645,29 +667,33 @@ class ReportService:
         else:
             feature_query = feature_query.where(FeatureSet.replay_player_id == replay_player.id)
         allowed_derived = set(session.scalars(feature_query))
+        rows = tuple(session.execute(query))
+        assessment_ids = tuple(row.id for row, _own in rows)
+        linked_by_assessment: dict[int, list[EvidenceItem]] = {
+            assessment_id: [] for assessment_id in assessment_ids
+        }
+        if assessment_ids:
+            for assessment_id, item in session.execute(
+                select(AssessmentEvidence.assessment_id, EvidenceItem)
+                .join(EvidenceItem, AssessmentEvidence.evidence_item_id == EvidenceItem.id)
+                .where(AssessmentEvidence.assessment_id.in_(assessment_ids))
+                .order_by(AssessmentEvidence.assessment_id, AssessmentEvidence.evidence_item_id)
+            ):
+                linked_by_assessment[assessment_id].append(item)
         output: list[ReportValue] = []
-        for row in session.scalars(query):
-            own = session.get(EvidenceItem, row.evidence_item_id)
+        for row, own in rows:
             if (
-                own is None
-                or own.replay_id != replay_id
+                own.replay_id != replay_id
                 or own.tier != "derived"
                 or own.source_kind != "strategy_rule"
                 or (telemetry is not None and own.telemetry_run_id != telemetry.id)
             ):
                 raise ReportContractError("deterministic strategy assessment is missing derived public evidence")
             evidence = {ReportEvidenceRef(own.public_id, "derived")}
-            for evidence_id in session.scalars(
-                select(AssessmentEvidence.evidence_item_id)
-                .where(AssessmentEvidence.assessment_id == row.id)
-                .order_by(AssessmentEvidence.evidence_item_id)
-            ):
-                item = session.get(EvidenceItem, evidence_id)
-                if item is None:
-                    raise ReportContractError("deterministic assessment has missing predecessor evidence")
+            for item in linked_by_assessment[row.id]:
                 ReportService._validate_predecessor(item, replay_id, parser, telemetry, allowed_derived)
                 if replay_player is not None:
-                    ReportService._validate_player_predecessor(session, item, replay_player)
+                    ReportService._validate_player_predecessor(item, player_authority)
                 evidence.add(ReportEvidenceRef(item.public_id, cast(ReportEvidenceTier, item.tier)))
             raw: object | None = (
                 None
@@ -916,39 +942,178 @@ class ReportService:
         raise ReportContractError("predecessor evidence tier is not authorized")
 
     @staticmethod
-    def _validate_player_predecessor(session: Session, item: EvidenceItem, replay_player: ReplayPlayer) -> None:
-        if item.tier == "derived":
-            feature = session.scalar(select(Feature).where(Feature.evidence_item_id == item.id))
-            if feature is None or feature.replay_player_id != replay_player.id:
-                raise ReportContractError("predecessor evidence is not owned by the requested player")
-            return
-        if item.telemetry_run_id is not None:
-            event = session.scalar(select(TelemetryEvent).where(TelemetryEvent.evidence_item_id == item.id))
-            if event is None or not ReportService._telemetry_evidence_owned_by_player(session, event, replay_player):
-                raise ReportContractError("telemetry predecessor is not owned by the requested player")
-            return
-        command = session.scalar(select(ReplayCommand).where(ReplayCommand.evidence_item_id == item.id))
-        if command is None or command.replay_player_id != replay_player.id:
-            raise ReportContractError("parser predecessor is not owned by the requested player")
+    def _validate_player_predecessor(
+        item: EvidenceItem,
+        player_authority: frozenset[int] | None,
+    ) -> None:
+        if player_authority is None or item.id not in player_authority:
+            raise ReportContractError("predecessor evidence is not owned by the requested player")
 
     @staticmethod
-    def _telemetry_evidence_owned_by_player(
+    def _player_evidence_authority(
+        session: Session,
+        replay_player: ReplayPlayer | None,
+        parser: ParserRun | None,
+        telemetry: TelemetryRun | None,
+    ) -> frozenset[int] | None:
+        if replay_player is None:
+            return None
+        owned = (
+            set(
+                session.scalars(
+                    select(ReplayCommand.evidence_item_id).where(
+                        ReplayCommand.parser_run_id == parser.id,
+                        ReplayCommand.replay_player_id == replay_player.id,
+                    )
+                )
+            )
+            if parser is not None
+            else set()
+        )
+        owned.update(
+            session.scalars(
+                select(Feature.evidence_item_id).where(Feature.replay_player_id == replay_player.id)
+            )
+        )
+        if telemetry is None:
+            return frozenset(owned)
+        events = tuple(
+            session.scalars(
+                select(TelemetryEvent)
+                .where(TelemetryEvent.telemetry_run_id == telemetry.id)
+                .order_by(TelemetryEvent.sequence, TelemetryEvent.id)
+            )
+        )
+        mapped_player_index = (
+            None
+            if not events
+            else ReportService._resolved_telemetry_player_index(session, events[0], replay_player)
+        )
+        has_initialization = any(event.event_type == "players_initialized" for event in events)
+        event_ids = tuple(event.id for event in events)
+        economy_owners: dict[int, int | None] = {}
+        production_owners: dict[int, int | None] = {}
+        combat_owners: dict[int, tuple[int | None, int | None]] = {}
+        if event_ids:
+            economy_owners = {
+                event_id: owner_id
+                for event_id, owner_id in session.execute(
+                    select(EconomyEvent.telemetry_event_id, EconomyEvent.replay_player_id).where(
+                        EconomyEvent.telemetry_event_id.in_(event_ids)
+                    )
+                )
+            }
+            production_owners = {
+                event_id: owner_id
+                for event_id, owner_id in session.execute(
+                    select(ProductionEvent.telemetry_event_id, ProductionEvent.replay_player_id).where(
+                        ProductionEvent.telemetry_event_id.in_(event_ids)
+                    )
+                )
+            }
+            combat_owners = {
+                event_id: (attacker_id, victim_id)
+                for event_id, attacker_id, victim_id in session.execute(
+                    select(
+                        CombatEvent.telemetry_event_id,
+                        CombatEvent.attacker_replay_player_id,
+                        CombatEvent.victim_replay_player_id,
+                    ).where(CombatEvent.telemetry_event_id.in_(event_ids))
+                )
+            }
+        for event in events:
+            payload = _mapping(event.payload_json, label="telemetry event payload")
+            payload_index = payload.get("player_index")
+            if payload_index is None:
+                owned.add(event.evidence_item_id)
+                continue
+            mapped = (
+                mapped_player_index is not None and payload_index == mapped_player_index
+                if has_initialization
+                else True
+            )
+            economy_owner = economy_owners.get(event.id)
+            production_owner = production_owners.get(event.id)
+            combat_owner = combat_owners.get(event.id)
+            if economy_owner is not None:
+                if economy_owner == replay_player.id and mapped:
+                    owned.add(event.evidence_item_id)
+            elif production_owner is not None:
+                if production_owner == replay_player.id and mapped:
+                    owned.add(event.evidence_item_id)
+            elif combat_owner is not None:
+                if replay_player.id in combat_owner and mapped:
+                    owned.add(event.evidence_item_id)
+            elif mapped_player_index is not None:
+                if payload_index == mapped_player_index:
+                    owned.add(event.evidence_item_id)
+            elif not has_initialization and replay_player.player_index == payload_index:
+                owned.add(event.evidence_item_id)
+        return frozenset(owned)
+
+    # TheSuperHackers @bugfix Leex 23/08/2026 Reuse the accepted telemetry slot mapping for report ownership. (#TBD)
+    @staticmethod
+    def _resolved_telemetry_player_index(
         session: Session, event: TelemetryEvent, replay_player: ReplayPlayer
-    ) -> bool:
-        payload = _mapping(event.payload_json, label="telemetry event payload")
-        if payload.get("player_index") is None:
-            return True
-        if replay_player.player_index is not None:
-            return payload["player_index"] == replay_player.player_index
-        for model in (EconomyEvent, ProductionEvent):
-            owner_id = session.scalar(select(model.replay_player_id).where(model.telemetry_event_id == event.id))
-            if owner_id is not None:
-                return owner_id == replay_player.id
-        combat = session.scalar(select(CombatEvent).where(CombatEvent.telemetry_event_id == event.id))
-        return combat is not None and replay_player.id in {
-            combat.attacker_replay_player_id,
-            combat.victim_replay_player_id,
-        }
+    ) -> int | None:
+        telemetry = session.get(TelemetryRun, event.telemetry_run_id)
+        if telemetry is None or telemetry.replay_id != replay_player.replay_id or telemetry.status != "succeeded":
+            return None
+        parser_run_id = _mapping(telemetry.settings_json, label="telemetry settings").get("parser_run_id")
+        if type(parser_run_id) is not str or not parser_run_id:
+            return None
+        parser = session.scalar(
+            select(ParserRun).where(
+                ParserRun.id == replay_player.parser_run_id,
+                ParserRun.replay_id == replay_player.replay_id,
+                ParserRun.run_id == parser_run_id,
+                ParserRun.status == "succeeded",
+            )
+        )
+        if parser is None:
+            return None
+        players = tuple(
+            session.scalars(
+                select(ReplayPlayer).where(
+                    ReplayPlayer.parser_run_id == parser.id,
+                    ReplayPlayer.replay_id == replay_player.replay_id,
+                )
+            )
+        )
+        by_slot = {player.slot_index: player for player in players}
+        if len(by_slot) != len(players):
+            return None
+        snapshots = tuple(
+            session.scalars(
+                select(TelemetryEvent).where(
+                    TelemetryEvent.telemetry_run_id == telemetry.id,
+                    TelemetryEvent.event_type == "players_initialized",
+                )
+            )
+        )
+        if len(snapshots) != 1:
+            return None
+        slots = _mapping(snapshots[0].payload_json, label="players initialized payload").get("slots")
+        if type(slots) is not list:
+            return None
+        resolved: dict[int, int] = {}
+        resolved_player_indices: set[int] = set()
+        for raw_slot in slots:
+            if not isinstance(raw_slot, Mapping) or raw_slot.get("resolution_status") != "resolved":
+                continue
+            slot_index = raw_slot.get("slot_index")
+            player_index = raw_slot.get("player_index")
+            if (
+                type(slot_index) is not int
+                or type(player_index) is not int
+                or slot_index not in by_slot
+                or slot_index in resolved
+                or player_index in resolved_player_indices
+            ):
+                return None
+            resolved[slot_index] = player_index
+            resolved_player_indices.add(player_index)
+        return resolved.get(replay_player.slot_index)
 
     @staticmethod
     def _ollama_values(

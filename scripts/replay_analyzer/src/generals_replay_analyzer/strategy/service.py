@@ -19,9 +19,11 @@ from generals_replay_analyzer.db.models import (
     Feature,
     FeatureEvidence,
     FeatureSet,
+    ParserRun,
     Replay,
     ReplayPlayer,
     StrategyAssessment,
+    TelemetryRun,
 )
 from generals_replay_analyzer.features.base import (
     FeatureScope,
@@ -574,8 +576,60 @@ class StrategyAssessmentService:
                 if replay_player is None:
                     raise ValueError("replay player disappeared before strategy persistence")
             authorized = self._authorized_evidence(session, replay, context, assessments)
+            parser_run_ids = {
+                item.parser_run_id for item in authorized.values() if item.parser_run_id is not None
+            }
+            telemetry_run_ids = {
+                item.telemetry_run_id
+                for item in authorized.values()
+                if item.telemetry_run_id is not None
+            }
+            if len(parser_run_ids) > 1 or len(telemetry_run_ids) > 1:
+                raise ValueError("strategy evidence has mixed authoritative run owners")
+            if not parser_run_ids and not telemetry_run_ids:
+                raise ValueError("strategy evidence has no authoritative run owner")
+            parser_run_id = next(iter(parser_run_ids), None)
+            telemetry_run_id = next(iter(telemetry_run_ids), None)
+            telemetry = None if telemetry_run_id is None else session.get(TelemetryRun, telemetry_run_id)
+            if telemetry is not None:
+                settings = telemetry.settings_json if isinstance(telemetry.settings_json, Mapping) else {}
+                selected_parser = session.scalar(
+                    select(ParserRun).where(
+                        ParserRun.replay_id == replay.id,
+                        ParserRun.run_id == settings.get("parser_run_id"),
+                        ParserRun.status == "succeeded",
+                        ParserRun.completion_status == "complete",
+                    )
+                )
+                if (
+                    telemetry.replay_id != replay.id
+                    or telemetry.status != "succeeded"
+                    or selected_parser is None
+                    or (parser_run_id is not None and parser_run_id != selected_parser.id)
+                ):
+                    raise ValueError("strategy parser and telemetry evidence do not select one branch")
+                parser_run_id = selected_parser.id
+            elif parser_run_id is not None:
+                selected_parser = session.get(ParserRun, parser_run_id)
+                if (
+                    selected_parser is None
+                    or selected_parser.replay_id != replay.id
+                    or selected_parser.status != "succeeded"
+                    or selected_parser.completion_status != "complete"
+                ):
+                    raise ValueError("strategy parser evidence owner is not authoritative")
             for assessment in assessments:
-                self._insert_assessment(session, replay, replay_player, assessment, taxonomy, cache_key, authorized)
+                self._insert_assessment(
+                    session,
+                    replay,
+                    replay_player,
+                    assessment,
+                    taxonomy,
+                    cache_key,
+                    authorized,
+                    parser_run_id,
+                    telemetry_run_id,
+                )
             session.flush()
             self._after_graph_insert(session)
             session.commit()
@@ -641,12 +695,12 @@ class StrategyAssessmentService:
         rows = {
             item.public_id: item
             for item in session.scalars(
-                select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(assessment_refs)))
+                select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(context_refs)))
             ).all()
         }
-        if set(rows) != set(assessment_refs):
-            raise ValueError("unknown assessment evidence public ID")
-        for public_id, ref in assessment_refs.items():
+        if set(rows) != set(context_refs):
+            raise ValueError("unknown strategy context evidence public ID")
+        for public_id, ref in context_refs.items():
             row = rows[public_id]
             if row.replay_id != replay.id:
                 raise ValueError("cross-replay assessment evidence is forbidden")
@@ -663,6 +717,8 @@ class StrategyAssessmentService:
         taxonomy: StrategyTaxonomy,
         cache_key: str,
         authorized: Mapping[str, EvidenceItem],
+        parser_run_id: int | None,
+        telemetry_run_id: int | None,
     ) -> None:
         supporting_ids = {ref.public_id for ref in assessment.supporting_evidence}
         contradicting_ids = {ref.public_id for ref in assessment.contradicting_evidence}
@@ -677,11 +733,14 @@ class StrategyAssessmentService:
         evidence = EvidenceItem(
             public_id=_uuid(f"evidence:{source_key}"),
             replay_id=replay.id,
+            parser_run_id=parser_run_id,
+            telemetry_run_id=telemetry_run_id,
             tier="derived",
             source_kind="strategy_rule",
             source_key=source_key,
             schema_version=1,
         )
+        # TheSuperHackers @bugfix Leex 23/08/2026 Preserve authoritative predecessor runs on derived strategy evidence. (#TBD)
         session.add(evidence)
         session.flush()
         row = StrategyAssessment(

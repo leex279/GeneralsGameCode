@@ -322,7 +322,12 @@ class DeriveFeaturesHandler:
                     session.execute(
                         select(ReplayPlayer.public_id, Player.public_id)
                         .outerjoin(Player, Player.id == ReplayPlayer.player_id)
-                        .where(ReplayPlayer.replay_id == replay.id, ReplayPlayer.parser_run_id == parser.id)
+                        # TheSuperHackers @bugfix Leex 23/08/2026 Exclude unoccupied parser slots from player-scoped analysis. (#TBD)
+                        .where(
+                            ReplayPlayer.replay_id == replay.id,
+                            ReplayPlayer.parser_run_id == parser.id,
+                            ReplayPlayer.slot_kind.in_(("human", "ai")),
+                        )
                         .order_by(ReplayPlayer.public_id)
                     )
                 )
@@ -650,9 +655,11 @@ class RenderReportHandler:
                         for replay_player_public_id, player_public_id in session.execute(
                             select(ReplayPlayer.public_id, Player.public_id)
                             .outerjoin(Player, Player.id == ReplayPlayer.player_id)
+                            # TheSuperHackers @bugfix Leex 23/08/2026 Keep report subjects aligned with occupied parser slots. (#TBD)
                             .where(
                                 ReplayPlayer.replay_id == replay.id,
                                 ReplayPlayer.parser_run_id == parser.id,
+                                ReplayPlayer.slot_kind.in_(("human", "ai")),
                             )
                             .order_by(ReplayPlayer.public_id)
                         )
