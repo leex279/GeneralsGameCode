@@ -212,7 +212,7 @@ def test_security_headers_apply_to_success_and_problem_responses() -> None:
             "base-uri 'none'; frame-ancestors 'none'"
         )
         assert response.headers["x-content-type-options"] == "nosniff"
-        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["referrer-policy"] == "same-origin"
         assert response.headers["x-frame-options"] == "DENY"
         assert response.headers["cross-origin-opener-policy"] == "same-origin"
         assert response.headers["permissions-policy"] == (

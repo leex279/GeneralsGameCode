@@ -133,7 +133,7 @@ def test_package_static_mount_serves_local_assets_and_rejects_traversal_without_
         "base-uri 'none'; frame-ancestors 'none'"
     )
     assert stylesheet.headers["x-content-type-options"] == "nosniff"
-    assert stylesheet.headers["referrer-policy"] == "no-referrer"
+    assert stylesheet.headers["referrer-policy"] == "same-origin"
     assert stylesheet.headers["x-frame-options"] == "DENY"
     assert traversal.status_code == 404
     assert encoded_traversal.status_code == 404

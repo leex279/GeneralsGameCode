@@ -80,7 +80,7 @@ def test_security_headers_cover_html_json_static_and_problem_responses(
     csp = headers["Content-Security-Policy"]
     assert all(directive in csp for directive in REQUIRED_CSP_DIRECTIVES)
     assert not any(token in csp for token in FORBIDDEN_CSP_TOKENS)
-    assert headers["Referrer-Policy"] == "no-referrer"
+    assert headers["Referrer-Policy"] == "same-origin"
     assert headers["X-Frame-Options"] == "DENY"
     assert headers["Cross-Origin-Opener-Policy"] == "same-origin"
     permissions = headers["Permissions-Policy"]
@@ -110,13 +110,13 @@ def test_populated_fixed_json_and_real_map_png_are_hardened_and_path_free(
     )
     for path, accept, expected_media_type in resources:
         status, headers, body = _response(origin, path, accept=accept)
-        assert status == 200
+        assert status == 200, (path, status, body)
         assert headers["Content-Type"].startswith(expected_media_type)
         assert headers["X-Content-Type-Options"] == "nosniff"
         csp = headers["Content-Security-Policy"]
         assert all(directive in csp for directive in REQUIRED_CSP_DIRECTIVES)
         assert not any(token in csp for token in FORBIDDEN_CSP_TOKENS)
-        assert headers["Referrer-Policy"] == "no-referrer"
+        assert headers["Referrer-Policy"] == "same-origin"
         assert headers["X-Frame-Options"] == "DENY"
         assert headers["Cross-Origin-Opener-Policy"] == "same-origin"
         assert body.find(str(populated_server.runtime_root).encode()) == -1

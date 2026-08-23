@@ -137,12 +137,12 @@ def test_production_web_adapter_projects_one_fixed_report_and_its_evidence(
         )
         assert type(projected.source).__name__ == expected_type
 
-    timeline = adapter.timeline_chart(
-        TimelineChartQueryDTO(
-            replay_public_id=published.replay_public_id,
-            report_public_id=published.player_report_id,
-        )
+    timeline_query = TimelineChartQueryDTO(
+        replay_public_id=published.replay_public_id,
+        report_public_id=published.player_report_id,
     )
+    timeline = adapter.timeline_chart(timeline_query)
+    assert timeline.query == timeline_query
     assert timeline.query.report_public_id == report.fixed_report.report_public_id
     assert timeline.timebase_fps == 30
 

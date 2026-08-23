@@ -360,16 +360,11 @@ class AnalyticsReportAdapter:
                 code="report_timeline_unavailable",
                 detail="Replay timeline is temporarily unavailable",
             ) from error
-        return self._timeline(chart)
+        return self._timeline(chart, query)
 
     @staticmethod
-    def _timeline(chart: AnalyticsTimelineChartDTO) -> TimelineChartDTO:
-        effective_query = TimelineChartQueryDTO(
-            replay_public_id=chart.replay_public_id,
-            report_public_id=chart.report_public_id,
-            players=chart.selected_player_public_ids,
-            families=chart.selected_families,
-        )
+    # TheSuperHackers @fix Leex 23/08/2026 Keep expanded timeline defaults separate from the immutable public request identity. (#TBD)
+    def _timeline(chart: AnalyticsTimelineChartDTO, query: TimelineChartQueryDTO) -> TimelineChartDTO:
         series = tuple(
             TimelineSeriesDTO(
                 series_id=item.series_id,
@@ -415,7 +410,7 @@ class AnalyticsReportAdapter:
         )
         return TimelineChartDTO(
             schema_version="web-report-timeline-v1",
-            query=effective_query,
+            query=query,
             availability=_availability(chart.availability, chart.unavailable_reason),
             timebase_fps=chart.frames_per_second,
             available_players=tuple(

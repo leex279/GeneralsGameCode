@@ -60,7 +60,8 @@ class PublicProblem(Exception):
 def apply_security_headers(response: _ResponseT) -> _ResponseT:
     response.headers["content-security-policy"] = CONTENT_SECURITY_POLICY
     response.headers["x-content-type-options"] = "nosniff"
-    response.headers["referrer-policy"] = "no-referrer"
+    # TheSuperHackers @fix Leex 23/08/2026 Preserve the exact loopback origin for native form POSTs without cross-origin referrers. (#TBD)
+    response.headers["referrer-policy"] = "same-origin"
     response.headers["x-frame-options"] = "DENY"
     response.headers["cross-origin-opener-policy"] = "same-origin"
     response.headers["permissions-policy"] = PERMISSIONS_POLICY

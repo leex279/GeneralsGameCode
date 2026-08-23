@@ -403,6 +403,7 @@ def test_settings_preview_normalizes_one_change_without_writing() -> None:
     assert port.applies == []
     assert "Affected analysis stages" in response.text
     assert "Apply confirmed change" in response.text
+    assert '<a class="button" href="/settings">Cancel settings change</a>' in response.text
 
 
 def test_settings_apply_requires_exact_preview_identity_and_returns_refreshed_page() -> None:

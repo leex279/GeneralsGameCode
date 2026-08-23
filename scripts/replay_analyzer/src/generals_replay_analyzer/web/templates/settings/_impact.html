@@ -12,5 +12,7 @@
     {% for change in impact.normalized_changes %}<input type="hidden" name="setting_key" value="{{ change.key }}"><input type="hidden" name="setting_value" value="{{ change.value }}">{% endfor %}
     <label><input type="checkbox" name="confirm_invalidating_change" value="true" required> I confirm this versioned settings impact. Existing outputs remain unchanged until explicit re-analysis.</label>
     <button type="submit">Apply confirmed change</button>
+    <!-- TheSuperHackers @fix Leex 23/08/2026 Keep native settings previews reversible without JavaScript. (#TBD) -->
+    <a class="button" href="/settings">Cancel settings change</a>
   </form>
 </section>

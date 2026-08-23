@@ -486,7 +486,7 @@ def test_settings_preview_cancel_apply_and_diagnostic_are_keyboard_operable(
     _tab_to(page, apply)
     page.keyboard.press("Enter")
     mutation_status = page.locator('section.notice[role="status"]')
-    expect(mutation_status).to_contain_text("Settings applied")
+    expect(mutation_status).to_contain_text("Settings updated")
     expect(mutation_status).to_contain_text("No analysis jobs were queued")
 
     diagnostic = page.get_by_role("button", name=re.compile(r"^Run ")).first
