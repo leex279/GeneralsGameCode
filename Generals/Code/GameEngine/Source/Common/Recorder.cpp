@@ -1027,6 +1027,8 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 
 			// Print Mismatch in case we are simulating replays from console.
 			printf("CRC Mismatch in Frame %d\n", mismatchFrame);
+			// TheSuperHackers @fix Leex 23/08/2026 Flush CRC diagnostics so rendered replay automation can observe the mismatch before shutdown. (#TBD)
+			fflush(stdout);
 
 			// TheSuperHackers @tweak Pause the game on mismatch.
 			// But not when a window with focus is opened, because that can make resuming difficult.

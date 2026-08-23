@@ -168,6 +168,9 @@ def test_crc_comparison_uses_human_slot_policy_and_paired_snapshot_frame(
     assert "playbackCRC.value" in handler
     assert "const UnsignedInt mismatchFrame = playbackCRC.frame;" in handler
     assert "TheGameLogic->getFrame() - m_crcInfo.GetQueueSize() - 1" not in handler
+    assert handler.index('printf("CRC Mismatch in Frame %d\\n", mismatchFrame);') < handler.index(
+        "fflush(stdout);"
+    )
 
 
 def _runtime_environment(repository_root: Path) -> dict[str, str]:
