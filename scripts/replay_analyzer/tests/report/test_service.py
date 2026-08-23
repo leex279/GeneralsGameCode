@@ -31,7 +31,12 @@ from generals_replay_analyzer.db.models import (
     TelemetryRun,
 )
 from generals_replay_analyzer.report.model import ReportRequest, document_to_mapping
-from generals_replay_analyzer.report.service import ReportContractError, ReportNotFoundError, ReportService
+from generals_replay_analyzer.report.service import (
+    ReportContractError,
+    ReportNotFoundError,
+    ReportService,
+    _evenly_sample,
+)
 from generals_replay_analyzer.storage import ContentAddressedStore
 
 from .conftest import SeededReportDatabase, stable_uuid
@@ -43,6 +48,17 @@ def _service(database: SeededReportDatabase) -> ReportService:
         settings=database.settings,
         store=ContentAddressedStore(database.settings.cache_directory / "reports"),
     )
+
+
+def test_full_match_observation_sampling_is_bounded_and_spans_the_timeline() -> None:
+    rows = tuple(range(10_000))
+
+    selected = _evenly_sample(rows, 256)
+
+    assert len(selected) == 256
+    assert selected[0] == rows[0]
+    assert selected[-1] == rows[-1]
+    assert selected == tuple(sorted(set(selected)))
 
 
 def test_report_feature_assembly_query_count_is_bounded_by_batches(
@@ -409,19 +425,39 @@ def test_player_telemetry_ownership_uses_the_exact_resolved_initialization_mappi
         )
         session.commit()
 
-    receipt = _service(report_database).create(
-        ReportRequest(
-            report_database.replay_public_id,
-            report_database.replay_player_public_id,
-            publish=False,
+    ownership_statements: list[str] = []
+    engine = report_database.session_factory.kw["bind"]  # type: ignore[attr-defined]
+
+    def capture_ownership_query(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        if "FROM economy_events" in statement:
+            ownership_statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_ownership_query)
+    try:
+        receipt = _service(report_database).create(
+            ReportRequest(
+                report_database.replay_public_id,
+                report_database.replay_player_public_id,
+                publish=False,
+            )
         )
-    )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_ownership_query)
 
     assert report_database.observed_evidence_id in {
         reference.public_id
         for value in receipt.document.derived
         for reference in value.evidence
     }
+    assert ownership_statements
+    assert all("JOIN telemetry_events" in statement for statement in ownership_statements)
 
 
 @pytest.mark.parametrize(

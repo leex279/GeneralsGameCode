@@ -42,7 +42,8 @@ IMPORT_OBSERVATIONS_VERSION = "1"
 DERIVE_FEATURES_VERSION = "1"
 ASSESS_STRATEGIES_VERSION = "1"
 ANALYZE_LLM_VERSION = "1"
-RENDER_REPORT_VERSION = "1"
+# TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
+RENDER_REPORT_VERSION = "2"
 
 
 def canonical_json(value: Any) -> str:

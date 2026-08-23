@@ -42,6 +42,7 @@ from generals_replay_analyzer.features.evidence import EvidenceRef
 from generals_replay_analyzer.identity.audit import identity_cache_digest
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.service import StageDependencyOutput, StageExecutionContext
+from generals_replay_analyzer.importing.stages import RENDER_REPORT, RENDER_REPORT_VERSION
 from generals_replay_analyzer.llm.evidence_bundle import build_evidence_bundle
 from generals_replay_analyzer.llm.provider import OllamaClientConfig
 from generals_replay_analyzer.llm.service import AnalysisOutcome, DeterministicFallback
@@ -300,7 +301,7 @@ def _context(
         REPLAY_ID,
         REPLAY_SHA,
         stage,
-        "1",
+        RENDER_REPORT_VERSION if stage == RENDER_REPORT else "1",
         input_value or {},
         (
             StageDependencyOutput(

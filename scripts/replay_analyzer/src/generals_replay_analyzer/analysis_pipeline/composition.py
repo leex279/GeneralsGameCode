@@ -23,6 +23,7 @@ from ..importing.service import (
     TelemetryAcquirer,
     TerminalDependencyPolicy,
 )
+from ..importing.stages import RENDER_REPORT_VERSION
 from ..importing.telemetry_import import ObservationImportHandler, TelemetryObservationImporter
 from ..llm.provider import OllamaClientConfig
 from ..llm.service import HttpxOllamaTransport, OllamaAnalysisService
@@ -130,7 +131,7 @@ def create_production_import_service(
         ),
         StageHandlerRegistration(
             "render_report",
-            "1",
+            RENDER_REPORT_VERSION,
             RenderReportHandler(reports, session_factory=session_factory),
         ),
     )

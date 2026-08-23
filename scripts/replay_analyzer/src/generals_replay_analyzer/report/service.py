@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import TypeVar, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
@@ -75,6 +75,25 @@ from generals_replay_analyzer.report.resources import ReportResources, load_repo
 from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 
 _ASSET_NAMESPACE = uuid5(NAMESPACE_URL, "replay-report-managed-asset-v1")
+_MAX_PARSER_OBSERVATIONS = 256
+_MAX_TELEMETRY_OBSERVATIONS = 512
+_MAX_NOISY_TELEMETRY_OBSERVATIONS = 32
+_CRITICAL_TELEMETRY_EVENT_TYPES = frozenset(
+    {
+        "construction_completed",
+        "construction_started",
+        "damage",
+        "object_created",
+        "object_destroyed",
+        "order",
+        "production_completed",
+        "production_queued",
+        "science_purchased",
+        "special_power_used",
+    }
+)
+_NOISY_TELEMETRY_EVENT_TYPES = frozenset({"entity_sample", "entity_state_changed"})
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -113,6 +132,20 @@ def _mapping(value: object, *, label: str) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ReportContractError(f"{label} must be a canonical mapping")
     return {str(key): item for key, item in value.items()}
+
+
+# TheSuperHackers @performance Leex 23/08/2026 Keep full-match report timelines deterministic and bounded across the match. (#TBD)
+def _evenly_sample(rows: Sequence[_T], limit: int) -> tuple[_T, ...]:
+    if limit < 0:
+        raise ValueError("sample limit must be nonnegative")
+    if len(rows) <= limit:
+        return tuple(rows)
+    if limit == 0:
+        return ()
+    if limit == 1:
+        return (rows[0],)
+    last = len(rows) - 1
+    return tuple(rows[(index * last) // (limit - 1)] for index in range(limit))
 
 
 def _diagnostic_codes(value: object) -> tuple[str, ...]:
@@ -225,10 +258,17 @@ class ReportService:
             player_authority = self._player_evidence_authority(
                 session, replay_player, parser, telemetry
             )
-            observed, parser_evidence, telemetry_evidence = self._observed_values(
+            observed, parser_evidence, telemetry_evidence, parser_total, telemetry_total = self._observed_values(
                 session, replay, replay_player, parser, telemetry, player_authority
             )
-            availability = self._availability_values(parser, telemetry, parser_evidence, telemetry_evidence)
+            availability = self._availability_values(
+                parser,
+                telemetry,
+                parser_evidence,
+                telemetry_evidence,
+                parser_total,
+                telemetry_total,
+            )
             issues = tuple(
                 ReportQualityIssue(
                     row.public_id,
@@ -409,17 +449,33 @@ class ReportService:
         parser: ParserRun | None,
         telemetry: TelemetryRun | None,
         player_authority: frozenset[int] | None,
-    ) -> tuple[tuple[ReportValue, ...], tuple[ReportEvidenceRef, ...], tuple[ReportEvidenceRef, ...]]:
+    ) -> tuple[
+        tuple[ReportValue, ...],
+        tuple[ReportEvidenceRef, ...],
+        tuple[ReportEvidenceRef, ...],
+        int,
+        int,
+    ]:
         values: list[ReportValue] = []
         parser_refs: list[ReportEvidenceRef] = []
         telemetry_refs: list[ReportEvidenceRef] = []
+        parser_total = 0
+        telemetry_total = 0
         if parser is not None:
-            command_rows = session.execute(
-                select(ReplayCommand, EvidenceItem)
-                .join(EvidenceItem, EvidenceItem.id == ReplayCommand.evidence_item_id)
-                .where(ReplayCommand.parser_run_id == parser.id, ReplayCommand.replay_id == replay.id)
-                .order_by(ReplayCommand.frame, EvidenceItem.source_key, EvidenceItem.public_id)
+            all_command_rows = tuple(
+                session.execute(
+                    select(ReplayCommand, EvidenceItem)
+                    .join(EvidenceItem, EvidenceItem.id == ReplayCommand.evidence_item_id)
+                    .where(ReplayCommand.parser_run_id == parser.id, ReplayCommand.replay_id == replay.id)
+                    .order_by(ReplayCommand.frame, EvidenceItem.source_key, EvidenceItem.public_id)
+                )
             )
+            if replay_player is not None:
+                all_command_rows = tuple(
+                    row for row in all_command_rows if row[0].replay_player_id == replay_player.id
+                )
+            parser_total = len(all_command_rows)
+            command_rows = _evenly_sample(all_command_rows, _MAX_PARSER_OBSERVATIONS)
             for command, evidence in command_rows:
                 if (
                     evidence.replay_id != replay.id
@@ -429,8 +485,6 @@ class ReportService:
                     or evidence.telemetry_run_id is not None
                 ):
                     raise ReportContractError("parser command evidence does not match the selected graph")
-                if replay_player is not None and command.replay_player_id != replay_player.id:
-                    continue
                 ref = ReportEvidenceRef(evidence.public_id, "observed")
                 parser_refs.append(ref)
                 values.append(
@@ -460,11 +514,42 @@ class ReportService:
                     )
                 )
         if telemetry is not None:
-            event_rows = session.execute(
-                select(TelemetryEvent, EvidenceItem)
-                .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
-                .where(TelemetryEvent.telemetry_run_id == telemetry.id)
-                .order_by(TelemetryEvent.frame, EvidenceItem.source_key, EvidenceItem.public_id)
+            all_event_rows = tuple(
+                session.execute(
+                    select(TelemetryEvent, EvidenceItem)
+                    .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                    .where(TelemetryEvent.telemetry_run_id == telemetry.id)
+                    .order_by(TelemetryEvent.frame, EvidenceItem.source_key, EvidenceItem.public_id)
+                )
+            )
+            if replay_player is not None:
+                all_event_rows = tuple(
+                    row
+                    for row in all_event_rows
+                    if player_authority is not None and row[1].id in player_authority
+                )
+            telemetry_total = len(all_event_rows)
+            critical = tuple(
+                row for row in all_event_rows if row[0].event_type in _CRITICAL_TELEMETRY_EVENT_TYPES
+            )
+            routine = tuple(
+                row
+                for row in all_event_rows
+                if row[0].event_type not in _CRITICAL_TELEMETRY_EVENT_TYPES
+                and row[0].event_type not in _NOISY_TELEMETRY_EVENT_TYPES
+            )
+            noisy = tuple(
+                row for row in all_event_rows if row[0].event_type in _NOISY_TELEMETRY_EVENT_TYPES
+            )
+            semantic_limit = _MAX_TELEMETRY_OBSERVATIONS - _MAX_NOISY_TELEMETRY_OBSERVATIONS
+            selected_critical = _evenly_sample(critical, semantic_limit)
+            selected_routine = _evenly_sample(routine, semantic_limit - len(selected_critical))
+            selected_noisy = _evenly_sample(noisy, _MAX_NOISY_TELEMETRY_OBSERVATIONS)
+            event_rows = tuple(
+                sorted(
+                    (*selected_critical, *selected_routine, *selected_noisy),
+                    key=lambda row: (row[0].frame, row[1].source_key, row[1].public_id),
+                )
             )
             for event, evidence in event_rows:
                 if (
@@ -477,10 +562,6 @@ class ReportService:
                     raise ReportContractError("telemetry event evidence does not match the selected graph")
                 payload = _mapping(event.payload_json, label="telemetry event payload")
                 player_index = payload.get("player_index")
-                if replay_player is not None and (
-                    player_authority is None or evidence.id not in player_authority
-                ):
-                    continue
                 ref = ReportEvidenceRef(evidence.public_id, "observed")
                 telemetry_refs.append(ref)
                 values.append(
@@ -503,7 +584,7 @@ class ReportService:
                         _canonical({"source_kind": evidence.source_kind, "schema_version": evidence.schema_version}),
                     )
                 )
-        return tuple(values), tuple(parser_refs), tuple(telemetry_refs)
+        return tuple(values), tuple(parser_refs), tuple(telemetry_refs), parser_total, telemetry_total
 
     @staticmethod
     def _availability_values(
@@ -511,14 +592,17 @@ class ReportService:
         telemetry: TelemetryRun | None,
         parser_evidence: tuple[ReportEvidenceRef, ...],
         telemetry_evidence: tuple[ReportEvidenceRef, ...],
+        parser_total: int,
+        telemetry_total: int,
     ) -> tuple[ReportValue, ...]:
         values: list[ReportValue] = []
-        for claim_id, label, selected, evidence, absent_reason, empty_reason in (
+        for claim_id, label, selected, evidence, total, absent_reason, empty_reason in (
             (
                 "availability:parser",
                 "Parser evidence",
                 parser is not None,
                 parser_evidence,
+                parser_total,
                 "parser_unavailable",
                 "parser_observations_empty",
             ),
@@ -527,11 +611,13 @@ class ReportService:
                 "Telemetry evidence",
                 telemetry is not None,
                 telemetry_evidence,
+                telemetry_total,
                 "telemetry_unavailable",
                 "telemetry_observations_empty",
             ),
         ):
             if selected and evidence:
+                bounded = len(evidence) < total
                 values.append(
                     ReportValue(
                         claim_id,
@@ -539,12 +625,12 @@ class ReportService:
                         label,
                         True,
                         None,
-                        "available",
-                        None,
+                        "partial" if bounded else "available",
+                        "report_observations_bounded" if bounded else None,
                         _canonical({}),
                         None,
                         evidence,
-                        _canonical({}),
+                        _canonical({"selected_count": len(evidence), "total_count": total}),
                     )
                 )
             else:
@@ -995,20 +1081,21 @@ class ReportService:
         production_owners: dict[int, int | None] = {}
         combat_owners: dict[int, tuple[int | None, int | None]] = {}
         if event_ids:
+            # TheSuperHackers @fix Leex 23/08/2026 Resolve full-match typed owners by telemetry run without exceeding SQLite bind limits. (#TBD)
             economy_owners = {
                 event_id: owner_id
                 for event_id, owner_id in session.execute(
-                    select(EconomyEvent.telemetry_event_id, EconomyEvent.replay_player_id).where(
-                        EconomyEvent.telemetry_event_id.in_(event_ids)
-                    )
+                    select(EconomyEvent.telemetry_event_id, EconomyEvent.replay_player_id)
+                    .join(TelemetryEvent, TelemetryEvent.id == EconomyEvent.telemetry_event_id)
+                    .where(TelemetryEvent.telemetry_run_id == telemetry.id)
                 )
             }
             production_owners = {
                 event_id: owner_id
                 for event_id, owner_id in session.execute(
-                    select(ProductionEvent.telemetry_event_id, ProductionEvent.replay_player_id).where(
-                        ProductionEvent.telemetry_event_id.in_(event_ids)
-                    )
+                    select(ProductionEvent.telemetry_event_id, ProductionEvent.replay_player_id)
+                    .join(TelemetryEvent, TelemetryEvent.id == ProductionEvent.telemetry_event_id)
+                    .where(TelemetryEvent.telemetry_run_id == telemetry.id)
                 )
             }
             combat_owners = {
@@ -1018,7 +1105,9 @@ class ReportService:
                         CombatEvent.telemetry_event_id,
                         CombatEvent.attacker_replay_player_id,
                         CombatEvent.victim_replay_player_id,
-                    ).where(CombatEvent.telemetry_event_id.in_(event_ids))
+                    )
+                    .join(TelemetryEvent, TelemetryEvent.id == CombatEvent.telemetry_event_id)
+                    .where(TelemetryEvent.telemetry_run_id == telemetry.id)
                 )
             }
         for event in events:
