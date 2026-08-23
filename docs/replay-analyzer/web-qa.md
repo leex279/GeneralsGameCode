@@ -56,6 +56,7 @@ The fixture manifest and database remain external. No ORM seed, forged job row, 
 | Populated wide-table release proof | `uv run pytest tests/browser/test_offline.py -k wide_evidence_tables_are_keyboard_scroll_regions -q` | 3 passed, 34 deselected in 218.16s; desktop/tablet/mobile width, Tab reachability, ArrowRight scroll, same-origin, console, and page-error checks green |
 | Populated report/map keyboard flows | `uv run --project . pytest tests/browser/test_user_flows.py -k "report_timeline_and_evidence_disclosure or map_filters_and_semantic_evidence" -q --browser chromium` | 2 passed, 25 deselected in 39.14s; fixed report scope, event filters, map controls, honest unavailable player options, evidence disclosure, and semantic alternatives green |
 | Settings native mutation flow | `uv run --project . pytest tests/browser/test_user_flows.py::test_settings_preview_cancel_apply_and_diagnostic_are_keyboard_operable -q --browser chromium` | 1 passed in 27.59s; exact-origin native POST, keyboard cancel, confirmed apply, and explicit diagnostic green |
+| Installed external-worker flow | `uv run --project . pytest tests/browser/test_user_flows.py::test_pending_job_is_settled_only_by_the_external_installed_worker -q --browser chromium` | 1 passed in 33.16s; separate worker ownership, HTMX polling, focus preservation, and succeeded detail green |
 | Populated installed-wheel security | `uv run --project . pytest tests/browser/test_security.py -q --browser chromium` | 52 passed in 32.93s; fixed JSON timeline, map JSON, and real map PNG hardening included |
 | Web and wheel | `uv run --project . pytest tests/web tests/test_wheel.py -q` | 577 passed, 1 skipped in 49.21s |
 | Ruff | `uv run --project . ruff check src tests` | all checks passed |
@@ -119,6 +120,6 @@ Required populated screenshot cases are now implemented for import dialog, fixed
 The production-service populated fixture and worker-supported pending discover now exist. Release acceptance is still blocked by these non-waived items:
 
 - No truthful comparable result can be derived from the only available replay: `leex279` and `FOX27` use different factions, while all accepted match and longitudinal comparison definitions are same-faction-only. The current fixed result correctly reports `faction_mismatch` and `subject_value_unavailable`. A fabricated replay, self-comparison, or relaxed comparison semantics is forbidden.
-- The remaining populated keyboard cases, external-worker browser flow, populated Axe/offline matrices, remaining screenshots, full static/build gates, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
+- The remaining populated keyboard cases, populated Axe/offline matrices, remaining screenshots, full static/build gates, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
 
 These items are pending, not skipped or waived. `web-qa.md` remains a factual partial record rather than release closure.

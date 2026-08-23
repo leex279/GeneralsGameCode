@@ -271,7 +271,7 @@ def test_pending_job_is_settled_only_by_the_external_installed_worker(
     expect(job_link).to_be_focused()
     page.keyboard.press("Enter")
     expect(page.get_by_role("heading", name="Analysis job", exact=True)).to_be_visible()
-    expect(page.get_by_text("succeeded", exact=True).first).to_be_visible()
+    expect(page.get_by_role("region", name="Job state", exact=True)).to_contain_text("State: succeeded")
     assert failures == []
     assert_browser_clean(console_errors, page_errors)
     context.close()

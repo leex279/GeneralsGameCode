@@ -10,4 +10,6 @@
   </form>
   {% if jobs.page.watched_folders %}<section aria-labelledby="watch-status"><h2 id="watch-status">Watched folders</h2>{% for root in jobs.page.watched_folders %}<p>{{ root.label }}: {{ root.state }}{% if root.reason_code %}. Reason: {{ root.reason_code }}{% endif %}</p>{% endfor %}</section>{% endif %}
   {% include "jobs/_rows.html" %}
+  {# TheSuperHackers @fix Leex 23/08/2026 Load the packaged polling runtime for active external-worker jobs. (#TBD) #}
+  <script src="/static/vendor/htmx.min.js" defer></script>
 {% endblock %}

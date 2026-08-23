@@ -214,6 +214,7 @@ def test_terminal_job_page_does_not_poll_and_detail_keeps_states_distinct() -> N
 
     assert listing.status_code == detail.status_code == 200
     assert "hx-trigger" not in listing.text
+    assert '<script src="/static/vendor/htmx.min.js" defer></script>' in listing.text
     assert "State: failed" in detail.text
     assert "Progress: progress_unavailable" in detail.text
     assert "Dependency jobs" in detail.text
