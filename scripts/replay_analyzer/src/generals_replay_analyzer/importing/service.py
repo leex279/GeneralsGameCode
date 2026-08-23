@@ -656,6 +656,15 @@ class ImportService:
             row.error_code,
         )
 
+    def _require_telemetry_acquirer(self, request_telemetry: bool) -> None:
+        # TheSuperHackers @fix Leex 23/08/2026 Keep configured telemetry imports retryable instead of silently creating parser-only graphs. (#TBD)
+        if request_telemetry and self._telemetry_acquirer is None:
+            raise StageFailure(
+                "telemetry_acquirer_unavailable",
+                "authoritative telemetry acquisition is unavailable",
+                retryable=True,
+            )
+
     def _discover(self, claimed: ClaimedJob) -> Mapping[str, Any]:
         if claimed.input_json.get("source_kind") == "verified_watched_replay":
             return self._discover_verified(claimed)
@@ -663,6 +672,7 @@ class ImportService:
         recursive = bool(claimed.input_json["recursive"])
         mode = cast(str, claimed.input_json["import_mode"])
         request_telemetry = bool(claimed.input_json["request_telemetry"])
+        self._require_telemetry_acquirer(request_telemetry)
         accepted_paths, diagnostics = _snapshot_replays(path, recursive)
         prepared: list[tuple[Path, os.stat_result, SourceProvenance]] = []
         for replay_path in accepted_paths:
@@ -726,6 +736,7 @@ class ImportService:
         invocation_id = cast(str, claimed.input_json["invocation_id"])
         mode = cast(str, claimed.input_json["import_mode"])
         request_telemetry = bool(claimed.input_json["request_telemetry"])
+        self._require_telemetry_acquirer(request_telemetry)
         try:
             stored = self._replay_store.verify(sha256)
         except ContentStorageError as error:
@@ -955,6 +966,8 @@ class ImportService:
         ]
 
     def _ensure_content_graph(self, session: Session, replay: Replay, mode: str, request_telemetry: bool) -> None:
+        if request_telemetry and self._telemetry_acquirer is None:
+            raise RuntimeError("telemetry acquirer invariant was violated")
         sha256 = replay.sha256
         hash_job = self._jobs.ensure_job(session, self._hash_spec(sha256))
 
@@ -989,7 +1002,7 @@ class ImportService:
 
         telemetry: Job | None = None
         telemetry_identity: Mapping[str, Any] | None = None
-        use_telemetry = request_telemetry and self._telemetry_acquirer is not None
+        use_telemetry = request_telemetry
         if use_telemetry:
             telemetry_identity = {
                 "acquirer_version": self._telemetry_acquirer_version,

@@ -387,6 +387,8 @@ def compose_worker_runtime(poll_seconds: int, lease_seconds: int) -> tuple[Worke
         create_analytics_watched_import_adapter(
             registry,
             service,  # type: ignore[arg-type]
+            # TheSuperHackers @fix Leex 23/08/2026 Persist configured telemetry intent without silently downgrading watched imports. (#TBD)
+            request_telemetry=settings.engine_executable is not None,  # type: ignore[attr-defined]
         ),
         status_store=status_store,
     )

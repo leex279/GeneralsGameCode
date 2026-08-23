@@ -191,6 +191,28 @@ def test_single_file_creates_provenance_lowercase_replay_and_expected_dag(
     assert all("\\" not in job.public_id and "/" not in job.public_id for job in result.jobs)
 
 
+def test_telemetry_request_fails_retryably_before_a_parser_only_graph_is_created(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+) -> None:
+    service = _service(session_factory, settings, replay_store, artifact_store, clock)
+
+    service.submit(ImportRequest(replay_file, request_telemetry=True))
+    outcomes = service.run_available("telemetry-unavailable", limit=2)
+
+    assert tuple((outcome.stage, outcome.status) for outcome in outcomes) == (("discover", "pending"),)
+    assert outcomes[-1].error_code == "telemetry_acquirer_unavailable"
+    assert outcomes[-1].retryable is True
+    with session_factory() as session:
+        stages = tuple(session.scalars(select(Job.stage).order_by(Job.id)))
+        assert stages == ("discover",)
+        assert session.scalar(select(func.count()).select_from(Replay)) == 0
+
+
 def test_registered_import_observations_runs_after_frozen_dependency_context(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,

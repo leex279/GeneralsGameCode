@@ -508,6 +508,8 @@ class AnalyticsPortFactory:
                 session_factory,
                 settings=self._settings,
                 import_service=import_service,
+                # TheSuperHackers @fix Leex 23/08/2026 Persist telemetry intent without launching the engine in a Web request. (#TBD)
+                request_telemetry=self._settings.engine_executable is not None,
                 clock=lambda: datetime.now(UTC),
             )
             players = AnalyticsPlayersAdapter(
@@ -517,7 +519,11 @@ class AnalyticsPortFactory:
                     PlayerIdentityService(session_factory),
                     AnalysisPlanner(session_factory, clock=lambda: datetime.now(UTC)),
                 ),
-                ReplayComparisonService(session_factory),
+                # TheSuperHackers @fix Leex 23/08/2026 Bind comparison resolution to the same accepted cohort threshold exposed by Web. (#TBD)
+                ReplayComparisonService(
+                    session_factory,
+                    minimum_sample_size=self._settings.minimum_longitudinal_sample_size,
+                ),
                 minimum_sample_size=self._settings.minimum_longitudinal_sample_size,
             )
             yield AnalyticsWebApplicationPort(

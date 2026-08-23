@@ -85,9 +85,14 @@ class VerifiedIngressImportAdapter:
 def create_analytics_watched_import_adapter(
     registry: _SnapshotRegistry,
     service: ImportService,
+    *,
+    request_telemetry: bool,
 ) -> VerifiedIngressImportAdapter:
     """Bind verified watcher handoffs directly to the Analytics import application service."""
     from ..importing import VerifiedReplaySubmission
+
+    if type(request_telemetry) is not bool:
+        raise TypeError("request_telemetry must be bool")
 
     def submit_verified_handoff(
         content: bytes,
@@ -101,6 +106,7 @@ def create_analytics_watched_import_adapter(
                 expected_sha256,
                 root_public_id,
                 relative_name,
+                request_telemetry=request_telemetry,
             )
         )
         return str(submission.discovery_job.public_id)

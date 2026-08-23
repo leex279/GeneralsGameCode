@@ -561,6 +561,7 @@ def test_analytics_import_factory_submits_exact_verified_content_without_a_path(
     adapter = create_analytics_watched_import_adapter(
         Registry(),
         cast(AnalyticsImportService, service),
+        request_telemetry=True,
     )
 
     assert adapter.submit_stable(ROOT, "match.rep") == "123e4567-e89b-42d3-a456-426614174099"
@@ -570,6 +571,7 @@ def test_analytics_import_factory_submits_exact_verified_content_without_a_path(
     assert request.expected_sha256 == hashlib.sha256(content).hexdigest()
     assert request.root_public_id == ROOT
     assert request.relative_name == "match.rep"
+    assert request.request_telemetry is True
 
 
 def test_production_import_adapter_records_only_path_free_discovery_codes(

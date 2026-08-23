@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+import generals_replay_analyzer.comparison.service as comparison_module
 import generals_replay_analyzer.db as database_module
 import generals_replay_analyzer.web.routes.jobs as jobs_routes
 from generals_replay_analyzer.config import AnalyzerSettings, load_runtime_configuration
@@ -206,6 +207,38 @@ def test_production_factory_exposes_player_and_comparison_ports(tmp_path: Path) 
         page = port.list_players(PlayerIndexQueryDTO(active_only=False))
 
     assert page.items == ()
+
+
+def test_production_factory_binds_one_comparison_minimum_sample_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[int] = []
+    original = comparison_module.ReplayComparisonService
+
+    class RecordingComparisonService(original):
+        def __init__(self, *args: object, minimum_sample_size: int = 3, **kwargs: object) -> None:
+            captured.append(minimum_sample_size)
+            super().__init__(*args, minimum_sample_size=minimum_sample_size, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comparison_module, "ReplayComparisonService", RecordingComparisonService)
+    settings = AnalyzerSettings.model_validate(
+        {
+            "data_root": tmp_path / "product-data",
+            "minimum_longitudinal_sample_size": 1,
+        }
+    )
+    settings.ensure_directories()
+    upgrade_database(settings.database_path)
+
+    with AnalyticsPortFactory(
+        settings,
+        _Readiness(),
+        configuration_root=tmp_path / "external-configuration",
+    )():
+        pass
+
+    assert captured == [1]
 
 
 def test_production_factory_keeps_one_settings_startup_identity(tmp_path: Path) -> None:

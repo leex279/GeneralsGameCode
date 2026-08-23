@@ -138,6 +138,7 @@ class AnalyticsLibraryAdapter:
         *,
         settings: AnalyzerSettings,
         import_service: ImportService,
+        request_telemetry: bool,
         registry: WatchedRootRegistry | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -147,6 +148,7 @@ class AnalyticsLibraryAdapter:
         self._ingress = create_analytics_watched_import_adapter(
             self._registry,
             import_service,
+            request_telemetry=request_telemetry,
         )
         self._clock = clock
 

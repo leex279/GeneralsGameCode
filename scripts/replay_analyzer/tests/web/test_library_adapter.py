@@ -322,6 +322,7 @@ def _adapter(database: tuple[AnalyzerSettings, sessionmaker[Session]]) -> Analyt
         factory,
         settings=settings,
         import_service=_NoopImportService(),
+        request_telemetry=False,
         clock=lambda: datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
     )
 
@@ -452,6 +453,7 @@ def test_configured_root_reconciliation_and_verified_submission_never_expose_or_
             create_session_factory(engine),
             settings=settings,
             import_service=service,
+            request_telemetry=True,
             clock=lambda: datetime(2026, 8, 23, tzinfo=UTC),
         )
         roots = adapter.import_roots()
@@ -466,6 +468,7 @@ def test_configured_root_reconciliation_and_verified_submission_never_expose_or_
     request = service.requests[0]
     assert request.content == replay_bytes
     assert request.root_public_id == roots[0].root_public_id
+    assert request.request_telemetry is True
     assert submission.submission_public_id == "123e4567-e89b-42d3-a456-426614174190"
 
 
@@ -487,6 +490,7 @@ def test_source_mutation_maps_to_stable_path_free_submission(
         settings=settings,
         import_service=service,
         registry=registry,
+        request_telemetry=False,
     )
     root = adapter.import_roots()[0]
     monkeypatch.setattr(
@@ -514,6 +518,7 @@ def test_unknown_root_maps_to_public_not_found_without_import_service_call(tmp_p
         lambda: (_ for _ in ()).throw(AssertionError("import must not open a database read session")),  # type: ignore[arg-type]
         settings=settings,
         import_service=service,
+        request_telemetry=False,
     )
 
     with pytest.raises(PublicProblem) as raised:
@@ -543,6 +548,33 @@ def test_factory_root_submission_commits_one_path_free_discovery_job(tmp_path: P
     assert str(root_path) not in repr(jobs[0].input_json)
     assert jobs[0].input_json["root_public_id"] == root.root_public_id
     assert jobs[0].input_json["relative_name"] == "league.rep"
+    assert jobs[0].input_json["request_telemetry"] is False
+
+
+def test_factory_root_submission_requests_telemetry_when_engine_is_configured(tmp_path: Path) -> None:
+    root_path = tmp_path / "external-private-root"
+    root_path.mkdir()
+    (root_path / "league.rep").write_bytes(b"factory replay bytes")
+    engine_path = tmp_path / "generalszh.exe"
+    engine_path.write_bytes(b"engine")
+    settings = AnalyzerSettings.model_validate(
+        {
+            "data_root": tmp_path / "product-data",
+            "watched_folders": (root_path,),
+            "engine_executable": engine_path,
+        }
+    )
+    settings.ensure_directories()
+    upgrade_database(settings.database_path)
+    factory = AnalyticsPortFactory(settings, _Readiness(), configuration_root=tmp_path / "configuration")
+
+    with factory() as port:
+        root = port.import_roots()[0]
+        port.submit_root_selection(
+            RootImportCommandDTO(root_public_id=root.root_public_id, relative_path="league.rep")
+        )
+
+    assert _jobs(settings)[0].input_json["request_telemetry"] is True
 
 
 def test_factory_rolls_back_root_submission_when_request_scope_fails(tmp_path: Path) -> None:
