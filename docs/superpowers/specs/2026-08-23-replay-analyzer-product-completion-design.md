@@ -2,7 +2,7 @@
 
 Date: 23 August 2026
 
-Status: approved direction; written design awaiting final review
+Status: approved for implementation
 
 ## 1. Product outcome
 
@@ -128,6 +128,22 @@ Comparison remains strict: cross-faction or version-incompatible values are not 
 - Complete text alternatives for charts and maps
 - No external assets or browser requests
 
+### 5.6 Approved visual reference
+
+Use `Command and Conquer UI Redesign.zip` only as a visual reference. It does not define or limit product features, and its placeholder statistics, routes, units, charts, and match facts are not evidence.
+
+The accepted visual language is:
+
+- Deep blue-black canvas `#080f15` with blue-black surface layers around `#0d1a24`, `#111f2b`, `#152838`, and `#1a2f41`
+- Cyan information and primary-action accents around `#7fc6f5`, `#4a9fd8`, and `#bfe3ff`
+- Lime success accent `#a9d05a`
+- Orange warning and opponent accents around `#f0966e` and `#d9764f`
+- Condensed tactical headings, readable sans-serif body text, and monospaced telemetry or evidence labels, with local system fallbacks so no web-font request is required
+- Thin cyan-blue rules, clipped-corner controls and marks, restrained grid or radial texture, and command-center panel composition
+- Dense but clearly grouped information, with the strategy summary and coaching decisions receiving the strongest visual hierarchy
+
+The reference may influence color, typography, spacing, panel shape, navigation treatment, and layout rhythm. It must not introduce unsupported APM, win probability, spend splits, army-value estimates, routes, units, or other invented values.
+
 ## 6. Data flow and boundaries
 
 ```text
@@ -201,4 +217,3 @@ The product is complete only when:
 - The first match-report viewport answers what happened, what each player attempted, and what is worth reviewing.
 - Technical evidence remains fully available but is not the primary experience.
 - The full acceptance, packaging, deterministic, accessibility, security, and visual gates pass against one final frozen wheel.
-
