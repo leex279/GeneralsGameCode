@@ -1,0 +1,29 @@
+[data-map-chart] {
+  inline-size: 100%;
+  min-height: 20rem;
+  max-height: min(70vh, 52rem);
+  aspect-ratio: 16 / 9;
+}
+
+.map-time-window {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.75rem 1.25rem;
+  margin-block: 1rem;
+}
+
+.map-time-window > span,
+.map-time-window > p {
+  grid-column: 1 / -1;
+}
+
+.map-time-window input[type="range"] {
+  inline-size: 100%;
+}
+
+@media (max-width: 42rem) {
+  [data-map-chart] {
+    min-height: 16rem;
+    aspect-ratio: 4 / 3;
+  }
+}

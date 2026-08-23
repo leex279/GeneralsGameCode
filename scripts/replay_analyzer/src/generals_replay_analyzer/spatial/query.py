@@ -1,0 +1,1039 @@
+"""Read-only immutable map scenes over accepted persisted spatial evidence."""
+
+from __future__ import annotations
+
+import binascii
+import hashlib
+import math
+import struct
+import zlib
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, cast
+from uuid import NAMESPACE_URL, uuid5
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from generals_replay_analyzer.db.models import (
+    CombatEvent,
+    Entity,
+    EntitySample,
+    EvidenceItem,
+    Map,
+    MapResource,
+    ParserRun,
+    Replay,
+    ReplayPlayer,
+    Report,
+    TelemetryEvent,
+    TelemetryRun,
+)
+from generals_replay_analyzer.features.evidence import (
+    CanonicalValue,
+    EvidenceRef,
+    freeze_canonical,
+)
+from generals_replay_analyzer.report.query import (
+    FixedReportQuery,
+    ReportGraphAmbiguousError,
+    ReportGraphContractError,
+    ReportGraphNotFoundError,
+)
+from generals_replay_analyzer.spatial.assets import (
+    GridSpec,
+    Position3,
+    SpatialMapProjection,
+    SpatialUnavailable,
+    StartPosition,
+    StaticObjectCategory,
+    StaticObjectFeature,
+    WorldBounds,
+    validate_map_projection,
+)
+from generals_replay_analyzer.spatial.coordinates import (
+    PlayerTransform,
+    player_centric_transform,
+    world_to_map_normalized,
+)
+
+_PUBLIC_NAMESPACE = uuid5(NAMESPACE_URL, "generals-replay-analyzer:map-scene-v1")
+_SAMPLE_REASONS = frozenset(
+    {"lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"}
+)
+_FORCED_REASONS = frozenset({"lifecycle_forced", "order_forced", "state_forced"})
+_RESOURCE_KINDS = frozenset(
+    {"supply_source", "supply_warehouse", "capturable", "tech_building", "cash_generator", "oil_income"}
+)
+
+
+class ReportAuthority(Protocol):
+    def get_report(self, query: FixedReportQuery) -> object: ...
+
+
+class MapSceneContractError(RuntimeError):
+    """Accepted immutable graph is missing or internally inconsistent."""
+
+
+class MapSceneNotFoundError(MapSceneContractError):
+    """Requested replay, report, map, or public member does not exist."""
+
+
+class RasterUnavailableError(MapSceneContractError):
+    """Requested raster has no accepted persisted semantic source."""
+
+
+class FrozenRecord(Mapping[str, CanonicalValue]):
+    """Small tuple-backed immutable record used by the read-model boundary."""
+
+    def __init__(self, value: Mapping[str, object]) -> None:
+        frozen = freeze_canonical(value)
+        if not isinstance(frozen, tuple):
+            raise TypeError("record must be a mapping")
+        self._items = cast(tuple[tuple[str, CanonicalValue], ...], frozen)
+
+    def __getitem__(self, key: str) -> CanonicalValue:
+        for item_key, value in self._items:
+            if item_key == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def as_mapping(self) -> dict[str, object]:
+        return {key: _thaw(value) for key, value in self._items}
+
+
+def _thaw(value: CanonicalValue) -> object:
+    from generals_replay_analyzer.features.evidence import FrozenMapping
+
+    if isinstance(value, FrozenMapping):
+        return {key: _thaw(cast(CanonicalValue, item)) for key, item in value}
+    if isinstance(value, tuple):
+        return [_thaw(cast(CanonicalValue, item)) for item in value]
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class MapSceneReadQuery:
+    replay_public_id: str
+    report_public_id: str
+    frame_start: int
+    frame_end: int
+    replay_player_public_ids: tuple[str, ...] = ()
+    entity_public_ids: tuple[str, ...] = ()
+    event_families: tuple[str, ...] = ()
+    locomotor_surface: Literal["ground", "amphibious"] | None = None
+    coordinate_display: Literal["raw", "map_normalized", "player_centric"] = "raw"
+    player_centric_subject_public_id: str | None = None
+    sample_budget: int = 5000
+
+    def __post_init__(self) -> None:
+        if type(self.frame_start) is not int or type(self.frame_end) is not int or not 0 <= self.frame_start <= self.frame_end:
+            raise ValueError("map scene frame window must be ordered and nonnegative")
+        if type(self.sample_budget) is not int or not 100 <= self.sample_budget <= 20_000:
+            raise ValueError("sample budget must be from 100 through 20000")
+        object.__setattr__(self, "replay_player_public_ids", tuple(sorted(set(self.replay_player_public_ids))))
+        object.__setattr__(self, "entity_public_ids", tuple(sorted(set(self.entity_public_ids))))
+        object.__setattr__(self, "event_families", tuple(sorted(set(self.event_families))))
+
+
+@dataclass(frozen=True, slots=True)
+class MapSceneIndexReadQuery:
+    page: int = 1
+    page_size: int = 25
+    search: str | None = None
+    availability: Literal["available", "partial", "unavailable"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MapRasterReadQuery:
+    map_public_id: str
+    raster_public_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SceneSample:
+    sample_public_id: str
+    entity_public_id: str
+    replay_player_public_id: str | None
+    frame: int
+    raw_position: tuple[float, float, float]
+    orientation: float
+    sample_reason: str
+    locomotor_surface: Literal["ground", "amphibious"] | None
+    evidence_public_id: str
+
+    def __post_init__(self) -> None:
+        if self.sample_reason not in _SAMPLE_REASONS:
+            raise ValueError("unsupported sample reason")
+        if type(self.frame) is not int or self.frame < 0:
+            raise ValueError("sample frame must be nonnegative")
+        if any(not math.isfinite(value) or (value == 0.0 and math.copysign(1.0, value) < 0) for value in (*self.raw_position, self.orientation)):
+            raise ValueError("sample spatial values must be finite and cannot use negative zero")
+
+
+@dataclass(frozen=True, slots=True)
+class MapSceneReadModel:
+    payload: CanonicalValue
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", freeze_canonical(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class MapSceneIndexReadModel:
+    payload: CanonicalValue
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", freeze_canonical(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class MapRasterReadModel:
+    map_public_id: str
+    descriptor: FrozenRecord
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if not self.content.startswith(b"\x89PNG\r\n\x1a\n") or len(self.content) > 16 * 1024 * 1024:
+            raise ValueError("raster must be a bounded PNG")
+        if hashlib.sha256(self.content).hexdigest() != self.descriptor["content_sha256"]:
+            raise ValueError("raster digest mismatch")
+
+
+def _sample_key(item: SceneSample) -> tuple[int, str, str]:
+    return (item.frame, item.entity_public_id, item.sample_public_id)
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Preserve event-forced observations with deterministic integer midpoint sampling. (#TBD)
+def downsample_samples(samples: Sequence[SceneSample], budget: int) -> tuple[tuple[SceneSample, ...], dict[str, object]]:
+    if type(budget) is not int or not 100 <= budget <= 20_000:
+        raise ValueError("sample budget must be from 100 through 20000")
+    by_id: dict[str, SceneSample] = {}
+    for item in samples:
+        if type(item) is not SceneSample:
+            raise TypeError("samples must use SceneSample")
+        prior = by_id.setdefault(item.sample_public_id, item)
+        if prior != item:
+            raise MapSceneContractError("duplicate sample identity has conflicting evidence")
+    ordered = tuple(sorted(by_id.values(), key=_sample_key))
+    by_entity: dict[str, list[SceneSample]] = {}
+    for item in ordered:
+        by_entity.setdefault(item.entity_public_id, []).append(item)
+    mandatory_ids = {
+        item.sample_public_id
+        for values in by_entity.values()
+        for item in (values[0], values[-1])
+    }
+    mandatory_ids.update(item.sample_public_id for item in ordered if item.sample_reason in _FORCED_REASONS)
+    mandatory = tuple(item for item in ordered if item.sample_public_id in mandatory_ids)
+    candidates = tuple(item for item in ordered if item.sample_public_id not in mandatory_ids)
+    if len(mandatory) >= budget:
+        selected = mandatory
+    else:
+        count = min(budget - len(mandatory), len(candidates))
+        if count == len(candidates):
+            extras = candidates
+        else:
+            extras = tuple(candidates[((2 * rank + 1) * len(candidates)) // (2 * count)] for rank in range(count))
+        selected = tuple(sorted((*mandatory, *extras), key=_sample_key))
+    metadata = {
+        "algorithm_version": "event-forced-stratified-v1",
+        "requested_sample_budget": budget,
+        "original_sample_count": len(ordered),
+        "mandatory_sample_count": len(mandatory),
+        "returned_sample_count": len(selected),
+        "budget_exceeded_by_mandatory": len(mandatory) > budget,
+    }
+    return selected, metadata
+
+
+def _mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise MapSceneContractError(f"{label} is not an accepted mapping")
+    return cast(Mapping[str, object], value)
+
+
+def _number(value: object, label: str) -> float:
+    if type(value) not in (int, float):
+        raise MapSceneContractError(f"{label} is not numeric")
+    result = float(cast(int | float, value))
+    if not math.isfinite(result) or (result == 0.0 and math.copysign(1.0, result) < 0):
+        raise MapSceneContractError(f"{label} is not canonical")
+    return result
+
+
+def _integer(value: object, label: str) -> int:
+    if type(value) is not int:
+        raise MapSceneContractError(f"{label} is not an integer")
+    return value
+
+
+def _public_id(*parts: object) -> str:
+    return str(uuid5(_PUBLIC_NAMESPACE, ":".join(str(part) for part in parts)))
+
+
+def _availability(state: str, reasons: Sequence[str] = (), evidence: Sequence[str] = ()) -> dict[str, object]:
+    return {
+        "state": state,
+        "reason_codes": sorted(set(reasons)),
+        "evidence_references": sorted(set(evidence)),
+    }
+
+
+def _evidence(public_id: str, tier: str = "observed") -> list[dict[str, str]]:
+    return [{"evidence_public_id": public_id, "tier": tier}]
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
+
+
+def _pathability_png(width: int, height: int, values: tuple[bool, ...]) -> bytes:
+    rows = []
+    for y in reversed(range(height)):
+        row = bytearray((0,))
+        for x in range(width):
+            row.extend((126, 231, 135) if values[y * width + x] else (31, 41, 55))
+        rows.append(bytes(row))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + _png_chunk(b"IEND", b"")
+
+
+def _assert_evidence_membership(value: object, accepted: frozenset[str]) -> None:
+    if isinstance(value, Mapping):
+        for key, member in value.items():
+            if key == "evidence_public_id" and isinstance(member, str) and member not in accepted:
+                raise MapSceneContractError("emitted evidence is outside the fixed report")
+            if (
+                key == "evidence_references"
+                and isinstance(member, Sequence)
+                and any(isinstance(item, str) and item not in accepted for item in member)
+            ):
+                raise MapSceneContractError("emitted evidence is outside the fixed report")
+            _assert_evidence_membership(member, accepted)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for member in value:
+            _assert_evidence_membership(member, accepted)
+
+
+class MapSceneQueryService:
+    """Validate a fixed report and project only its selected persisted observation graph."""
+
+    def __init__(self, session_factory: sessionmaker[Session], report_authority: ReportAuthority) -> None:
+        self._session_factory = session_factory
+        self._report_authority = report_authority
+
+    @property
+    def session_factory(self) -> sessionmaker[Session]:
+        return self._session_factory
+
+    @staticmethod
+    def raster_public_id(map_public_id: str, kind: str, surface: str | None) -> str:
+        return _public_id("raster", map_public_id, kind, surface or "none", "map-grid-raster-v1")
+
+    def _report_graph(self, query: MapSceneReadQuery) -> Any:
+        graph = self._report_authority.get_report(FixedReportQuery(query.replay_public_id, query.report_public_id))
+        selected = getattr(graph, "selected", None)
+        document = getattr(selected, "document", None)
+        if document is None or (document.replay_public_id, document.report_public_id) != (
+            query.replay_public_id,
+            query.report_public_id,
+        ):
+            raise MapSceneContractError("fixed report membership is inconsistent")
+        return graph
+
+    @staticmethod
+    def _report_evidence(document: object) -> dict[str, str]:
+        references = [
+            reference
+            for family in ("evidence_availability", "observed", "derived", "inferred")
+            for value in getattr(document, family, ())
+            for reference in getattr(value, "evidence", ())
+        ]
+        tiers: dict[str, str] = {}
+        for reference in references:
+            existing = tiers.setdefault(reference.public_id, reference.tier)
+            if existing != reference.tier:
+                raise MapSceneContractError("report evidence membership is internally inconsistent")
+        return tiers
+
+    def _authority(
+        self, session: Session, query: MapSceneReadQuery, graph: Any
+    ) -> tuple[Replay, Map, ParserRun, TelemetryRun, Any, frozenset[str]]:
+        replay = session.scalar(select(Replay).where(Replay.public_id == query.replay_public_id))
+        if replay is None or replay.map_id is None:
+            raise MapSceneNotFoundError("replay has no accepted map projection")
+        map_row = session.get(Map, replay.map_id)
+        if map_row is None:
+            raise MapSceneNotFoundError("replay map is missing")
+        players = tuple(getattr(getattr(graph, "identity", None), "players", ()))
+        player_ids = tuple(item.public_id for item in players)
+        player_rows = tuple(
+            session.scalars(
+                select(ReplayPlayer).where(
+                    ReplayPlayer.replay_id == replay.id,
+                    ReplayPlayer.public_id.in_(player_ids),
+                )
+            )
+        )
+        parser_ids = {item.parser_run_id for item in player_rows}
+        if len(player_rows) != len(player_ids) or len(parser_ids) != 1:
+            raise MapSceneContractError("report players do not bind one parser authority")
+        parser = session.get(ParserRun, next(iter(parser_ids)))
+        if parser is None or parser.status != "succeeded" or parser.completion_status != "complete":
+            raise MapSceneContractError("parser authority is not completed")
+        document = graph.selected.document
+        report_evidence = self._report_evidence(document)
+        evidence_rows = tuple(
+            session.scalars(
+                select(EvidenceItem).where(
+                    EvidenceItem.public_id.in_(tuple(report_evidence)),
+                )
+            )
+        )
+        resolved = {item.public_id: item.tier for item in evidence_rows}
+        if resolved != report_evidence:
+            raise MapSceneContractError("report evidence membership is unresolved or inconsistent")
+        replay_evidence = tuple(item for item in evidence_rows if item.replay_id == replay.id)
+        telemetry_ids = {item.telemetry_run_id for item in replay_evidence if item.telemetry_run_id is not None}
+        if len(telemetry_ids) != 1:
+            raise MapSceneContractError("fixed report does not bind one telemetry authority")
+        telemetry = session.get(TelemetryRun, next(iter(telemetry_ids)))
+        if (
+            telemetry is None
+            or telemetry.status != "succeeded"
+            or telemetry.replay_id != replay.id
+            or telemetry.map_id != map_row.id
+            or telemetry.engine_build != map_row.engine_data_identity
+            or not isinstance(telemetry.settings_json, Mapping)
+            or telemetry.settings_json.get("parser_run_id") != parser.run_id
+        ):
+            raise MapSceneContractError("telemetry, parser, report, and map authorities disagree")
+        manifest = session.scalar(
+            select(TelemetryEvent)
+            .where(TelemetryEvent.telemetry_run_id == telemetry.id, TelemetryEvent.event_type == "manifest")
+        )
+        if manifest is None:
+            raise MapSceneContractError("selected telemetry has no manifest evidence")
+        return replay, map_row, parser, telemetry, document, frozenset(report_evidence)
+
+    @staticmethod
+    def _manifest_evidence(
+        session: Session, telemetry: TelemetryRun, report_evidence_ids: frozenset[str]
+    ) -> EvidenceItem:
+        rows = tuple(
+            session.scalars(
+                select(EvidenceItem)
+                .join(TelemetryEvent, TelemetryEvent.evidence_item_id == EvidenceItem.id)
+                .where(TelemetryEvent.telemetry_run_id == telemetry.id, TelemetryEvent.event_type == "manifest")
+            )
+        )
+        if (
+            len(rows) != 1
+            or rows[0].tier != "observed"
+            or rows[0].public_id not in report_evidence_ids
+        ):
+            raise MapSceneContractError("selected manifest evidence is ambiguous")
+        return rows[0]
+
+    def _projection(self, session: Session, map_row: Map, manifest: EvidenceItem) -> SpatialMapProjection:
+        metadata = _mapping(map_row.metadata_json, "map metadata")
+        raw = _mapping(metadata.get("validated_spatial_projection"), "validated spatial projection")
+        pathing = _mapping(raw.get("pathing"), "pathing projection")
+        bounds = _mapping(pathing.get("bounds"), "pathing bounds")
+        minimum = _mapping(bounds.get("minimum_inclusive"), "pathing minimum")
+        maximum = _mapping(bounds.get("maximum_exclusive"), "pathing maximum")
+        cell = _mapping(pathing.get("cell_size"), "pathing cell size")
+        origin = _mapping(pathing.get("index_origin"), "pathing origin")
+        width = _integer(pathing.get("width"), "pathing width")
+        height = _integer(pathing.get("height"), "pathing height")
+        grid = GridSpec(
+            width,
+            height,
+            _integer(origin.get("x"), "pathing origin x"),
+            _integer(origin.get("y"), "pathing origin y"),
+            _number(cell.get("x"), "pathing cell x"),
+            _number(cell.get("y"), "pathing cell y"),
+            _number(minimum.get("x"), "pathing minimum x"),
+            _number(minimum.get("y"), "pathing minimum y"),
+            _number(maximum.get("x"), "pathing maximum x"),
+            _number(maximum.get("y"), "pathing maximum y"),
+        )
+        raw_world = _mapping(raw.get("world_bounds"), "world bounds")
+        world_min = _mapping(raw_world.get("minimum"), "world minimum")
+        world_max = _mapping(raw_world.get("maximum"), "world maximum")
+        world = WorldBounds(
+            Position3(*(_number(world_min.get(axis), f"world minimum {axis}") for axis in ("x", "y", "z"))),
+            Position3(*(_number(world_max.get(axis), f"world maximum {axis}") for axis in ("x", "y", "z"))),
+        )
+        evidence = EvidenceRef(
+            manifest.public_id,
+            "observed",
+            manifest.source_kind,
+            manifest.source_key,
+            str(manifest.schema_version),
+        )
+        starts: list[StartPosition] = []
+        static_objects: list[StaticObjectFeature] = []
+        rows = tuple(session.scalars(select(MapResource).where(MapResource.map_id == map_row.id)))
+        for row in rows:
+            if row.x is None or row.y is None or row.z is None:
+                continue
+            position = Position3(row.x, row.y, row.z)
+            payload = _mapping(row.payload_json, "map resource payload")
+            if row.resource_kind == "start_position":
+                slots = payload.get("slot_indices")
+                if not isinstance(slots, list) or any(type(item) is not int for item in slots):
+                    raise MapSceneContractError("start position slots are malformed")
+                starts.append(
+                    StartPosition(
+                        str(payload.get("name") or row.template_name or row.stable_key),
+                        _integer(payload.get("waypoint_id"), "start waypoint"),
+                        tuple(slots),
+                        position,
+                        evidence,
+                    )
+                )
+            elif row.resource_kind == "static_object" and row.source_object_id is not None and row.template_name:
+                categories_raw = payload.get("categories")
+                if not isinstance(categories_raw, list):
+                    continue
+                categories = tuple(
+                    StaticObjectCategory(str(_mapping(item, "static category").get("name")), str(_mapping(item, "static category").get("source")))
+                    for item in categories_raw
+                )
+                static_objects.append(StaticObjectFeature(row.source_object_id, row.template_name, position, categories, evidence))
+        ground_raw = raw.get("ground_passable")
+        amphibious_raw = raw.get("amphibious_passable")
+        zones_raw = raw.get("zone_ids")
+        if not isinstance(ground_raw, list) or not isinstance(amphibious_raw, list) or not isinstance(zones_raw, list):
+            raise MapSceneContractError("persisted pathability projection is missing")
+        projection = SpatialMapProjection(
+            _integer(raw.get("schema_version"), "map schema"),
+            str(raw.get("content_sha256")),
+            str(raw.get("map_identity")),
+            str(raw.get("engine_data_identity")),
+            grid,
+            world,
+            tuple(ground_raw),
+            tuple(amphibious_raw),
+            tuple(zones_raw),
+            tuple(starts),
+            tuple(static_objects),
+        )
+        checked = validate_map_projection(projection)
+        if isinstance(checked, SpatialUnavailable):
+            raise MapSceneContractError(checked.reason)
+        if (
+            projection.content_sha256 != map_row.content_sha256
+            or projection.schema_version != map_row.schema_version
+            or projection.engine_data_identity != map_row.engine_data_identity
+            or projection.map_identity != map_row.map_identity
+        ):
+            raise MapSceneContractError("persisted map row and semantic projection disagree")
+        return projection
+
+    @staticmethod
+    def _position(position: Position3, projection: SpatialMapProjection, transform: PlayerTransform | None) -> dict[str, object]:
+        normalized = world_to_map_normalized(position, projection.world_bounds)
+        if isinstance(normalized, SpatialUnavailable):
+            raise MapSceneContractError(normalized.reason)
+        centered = transform.apply(position) if transform is not None else None
+        return {
+            "raw": {"x": position.x, "y": position.y, "z": position.z},
+            "map_normalized": {"u": normalized.u, "v": normalized.v},
+            "player_centric": None
+            if centered is None
+            else {"forward": centered.x, "left": centered.y, "z": centered.z},
+        }
+
+    @staticmethod
+    def _player_map(session: Session, replay: Replay, parser: ParserRun) -> dict[int, ReplayPlayer]:
+        return {
+            item.player_index: item
+            for item in session.scalars(
+                select(ReplayPlayer).where(ReplayPlayer.replay_id == replay.id, ReplayPlayer.parser_run_id == parser.id)
+            )
+            if item.player_index is not None
+        }
+
+    def _transforms(
+        self,
+        projection: SpatialMapProjection,
+        players: Mapping[int, ReplayPlayer],
+        manifest: EvidenceItem,
+        subject: str | None,
+    ) -> tuple[list[dict[str, object]], PlayerTransform | None, list[str]]:
+        output: list[dict[str, object]] = []
+        selected: PlayerTransform | None = None
+        reasons: list[str] = []
+        for player in sorted(players.values(), key=lambda item: item.public_id):
+            own = next((start for start in projection.start_positions if player.slot_index in start.slot_indices), None)
+            if own is None:
+                reasons.append("unresolved_player_transform")
+                continue
+            enemies = tuple(start for start in projection.start_positions if start != own)
+            transform = player_centric_transform(own, enemies)
+            if isinstance(transform, SpatialUnavailable):
+                reasons.append(transform.reason)
+                continue
+            own_id = _public_id("start", projection.content_sha256, own.waypoint_id, own.name)
+            enemy_id = _public_id(
+                "start", projection.content_sha256, transform.enemy_start.waypoint_id, transform.enemy_start.name
+            )
+            output.append(
+                {
+                    "transform_version": "player-centric-v1",
+                    "subject_replay_player_public_id": player.public_id,
+                    "own_start_public_id": own_id,
+                    "reference_enemy_start_public_id": enemy_id,
+                    "angle_radians": transform.angle_radians,
+                    "availability": _availability("available", evidence=(manifest.public_id,)),
+                    "evidence": _evidence(manifest.public_id),
+                }
+            )
+            if player.public_id == subject:
+                selected = transform
+        return output, selected, reasons
+
+    def _raster_descriptor(self, map_row: Map, projection: SpatialMapProjection, surface: str) -> dict[str, object]:
+        values = projection.ground_passable if surface == "ground" else projection.amphibious_passable
+        png = _pathability_png(projection.pathing.width, projection.pathing.height, values)
+        return {
+            "raster_public_id": self.raster_public_id(map_row.public_id, "pathability", surface),
+            "kind": "pathability",
+            "locomotor_surface": surface,
+            "rasterization_version": "map-grid-raster-v1",
+            "media_type": "image/png",
+            "width": projection.pathing.width,
+            "height": projection.pathing.height,
+            "content_sha256": hashlib.sha256(png).hexdigest(),
+            "placement": {
+                "raw_minimum_x": projection.pathing.minimum_x,
+                "raw_minimum_y": projection.pathing.minimum_y,
+                "raw_maximum_x": projection.pathing.maximum_x,
+                "raw_maximum_y": projection.pathing.maximum_y,
+                "grid_width": projection.pathing.width,
+                "grid_height": projection.pathing.height,
+                "source_storage_order": "row_major_y_then_x_x_fastest",
+                "source_row_zero": "minimum_world_y",
+                "png_row_zero": "maximum_world_y",
+                "display_interpolation": "nearest",
+            },
+            "availability": _availability("available"),
+        }
+
+    def _samples(
+        self,
+        session: Session,
+        telemetry: TelemetryRun,
+        players: Mapping[int, ReplayPlayer],
+        query: MapSceneReadQuery,
+        projection: SpatialMapProjection,
+        report_evidence_ids: frozenset[str],
+    ) -> tuple[tuple[SceneSample, ...], tuple[str, ...]]:
+        if query.event_families and "samples" not in query.event_families:
+            return (), ()
+        rows = tuple(
+            session.execute(
+                select(EntitySample, Entity, EvidenceItem)
+                .join(Entity, Entity.id == EntitySample.entity_id)
+                .join(TelemetryEvent, TelemetryEvent.id == EntitySample.telemetry_event_id)
+                .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                .where(
+                    EntitySample.telemetry_run_id == telemetry.id,
+                    EntitySample.frame >= query.frame_start,
+                    EntitySample.frame <= query.frame_end,
+                )
+            )
+        )
+        output = []
+        reasons: set[str] = set()
+        for row, entity, evidence in rows:
+            if (
+                row.sample_reason not in _SAMPLE_REASONS
+                or evidence.tier != "observed"
+                or evidence.public_id not in report_evidence_ids
+            ):
+                continue
+            player = players.get(entity.initial_owner_player_index) if entity.initial_owner_player_index is not None else None
+            if query.replay_player_public_ids and (player is None or player.public_id not in query.replay_player_public_ids):
+                continue
+            if query.entity_public_ids and entity.public_id not in query.entity_public_ids:
+                continue
+            if query.locomotor_surface is not None:
+                reasons.add("unsupported_or_unproven_locomotor_surface")
+                continue
+            raw_position = Position3(row.x, row.y, row.z)
+            if isinstance(world_to_map_normalized(raw_position, projection.world_bounds), SpatialUnavailable):
+                reasons.add("map_coordinate_out_of_bounds")
+                continue
+            output.append(
+                SceneSample(
+                    _public_id("sample", telemetry.run_id, entity.public_id, row.sequence),
+                    entity.public_id,
+                    None if player is None else player.public_id,
+                    row.frame,
+                    (raw_position.x, raw_position.y, raw_position.z),
+                    row.orientation,
+                    row.sample_reason,
+                    None,
+                    evidence.public_id,
+                )
+            )
+        return tuple(sorted(output, key=_sample_key)), tuple(sorted(reasons))
+
+    # TheSuperHackers @feature Leex 23/08/2026 Query one completed report-scoped map scene without sidecar or latest-report fallback. (#TBD)
+    def get_scene(self, query: MapSceneReadQuery) -> MapSceneReadModel:
+        if type(query) is not MapSceneReadQuery:
+            raise TypeError("query must be a MapSceneReadQuery")
+        graph = self._report_graph(query)
+        with self._session_factory() as session:
+            replay, map_row, parser, telemetry, document, report_evidence_ids = self._authority(
+                session, query, graph
+            )
+            available_end = min(replay.frame_count, telemetry.final_frame if telemetry.final_frame is not None else replay.frame_count)
+            if query.frame_end > available_end:
+                raise ValueError("map scene query exceeds the available frame window")
+            manifest = self._manifest_evidence(session, telemetry, report_evidence_ids)
+            projection = self._projection(session, map_row, manifest)
+            players = self._player_map(session, replay, parser)
+            available_player_ids = {item.public_id for item in players.values()}
+            if not set(query.replay_player_public_ids).issubset(available_player_ids):
+                raise MapSceneNotFoundError("player filter is outside the fixed scene")
+            subject = query.player_centric_subject_public_id
+            transforms, selected_transform, transform_reasons = self._transforms(
+                projection, players, manifest, subject
+            )
+            if query.coordinate_display == "player_centric" and selected_transform is None:
+                raise ValueError("player-centric transform is unavailable")
+            raw_samples, sample_reasons = self._samples(
+                session, telemetry, players, query, projection, report_evidence_ids
+            )
+            entity_ids_by_public = {
+                item.public_id: item.id
+                for item in session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id))
+            }
+            if not set(query.entity_public_ids).issubset(entity_ids_by_public):
+                raise MapSceneNotFoundError("entity filter is outside the fixed scene")
+            samples, downsampling = downsample_samples(raw_samples, query.sample_budget)
+            sample_values = []
+            omitted_reasons = [
+                "terrain_grid_not_persisted",
+                "normalized_order_target_not_persisted",
+                "fixed_report_route_projection_unavailable",
+                "fixed_report_engagement_projection_unavailable",
+                "presence_eligibility_not_persisted",
+                *sample_reasons,
+            ]
+            for item in samples:
+                position = Position3(*item.raw_position)
+                semantic_position = self._position(position, projection, selected_transform)
+                sample_values.append(
+                    {
+                        "sample_public_id": item.sample_public_id,
+                        "entity_public_id": item.entity_public_id,
+                        "replay_player_public_id": item.replay_player_public_id,
+                        "frame": item.frame,
+                        "position": semantic_position,
+                        "orientation": item.orientation,
+                        "sample_reason": item.sample_reason,
+                        "locomotor_surface": None,
+                        "evidence": _evidence(item.evidence_public_id),
+                    }
+                )
+            starts = [
+                {
+                    "start_public_id": _public_id("start", projection.content_sha256, item.waypoint_id, item.name),
+                    "name": item.name,
+                    "replay_player_public_ids": sorted(
+                        player.public_id for player in players.values() if player.slot_index in item.slot_indices
+                    ),
+                    "position": self._position(item.position, projection, selected_transform),
+                    "evidence": _evidence(manifest.public_id),
+                }
+                for item in projection.start_positions
+            ]
+            resources = []
+            structures = []
+            for static_item in projection.static_objects:
+                position_value = self._position(static_item.position, projection, selected_transform)
+                structure_id = _public_id("structure", projection.content_sha256, static_item.object_id)
+                structures.append(
+                    {
+                        "structure_public_id": structure_id,
+                        "source_kind": "map_static",
+                        "replay_player_public_id": None,
+                        "template_name": static_item.template_name,
+                        "frame": None,
+                        "position": position_value,
+                        "availability": _availability("available", evidence=(manifest.public_id,)),
+                        "evidence": _evidence(manifest.public_id),
+                    }
+                )
+                for category in static_item.categories:
+                    if category.name in _RESOURCE_KINDS:
+                        resources.append(
+                            {
+                                "resource_public_id": _public_id(
+                                    "resource", projection.content_sha256, static_item.object_id, category.name
+                                ),
+                                "resource_kind": category.name,
+                                "label": static_item.template_name,
+                                "position": position_value,
+                                "amount": None,
+                                "availability": _availability("available", evidence=(manifest.public_id,)),
+                                "evidence": _evidence(manifest.public_id),
+                            }
+                        )
+            combat_rows = tuple(
+                session.execute(
+                    select(CombatEvent, EvidenceItem)
+                    .join(TelemetryEvent, TelemetryEvent.id == CombatEvent.telemetry_event_id)
+                    .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                    .where(
+                        CombatEvent.telemetry_run_id == telemetry.id,
+                        CombatEvent.frame >= query.frame_start,
+                        CombatEvent.frame <= query.frame_end,
+                    )
+                )
+            )
+            casualties = []
+            player_by_id = {item.id: item for item in players.values()}
+            include_casualties = not query.event_families or "casualties" in query.event_families
+            selected_entity_ids = {
+                entity_ids_by_public[public_id] for public_id in query.entity_public_ids
+            }
+            for combat, evidence in combat_rows:
+                if (
+                    combat.location_x is None
+                    or combat.location_y is None
+                    or combat.location_z is None
+                    or evidence.tier != "observed"
+                    or evidence.public_id not in report_evidence_ids
+                ):
+                    continue
+                attacker = player_by_id.get(combat.attacker_replay_player_id)
+                victim = player_by_id.get(combat.victim_replay_player_id)
+                participant_ids = {
+                    item.public_id for item in (attacker, victim) if item is not None
+                }
+                if query.replay_player_public_ids and not participant_ids.intersection(
+                    query.replay_player_public_ids
+                ):
+                    continue
+                if selected_entity_ids and not selected_entity_ids.intersection(
+                    (combat.attacker_entity_id, combat.victim_entity_id)
+                ):
+                    continue
+                location = Position3(combat.location_x, combat.location_y, combat.location_z)
+                if combat.killing_blow is True and include_casualties:
+                    if isinstance(
+                        world_to_map_normalized(location, projection.world_bounds),
+                        SpatialUnavailable,
+                    ):
+                        omitted_reasons.append("map_coordinate_out_of_bounds")
+                        continue
+                    casualties.append(
+                        {
+                            "casualty_public_id": _public_id("casualty", telemetry.run_id, evidence.public_id),
+                            "frame": combat.frame,
+                            "victim_replay_player_public_id": None if victim is None else victim.public_id,
+                            "attacker_replay_player_public_id": None if attacker is None else attacker.public_id,
+                            "position": self._position(location, projection, selected_transform),
+                            "evidence": _evidence(evidence.public_id),
+                        }
+                    )
+            engagements: list[dict[str, object]] = []
+            if transform_reasons:
+                omitted_reasons.extend(transform_reasons)
+            raster_values = [
+                self._raster_descriptor(map_row, projection, "ground"),
+                self._raster_descriptor(map_row, projection, "amphibious"),
+            ]
+            issue_values = [
+                {
+                    "code": issue.issue_code,
+                    "message": issue.issue_code.replace("_", " "),
+                    "evidence_references": (),
+                }
+                for issue in getattr(document, "quality_issues", ())
+            ]
+            query_value = {
+                "replay_public_id": query.replay_public_id,
+                "report_public_id": query.report_public_id,
+                "frame_start": query.frame_start,
+                "frame_end": query.frame_end,
+                "replay_player_public_ids": list(query.replay_player_public_ids),
+                "entity_public_ids": list(query.entity_public_ids),
+                "event_families": list(query.event_families),
+                "locomotor_surface": query.locomotor_surface,
+                "coordinate_display": query.coordinate_display,
+                "player_centric_subject_public_id": query.player_centric_subject_public_id,
+                "sample_budget": query.sample_budget,
+            }
+            evidence_ids = [manifest.public_id, *(item.evidence_public_id for item in samples)]
+            state = "partial" if omitted_reasons else "available"
+            payload = {
+                "schema_version": "replay-map-scene-v1",
+                "replay_public_id": replay.public_id,
+                "report_public_id": document.report_public_id,
+                "report_version": document.report_version,
+                "map_public_id": map_row.public_id,
+                "map_display_name": map_row.display_name or replay.map_name,
+                "map_content_sha256": map_row.content_sha256,
+                "map_schema_version": map_row.schema_version,
+                "engine_data_identity": map_row.engine_data_identity,
+                "query": query_value,
+                "available_frame_window": {"frame_start": 0, "frame_end": available_end},
+                "transforms": {
+                    "raw": {
+                        "coordinate_version": "engine-world-xyz-v1",
+                        "axes": ["engine_world_x", "engine_world_y", "engine_world_z"],
+                        "units": "engine_world_unit",
+                        "minimum": {
+                            "x": projection.world_bounds.minimum.x,
+                            "y": projection.world_bounds.minimum.y,
+                            "z": projection.world_bounds.minimum.z,
+                        },
+                        "maximum": {
+                            "x": projection.world_bounds.maximum.x,
+                            "y": projection.world_bounds.maximum.y,
+                            "z": projection.world_bounds.maximum.z,
+                        },
+                        "minimum_inclusive": True,
+                        "maximum_inclusive": True,
+                    },
+                    "map_normalized": {
+                        "transform_version": "map-normalized-v1",
+                        "formula": "u=(x-min_x)/(max_x-min_x);v=(y-min_y)/(max_y-min_y)",
+                        "availability": _availability("available", evidence=(manifest.public_id,)),
+                    },
+                    "player_centric": transforms,
+                },
+                "rasters": raster_values,
+                "starts": starts,
+                "resources": resources,
+                "structures": structures if not query.event_families or "structures" in query.event_families else [],
+                "samples": sample_values,
+                "orders": [],
+                "routes": [],
+                "engagements": engagements,
+                "casualties": casualties,
+                "control_windows": [],
+                "downsampling": downsampling,
+                "availability": _availability(state, omitted_reasons, evidence_ids),
+                "terminal_quality": {
+                    "lifecycle": document.lifecycle.lifecycle_state,
+                    "issues": issue_values,
+                    "engine_run_status": document.lifecycle.telemetry_runner_status,
+                    "strategy_analysis_scope": "replay" if document.replay_player_public_id is None else "player",
+                },
+            }
+            _assert_evidence_membership(payload, report_evidence_ids)
+            return MapSceneReadModel(freeze_canonical(payload))
+
+    # TheSuperHackers @feature Leex 23/08/2026 Regenerate only accepted persisted pathability rasters by stable public identity. (#TBD)
+    def get_raster(self, query: MapRasterReadQuery) -> MapRasterReadModel:
+        if type(query) is not MapRasterReadQuery:
+            raise TypeError("query must be a MapRasterReadQuery")
+        with self._session_factory() as session:
+            map_row = session.scalar(select(Map).where(Map.public_id == query.map_public_id))
+            if map_row is None:
+                raise MapSceneNotFoundError("map was not found")
+            terrain_id = self.raster_public_id(map_row.public_id, "terrain_cell_type", None)
+            if query.raster_public_id == terrain_id:
+                raise RasterUnavailableError("terrain_grid_not_persisted")
+            manifest = EvidenceItem(
+                public_id=_public_id("map-projection-evidence", map_row.public_id),
+                replay_id=0,
+                tier="observed",
+                source_kind="persisted_map_projection",
+                source_key=f"map:{map_row.public_id}",
+                schema_version=map_row.schema_version,
+            )
+            projection = self._projection(session, map_row, manifest)
+            for surface in ("ground", "amphibious"):
+                descriptor = self._raster_descriptor(map_row, projection, surface)
+                if descriptor["raster_public_id"] == query.raster_public_id:
+                    values = projection.ground_passable if surface == "ground" else projection.amphibious_passable
+                    content = _pathability_png(projection.pathing.width, projection.pathing.height, values)
+                    return MapRasterReadModel(map_row.public_id, FrozenRecord(descriptor), content)
+            raise MapSceneNotFoundError("raster does not belong to the requested map")
+
+    def list_scenes(self, query: MapSceneIndexReadQuery) -> MapSceneIndexReadModel:
+        if type(query) is not MapSceneIndexReadQuery:
+            raise TypeError("query must be a MapSceneIndexReadQuery")
+        with self._session_factory() as session:
+            rows = tuple(
+                session.execute(
+                    select(Report, Replay, Map)
+                    .join(Replay, Replay.id == Report.replay_id)
+                    .join(Map, Map.id == Replay.map_id)
+                    .order_by(Replay.public_id, Report.public_id)
+                )
+            )
+        items: list[dict[str, object]] = []
+        for report, replay, map_row in rows:
+            try:
+                graph = self._report_authority.get_report(FixedReportQuery(replay.public_id, report.public_id))
+            except (ReportGraphNotFoundError, ReportGraphAmbiguousError, ReportGraphContractError):
+                continue
+            identity_players = tuple(getattr(getattr(graph, "identity", None), "players", ()))
+            item = {
+                "replay_public_id": replay.public_id,
+                "report_public_id": report.public_id,
+                "map_public_id": map_row.public_id,
+                "map_display_name": map_row.display_name or replay.map_name,
+                "report_version": report.report_version,
+                "frame_window": {"frame_start": 0, "frame_end": replay.frame_count},
+                "players": [
+                    {"public_id": player.public_id, "label": player.display_name} for player in identity_players
+                ],
+                "availability": _availability("partial", ("terrain_grid_not_persisted",)),
+            }
+            if query.search and query.search.casefold() not in f"{item['map_display_name']} {replay.replay_name}".casefold():
+                continue
+            if query.availability and query.availability != "partial":
+                continue
+            items.append(item)
+        total = len(items)
+        start = (query.page - 1) * query.page_size
+        page_items = items[start : start + query.page_size]
+        payload = {
+            "query": {
+                "page": query.page,
+                "page_size": query.page_size,
+                "search": query.search,
+                "availability": query.availability,
+            },
+            "items": page_items,
+            "page": query.page,
+            "page_size": query.page_size,
+            "total_items": total,
+            "availability": _availability("partial" if items else "unavailable", ("terrain_grid_not_persisted",) if items else ("no_completed_map_scenes",)),
+        }
+        return MapSceneIndexReadModel(freeze_canonical(payload))
+
+
+__all__ = [
+    "FrozenRecord",
+    "MapRasterReadModel",
+    "MapRasterReadQuery",
+    "MapSceneContractError",
+    "MapSceneIndexReadModel",
+    "MapSceneIndexReadQuery",
+    "MapSceneNotFoundError",
+    "MapSceneQueryService",
+    "MapSceneReadModel",
+    "MapSceneReadQuery",
+    "RasterUnavailableError",
+    "SceneSample",
+    "downsample_samples",
+]

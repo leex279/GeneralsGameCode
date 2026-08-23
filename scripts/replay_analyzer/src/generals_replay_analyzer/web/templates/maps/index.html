@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+  <header class="page-heading">
+    <div>
+      <span class="eyebrow">Evidence / Maps</span>
+      <h1>Authoritative map scenes</h1>
+      <p>Open a completed report at its fixed identity. Spatial facts remain tied to that publication.</p>
+    </div>
+  </header>
+  <section class="library-panel" aria-labelledby="map-filter-heading">
+    <h2 id="map-filter-heading">Find completed scenes</h2>
+    <form action="/maps" method="get" aria-label="Map scene filters">
+      <label for="map-search">Search <input id="map-search" name="search" value="{{ maps.page.query.search or '' }}"></label>
+      <label for="map-availability">Availability
+        <select id="map-availability" name="availability">
+          <option value="">Any state</option>
+          {% for state in ('available', 'partial', 'unavailable') %}<option value="{{ state }}"{% if maps.page.query.availability == state %} selected{% endif %}>{{ state }}</option>{% endfor %}
+        </select>
+      </label>
+      <input type="hidden" name="page" value="1">
+      <input type="hidden" name="page_size" value="{{ maps.page.page_size }}">
+      <button type="submit">Apply filters</button>
+    </form>
+  </section>
+  <section aria-labelledby="map-results-heading">
+    <h2 id="map-results-heading">Completed fixed scenes</h2>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Completed map scenes">
+      <table>
+        <caption>{{ maps.page.total_items }} completed fixed-report map scenes</caption>
+        <thead><tr><th scope="col">Map</th><th scope="col">Players</th><th scope="col">Frames</th><th scope="col">Availability</th><th scope="col">Fixed report</th></tr></thead>
+        <tbody>
+          {% for item in maps.page.items %}
+          <tr>
+            <th scope="row">{{ item.map_display_name }}<small>{{ item.map_public_id }}</small></th>
+            <td>{% for player in item.players %}{{ player.label }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+            <td>{{ item.frame_window.frame_start }}–{{ item.frame_window.frame_end }}</td>
+            <td>{{ item.availability.state }}{% if item.availability.reason_codes %}: {{ item.availability.reason_codes|join(', ') }}{% endif %}</td>
+            <td><a href="/replays/{{ item.replay_public_id }}/reports/{{ item.report_public_id }}/map">Open spatial analysis</a><small>{{ item.report_version }}</small></td>
+          </tr>
+          {% else %}<tr><td colspan="5">No completed map scenes match this fixed query.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <nav aria-label="Map scene pagination">
+      {% if maps.previous_url %}<a href="{{ maps.previous_url }}">Previous page</a>{% endif %}
+      <span>Page {{ maps.page.page }} of {{ maps.total_pages }}</span>
+      {% if maps.next_url %}<a href="{{ maps.next_url }}">Next page</a>{% endif %}
+    </nav>
+    <a href="{{ maps.canonical_url }}">Canonical map query</a>
+  </section>
+{% endblock %}
