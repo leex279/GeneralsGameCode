@@ -46,15 +46,100 @@ def test_crc_queue_keeps_atomic_snapshot_frame_value_records(
     assert "UnsignedInt value;" in crc_info
     assert "UnsignedInt frame;" in crc_info
     assert "void addCRC(UnsignedInt val, UnsignedInt frame);" in crc_info
-    assert "CRCRecord readCRC();" in crc_info
+    assert "Bool readCRC(CRCRecord &record);" in crc_info
     assert "std::list<CRCRecord> m_data;" in crc_info
     assert crc_implementation.index("if (!m_skippedOne)") < crc_implementation.index(
         "m_data.push_back(CRCRecord(val, frame))"
     )
-    assert crc_implementation.index("CRCRecord record = m_data.front()") < crc_implementation.index(
+    assert crc_implementation.index("record = m_data.front()") < crc_implementation.index(
         "m_data.pop_front()"
     )
-    assert "return record;" in crc_implementation
+    assert "return FALSE;" in crc_implementation
+    assert "record = m_data.front();" in crc_implementation
+    assert "return TRUE;" in crc_implementation
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp",
+        "Generals/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp",
+    ),
+)
+def test_locally_generated_playback_crc_carries_its_snapshot_frame_on_both_dispatch_paths(
+    repository_root: Path,
+    relative_path: str,
+) -> None:
+    """Rendered MessageStream latency must not replace the exact CRC calculation frame."""
+    source = (repository_root / relative_path).read_text(encoding="utf-8")
+    generation = source.split("if (generateForSolo || generateForMP)", maxsplit=1)[1].split(
+        "// collect stats", maxsplit=1
+    )[0]
+
+    assert "msg->appendBooleanArgument(isPlayback);" in generation
+    assert "if (isPlayback)" in generation
+    assert "msg->appendIntegerArgument(m_frame);" in generation
+    assert generation.index("msg->appendIntegerArgument(m_frame);") < generation.index(
+        "GameMessageList *messageList = TheMessageStream;"
+    )
+    assert "RECORDERMODETYPE_SIMULATION_PLAYBACK" in generation
+
+
+def test_crc_dispatch_forwards_snapshot_frame_presence_without_changing_legacy_messages(
+    repository_root: Path,
+) -> None:
+    """Only three-argument local playback CRCs may provide a snapshot frame."""
+    source = (
+        repository_root / "Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp"
+    ).read_text(encoding="utf-8")
+    dispatch = source.split("else if (TheRecorder && TheRecorder->isPlaybackMode())", maxsplit=1)[1].split(
+        "return true;", maxsplit=1
+    )[0]
+
+    assert "const Bool fromPlayback" in dispatch
+    assert "msg->getArgumentCount() > 2" in dispatch
+    assert "const Bool hasSnapshotFrame = fromPlayback" in dispatch
+    assert "msg->getArgument(2)->integer" in dispatch
+    assert "hasSnapshotFrame" in dispatch.split("TheRecorder->handleCRCMessage", maxsplit=1)[1]
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp",
+        "Generals/Code/GameEngine/Source/Common/Recorder.cpp",
+    ),
+)
+def test_empty_crc_queue_never_publishes_a_fabricated_frame_zero_mismatch(
+    repository_root: Path,
+    relative_path: str,
+) -> None:
+    """A missing local snapshot is absence, never the synthetic record (0, 0)."""
+    source = (repository_root / relative_path).read_text(encoding="utf-8")
+    handler = source.split("void RecorderClass::handleCRCMessage", maxsplit=1)[1].split(
+        "Bool RecorderClass::playbackFile", maxsplit=1
+    )[0]
+
+    assert "if (!m_crcInfo.readCRC(playbackCRC))" in handler
+    assert handler.index("if (!m_crcInfo.readCRC(playbackCRC))") < handler.index(
+        "newCRC != playbackCRC.value"
+    )
+    assert "m_crcInfo.addCRC(newCRC, snapshotFrame)" in handler
+    assert "m_crcInfo.addCRC(newCRC, TheGameLogic->getFrame())" not in handler
+
+
+def test_zero_hour_replay_header_loop_is_legacy_vc6_scoped(repository_root: Path) -> None:
+    """MSVC 6 treats repeated for-init declarations in one function as C2374."""
+    source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    header_reader = source.split("Bool RecorderClass::readReplayHeader", maxsplit=1)[1].split(
+        "Bool RecorderClass::replayMatchesGameVersion", maxsplit=1
+    )[0]
+
+    assert "TheSuperHackers @build Leex 23/08/2026" in header_reader
+    assert "Int playerDisconnectIndex = 0;" in header_reader
+    assert header_reader.count("for (playerDisconnectIndex=0; playerDisconnectIndex<MAX_SLOTS; ++playerDisconnectIndex)") == 2
 
 
 @pytest.mark.parametrize(
@@ -79,7 +164,7 @@ def test_crc_comparison_uses_human_slot_policy_and_paired_snapshot_frame(
 
     assert "m_gameInfo.isMultiPlayer()" in setup
     assert "getIP() != 0" not in setup
-    assert "m_crcInfo.addCRC(newCRC, TheGameLogic->getFrame())" in handler
+    assert "m_crcInfo.addCRC(newCRC, snapshotFrame)" in handler
     assert "playbackCRC.value" in handler
     assert "const UnsignedInt mismatchFrame = playbackCRC.frame;" in handler
     assert "TheGameLogic->getFrame() - m_crcInfo.GetQueueSize() - 1" not in handler
