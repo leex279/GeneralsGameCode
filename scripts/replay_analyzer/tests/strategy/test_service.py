@@ -691,7 +691,7 @@ def test_service_persists_one_immutable_rule_graph_and_returns_public_dtos(
 
     receipt = service.assess_rule_candidates(REPLAY, PLAYER, (FEATURE_SET,), BASE_REGISTRY)
 
-    assert receipt.taxonomy_version == "strategy-taxonomy-v1.0.0"
+    assert receipt.taxonomy_version == "strategy-taxonomy-v1.1.0"
     assert len(receipt.taxonomy_sha256) == len(receipt.cache_key) == 64
     assert tuple(item.strategy_id for item in receipt.assessments) == ("unknown_or_mixed",)
     assert receipt.assessments[0].quality == "unavailable"

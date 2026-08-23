@@ -157,13 +157,13 @@ def _overlaps(left: FeatureWindow, right: FeatureWindow) -> bool:
     return left.frame_start <= right.frame_end and right.frame_start <= left.frame_end
 
 
-# TheSuperHackers @feature Leex 23/08/2026 Match exact templates nested in immutable feature values. (#TBD)
-def _canonical_contains(raw: object, expected: str) -> bool:
+# TheSuperHackers @feature Leex 23/08/2026 Count exact templates nested in immutable feature values. (#TBD)
+def _canonical_occurrences(raw: object, expected: str) -> int:
     if type(raw) is str:
-        return raw == expected
+        return int(raw == expected)
     if isinstance(raw, tuple):
-        return any(_canonical_contains(item, expected) for item in raw)
-    return False
+        return sum(_canonical_occurrences(item, expected) for item in raw)
+    return 0
 
 
 def _predicate_value(predicate: FeaturePredicate, raw: object) -> bool:
@@ -200,8 +200,8 @@ def _predicate_value(predicate: FeaturePredicate, raw: object) -> bool:
     if predicate.operator == "gte":
         return cast(int | float, raw) >= cast(int | float, expected)
     if predicate.operator == "contains":
-        return _canonical_contains(raw, cast(str, expected))
-    return not _canonical_contains(raw, cast(str, expected))
+        return _canonical_occurrences(raw, cast(str, expected)) >= predicate.minimum_occurrences
+    return _canonical_occurrences(raw, cast(str, expected)) == 0
 
 
 def _evaluate_predicate(
@@ -277,9 +277,13 @@ def _applicability(
             "missing_catalog_semantics",
             {"status": "unavailable", "catalog_identity": catalog.catalog_identity},
         )
+    player_factions = definition.applicability.faction_template_names
+    opponent_factions = definition.applicability.opponent_faction_template_names
     if (
-        context.player_faction_template_name not in definition.applicability.faction_template_names
-        or context.opponent_faction_template_name not in definition.applicability.opponent_faction_template_names
+        "*" not in player_factions
+        and context.player_faction_template_name not in player_factions
+        or "*" not in opponent_factions
+        and context.opponent_faction_template_name not in opponent_factions
     ):
         return (
             False,
@@ -292,7 +296,8 @@ def _applicability(
             "missing_observed_map_identity",
             {"status": "unavailable", "catalog_identity": catalog.catalog_identity},
         )
-    if context.map_identity not in definition.applicability.map_identities:
+    map_identities = definition.applicability.map_identities
+    if "*" not in map_identities and context.map_identity not in map_identities:
         return (
             False,
             "map_identity_mismatch",
@@ -329,6 +334,7 @@ def _predicate_details(result: PredicateResult) -> dict[str, object]:
         "feature_name": result.predicate.feature_name,
         "operator": result.predicate.operator,
         "expected_value": result.predicate.expected_value,
+        "minimum_occurrences": result.predicate.minimum_occurrences,
         "unit": result.predicate.unit,
         "weight": result.predicate.weight,
         "state": result.state,

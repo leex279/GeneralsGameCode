@@ -35,6 +35,7 @@ class FeaturePredicate:
     unit: str
     allowed_scope_types: tuple[str, ...]
     weight: int
+    minimum_occurrences: int = 1
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,11 @@ def _validate_expected(predicate: FeaturePredicate, definition: FeatureDefinitio
     if type(expected) is float:
         _reject_nonfinite(expected)
     if definition.value_type == "json":
-        raise TaxonomyValidationError("JSON feature predicates are prohibited in taxonomy v1")
+        if predicate.operator not in ("contains", "not_contains") or type(expected) is not str:
+            raise TaxonomyValidationError("JSON feature predicates require exact string membership")
+        if predicate.operator == "not_contains" and predicate.minimum_occurrences != 1:
+            raise TaxonomyValidationError("not_contains does not support an occurrence threshold")
+        return
     value_matches = {
         "integer": type(expected) is int,
         "real": type(expected) in (int, float),
@@ -154,6 +159,8 @@ def _validate_expected(predicate: FeaturePredicate, definition: FeatureDefinitio
         raise TaxonomyValidationError("numeric predicate operator requires a numeric registry feature")
     if predicate.operator in ("contains", "not_contains") and definition.value_type != "text":
         raise TaxonomyValidationError("contains predicate operator requires a text registry feature")
+    if predicate.minimum_occurrences != 1:
+        raise TaxonomyValidationError("occurrence thresholds require a JSON contains predicate")
 
 
 def _predicate(value: dict[str, Any], registry: FeatureRegistry) -> FeaturePredicate:
@@ -165,11 +172,14 @@ def _predicate(value: dict[str, Any], registry: FeatureRegistry) -> FeaturePredi
         unit=cast(str, value["unit"]),
         allowed_scope_types=_strict_sorted_unique(cast(list[str], value["allowed_scope_types"]), "predicate scopes"),
         weight=cast(int, value["weight"]),
+        minimum_occurrences=cast(int, value.get("minimum_occurrences", 1)),
     )
     if not _IDENTIFIER.fullmatch(predicate.predicate_id):
         raise TaxonomyValidationError("predicate identifier is invalid")
     if type(predicate.weight) is not int or predicate.weight <= 0:
         raise TaxonomyValidationError("predicate weight must be a positive integer")
+    if type(predicate.minimum_occurrences) is not int or predicate.minimum_occurrences <= 0:
+        raise TaxonomyValidationError("predicate minimum occurrences must be a positive integer")
     try:
         definition = registry.definition(predicate.feature_name)
     except KeyError as error:
@@ -220,9 +230,9 @@ def _strategy(value: dict[str, Any], registry: FeatureRegistry) -> StrategyDefin
     predicate_ids = tuple(item.predicate_id for item in all_predicates)
     if len(predicate_ids) != len(set(predicate_ids)):
         raise TaxonomyValidationError("predicate ID may occur in exactly one predicate group")
-    selectors = tuple(item.feature_name for item in all_predicates)
+    selectors = tuple((item.feature_name, item.operator, item.expected_value) for item in all_predicates)
     if len(selectors) != len(set(selectors)):
-        raise TaxonomyValidationError("overlapping feature selector is prohibited")
+        raise TaxonomyValidationError("duplicate feature predicate selector is prohibited")
     if definition.fallback:
         if definition.strategy_id != "unknown_or_mixed" or definition.phase != "cross_phase" or all_predicates:
             raise TaxonomyValidationError("fallback must be the empty cross-phase unknown_or_mixed definition")
@@ -231,12 +241,15 @@ def _strategy(value: dict[str, Any], registry: FeatureRegistry) -> StrategyDefin
     else:
         if not definition.required:
             raise TaxonomyValidationError("regular strategy requires at least one required predicate")
-        if "*" in (
-            applicability.faction_template_names
-            + applicability.opponent_faction_template_names
-            + applicability.map_identities
+        if any(
+            "*" in values and values != ("*",)
+            for values in (
+                applicability.faction_template_names,
+                applicability.opponent_faction_template_names,
+                applicability.map_identities,
+            )
         ):
-            raise TaxonomyValidationError("regular strategy may not use wildcard applicability")
+            raise TaxonomyValidationError("wildcard applicability must be the only value")
     return definition
 
 

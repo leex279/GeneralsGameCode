@@ -54,7 +54,9 @@ def test_wheel_contains_exact_taxonomy_bytes_and_loads_outside_the_checkout(tmp_
                 "default_taxonomy=module.default_taxonomy;"
                 "t=default_taxonomy(BASE_REGISTRY);"
                 "assert t.schema_version=='strategy-taxonomy-v1';"
-                "assert [s.strategy_id for s in t.strategies]==['unknown_or_mixed'];"
+                    "assert len(t.strategies)==19;"
+                    "assert t.strategies[0].strategy_id=='all_in_aggression';"
+                    "assert any(s.strategy_id=='unknown_or_mixed' and s.fallback for s in t.strategies);"
                 "print(t.content_sha256)"
             ),
         ],

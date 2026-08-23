@@ -11,7 +11,7 @@ from generals_replay_analyzer.features.context import canonical_json
 from generals_replay_analyzer.features.evidence import CanonicalValue, EvidenceRef, evidence_sort_key, thaw_canonical
 from generals_replay_analyzer.features.registry import FeatureRegistry
 from generals_replay_analyzer.strategy.rules import RuleAssessment, StrategyContext, evaluate_rule
-from generals_replay_analyzer.strategy.taxonomy import StrategyDefinition, StrategyTaxonomy
+from generals_replay_analyzer.strategy.taxonomy import FeaturePredicate, StrategyDefinition, StrategyTaxonomy
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FALLBACK_REASON_ORDER = (
@@ -206,13 +206,50 @@ def _mixed_fallback(
     )
 
 
+def _predicate_document(predicate: FeaturePredicate) -> dict[str, object]:
+    document: dict[str, object] = {
+        "allowed_scope_types": predicate.allowed_scope_types,
+        "expected_value": predicate.expected_value,
+        "feature_name": predicate.feature_name,
+        "operator": predicate.operator,
+        "predicate_id": predicate.predicate_id,
+        "unit": predicate.unit,
+        "weight": predicate.weight,
+    }
+    if predicate.minimum_occurrences != 1:
+        document["minimum_occurrences"] = predicate.minimum_occurrences
+    return document
+
+
+def _strategy_document(definition: StrategyDefinition) -> dict[str, object]:
+    applicability = definition.applicability
+    return {
+        "applicability": {
+            "faction_template_names": applicability.faction_template_names,
+            "map_identities": applicability.map_identities,
+            "opponent_faction_template_names": applicability.opponent_faction_template_names,
+        },
+        "contradicting": tuple(_predicate_document(item) for item in definition.contradicting),
+        "display_name": definition.display_name,
+        "fallback": definition.fallback,
+        "minimum_quality": definition.minimum_quality,
+        "phase": definition.phase,
+        "required": tuple(_predicate_document(item) for item in definition.required),
+        "rule_version": definition.rule_version,
+        "strategy_id": definition.strategy_id,
+        "supporting": tuple(_predicate_document(item) for item in definition.supporting),
+        "synonyms": definition.synonyms,
+    }
+
+
+# TheSuperHackers @fix Leex 23/08/2026 Hash the exact canonical taxonomy document while preserving optional default fields. (#TBD)
 def strategy_definition_digests(taxonomy: StrategyTaxonomy, registry: FeatureRegistry) -> tuple[str, str]:
     registry_content_sha256 = hashlib.sha256(canonical_json(registry.definitions).encode("utf-8")).hexdigest()
     taxonomy_rules_sha256 = hashlib.sha256(
         canonical_json(
             {
                 "schema_version": taxonomy.schema_version,
-                "strategies": taxonomy.strategies,
+                "strategies": tuple(_strategy_document(item) for item in taxonomy.strategies),
                 "taxonomy_version": taxonomy.taxonomy_version,
             }
         ).encode("utf-8")

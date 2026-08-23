@@ -80,7 +80,7 @@ def test_generic_feature_scenarios_never_invent_a_gameplay_label(
     assert tuple(item.strategy_id for item in assessments) == ("unknown_or_mixed",)
     assert assessments[0].quality == "unavailable"
     assert assessments[0].rule_score is None
-    assert thaw_canonical(assessments[0].details)["reason"] == "no_named_rule_established"  # type: ignore[index]
+    assert thaw_canonical(assessments[0].details)["reason"] == "missing_catalog_semantics"  # type: ignore[index]
 
 
 def test_missing_catalog_semantics_or_required_evidence_returns_only_an_unavailable_fallback(

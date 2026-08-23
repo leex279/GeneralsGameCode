@@ -16,6 +16,7 @@ from generals_replay_analyzer.strategy.rules import (
     evaluate_rule,
 )
 from generals_replay_analyzer.strategy.taxonomy import (
+    Applicability,
     FeaturePredicate,
     StrategyDefinition,
     default_taxonomy,
@@ -105,7 +106,8 @@ def test_fallback_without_a_complete_terminal_record_is_unavailable(registry: Fe
         settings=(),
     )
 
-    result = evaluate_rule(default_taxonomy(registry).strategies[0], context, registry)
+    fallback = next(item for item in default_taxonomy(registry).strategies if item.fallback)
+    result = evaluate_rule(fallback, context, registry)
 
     assert result.strategy_id == "unknown_or_mixed"
     assert result.quality == "unavailable"
@@ -199,6 +201,63 @@ def test_contains_predicate_finds_an_exact_template_inside_a_canonical_build_seq
     assert result.quality == "available"
     assert result.rule_score == 1.0
     assert thaw_canonical(result.details)["predicates"][0]["state"] == "matched"  # type: ignore[index]
+
+
+def test_json_membership_threshold_and_wildcard_applicability_require_two_exact_templates(
+    registry: FeatureRegistry,
+    evidence_ref: Callable[..., EvidenceRef],
+    strategy_feature: Callable[..., object],
+    taxonomy_resource: Callable[[dict[str, object] | bytes | None], MemoryResource],
+) -> None:
+    """Catch dual-production labels accepting one template or one fixed map only."""
+    definition = replace(
+        _named_definition(registry, taxonomy_resource),
+        applicability=Applicability(("FactionAmerica",), ("*",), ("*",)),
+        required=(
+            FeaturePredicate(
+                "two_airfields_completed",
+                "build.completed_sequence",
+                "contains",
+                "AmericaAirfield",
+                "json",
+                ("player",),
+                3,
+                2,
+            ),
+        ),
+        supporting=(),
+        contradicting=(),
+    )
+    one = strategy_feature(
+        name="build.completed_sequence",
+        raw_value=({"frame": 300, "template_name": "AmericaAirfield"},),
+        unit="json",
+        sequence=21,
+    )
+    two = strategy_feature(
+        name="build.completed_sequence",
+        raw_value=(
+            {"frame": 300, "template_name": "AmericaAirfield"},
+            {"frame": 600, "template_name": "AmericaAirfield"},
+        ),
+        unit="json",
+        sequence=22,
+    )
+
+    one_result = evaluate_rule(
+        definition,
+        _context(evidence_ref=evidence_ref, features=(one,), map_identity="maps/other/map.ini"),  # type: ignore[arg-type]
+        registry,
+    )
+    two_result = evaluate_rule(
+        definition,
+        _context(evidence_ref=evidence_ref, features=(two,), map_identity="maps/other/map.ini"),  # type: ignore[arg-type]
+        registry,
+    )
+
+    assert one_result.quality == "unavailable"
+    assert two_result.quality == "available"
+    assert thaw_canonical(two_result.details)["predicates"][0]["minimum_occurrences"] == 2  # type: ignore[index]
 
 
 def test_partial_feature_produces_an_exact_partial_rule_score(
