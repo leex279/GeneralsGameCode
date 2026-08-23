@@ -56,4 +56,3 @@ The fixed-report map contract advances to `replay-map-scene-v2`. It exposes type
 - Telemetry disabled/enabled replay terminal facts and CRC behavior are identical.
 - Three runs produce byte-identical normalized traces.
 - The ten-replay corpus passes before regenerated hashes are accepted.
-

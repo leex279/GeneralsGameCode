@@ -176,4 +176,3 @@
 - [ ] Run all ten retail replays with telemetry disabled/enabled and require identical CRC behavior and terminal facts.
 - [ ] Refresh expected hashes only from those exact runs; inspect the useful scouting/heuristic Web journey and accessibility at desktop/mobile.
 - [ ] Commit and push `test(replay): Verify engine-native insights`.
-
