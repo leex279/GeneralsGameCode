@@ -23,6 +23,7 @@ from generals_replay_analyzer.web.ports import (
     ReportSectionDTO,
     TimelineChartDTO,
 )
+from generals_replay_analyzer.web.viewmodels.coaching import CoachingViewModel, coaching_view
 
 
 class ReplayReportViewModel(BaseModel):
@@ -32,6 +33,7 @@ class ReplayReportViewModel(BaseModel):
 
     report: ReplayReportDTO
     timeline: TimelineChartDTO
+    coaching: CoachingViewModel
     jump_sections: tuple[ReportSectionDTO, ...]
     selected_player: ReplayPlayerDisplayDTO | None
     highlight_claims: tuple[ReportClaimDTO, ...]
@@ -129,6 +131,7 @@ def replay_report_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> R
     return ReplayReportViewModel(
         report=report,
         timeline=timeline,
+        coaching=coaching_view(report, timeline),
         jump_sections=jump_sections,
         selected_player=selected_player,
         highlight_claims=highlight_claims,

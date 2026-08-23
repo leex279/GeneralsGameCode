@@ -1,0 +1,282 @@
+"""Deterministic, evidence-backed coaching projection tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from generals_replay_analyzer.web.ports import (
+    AvailabilityDTO,
+    FixedReportQueryDTO,
+    OllamaReportStatusDTO,
+    QualityIssueDTO,
+    ReplayPlayerDisplayDTO,
+    ReplayReportDTO,
+    ReportClaimDTO,
+    ReportEvidenceReferenceDTO,
+    ReportLifecycleDTO,
+    ReportSectionDTO,
+    ReportVersionDTO,
+    TerminalQualityDTO,
+    TimelineChartDTO,
+    TimelineChartQueryDTO,
+)
+from generals_replay_analyzer.web.viewmodels.coaching import coaching_view
+
+REPLAY = "123e4567-e89b-42d3-a456-426614170001"
+REPORT = "123e4567-e89b-42d3-a456-426614170002"
+PLAYER = "123e4567-e89b-42d3-a456-426614170003"
+OPPONENT = "123e4567-e89b-42d3-a456-426614170004"
+OPPONENT_REPORT = "123e4567-e89b-42d3-a456-426614170005"
+STRATEGY_EVIDENCE = "123e4567-e89b-42d3-a456-426614170006"
+BUILD_EVIDENCE = "123e4567-e89b-42d3-a456-426614170007"
+METRIC_EVIDENCE = "123e4567-e89b-42d3-a456-426614170008"
+SECTION_KEYS = (
+    "overview",
+    "players_results",
+    "opening_build_order",
+    "economy",
+    "production_composition",
+    "combat_engagements",
+    "activity",
+    "strategy_phases",
+    "spatial_analysis",
+    "longitudinal_context",
+    "llm_interpretation",
+)
+
+
+def _claim(
+    *,
+    claim_id: str,
+    section: str,
+    label: str,
+    raw_value: object,
+    display_value: str,
+    evidence_id: str,
+    frame_end: int,
+    availability: str = "available",
+) -> ReportClaimDTO:
+    return ReportClaimDTO(
+        claim_id=claim_id,
+        section=section,  # type: ignore[arg-type]
+        label=label,
+        raw_value=raw_value,
+        display_value=display_value,
+        unit="json" if isinstance(raw_value, (dict, list)) else "credits_per_minute",
+        availability=availability,  # type: ignore[arg-type]
+        unavailable_reason=None if availability == "available" else "trace_incomplete",
+        scope={"scope_type": "player", "public_id": PLAYER},
+        frame_window=(0, frame_end),
+        confidence=None,
+        evidence=(ReportEvidenceReferenceDTO(public_id=evidence_id, tier="derived"),),
+        details={"definition_version": "fixture-v1"},
+    )
+
+
+def _report(*, partial: bool = False) -> ReplayReportDTO:
+    end = 105 if partial else 3_600
+    build = _claim(
+        claim_id="feature:build.completed_sequence:fixture",
+        section="opening_build_order",
+        label="build.completed_sequence",
+        raw_value=[
+            {"frame": 45, "template_name": "AmericaPowerPlant"},
+            {"frame": 90, "template_name": "AmericaBarracks"},
+        ],
+        display_value="2 completed structures",
+        evidence_id=BUILD_EVIDENCE,
+        frame_end=end,
+        availability="partial" if partial else "available",
+    )
+    strategy = _claim(
+        claim_id="strategy:usa_humvee_pressure:fixture",
+        section="strategy_phases",
+        label="usa_humvee_pressure",
+        raw_value={"confidence": 1.0, "phase": "early", "strategy_label": "usa_humvee_pressure"},
+        display_value="Humvee pressure",
+        evidence_id=STRATEGY_EVIDENCE,
+        frame_end=end,
+    )
+    supply = _claim(
+        claim_id="feature:economy.supply_collection_rate:fixture",
+        section="economy",
+        label="economy.supply_collection_rate",
+        raw_value=1_350.0,
+        display_value="1350",
+        evidence_id=METRIC_EVIDENCE,
+        frame_end=end,
+        availability="partial" if partial else "available",
+    )
+    claims_by_section = {
+        "opening_build_order": (build,),
+        "economy": (supply,),
+        "strategy_phases": () if partial else (strategy,),
+    }
+    sections = tuple(
+        ReportSectionDTO(
+            key=key,  # type: ignore[arg-type]
+            title=key.replace("_", " ").title(),
+            availability=AvailabilityDTO(
+                state="partial" if partial and key in claims_by_section else "available"
+            )
+            if claims_by_section.get(key)
+            else AvailabilityDTO(state="unavailable", reason_codes=("section_not_available",)),
+            claims=claims_by_section.get(key, ()),
+        )
+        for key in SECTION_KEYS
+    )
+    return ReplayReportDTO(
+        schema_version="web-replay-report-v1",
+        generated_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+        fixed_report=FixedReportQueryDTO(replay_public_id=REPLAY, report_public_id=REPORT),
+        version=ReportVersionDTO(
+            report_public_id=REPORT,
+            report_version="replay-report-v1",
+            replay_player_public_id=PLAYER,
+        ),
+        availability=AvailabilityDTO(state="partial" if partial else "available"),
+        replay_label="Tournament Desert replay",
+        replay_sha256="a" * 64,
+        players=(
+            ReplayPlayerDisplayDTO(
+                replay_player_public_id=PLAYER,
+                report_public_id=REPORT,
+                display_name="Leex279",
+                slot=1,
+                faction="FactionAmerica",
+                result=None if partial else "won",
+            ),
+            ReplayPlayerDisplayDTO(
+                replay_player_public_id=OPPONENT,
+                report_public_id=OPPONENT_REPORT,
+                display_name="Opponent",
+                slot=2,
+                faction="FactionChina",
+                result=None if partial else "lost",
+            ),
+        ),
+        result=None if partial else "won",
+        map_name="Tournament Desert",
+        patch="1.04",
+        duration_frames=108 if partial else 3_600,
+        source_mode="deterministic_only",
+        lifecycle=ReportLifecycleDTO(
+            lifecycle_state="desynced" if partial else "engine_verified",
+            parser_completion_status="complete",
+            telemetry_status="failed" if partial else "succeeded",
+            telemetry_runner_status="desynced" if partial else "success",
+        ),
+        terminal_quality=TerminalQualityDTO(
+            lifecycle="desynced" if partial else "engine_verified",
+            issues=(
+                QualityIssueDTO(code="crc_mismatch", message="CRC mismatch at frame 105"),
+            )
+            if partial
+            else (),
+            engine_run_status="desynced" if partial else "succeeded",
+            strategy_analysis_scope="player",
+        ),
+        sections=sections,
+        ollama=OllamaReportStatusDTO(requested=False, status="not_requested"),
+    )
+
+
+def _timeline() -> TimelineChartDTO:
+    return TimelineChartDTO(
+        schema_version="web-report-timeline-v1",
+        query=TimelineChartQueryDTO(replay_public_id=REPLAY, report_public_id=REPORT),
+        availability=AvailabilityDTO(state="unavailable", reason_codes=("fixture",)),
+        timebase_fps=30,
+        available_players=(),
+        available_families=(),
+        series=(),
+    )
+
+
+def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt() -> None:
+    coaching = coaching_view(_report(), _timeline())
+
+    assert coaching.horizon.status == "complete"
+    assert coaching.horizon.title == "Complete match evidence"
+    assert "Leex279 showed Humvee pressure during the early game" in coaching.summary
+    assert [(item.strategy_id, item.title, item.player_label) for item in coaching.strategies] == [
+        ("usa_humvee_pressure", "Humvee pressure", "Leex279")
+    ]
+    assert [(item.time_label, item.structure_label) for item in coaching.build_order] == [
+        ("0:01.5 (frame 45)", "Power Plant"),
+        ("0:03.0 (frame 90)", "Barracks"),
+    ]
+    assert coaching.highlights[0].title == "Supply income"
+    assert coaching.highlights[0].evidence[0].public_id == METRIC_EVIDENCE
+    assert 1 <= len(coaching.prompts) <= 5
+    assert coaching.prompts[0].strategy_id == "usa_humvee_pressure"
+    assert coaching.prompts[0].evidence[0].public_id == STRATEGY_EVIDENCE
+
+
+def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
+    coaching = coaching_view(_report(partial=True), _timeline())
+
+    assert coaching.horizon.status == "partial"
+    assert coaching.horizon.title == "Observed opening through 0:03.5"
+    assert coaching.horizon.frame_end == 105
+    combined = " ".join(
+        (
+            coaching.summary,
+            *(item.title for item in coaching.strategies),
+            *(item.text for item in coaching.prompts),
+        )
+    ).casefold()
+    assert all(token not in combined for token in ("winner", "won", "lost", "victory", "mid game", "late game"))
+    assert coaching.limitations == ("CRC mismatch at frame 105",)
+    assert coaching.local_model_summary is None
+
+
+def test_ollama_state_cannot_change_deterministic_coaching() -> None:
+    report = _report()
+    offline = report.model_copy(
+        update={
+            "source_mode": "deterministic_with_ollama",
+            "ollama": OllamaReportStatusDTO(
+                requested=True,
+                status="unavailable",
+                diagnostic_codes=("ollama_offline",),
+            ),
+        }
+    )
+    succeeded = report.model_copy(
+        update={
+            "source_mode": "deterministic_with_ollama",
+            "ollama": OllamaReportStatusDTO(
+                requested=True,
+                status="succeeded",
+                analysis_run_id="123e4567-e89b-42d3-a456-426614170009",
+                provider="ollama",
+                model_name="fixture-model",
+                model_digest="b" * 64,
+                prompt_version="strategy-report-v1",
+                response_schema_version="strategy-report-response-v1",
+                validated_prose={"summary": "Validated local interpretation."},
+            ),
+        }
+    )
+
+    baseline = coaching_view(report, _timeline())
+    offline_view = coaching_view(offline, _timeline())
+    succeeded_view = coaching_view(succeeded, _timeline())
+
+    assert offline_view == baseline
+    assert succeeded_view.model_dump(exclude={"local_model_summary"}) == baseline.model_dump(
+        exclude={"local_model_summary"}
+    )
+    assert succeeded_view.local_model_summary == "Validated local interpretation."
+
+
+def test_coaching_rejects_cross_report_timeline_data() -> None:
+    timeline = _timeline().model_copy(
+        update={"query": TimelineChartQueryDTO(replay_public_id=REPLAY, report_public_id=OPPONENT_REPORT)}
+    )
+
+    with pytest.raises(ValueError, match="timeline identity"):
+        coaching_view(_report(), timeline)

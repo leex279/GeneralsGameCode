@@ -20,8 +20,11 @@ _GAME_LABELS = MappingProxyType(
         "FactionGLAStealthGeneral": "GLA Stealth General",
         "FactionGLAToxinGeneral": "GLA Toxin General",
         "AmericaAirfield": "Airfield",
+        "AmericaBarracks": "Barracks",
         "AmericaBuildingFirebase": "Firebase",
+        "AmericaPowerPlant": "Power Plant",
         "AmericaStrategyCenter": "Strategy Center",
+        "AmericaSupplyCenter": "Supply Center",
         "AmericaVehicleHumvee": "Humvee",
         "AirF_AmericaVehicleCombatChinook": "Combat Chinook",
         "ChinaInfantryRedguard": "Red Guard",
@@ -39,6 +42,8 @@ _GAME_LABELS = MappingProxyType(
 
 _FEATURE_LABELS = MappingProxyType(
     {
+        "activity.effective_actions_per_minute": "Observed effective APM",
+        "activity.supported_order_action_count": "Supported orders",
         "build.completed_count": "Structures completed",
         "build.completed_sequence": "Build order",
         "combat.applied_damage_taken": "Damage taken",
@@ -50,9 +55,44 @@ _FEATURE_LABELS = MappingProxyType(
     }
 )
 
+_STRATEGY_LABELS = MappingProxyType(
+    {
+        "all_in_aggression": "Massing Humvees",
+        "china_dual_war_factory_pressure": "Dual War Factory pressure",
+        "china_fast_propaganda_center": "Propaganda Center technology",
+        "china_helix_pressure": "Helix pressure",
+        "china_infantry_pressure": "Red Guard infantry pressure",
+        "defensive_opening": "Layered Firebase defense",
+        "economic_expansion": "Second Supply Center expansion",
+        "gla_dual_arms_dealer_pressure": "Dual Arms Dealer pressure",
+        "gla_fast_palace": "Palace technology",
+        "gla_forward_tunnel_pressure": "Forward Tunnel pressure",
+        "gla_technical_aggression": "Technical aggression",
+        "gla_terror_tech": "Terror Tech",
+        "oil_capture": "Oil capture",
+        "unknown_or_mixed": "No named strategy established",
+        "usa_combat_chinook_pressure": "Combat Chinook pressure",
+        "usa_defensive_firebase_expansion": "Firebase expansion",
+        "usa_dual_airfield": "Dual Airfield",
+        "usa_fast_strategy_center": "Strategy Center technology",
+        "usa_humvee_pressure": "Humvee pressure",
+    }
+)
+
+_PHASE_LABELS = MappingProxyType(
+    {
+        "opening": "Opening",
+        "early": "Early game",
+        "mid": "Mid game",
+        "late": "Late game",
+        "cross_phase": "Across observed phases",
+    }
+)
+
 _REASON_LABELS = MappingProxyType(
     {
         "ambiguous_feature_value": "The replay contains conflicting evidence",
+        "crc_mismatch": "Replay playback desynchronized at the reported frame",
         "incompatible_feature_value": "This evidence cannot support that conclusion",
         "insufficient_feature_quality": "The available evidence is incomplete",
         "map_identity_mismatch": "This strategy is not defined for the detected map",
@@ -88,6 +128,20 @@ def feature_label(feature_name: str) -> str:
 
     known = _FEATURE_LABELS.get(feature_name)
     return known if known is not None else f"{_readable_identity(feature_name)} (unrecognized)"
+
+
+def strategy_label(strategy_id: str) -> str:
+    """Return the taxonomy's stable player-facing strategy title."""
+
+    known = _STRATEGY_LABELS.get(strategy_id)
+    return known if known is not None else f"{_readable_identity(strategy_id)} (unrecognized)"
+
+
+def phase_label(phase: str) -> str:
+    """Return a consistent phase label without inferring an unseen phase."""
+
+    known = _PHASE_LABELS.get(phase)
+    return known if known is not None else f"{_readable_identity(phase)} (unrecognized)"
 
 
 def reason_label(reason: str) -> str:
