@@ -148,7 +148,8 @@ def _valid_local_host(value: str) -> bool:
     return port_text is None or 1 <= int(port_text) <= 65535
 
 
-def _valid_local_origin(value: str | None) -> bool:
+# TheSuperHackers @fix Leex 23/08/2026 Require mutation origins to match the exact loopback authority. (#TBD)
+def _valid_local_origin(value: str | None, *, expected_host: str) -> bool:
     if value is None:
         return False
     try:
@@ -160,9 +161,9 @@ def _valid_local_origin(value: str | None) -> bool:
         return False
     if parsed.path or parsed.query or parsed.fragment:
         return False
-    if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+    if parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or (port is not None and not 1 <= port <= 65535):
         return False
-    return port is None or 1 <= port <= 65535
+    return parsed.netloc.casefold() == expected_host.casefold()
 
 
 class LocalRequestSecurityMiddleware(BaseHTTPMiddleware):
@@ -182,7 +183,9 @@ class LocalRequestSecurityMiddleware(BaseHTTPMiddleware):
                 code="host_rejected",
                 detail="The request Host is not allowed",
             )
-        elif request.method.upper() not in _SAFE_METHODS and not _valid_local_origin(request.headers.get("origin")):
+        elif request.method.upper() not in _SAFE_METHODS and not _valid_local_origin(
+            request.headers.get("origin"), expected_host=host
+        ):
             response = problem_response(
                 403,
                 title="Forbidden",

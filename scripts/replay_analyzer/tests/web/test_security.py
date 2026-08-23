@@ -63,7 +63,11 @@ def test_local_host_headers_are_allowed(host: str) -> None:
     assert response.status_code == 200
 
 
-def test_unsafe_request_rejects_nonlocal_origin_before_csrf() -> None:
+@pytest.mark.parametrize(
+    "origin",
+    ("http://example.test", "http://localhost:65534", "http://127.0.0.1:8765", "https://localhost:8765"),
+)
+def test_unsafe_request_rejects_nonexact_origin_before_csrf(origin: str) -> None:
     app = _secured_app(csrf_validator=TokenValidator())
 
     @app.post("/test-command")
@@ -73,7 +77,7 @@ def test_unsafe_request_rejects_nonlocal_origin_before_csrf() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/test-command",
-            headers={"host": "localhost", "origin": "http://example.test", "x-csrf-token": "accepted-token"},
+            headers={"host": "localhost:8765", "origin": origin, "x-csrf-token": "accepted-token"},
         )
 
     assert response.status_code == 403
@@ -88,7 +92,7 @@ def test_unsafe_local_request_requires_future_csrf_validator_acceptance(token: s
     def command() -> dict[str, bool]:
         return {"accepted": True}
 
-    headers = {"host": "localhost", "origin": "http://localhost:8765"}
+    headers = {"host": "localhost:8765", "origin": "http://localhost:8765"}
     if token is not None:
         headers["x-csrf-token"] = token
     with TestClient(app) as client:
