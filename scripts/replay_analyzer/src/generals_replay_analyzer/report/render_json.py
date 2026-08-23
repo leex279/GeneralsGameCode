@@ -8,9 +8,7 @@ from generals_replay_analyzer.report.model import ReportDocument, document_to_ma
 from generals_replay_analyzer.report.resources import validate_document
 
 
-def render_json(document: ReportDocument) -> bytes:
-    """Return the unrounded canonical UTF-8 public document."""
-    validate_document(document)
+def _render_json_validated(document: ReportDocument) -> bytes:
     return json.dumps(
         document_to_mapping(document),
         sort_keys=True,
@@ -18,3 +16,9 @@ def render_json(document: ReportDocument) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def render_json(document: ReportDocument) -> bytes:
+    """Return the unrounded canonical UTF-8 public document."""
+    validate_document(document)
+    return _render_json_validated(document)

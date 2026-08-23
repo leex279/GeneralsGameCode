@@ -46,9 +46,7 @@ def _values(title: str, values: tuple[ReportValue, ...]) -> list[str]:
     return lines
 
 
-def render_text(document: ReportDocument) -> str:
-    """Render the stable fixed-order human-readable report without environment metadata."""
-    validate_document(document)
+def _render_text_validated(document: ReportDocument) -> str:
     lifecycle = document.lifecycle
     lines = [
         "Replay analysis report",
@@ -87,3 +85,9 @@ def render_text(document: ReportDocument) -> str:
         *([f"- {_safe_text(warning)}" for warning in document.warnings] or ["- none"]),
     ]
     return "\n".join(lines) + "\n"
+
+
+def render_text(document: ReportDocument) -> str:
+    """Render the stable fixed-order human-readable report without environment metadata."""
+    validate_document(document)
+    return _render_text_validated(document)

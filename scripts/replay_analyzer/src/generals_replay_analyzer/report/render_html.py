@@ -76,9 +76,7 @@ def _issues(values: tuple[ReportQualityIssue, ...]) -> str:
     )
 
 
-def render_html(document: ReportDocument) -> str:
-    """Render one report through the exact pinned script-free template."""
-    validate_document(document)
+def _render_html_validated(document: ReportDocument) -> str:
     loaded = load_report_resources()
     lifecycle = document.lifecycle
     parts = [
@@ -113,3 +111,9 @@ def render_html(document: ReportDocument) -> str:
         "</main>",
     ]
     return loaded.html_template.replace("{{REPORT_BODY}}", "".join(parts))
+
+
+def render_html(document: ReportDocument) -> str:
+    """Render one report through the exact pinned script-free template."""
+    validate_document(document)
+    return _render_html_validated(document)

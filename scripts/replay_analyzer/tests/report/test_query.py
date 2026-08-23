@@ -1318,6 +1318,54 @@ def test_latest_resolution_selects_exact_replay_and_player_reports_without_write
         )
 
 
+def test_fixed_query_validates_each_immutable_document_once_before_trusted_rendering(
+    published_graph: PublishedGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    original_validate = report_query.validate_document
+    original_json = report_query._render_json_validated
+    original_html = report_query._render_html_validated
+    original_text = report_query._render_text_validated
+
+    def count_validation(document: ReportDocument) -> None:
+        calls.append(("validate", document.report_public_id))
+        original_validate(document)
+
+    def count_json(document: ReportDocument) -> bytes:
+        calls.append(("json", document.report_public_id))
+        return original_json(document)
+
+    def count_html(document: ReportDocument) -> str:
+        calls.append(("html", document.report_public_id))
+        return original_html(document)
+
+    def count_text(document: ReportDocument) -> str:
+        calls.append(("text", document.report_public_id))
+        return original_text(document)
+
+    monkeypatch.setattr(report_query, "validate_document", count_validation)
+    monkeypatch.setattr(report_query, "_render_json_validated", count_json)
+    monkeypatch.setattr(report_query, "_render_html_validated", count_html)
+    monkeypatch.setattr(report_query, "_render_text_validated", count_text)
+
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.replay_wide_report_id)
+    )
+
+    expected_ids = {
+        item.document.report_public_id for item in (graph.replay_wide, *graph.player_reports)
+    }
+    assert len(calls) == len(expected_ids) * 4
+    for report_public_id in expected_ids:
+        assert [stage for stage, value in calls if value == report_public_id] == [
+            "validate",
+            "json",
+            "html",
+            "text",
+        ]
+
+
 def test_timeline_query_is_frame_canonical_sorted_and_report_scoped(
     published_graph: PublishedGraph,
 ) -> None:

@@ -138,9 +138,9 @@ from generals_replay_analyzer.report.read_model import (
     TimelinePointDTO,
     TimelineSeriesDTO,
 )
-from generals_replay_analyzer.report.render_html import render_html
-from generals_replay_analyzer.report.render_json import render_json
-from generals_replay_analyzer.report.render_text import render_text
+from generals_replay_analyzer.report.render_html import _render_html_validated
+from generals_replay_analyzer.report.render_json import _render_json_validated
+from generals_replay_analyzer.report.render_text import _render_text_validated
 from generals_replay_analyzer.report.resources import (
     ReportResources,
     load_report_resources,
@@ -1558,10 +1558,11 @@ class ReportQueryService:
         presentation_row = session.get(ManagedAsset, row.rendered_asset_id)
         if structured_row is None or presentation_row is None or structured_row.id == presentation_row.id:
             raise ReportGraphContractError("published report asset links are invalid")
-        structured_bytes = render_json(document)
+        # TheSuperHackers @performance Leex 23/08/2026 Validate each immutable report once before deterministic trusted rendering. (#TBD)
+        structured_bytes = _render_json_validated(document)
         structured = self._asset(structured_row, "report_structured_json", structured_bytes)
-        html = render_html(document)
-        text = render_text(document)
+        html = _render_html_validated(document)
+        text = _render_text_validated(document)
         bundle_mapping = {
             "schema_version": "report-presentation-bundle-v1",
             "report_version": REPORT_VERSION,
@@ -1694,7 +1695,9 @@ class ReportQueryService:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReportGraphContractError("stored report document is invalid") from exc
-        if document_to_mapping(document) != value or render_json(document) != _canonical_bytes(value):
+        if document_to_mapping(document) != value or _canonical_bytes(document_to_mapping(document)) != _canonical_bytes(
+            value
+        ):
             raise ReportGraphContractError("stored report document is noncanonical")
         return document
 
