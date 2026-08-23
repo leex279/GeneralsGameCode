@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="page-heading">
+  <div><span class="eyebrow">Players / Version-Bound History</span><h1>Player Evidence</h1><p>Canonical identities backed by exact replay observations and immutable analysis runs.</p></div>
+  <a class="button" href="/compare">Compare Players</a>
+</header>
+<form class="library-filters" method="get" action="/players" aria-label="Player Filters">
+  <fieldset><legend>Find Players</legend><div class="filter-grid">
+    <label for="player-search">Display Name<input id="player-search" name="search" type="search" value="{{ view.page.query.search or '' }}" autocomplete="off" placeholder="Example: Leex279…"></label>
+    <label for="player-faction">Faction<input id="player-faction" name="faction" value="{{ view.page.query.faction or '' }}" autocomplete="off" placeholder="Example: China…"></label>
+    <label for="player-opponent-faction">Opponent Faction<input id="player-opponent-faction" name="opponent_faction" value="{{ view.page.query.opponent_faction or '' }}" autocomplete="off" placeholder="Example: GLA…"></label>
+    <label for="player-patch">Patch<input id="player-patch" name="patch" value="{{ view.page.query.patch or '' }}" autocomplete="off" placeholder="Example: 1.04…"></label>
+    <label for="player-sort">Sort<select id="player-sort" name="sort"><option value="display_name"{% if view.page.query.sort == 'display_name' %} selected{% endif %}>Display Name</option><option value="recent_match"{% if view.page.query.sort == 'recent_match' %} selected{% endif %}>Recent Match</option><option value="match_count"{% if view.page.query.sort == 'match_count' %} selected{% endif %}>Match Count</option></select></label>
+    <label for="player-active"><input id="player-active" name="active_only" type="checkbox" value="true"{% if view.page.query.active_only %} checked{% endif %}> Active Players Only</label>
+  </div><button type="submit">Apply Player Filters</button></fieldset>
+</form>
+<section class="workspace-panel" aria-labelledby="player-results-title">
+  <div class="section-heading"><div><span class="eyebrow">{{ view.page.total_items }} identities</span><h2 id="player-results-title">Player Directory</h2></div><span>{{ view.page.availability.state }}</span></div>
+  {% if view.page.items %}<table><caption>Canonical players in the selected immutable result page</caption><thead><tr><th scope="col">Player</th><th scope="col">State</th><th scope="col">Matches</th><th scope="col">Latest Match</th><th scope="col">Evidence</th></tr></thead><tbody>
+  {% for player in view.page.items %}<tr><th scope="row"><a href="/players/{{ player.player_public_id }}">{{ player.display_name }}</a><small>Revision {{ player.identity_revision }}</small></th><td>{{ player.state }}</td><td>{{ player.match_count }}</td><td>{{ player.latest_match_at_utc or 'Unavailable' }}</td><td>{{ player.availability.state }}{% if player.availability.reason_codes %}: {{ player.availability.reason_codes|join(', ') }}{% endif %}</td></tr>{% endfor %}
+  </tbody></table>{% else %}<p>No player observations are available. Reason: {{ view.page.availability.reason_codes|join(', ') or 'no_players' }}</p>{% endif %}
+  <nav class="pagination" aria-label="Player pages">{% if view.previous_url %}<a href="{{ view.previous_url }}">Previous Page</a>{% endif %}<span>Page {{ view.page.page }} of {{ view.total_pages }}</span>{% if view.next_url %}<a href="{{ view.next_url }}">Next Page</a>{% endif %}</nav>
+</section>
+{% endblock %}
