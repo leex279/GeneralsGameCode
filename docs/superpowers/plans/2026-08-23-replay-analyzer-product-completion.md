@@ -495,13 +495,13 @@ From screenshots verify a Zero Hour player can answer what happened, what each s
 - Consumes: final frozen wheel and prior commits.
 - Produces: pushed release checkpoint with pass counts, wheel hash, retained artifacts, partial-replay boundary, Ollama status, and external-toolchain limits.
 
-- [ ] **Step 1: Run the complete suite**
+- [x] **Step 1: Run the complete suite**
 
 Run: uv run --project . pytest -q
 
 Expected: all pass except explicit environment-dependent skips.
 
-- [ ] **Step 2: Run complete static gates**
+- [x] **Step 2: Run complete static gates**
 
 Run: uv run --project . ruff check src tests
 
@@ -515,19 +515,19 @@ Run parser, telemetry, parity, SQLite, worker, report, strategy, longitudinal, s
 
 Run telemetry-off/on non-interference and available Win32 Release/Debug targets. Record VC6/MinGW unverified if absent; never present static exclusion as retail replay execution.
 
-- [ ] **Step 5: Rebuild final wheel**
+- [x] **Step 5: Rebuild final wheel**
 
 Build a new wheel after all changes, hash it, install fresh, rerun the entire installed-wheel browser set against that exact hash.
 
-- [ ] **Step 6: Audit repository scope**
+- [x] **Step 6: Audit repository scope**
 
 Run git status --short, git diff --check, and git diff --name-only from the starting commit. Confirm protected files/test were never committed.
 
-- [ ] **Step 7: Record release evidence**
+- [x] **Step 7: Record release evidence**
 
 Write exact commands, pass counts, wheel hash, screenshot path/hash, frame-105 CRC boundary, live Ollama status, and absent toolchains. Mark only actually verified plan items complete.
 
-- [ ] **Step 8: Commit and push final checkpoint**
+- [x] **Step 8: Commit and push final checkpoint**
 
     git add scripts/replay_analyzer/docs/acceptance-matrix.md scripts/replay_analyzer/docs/release-status.md docs/superpowers/plans/2026-08-23-replay-analyzer-product-completion.md
     git commit -m "docs(replay): Record strategy-first release evidence"
