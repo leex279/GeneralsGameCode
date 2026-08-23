@@ -29,6 +29,7 @@ from .job_contracts import (
     WorkerLeaseDTO,
 )
 from .job_lifecycle import JobLifecycleService
+from .engine_acquirer import EngineTelemetryAcquirer
 from .jobs import StageFailure
 from .service import (
     AcquisitionDiagnostic,
@@ -53,6 +54,7 @@ __all__ = [
     "AcquisitionDiagnostic",
     "CancelJobCommandDTO",
     "CancellationReasonCode",
+    "EngineTelemetryAcquirer",
     "FrozenJSONValue",
     "ImportRequest",
     "ImportResultDTO",
