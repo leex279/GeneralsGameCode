@@ -33,10 +33,14 @@ from ..db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
-from ..identity.service import IdentityBusyError, IdentityError
+from ..identity.service import IdentityError
 from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundle
 from .evidence_identity import telemetry_event_evidence_identities, validate_observed_evidence_identity
-from .identity_import import ParserObservationImportPort
+from .identity_import import (
+    IdentityResolutionContractError,
+    ParserObservationImportPort,
+    _identity_failure,
+)
 from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
 from .service import FrozenJSONValue, StageDependencyOutput, StageExecutionContext
@@ -1466,19 +1470,11 @@ class ObservationImportHandler:
                     parser_version=parser_version,
                     idempotency_key=context.idempotency_key,
                 )
-            except IdentityBusyError as error:
-                raise StageFailure(
-                    "identity_resolution_busy",
-                    "player identity resolution is busy",
-                    retryable=True,
-                ) from error
+            except IdentityResolutionContractError as error:
+                raise _identity_failure(error) from error
             except IdentityError as error:
                 # TheSuperHackers @fix Leex 23/08/2026 Keep identity internals outside durable public job failures. (#TBD)
-                raise StageFailure(
-                    "identity_resolution_failed",
-                    "player identity resolution failed",
-                    retryable=False,
-                ) from error
+                raise _identity_failure(error) from error
             if parser_result.status != "succeeded":
                 raise StageFailure("parser_import_failed", "parser observations failed validation", retryable=False)
         elif parse_dependency.status == "failed":
@@ -1493,18 +1489,10 @@ class ObservationImportHandler:
                     error_message=message,
                     error_details=details,
                 )
-            except IdentityBusyError as error:
-                raise StageFailure(
-                    "identity_resolution_busy",
-                    "player identity resolution is busy",
-                    retryable=True,
-                ) from error
+            except IdentityResolutionContractError as error:
+                raise _identity_failure(error) from error
             except IdentityError as error:
-                raise StageFailure(
-                    "identity_resolution_failed",
-                    "player identity resolution failed",
-                    retryable=False,
-                ) from error
+                raise _identity_failure(error) from error
         else:
             raise StageFailure("parser_dependency_invalid", "parser dependency is not terminal", retryable=False)
         telemetry_result: TelemetryImportResult | None = None

@@ -27,6 +27,7 @@ from generals_replay_analyzer.db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
+from generals_replay_analyzer.identity.service import PlayerIdentityService
 from generals_replay_analyzer.importing import (
     AcquisitionDiagnostic,
     ImportRequest,
@@ -36,6 +37,7 @@ from generals_replay_analyzer.importing import (
     TelemetryArtifact,
     TerminalDependencyPolicy,
 )
+from generals_replay_analyzer.importing.identity_import import IdentityResolvingParserObservationImporter
 from generals_replay_analyzer.importing.parser_import import ParserObservationImporter
 from generals_replay_analyzer.importing.telemetry_import import (
     ObservationImportHandler,
@@ -306,14 +308,17 @@ def test_real_offline_import_observation_deterministic_analytics_to_report(tmp_p
         return {"assessment_public_id": _uuid(91_004)}
 
     observation = ObservationImportHandler(
-        ParserObservationImporter(
-            factory,
-            settings.data_root,
-            parser=fake_parser,
-            parser_version="offline-parser-v1",
-            schema_version=1,
-            clock=lambda: now,
-            uuid_factory=_DeterministicUUIDs(92_000_000_000),
+        IdentityResolvingParserObservationImporter(
+            ParserObservationImporter(
+                factory,
+                settings.data_root,
+                parser=fake_parser,
+                parser_version="offline-parser-v1",
+                schema_version=1,
+                clock=lambda: now,
+                uuid_factory=_DeterministicUUIDs(92_000_000_000),
+            ),
+            PlayerIdentityService(factory, now_factory=lambda: now),
         ),
         TelemetryObservationImporter(
             factory,

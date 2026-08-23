@@ -18,7 +18,10 @@ from ..features.production import ProductionExtractor
 from ..features.service import FeatureExtractionService, RegisteredExtractor
 from ..identity.service import PlayerIdentityService
 from ..importing.engine_acquirer import EngineTelemetryAcquirer
-from ..importing.identity_import import IdentityResolvingParserObservationImporter
+from ..importing.identity_import import (
+    IdentityReconciliationHandler,
+    IdentityResolvingParserObservationImporter,
+)
 from ..importing.parser_import import ParserObservationImporter
 from ..importing.service import (
     ImportService,
@@ -26,7 +29,7 @@ from ..importing.service import (
     TelemetryAcquirer,
     TerminalDependencyPolicy,
 )
-from ..importing.stages import RENDER_REPORT_VERSION
+from ..importing.stages import RECONCILE_IDENTITIES, RECONCILE_IDENTITIES_VERSION, RENDER_REPORT_VERSION
 from ..importing.telemetry_import import ObservationImportHandler, TelemetryObservationImporter
 from ..llm.provider import OllamaClientConfig
 from ..llm.service import HttpxOllamaTransport, OllamaAnalysisService
@@ -89,6 +92,7 @@ def create_production_import_service(
     strategies = StrategyAssessmentService(session_factory, data_root=settings.data_root)
     longitudinal = LongitudinalAnalysisService(session_factory, analyzer_settings=settings)
     reports = ReportService(session_factory, settings=settings)
+    identities = PlayerIdentityService(session_factory, now_factory=clock)
     observation = ObservationImportHandler(
         IdentityResolvingParserObservationImporter(
             ParserObservationImporter(
@@ -99,7 +103,7 @@ def create_production_import_service(
                 schema_version=1,
                 clock=clock,
             ),
-            PlayerIdentityService(session_factory, now_factory=clock),
+            identities,
         ),
         TelemetryObservationImporter(
             session_factory,
@@ -123,6 +127,11 @@ def create_production_import_service(
             "1",
             observation,
             TerminalDependencyPolicy(failed_stages=frozenset({"parse", "telemetry"})),
+        ),
+        StageHandlerRegistration(
+            RECONCILE_IDENTITIES,
+            RECONCILE_IDENTITIES_VERSION,
+            IdentityReconciliationHandler(identities),
         ),
         StageHandlerRegistration(
             "derive_features",

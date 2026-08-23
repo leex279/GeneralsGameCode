@@ -2,6 +2,7 @@
 
 from .engine_acquirer import EngineTelemetryAcquirer
 from .identity_import import (
+    IdentityReconciliationHandler,
     IdentityResolutionContractError,
     IdentityResolutionPort,
     IdentityResolvingParserObservationImporter,
@@ -62,6 +63,7 @@ __all__ = [
     "CancellationReasonCode",
     "EngineTelemetryAcquirer",
     "FrozenJSONValue",
+    "IdentityReconciliationHandler",
     "IdentityResolutionContractError",
     "IdentityResolutionPort",
     "IdentityResolvingParserObservationImporter",

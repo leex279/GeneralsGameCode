@@ -32,12 +32,12 @@ SCREENSHOTS = (
     ("compare--mobile.png", "/compare", "Pattern Comparison", "mobile"),
 )
 POPULATED_SCREENSHOTS = (
-    ("report--desktop.png", "report", "Observed opening through 0:03.5", "desktop"),
+    ("report--desktop.png", "report", "Observed opening through 0:03.3", "desktop"),
     ("map-detail--desktop.png", "map", "Observed sample reduction", "desktop"),
     ("player-profile--desktop.png", "profile", "Recent analyzed matches", "desktop"),
-    ("report--tablet.png", "report", "Observed opening through 0:03.5", "tablet"),
+    ("report--tablet.png", "report", "Observed opening through 0:03.3", "tablet"),
     ("map-detail--tablet.png", "map", "Observed sample reduction", "tablet"),
-    ("report--mobile.png", "report", "Observed opening through 0:03.5", "mobile"),
+    ("report--mobile.png", "report", "Observed opening through 0:03.3", "mobile"),
     ("map-detail--mobile.png", "map", "Observed sample reduction", "mobile"),
 )
 
@@ -300,7 +300,7 @@ def test_report_timeline_and_evidence_disclosure_are_keyboard_operable(
     console_errors, page_errors = install_browser_error_guard(page)
     rejected = install_same_origin_guard(page, origin)
     _goto_populated_page(page, origin, manifest.player_reports[0].fixed_url, populated_fixture_template)
-    expect(page.get_by_role("heading", name="Observed opening through 0:03.5", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", name="Observed opening through 0:03.3", exact=True)).to_be_visible()
 
     player_toggles = page.locator("[data-timeline-player]")
     assert player_toggles.count() == 1, "player report must expose its exact player timeline scope"
