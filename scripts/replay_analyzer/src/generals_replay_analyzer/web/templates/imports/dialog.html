@@ -17,7 +17,8 @@
       {% for root in roots %}<option value="{{ root.root_public_id }}"{% if root.availability.state != 'available' %} disabled{% endif %}>{{ root.label }}{% if root.availability.state != 'available' %}: {{ root.availability.reason_codes|join(', ') or root.reason_code or 'unavailable' }}{% endif %}</option>{% endfor %}
     </select>
     <label for="relative-path">Relative replay name</label>
-    <input id="relative-path" name="relative_path" required pattern="[^\\/][^\\]*\\.rep"{% if not has_available_roots %} disabled{% endif %}>
+    <!-- TheSuperHackers @fix Leex 23/08/2026 Use a UnicodeSets-compatible client hint while retaining server-owned path validation. (#TBD) -->
+    <input id="relative-path" name="relative_path" required pattern="[^\/][^\\]*[.]rep"{% if not has_available_roots %} disabled{% endif %}>
     <button type="submit"{% if not has_available_roots %} disabled{% endif %}>Import configured replay</button>
   </form>
   <noscript><p>JavaScript is unavailable. {% if has_available_roots %}Use the configured-root form with its rendered security token.{% else %}No configured roots can be imported.{% endif %} Uploads remain unavailable until opaque ingress is installed.</p></noscript>

@@ -7,6 +7,8 @@ import os
 import shutil
 from pathlib import Path
 
+from generals_replay_analyzer.watching.roots import _normalized_path_key
+
 POPULATED_FIXTURE_MANIFEST = "populated-browser-fixture.json"
 
 
@@ -37,6 +39,18 @@ def clone_populated_runtime(template_root: Path, runtime_root: Path) -> Path:
     shutil.copytree(fixture_input, runtime / fixture_input.name)
     destination_manifest = runtime / manifest.name
     shutil.copy2(manifest, destination_manifest)
+    registry_path = runtime / data.name / "watched-roots-v1.json"
+    if registry_path.is_file():
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        roots = registry.get("roots") if isinstance(registry, dict) else None
+        if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict):
+            raise ValueError("populated fixture watched-root registry must contain exactly one root")
+        # TheSuperHackers @fix Leex 23/08/2026 Preserve the durable root identity while rebinding an isolated clone path. (#TBD)
+        roots[0]["path_key_sha256"] = _normalized_path_key(runtime / fixture_input.name)
+        registry_path.write_text(
+            json.dumps(registry, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return destination_manifest
 
 

@@ -2,7 +2,7 @@
 
 Date: 23 August 2026
 
-Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture now builds successfully and has been consumed by fresh installed wheels. The responsive, populated security, Settings mutation, external-worker, Axe, semantic-alternative, offline, and no-script matrices are green. A required comparable result cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current fixed result remains truthfully unavailable; it is not weakened or presented as comparable. The remaining full populated keyboard, screenshot, and manual-review matrices are not yet complete.
+Status: **PARTIAL - release acceptance remains blocked.** The production-service populated fixture now builds successfully and has been consumed by fresh installed wheels. The responsive, populated security, Settings mutation, external-worker, Axe, semantic-alternative, offline, no-script, keyboard, and screenshot-capture matrices are green. A required comparable result cannot be composed truthfully from the sole pinned replay, whose two players have different factions, while every accepted comparison definition is same-faction-only. The current fixed result remains truthfully unavailable; it is not weakened or presented as comparable. Final static/build gates and manual screenshot review remain incomplete.
 
 ## Accepted inputs
 
@@ -48,7 +48,7 @@ The fixture manifest and database remain external. No ORM seed, forged job row, 
 | Security owner fix | accepted commit `73830f2dd` | 13 passed installed-wheel; owner focused gate 41 passed |
 | Axe and explicit semantics | `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/browser/test_accessibility.py -q --browser chromium` | 8 passed |
 | Offline/no-script/reflow | `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/browser/test_offline.py -q --browser chromium` | 24 passed |
-| Keyboard/screenshots | `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/browser/test_user_flows.py -q --browser chromium` | 11 passed |
+| Keyboard/screenshots | `uv run --project . pytest -q tests/browser/test_user_flows.py` | 27 passed in 76.26s; installed-wheel keyboard, focus, configured-root import, Settings, external-worker, and populated screenshot capture green |
 | Pre-populated browser scope | `uv run --project scripts/replay_analyzer pytest scripts/replay_analyzer/tests/browser -q --browser chromium` | 59 passed in 17.62s; superseded by populated additions |
 | Production fixture builder | focused helper gate reported by fixture owner | 1 passed in 80.80s; completed discover requested telemetry, pending discover did not |
 | Installed populated configuration clone | focused clone/environment tests | 2 passed; fresh wheel process observed revision `1` and minimum sample size `1` |
@@ -115,13 +115,13 @@ Artifacts are external and are not in Git or the application wheel.
 | `library--mobile.png` | 390x844 | `d37d8c4b32d7b70eb9989e7ce4b0252c304b44894194864884198258fa399762` | reviewed at actual size; readable, no overflow |
 | `compare--mobile.png` | 390x844 | `cf51e1a9692ebb8db7ee9e4eb54aa4fdac67dd049416aab109865b6e342dfd49` | captured; automated reflow pass |
 
-Required populated screenshot cases are now implemented for import dialog, fixed report, evidence disclosure, map detail, player profile, identity confirmation, report tablet/mobile, and map-detail tablet/mobile. They have not yet run against the final frozen wheel, so no hashes or review result are claimed.
+Required populated screenshot cases ran successfully for import dialog, fixed report, evidence disclosure, map detail, player profile, identity confirmation, report tablet/mobile, and map-detail tablet/mobile. Their final retained hashes and actual-size manual review are not yet claimed.
 
 ## Release blockers
 
 The production-service populated fixture and worker-supported pending discover now exist. Release acceptance is still blocked by these non-waived items:
 
 - No truthful comparable result can be derived from the only available replay: `leex279` and `FOX27` use different factions, while all accepted match and longitudinal comparison definitions are same-faction-only. The current fixed result correctly reports `subject_value_unavailable`; the underlying cross-faction cohort cannot supply an aligned value. A fabricated replay, self-comparison, or relaxed comparison semantics is forbidden.
-- The remaining populated keyboard cases, remaining screenshots, full final static/build gates, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
+- Full final static/build gates, retained screenshot hashes, and manual 100%/200% review have not yet completed against one final frozen installed wheel.
 
 These items are pending, not skipped or waived. `web-qa.md` remains a factual partial record rather than release closure.

@@ -147,7 +147,7 @@ def test_keyboard_import_dialog_escape_returns_to_library_invoker(
 
 
 @pytest.mark.browser
-def test_configured_root_duplicate_import_is_keyboard_submitted_truthfully(
+def test_configured_root_import_is_keyboard_submitted_without_claiming_completion(
     mutable_populated_server: object,
     populated_fixture_template: PopulatedFixtureResult,
     browser: Browser,
@@ -170,15 +170,25 @@ def test_configured_root_duplicate_import_is_keyboard_submitted_truthfully(
     expect(dialog).to_be_visible()
     root = page.get_by_label("Configured replay root", exact=True)
     _tab_to(page, root)
+    expect(root).to_be_enabled()
     expect(root).to_have_value(manifest.import_root_public_id)
     relative_name = page.get_by_label("Relative replay name", exact=True)
-    _type_by_keyboard(page, relative_name, manifest.import_relative_path)
+    _tab_to(page, relative_name)
+    relative_name.press_sequentially(manifest.import_relative_path)
+    expect(relative_name).to_have_value(manifest.import_relative_path)
     submit = page.get_by_role("button", name="Import configured replay", exact=True)
     _tab_to(page, submit)
-    page.keyboard.press("Enter")
+    with page.expect_response(re.compile(rf"^{re.escape(origin)}/imports/root-selections$")) as response_info:
+        page.keyboard.press("Enter")
     page.wait_for_url(re.compile(rf"^{re.escape(origin)}/imports/root-selections$"), timeout=30_000)
     payload = json.loads(page.locator("body").inner_text())
-    assert payload["duplicate_of_replay_public_id"] == manifest.replay_public_id
+    assert response_info.value.status == 201
+    assert payload["availability"] == {
+        "state": "available",
+        "reason_codes": [],
+        "evidence_references": [],
+    }
+    assert payload["duplicate_of_replay_public_id"] is None
     assert payload["problem_code"] is None
     assert rejected == []
     assert_browser_clean(console_errors, page_errors)

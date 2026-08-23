@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
+from generals_replay_analyzer.watching import WatchedRootRegistry
+
 from .fixture_data import clone_populated_runtime, isolated_runtime_environment, populated_runtime_environment
 from .populated_fixture import PopulatedFixtureResult
 from .support import (
@@ -151,6 +153,40 @@ def test_populated_runtime_clone_copies_only_release_inputs(tmp_path: Path) -> N
         / "settings.json"
     )
     assert installed_configuration.read_text(encoding="utf-8") == "{}"
+
+
+def test_populated_runtime_clone_rebinds_the_watched_root_without_changing_its_public_identity(
+    tmp_path: Path,
+) -> None:
+    """Catch isolated runtime paths accidentally changing the durable ingress identity under test."""
+    template = tmp_path / "template"
+    destination = tmp_path / "runtime"
+    (template / "product-data" / "managed-replays").mkdir(parents=True)
+    (template / "local-app-data" / "GeneralsReplayAnalyzer").mkdir(parents=True)
+    (template / "fixture-input").mkdir()
+    (template / "product-data" / "watched-roots-v1.json").write_text(
+        json.dumps(
+            {
+                "roots": [
+                    {
+                        "label": "Replay folder 1",
+                        "path_key_sha256": "a" * 64,
+                        "root_public_id": "00000000-0000-4000-8000-000000000011",
+                    }
+                ],
+                "version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (template / "populated-browser-fixture.json").write_text("{}", encoding="utf-8")
+
+    clone_populated_runtime(template, destination)
+    roots = WatchedRootRegistry(destination / "product-data").reconcile((destination / "fixture-input",))
+
+    assert len(roots) == 1
+    assert roots[0].root_public_id == "00000000-0000-4000-8000-000000000011"
+    assert roots[0].label == "Replay folder 1"
 
 
 def test_same_origin_guard_records_failed_local_transport() -> None:
