@@ -55,6 +55,7 @@
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayVisibilitySampler.h"
 #endif
 #include "Common/StatsCollector.h"
 #include "Common/ThingFactory.h"
@@ -429,6 +430,8 @@ void GameLogic::reset()
 	ReplayEntityLifecycle::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Clear copied sampler snapshots before object IDs can be reused. (#TBD)
 	ReplayMovementSampler::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Clear copied scouting observations before object identities are reused. (#0)
+	ReplayVisibilitySampler::reset();
 #endif
 	m_thingTemplateBuildableOverrides.clear();
 	m_controlBarOverrides.clear();
@@ -3985,6 +3988,8 @@ void GameLogic::update()
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	// TheSuperHackers @feature Leex 20/08/2026 Sample deterministic live-object snapshots after simulation updates and destruction cleanup. (#TBD)
 	ReplayMovementSampler::sampleEndOfFrame();
+	// TheSuperHackers @feature Leex 23/08/2026 Observe shroud after partition and destruction updates without changing simulation state. (#0)
+	ReplayVisibilitySampler::sampleEndOfFrame();
 #endif
 
 

@@ -9,6 +9,7 @@
 #include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayMapExport.h"
 #include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayVisibilitySampler.h"
 #include "Common/ReplayOutcome.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayEntityLifecycle.h"
@@ -520,6 +521,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	ReplayEntityLifecycle::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset copied movement and order observations whenever telemetry is reconfigured. (#TBD)
 	ReplayMovementSampler::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Reset trace-local scouting state whenever telemetry is reconfigured. (#0)
+	ReplayVisibilitySampler::reset();
 }
 
 Bool ReplayTelemetry::isEnabled()
