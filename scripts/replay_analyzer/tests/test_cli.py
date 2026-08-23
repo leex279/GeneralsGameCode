@@ -832,3 +832,27 @@ def test_default_analyze_uses_no_execution_or_ollama_machinery(
     output = _json_output(capsys)
     assert output["status"] == "awaiting_observations"
     assert output["allow_ollama"] is False
+
+
+def test_cli_runtime_configuration_activates_persisted_settings(tmp_path: Path) -> None:
+    """Import, analyze, and Web CLI composition consume the same fresh persisted settings loader."""
+
+    from generals_replay_analyzer.configuration import ConfigurationStore, SettingChange
+
+    configuration_root = tmp_path / "external-configuration"
+    ConfigurationStore(configuration_root=configuration_root, environment={}).apply(
+        expected_revision=0,
+        changes=(
+            SettingChange("movement_sample_frames", 90),
+            SettingChange("minimum_longitudinal_sample_size", 23),
+        ),
+    )
+
+    runtime = cli_module._runtime_configuration(
+        configuration_root=configuration_root,
+        environment={},
+        values={"data_root": tmp_path / "product-data"},
+    )
+
+    assert runtime.settings.movement_sample_frames == 90
+    assert runtime.settings.minimum_longitudinal_sample_size == 23

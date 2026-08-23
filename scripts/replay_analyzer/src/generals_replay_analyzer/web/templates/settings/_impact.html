@@ -1,0 +1,16 @@
+<section id="settings-impact" role="status" aria-live="polite" aria-labelledby="settings-impact-title">
+  <h2 id="settings-impact-title">Settings impact preview</h2>
+  <p>Expected configuration revision: {{ impact.expected_revision }}.</p>
+  <h3>Affected analysis stages</h3><ul>{% for family in impact.affected_stage_families %}<li>{{ family }}</li>{% endfor %}</ul>
+  <p>Existing immutable results invalidated for new work: {{ "yes" if impact.invalidates_existing_results else "no" }}.</p>
+  <p>Restart required: {{ "yes" if impact.restart_required else "no" }}.</p>
+  {% for message in impact.messages %}<p>{{ message.code }}: {{ message.message }}</p>{% endfor %}
+  <form method="post" action="/settings/apply">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="expected_revision" value="{{ impact.expected_revision }}">
+    <input type="hidden" name="expected_impact_digest" value="{{ impact.impact_digest }}">
+    {% for change in impact.normalized_changes %}<input type="hidden" name="setting_key" value="{{ change.key }}"><input type="hidden" name="setting_value" value="{{ change.value }}">{% endfor %}
+    <label><input type="checkbox" name="confirm_invalidating_change" value="true" required> I confirm this versioned settings impact. Existing outputs remain unchanged until explicit re-analysis.</label>
+    <button type="submit">Apply confirmed change</button>
+  </form>
+</section>

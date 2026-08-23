@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from .analysis_pipeline.command import AnalysisCommandResult, AnalysisCommandService
+    from .config import RuntimeConfiguration
     from .engine.config import EngineRunConfig
     from .engine.result import EngineRunResult, EngineRunStatus
     from .importing import ImportService, JobClaimSelectorDTO, WorkerControlPort
@@ -209,15 +210,32 @@ def _run_export(arguments: argparse.Namespace) -> int:
 
 
 # TheSuperHackers @feature Leex 21/08/2026 Initialize resumable replay intake only at an explicit CLI boundary. (#TBD)
+def _runtime_configuration(
+    *,
+    configuration_root: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+    values: Mapping[str, object] | None = None,
+) -> RuntimeConfiguration:
+    """Load one process-lifetime settings/store identity for every CLI composition root."""
+
+    from .config import load_runtime_configuration
+
+    return load_runtime_configuration(
+        configuration_root=configuration_root,
+        environment=environment,
+        values=values,
+        version_identities=(("analyzer", __version__),),
+    )
+
+
 def _import_service() -> tuple[ImportService, Engine]:
     """Initialize managed paths and the packaged database only at the CLI application boundary."""
-    from .config import AnalyzerSettings
     from .db import create_database_engine, create_session_factory
     from .importing import ImportService
     from .storage import ContentAddressedStore
     from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
 
-    settings = AnalyzerSettings.model_validate({})
+    settings = _runtime_configuration().settings
     readiness = BootstrapReadinessState()
     create_production_bootstrapper(readiness).prepare(settings)
     engine = create_database_engine(settings.database_path)
@@ -278,16 +296,16 @@ def _run_jobs(arguments: argparse.Namespace) -> int:
 
 # TheSuperHackers @feature Leex 22/08/2026 Compose the loopback web scaffold without importing it for other commands. (#TBD)
 def _web_application() -> Any:
-    from .config import AnalyzerSettings
     from .web.app import create_app
     from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
     from .web.dependencies import AnalyticsPortFactory
 
-    settings = AnalyzerSettings.model_validate({})
+    runtime = _runtime_configuration()
+    settings = runtime.settings
     readiness = BootstrapReadinessState()
     return create_app(
         settings,
-        port_factory=AnalyticsPortFactory(settings, readiness),
+        port_factory=AnalyticsPortFactory(runtime, readiness),
         bootstrapper=create_production_bootstrapper(readiness),
     )
 
@@ -407,12 +425,11 @@ def _analyze_application() -> _AnalyzeApplication:
     from .analysis_pipeline.command import AnalysisCommandService
     from .analysis_pipeline.composition import create_production_import_service
     from .analysis_pipeline.planner import AnalysisPlanner
-    from .config import AnalyzerSettings
     from .db import create_database_engine, create_session_factory
     from .storage import ContentAddressedStore
     from .web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
 
-    settings = AnalyzerSettings.model_validate({})
+    settings = _runtime_configuration().settings
     create_production_bootstrapper(BootstrapReadinessState()).prepare(settings)
     engine = create_database_engine(settings.database_path)
     session_factory = create_session_factory(engine)

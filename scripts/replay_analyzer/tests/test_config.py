@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from generals_replay_analyzer.config import AnalyzerSettings
+from generals_replay_analyzer.config import AnalyzerSettings, load_runtime_configuration
+from generals_replay_analyzer.configuration import ConfigurationStore, SettingChange
 
 PROJECT_ROOT = Path(__file__).parents[3]
 
@@ -46,6 +47,7 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
         watched_folders=(watch,),
         import_mode="reference",
         minimum_longitudinal_sample_size=9,
+        movement_sample_frames=30,
     )
 
     assert settings.data_root == data_root.resolve()
@@ -61,6 +63,7 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
     assert settings.watched_folders == (watch.resolve(),)
     assert settings.import_mode == "reference"
     assert settings.minimum_longitudinal_sample_size == 9
+    assert settings.movement_sample_frames == 30
 
 
 def test_prefixed_environment_variables_override_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,9 +214,92 @@ def test_minimum_longitudinal_sample_size_must_be_positive(tmp_path: Path) -> No
         _settings(tmp_path, minimum_longitudinal_sample_size=0)
 
 
+def test_movement_sample_frames_has_the_accepted_default_and_range(tmp_path: Path) -> None:
+    """Keep the effective telemetry interval aligned with the engine-run contract."""
+    assert _settings(tmp_path).movement_sample_frames == 15
+
+    for invalid in (0, 3601):
+        with pytest.raises(ValidationError):
+            _settings(tmp_path, movement_sample_frames=invalid)
+
+
 def test_settings_are_frozen(tmp_path: Path) -> None:
     """Prevent path or model changes while a pipeline stage is using the settings."""
     settings = _settings(tmp_path)
 
     with pytest.raises(ValidationError, match="frozen"):
         settings.ollama_model = "changed"  # type: ignore[misc]
+
+
+def test_fresh_runtime_configuration_activates_persisted_safe_settings(tmp_path: Path) -> None:
+    """A restarted process must consume the exact safe values displayed by Settings."""
+
+    configuration_root = tmp_path / "external-configuration"
+    writer = ConfigurationStore(configuration_root=configuration_root, environment={})
+    writer.apply(
+        expected_revision=0,
+        changes=(
+            SettingChange("import_mode", "reference"),
+            SettingChange("minimum_longitudinal_sample_size", 17),
+            SettingChange("movement_sample_frames", 45),
+            SettingChange("ollama_model", "qwen3.6:8b"),
+            SettingChange("ollama_url", "http://[::1]:22434"),
+        ),
+    )
+
+    runtime = load_runtime_configuration(
+        configuration_root=configuration_root,
+        environment={},
+        values={"data_root": tmp_path / "product-data"},
+    )
+
+    assert runtime.settings.import_mode == "reference"
+    assert runtime.settings.minimum_longitudinal_sample_size == 17
+    assert runtime.settings.movement_sample_frames == 45
+    assert runtime.settings.ollama_model == "qwen3.6:8b"
+    assert runtime.settings.ollama_url == "http://[::1]:22434"
+    assert runtime.snapshot == runtime.store.read()
+    assert all(runtime.snapshot.source(key) == "persisted" for key, _value in runtime.snapshot.values)
+
+
+def test_runtime_configuration_preserves_programmatic_then_environment_precedence(tmp_path: Path) -> None:
+    """Explicit composition remains highest priority and both override kinds stay truthful/read-only."""
+
+    configuration_root = tmp_path / "external-configuration"
+    writer = ConfigurationStore(configuration_root=configuration_root, environment={})
+    writer.apply(
+        expected_revision=0,
+        changes=(
+            SettingChange("movement_sample_frames", 30),
+            SettingChange("ollama_model", "persisted:1"),
+        ),
+    )
+    runtime = load_runtime_configuration(
+        configuration_root=configuration_root,
+        environment={"GENERALS_REPLAY_ANALYZER_OLLAMA_MODEL": "environment:1"},
+        values={
+            "data_root": tmp_path / "product-data",
+            "movement_sample_frames": 60,
+        },
+    )
+
+    assert runtime.settings.movement_sample_frames == 60
+    assert runtime.snapshot.source("movement_sample_frames") == "composition"
+    assert runtime.settings.ollama_model == "environment:1"
+    assert runtime.snapshot.source("ollama_model") == "environment"
+
+
+def test_runtime_configuration_preserves_process_environment_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The canonical loader must retain non-persisted BaseSettings environment inputs."""
+
+    data_root = tmp_path / "environment-product-data"
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+
+    runtime = load_runtime_configuration(
+        configuration_root=tmp_path / "external-configuration",
+    )
+
+    assert runtime.settings.data_root == data_root.resolve()

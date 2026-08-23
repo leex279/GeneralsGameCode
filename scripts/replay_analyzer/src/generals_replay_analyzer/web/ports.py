@@ -9,9 +9,14 @@ from typing import Annotated, Literal, Protocol, Self, runtime_checkable
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 from pydantic.functional_validators import AfterValidator
 
+from generals_replay_analyzer.configuration import (
+    SettingsStoreError,
+    normalize_ollama_endpoint,
+    validate_ollama_model_name,
+)
 from generals_replay_analyzer.ingress_contract import validate_replay_relative_name, validate_root_public_id
 from generals_replay_analyzer.report.model import freeze_report_value
 
@@ -70,29 +75,18 @@ def _locator_candidate_end(value: str, start: int) -> int | None:
     if not _is_candidate_boundary(value, start):
         return None
     remaining_length = len(value) - start
-    if (
-        remaining_length >= 3
-        and value[start].isalpha()
-        and value[start + 1] == ":"
-        and value[start + 2] in "\\/"
-    ):
+    if remaining_length >= 3 and value[start].isalpha() and value[start + 1] == ":" and value[start + 2] in "\\/":
         return start + 3
     if value.startswith(("//", "\\\\"), start):
         if remaining_length <= 2:
             return None
         if value[start + 2] in "?.":
             return start + 4 if remaining_length > 3 and value[start + 3] in "\\/" else None
-        return (
-            start + 2
-            if not value[start + 2].isspace() and value[start + 2] not in _CLOSING_PUNCTUATION
-            else None
-        )
+        return start + 2 if not value[start + 2].isspace() and value[start + 2] not in _CLOSING_PUNCTUATION else None
     if value[start] == "/":
         return (
             start + 1
-            if remaining_length > 1
-            and not value[start + 1].isspace()
-            and value[start + 1] not in _CLOSING_PUNCTUATION
+            if remaining_length > 1 and not value[start + 1].isspace() and value[start + 1] not in _CLOSING_PUNCTUATION
             else None
         )
     return None
@@ -174,11 +168,7 @@ def _is_unsafe_uri_component(value: str) -> bool:
     if decoded is None:
         return True
     normalized = decoded.casefold().replace("-", "_")
-    return (
-        "@" in decoded
-        or _contains_local_locator(decoded)
-        or any(marker in normalized for marker in _SECRET_MARKERS)
-    )
+    return "@" in decoded or _contains_local_locator(decoded) or any(marker in normalized for marker in _SECRET_MARKERS)
 
 
 def _uri_data_fields(component: str) -> tuple[str, ...]:
@@ -414,7 +404,9 @@ class ReplayLibraryQueryDTO(WebDTO):
     result: str | None = Field(default=None, min_length=1, max_length=64)
     patch: str | None = Field(default=None, min_length=1, max_length=64)
     strategy_id: str | None = Field(default=None, min_length=1, max_length=128)
-    analysis_status: Literal["discovered", "parsed", "engine_verified", "partial", "desynced", "unsupported", "failed"] | None = None
+    analysis_status: (
+        Literal["discovered", "parsed", "engine_verified", "partial", "desynced", "unsupported", "failed"] | None
+    ) = None
     evidence_tier: Literal["observed", "derived", "inferred"] | None = None
     lifecycle_state: str | None = Field(default=None, min_length=1, max_length=64)
     source_kind: str | None = Field(default=None, min_length=1, max_length=64)
@@ -1355,3 +1347,1634 @@ class ReportQueryPort(Protocol):
     def timeline_chart(self, query: TimelineChartQueryDTO) -> TimelineChartDTO: ...
 
     def get_evidence(self, query: EvidenceQueryDTO) -> EvidenceDetailDTO: ...
+
+
+EvidenceTier = Literal["observed", "derived"]
+CoordinateDisplay = Literal["raw", "map_normalized", "player_centric"]
+LocomotorSurface = Literal["ground", "amphibious"]
+MapEventFamily = Literal["samples", "orders", "routes", "structures", "engagements", "casualties", "presence"]
+MapAvailabilityFilter = Literal["available", "partial", "unavailable"]
+SampleReason = Literal["lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"]
+
+
+def _finite_canonical_float(value: float) -> float:
+    if not math.isfinite(value) or (value == 0.0 and math.copysign(1.0, value) < 0):
+        raise ValueError("spatial values must be finite and cannot use negative zero")
+    return value
+
+
+FiniteSpatialFloat = Annotated[float, AfterValidator(_finite_canonical_float)]
+
+
+class MapOptionDTO(WebDTO):
+    public_id: PublicId
+    label: str = Field(min_length=1, max_length=256)
+
+
+class SpatialEvidenceReferenceDTO(WebDTO):
+    evidence_public_id: PublicId
+    tier: EvidenceTier
+
+
+def _ordered_spatial_evidence(
+    values: tuple[SpatialEvidenceReferenceDTO, ...],
+) -> tuple[SpatialEvidenceReferenceDTO, ...]:
+    identities = tuple((item.tier, item.evidence_public_id) for item in values)
+    if len(identities) != len(set(identities)):
+        raise ValueError("spatial evidence references must be unique")
+    return tuple(sorted(values, key=lambda item: (item.tier, item.evidence_public_id)))
+
+
+class FrameWindowDTO(WebDTO):
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("frame window must be ordered")
+        return self
+
+
+class MapSceneIndexQueryDTO(WebDTO):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+    search: str | None = Field(default=None, min_length=1, max_length=256)
+    availability: MapAvailabilityFilter | None = None
+
+
+class MapSceneSummaryDTO(WebDTO):
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    map_public_id: PublicId
+    map_display_name: str = Field(min_length=1, max_length=256)
+    report_version: str = Field(min_length=1, max_length=128)
+    frame_window: FrameWindowDTO
+    players: tuple[MapOptionDTO, ...] = Field(max_length=16)
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _order_players(self) -> Self:
+        identities = tuple(item.public_id for item in self.players)
+        if len(identities) != len(set(identities)):
+            raise ValueError("map player options must be unique")
+        object.__setattr__(self, "players", tuple(sorted(self.players, key=lambda item: item.public_id)))
+        return self
+
+
+class MapSceneIndexPageDTO(WebDTO):
+    query: MapSceneIndexQueryDTO
+    items: tuple[MapSceneSummaryDTO, ...]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total_items: int = Field(ge=0)
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _validate_page(self) -> Self:
+        if (self.page, self.page_size) != (self.query.page, self.query.page_size):
+            raise ValueError("map page identity must match its normalized query")
+        identities = tuple((item.replay_public_id, item.report_public_id) for item in self.items)
+        if len(identities) != len(set(identities)):
+            raise ValueError("map scene summaries must be unique")
+        object.__setattr__(
+            self,
+            "items",
+            tuple(sorted(self.items, key=lambda item: (item.replay_public_id, item.report_public_id))),
+        )
+        return self
+
+
+class MapSceneQueryDTO(WebDTO):
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    replay_player_public_ids: tuple[PublicId, ...] = ()
+    entity_public_ids: tuple[PublicId, ...] = ()
+    event_families: tuple[MapEventFamily, ...] = ()
+    locomotor_surface: LocomotorSurface | None = None
+    coordinate_display: CoordinateDisplay = "raw"
+    player_centric_subject_public_id: PublicId | None = None
+    sample_budget: int = Field(default=5000, ge=100, le=20_000)
+
+    @model_validator(mode="after")
+    def _normalize_query(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("map scene frame window must be ordered")
+        players = tuple(sorted(set(self.replay_player_public_ids)))
+        entities = tuple(sorted(set(self.entity_public_ids)))
+        families = tuple(sorted(set(self.event_families)))
+        if self.coordinate_display == "player_centric" and self.player_centric_subject_public_id is None:
+            raise ValueError("player-centric display requires a subject")
+        if (
+            self.player_centric_subject_public_id is not None
+            and players
+            and self.player_centric_subject_public_id not in players
+        ):
+            raise ValueError("player-centric subject must be present in the player filter")
+        object.__setattr__(self, "replay_player_public_ids", players)
+        object.__setattr__(self, "entity_public_ids", entities)
+        object.__setattr__(self, "event_families", families)
+        return self
+
+
+class RawPositionDTO(WebDTO):
+    x: FiniteSpatialFloat
+    y: FiniteSpatialFloat
+    z: FiniteSpatialFloat
+
+
+class NormalizedPositionDTO(WebDTO):
+    u: FiniteSpatialFloat = Field(ge=0, le=1)
+    v: FiniteSpatialFloat = Field(ge=0, le=1)
+
+
+class PlayerCentricPositionDTO(WebDTO):
+    forward: FiniteSpatialFloat
+    left: FiniteSpatialFloat
+    z: FiniteSpatialFloat
+
+
+class SpatialPositionDTO(WebDTO):
+    raw: RawPositionDTO
+    map_normalized: NormalizedPositionDTO
+    player_centric: PlayerCentricPositionDTO | None = None
+
+
+class RawCoordinateSystemDTO(WebDTO):
+    coordinate_version: Literal["engine-world-xyz-v1"]
+    axes: tuple[Literal["engine_world_x"], Literal["engine_world_y"], Literal["engine_world_z"]]
+    units: Literal["engine_world_unit"]
+    minimum: RawPositionDTO
+    maximum: RawPositionDTO
+    minimum_inclusive: Literal[True]
+    maximum_inclusive: Literal[True]
+
+
+class MapNormalizedTransformDTO(WebDTO):
+    transform_version: Literal["map-normalized-v1"]
+    formula: Literal["u=(x-min_x)/(max_x-min_x);v=(y-min_y)/(max_y-min_y)"]
+    availability: AvailabilityDTO
+
+
+class PlayerCentricTransformDTO(WebDTO):
+    transform_version: Literal["player-centric-v1"]
+    subject_replay_player_public_id: PublicId
+    own_start_public_id: PublicId
+    reference_enemy_start_public_id: PublicId
+    angle_radians: FiniteSpatialFloat
+    availability: AvailabilityDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _order_evidence(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class CoordinateTransformsDTO(WebDTO):
+    raw: RawCoordinateSystemDTO
+    map_normalized: MapNormalizedTransformDTO
+    player_centric: tuple[PlayerCentricTransformDTO, ...]
+
+    @model_validator(mode="after")
+    def _order_player_transforms(self) -> Self:
+        identities = tuple(item.subject_replay_player_public_id for item in self.player_centric)
+        if len(identities) != len(set(identities)):
+            raise ValueError("player-centric transforms must have unique subjects")
+        object.__setattr__(
+            self,
+            "player_centric",
+            tuple(sorted(self.player_centric, key=lambda item: item.subject_replay_player_public_id)),
+        )
+        return self
+
+
+class RasterPlacementDTO(WebDTO):
+    raw_minimum_x: FiniteSpatialFloat
+    raw_minimum_y: FiniteSpatialFloat
+    raw_maximum_x: FiniteSpatialFloat
+    raw_maximum_y: FiniteSpatialFloat
+    grid_width: int = Field(ge=1)
+    grid_height: int = Field(ge=1)
+    source_storage_order: Literal["row_major_y_then_x_x_fastest"]
+    source_row_zero: Literal["minimum_world_y"]
+    png_row_zero: Literal["maximum_world_y"]
+    display_interpolation: Literal["nearest"]
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> Self:
+        if self.raw_maximum_x <= self.raw_minimum_x or self.raw_maximum_y <= self.raw_minimum_y:
+            raise ValueError("raster placement bounds must have positive extent")
+        return self
+
+
+class MapRasterDescriptorDTO(WebDTO):
+    raster_public_id: PublicId
+    kind: Literal["terrain_cell_type", "pathability"]
+    locomotor_surface: LocomotorSurface | None
+    rasterization_version: Literal["map-grid-raster-v1"]
+    media_type: Literal["image/png"]
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    placement: RasterPlacementDTO
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _validate_raster_kind(self) -> Self:
+        if (self.kind == "terrain_cell_type") != (self.locomotor_surface is None):
+            raise ValueError("only pathability rasters have a locomotor surface")
+        if (self.width, self.height) != (self.placement.grid_width, self.placement.grid_height):
+            raise ValueError("raster dimensions must match its grid placement")
+        return self
+
+
+class MapRasterQueryDTO(WebDTO):
+    map_public_id: PublicId
+    raster_public_id: PublicId
+
+
+class MapRasterResourceDTO(BaseModel):
+    """Bounded opaque PNG bytes; the route derives its same-origin URL from public IDs."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    map_public_id: PublicId
+    raster: MapRasterDescriptorDTO
+    content: bytes = Field(max_length=16 * 1024 * 1024)
+
+    @model_validator(mode="after")
+    def _validate_png(self) -> Self:
+        from hashlib import sha256
+
+        if not self.content.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("map raster resource must contain PNG bytes")
+        if sha256(self.content).hexdigest() != self.raster.content_sha256:
+            raise ValueError("map raster resource digest must match its descriptor")
+        return self
+
+
+class MapStartDTO(WebDTO):
+    start_public_id: PublicId
+    name: str = Field(min_length=1, max_length=256)
+    replay_player_public_ids: tuple[PublicId, ...]
+    position: SpatialPositionDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "replay_player_public_ids", tuple(sorted(set(self.replay_player_public_ids))))
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapResourceDTO(WebDTO):
+    resource_public_id: PublicId
+    resource_kind: Literal[
+        "supply_source", "supply_warehouse", "capturable", "tech_building", "cash_generator", "oil_income"
+    ]
+    label: str = Field(min_length=1, max_length=256)
+    position: SpatialPositionDTO
+    amount: FiniteSpatialFloat | None = Field(default=None, ge=0)
+    availability: AvailabilityDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapStructureDTO(WebDTO):
+    structure_public_id: PublicId
+    source_kind: Literal["map_static", "construction_completed"]
+    replay_player_public_id: PublicId | None = None
+    template_name: str = Field(min_length=1, max_length=256)
+    frame: int | None = Field(default=None, ge=0)
+    position: SpatialPositionDTO
+    availability: AvailabilityDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if (self.source_kind == "map_static") != (self.frame is None):
+            raise ValueError("only completed construction structures have a frame")
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapSampleDTO(WebDTO):
+    sample_public_id: PublicId
+    entity_public_id: PublicId
+    replay_player_public_id: PublicId | None = None
+    frame: int = Field(ge=0)
+    position: SpatialPositionDTO
+    orientation: FiniteSpatialFloat
+    sample_reason: SampleReason
+    locomotor_surface: LocomotorSurface | None = None
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapOrderDTO(WebDTO):
+    order_public_id: PublicId
+    replay_player_public_id: PublicId
+    frame: int = Field(ge=0)
+    target_kind: Literal["none", "object", "location"]
+    target_position: SpatialPositionDTO | None = None
+    selected_entity_public_ids: tuple[PublicId, ...]
+    label: str = Field(min_length=1, max_length=256)
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if (self.target_kind == "location") != (self.target_position is not None):
+            raise ValueError("only location orders contain a public target position")
+        object.__setattr__(self, "selected_entity_public_ids", tuple(sorted(set(self.selected_entity_public_ids))))
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapRouteSegmentDTO(WebDTO):
+    segment_public_id: PublicId
+    entity_public_id: PublicId
+    replay_player_public_id: PublicId | None = None
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    locomotor_surface: LocomotorSurface
+    route_algorithm_version: Literal["grid-route-v1"]
+    points: tuple[SpatialPositionDTO, ...]
+    availability: AvailabilityDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("route frame window must be ordered")
+        if self.availability.state == "available" and len(self.points) < 1:
+            raise ValueError("available routes require validated grid points")
+        if self.availability.state == "unavailable" and self.points:
+            raise ValueError("unavailable route gaps cannot expose line geometry")
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapEngagementDTO(WebDTO):
+    engagement_public_id: PublicId
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+    centroid: SpatialPositionDTO
+    participant_replay_player_public_ids: tuple[PublicId, ...]
+    applied_damage_sum: FiniteSpatialFloat = Field(ge=0)
+    killing_blow_count: int = Field(ge=0)
+    engagement_algorithm_version: Literal["engagement-cluster-v1"]
+    availability: AvailabilityDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("engagement frame window must be ordered")
+        object.__setattr__(
+            self, "participant_replay_player_public_ids", tuple(sorted(set(self.participant_replay_player_public_ids)))
+        )
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapCasualtyDTO(WebDTO):
+    casualty_public_id: PublicId
+    frame: int = Field(ge=0)
+    victim_replay_player_public_id: PublicId | None = None
+    attacker_replay_player_public_id: PublicId | None = None
+    position: SpatialPositionDTO
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class PlayerShareDTO(WebDTO):
+    replay_player_public_id: PublicId
+    observed_sample_count: int = Field(ge=0)
+    share: FiniteSpatialFloat = Field(ge=0, le=1)
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class PresenceCellDTO(WebDTO):
+    cell_x: int = Field(ge=0)
+    cell_y: int = Field(ge=0)
+    shares: tuple[PlayerShareDTO, ...]
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        identities = tuple(item.replay_player_public_id for item in self.shares)
+        if len(identities) != len(set(identities)):
+            raise ValueError("presence shares must have unique players")
+        object.__setattr__(self, "shares", tuple(sorted(self.shares, key=lambda item: item.replay_player_public_id)))
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapControlWindowDTO(WebDTO):
+    control_window_public_id: PublicId
+    frame_window: FrameWindowDTO
+    metric_kind: Literal["observed_cell_presence_share"]
+    algorithm_version: Literal["sample-count-presence-v1"]
+    cells: tuple[PresenceCellDTO, ...]
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        cell_ids = tuple((item.cell_x, item.cell_y) for item in self.cells)
+        if len(cell_ids) != len(set(cell_ids)):
+            raise ValueError("presence cells must be unique")
+        object.__setattr__(self, "cells", tuple(sorted(self.cells, key=lambda item: (item.cell_y, item.cell_x))))
+        return self
+
+
+class DownsamplingDTO(WebDTO):
+    algorithm_version: Literal["event-forced-stratified-v1"]
+    requested_sample_budget: int = Field(ge=100, le=20_000)
+    original_sample_count: int = Field(ge=0)
+    mandatory_sample_count: int = Field(ge=0)
+    returned_sample_count: int = Field(ge=0)
+    budget_exceeded_by_mandatory: bool
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if not self.mandatory_sample_count <= self.returned_sample_count <= self.original_sample_count:
+            raise ValueError("downsampling counts are inconsistent")
+        if self.budget_exceeded_by_mandatory != (self.mandatory_sample_count > self.requested_sample_budget):
+            raise ValueError("mandatory sample budget flag is inconsistent")
+        if (
+            self.mandatory_sample_count <= self.requested_sample_budget
+            and self.returned_sample_count > self.requested_sample_budget
+        ):
+            raise ValueError("nonmandatory samples cannot exceed the requested budget")
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Expose one fixed authoritative spatial scene without storage capabilities. (#TBD)
+class MapSceneDTO(WebDTO):
+    schema_version: Literal["replay-map-scene-v1"]
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    report_version: str = Field(min_length=1, max_length=128)
+    map_public_id: PublicId
+    map_display_name: str = Field(min_length=1, max_length=256)
+    map_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    map_schema_version: Literal[1, 2]
+    engine_data_identity: str = Field(min_length=1, max_length=256)
+    query: MapSceneQueryDTO
+    available_frame_window: FrameWindowDTO
+    transforms: CoordinateTransformsDTO
+    rasters: tuple[MapRasterDescriptorDTO, ...]
+    starts: tuple[MapStartDTO, ...]
+    resources: tuple[MapResourceDTO, ...]
+    structures: tuple[MapStructureDTO, ...]
+    samples: tuple[MapSampleDTO, ...]
+    orders: tuple[MapOrderDTO, ...]
+    routes: tuple[MapRouteSegmentDTO, ...]
+    engagements: tuple[MapEngagementDTO, ...]
+    casualties: tuple[MapCasualtyDTO, ...]
+    control_windows: tuple[MapControlWindowDTO, ...]
+    downsampling: DownsamplingDTO
+    availability: AvailabilityDTO
+    terminal_quality: TerminalQualityDTO
+
+    @model_validator(mode="after")
+    def _validate_scene(self) -> Self:
+        if (self.query.replay_public_id, self.query.report_public_id) != (
+            self.replay_public_id,
+            self.report_public_id,
+        ):
+            raise ValueError("map scene identity must match its fixed query")
+        if not (
+            self.available_frame_window.frame_start <= self.query.frame_start
+            and self.query.frame_end <= self.available_frame_window.frame_end
+        ):
+            raise ValueError("map query must stay inside the available frame window")
+        if self.downsampling.returned_sample_count != len(self.samples):
+            raise ValueError("returned sample count must equal the scene sample tuple")
+        semantic_identities: tuple[tuple[str, tuple[object, ...]], ...] = (
+            ("rasters", tuple(item.raster_public_id for item in self.rasters)),
+            ("starts", tuple(item.start_public_id for item in self.starts)),
+            ("resources", tuple(item.resource_public_id for item in self.resources)),
+            ("structures", tuple(item.structure_public_id for item in self.structures)),
+            ("samples", tuple(item.sample_public_id for item in self.samples)),
+            ("orders", tuple(item.order_public_id for item in self.orders)),
+            ("routes", tuple(item.segment_public_id for item in self.routes)),
+            ("engagements", tuple(item.engagement_public_id for item in self.engagements)),
+            ("casualties", tuple(item.casualty_public_id for item in self.casualties)),
+            ("control_windows", tuple(item.control_window_public_id for item in self.control_windows)),
+        )
+        for field_name, identities in semantic_identities:
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"{field_name} must contain unique semantic identities")
+        object.__setattr__(self, "rasters", tuple(sorted(self.rasters, key=lambda item: item.raster_public_id)))
+        object.__setattr__(self, "starts", tuple(sorted(self.starts, key=lambda item: item.start_public_id)))
+        object.__setattr__(self, "resources", tuple(sorted(self.resources, key=lambda item: item.resource_public_id)))
+        object.__setattr__(
+            self, "structures", tuple(sorted(self.structures, key=lambda item: item.structure_public_id))
+        )
+        object.__setattr__(
+            self,
+            "samples",
+            tuple(sorted(self.samples, key=lambda item: (item.frame, item.entity_public_id, item.sample_public_id))),
+        )
+        object.__setattr__(
+            self, "orders", tuple(sorted(self.orders, key=lambda item: (item.frame, item.order_public_id)))
+        )
+        object.__setattr__(
+            self,
+            "routes",
+            tuple(
+                sorted(
+                    self.routes,
+                    key=lambda item: (item.frame_start, item.entity_public_id, item.segment_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "engagements",
+            tuple(sorted(self.engagements, key=lambda item: (item.frame_start, item.engagement_public_id))),
+        )
+        object.__setattr__(
+            self,
+            "casualties",
+            tuple(sorted(self.casualties, key=lambda item: (item.frame, item.casualty_public_id))),
+        )
+        object.__setattr__(
+            self,
+            "control_windows",
+            tuple(
+                sorted(
+                    self.control_windows,
+                    key=lambda item: (item.frame_window.frame_start, item.control_window_public_id),
+                )
+            ),
+        )
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Isolate fixed map-scene reads behind one immutable fakeable capability. (#TBD)
+@runtime_checkable
+class MapSceneQueryPort(Protocol):
+    def list_scenes(self, query: MapSceneIndexQueryDTO) -> MapSceneIndexPageDTO: ...
+
+    def get_scene(self, query: MapSceneQueryDTO) -> MapSceneDTO: ...
+
+    def get_raster(self, query: MapRasterQueryDTO) -> MapRasterResourceDTO: ...
+
+
+ComparisonState = Literal["comparable", "partial", "not_comparable", "unavailable"]
+ComparisonKind = Literal["players", "matches", "openings", "strategies", "time_periods"]
+IdentityOperationKind = Literal["merge_players", "split_alias", "inverse"]
+
+
+def _require_utc_datetime(value: datetime | None, *, label: str) -> datetime | None:
+    if value is not None and value.utcoffset() != timedelta(0):
+        raise ValueError(f"{label} must use UTC")
+    return value
+
+
+def _freeze_optional_canonical_value(value: object) -> object:
+    if value is None:
+        return None
+    return freeze_report_value(value)
+
+
+class PublicEvidenceReferenceDTO(WebDTO):
+    evidence_public_id: PublicId
+    tier: ReportTier
+
+
+class FixedReportReferenceDTO(WebDTO):
+    replay_public_id: PublicId
+    replay_player_public_id: PublicId
+    report_public_id: PublicId
+    document_schema_version: str = Field(min_length=1, max_length=128)
+    report_version: str = Field(min_length=1, max_length=128)
+    display_policy_version: str = Field(min_length=1, max_length=128)
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class LongitudinalBindingDTO(WebDTO):
+    run_id: PublicId
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    analyzer_name: str = Field(min_length=1, max_length=256)
+    analyzer_version: str = Field(min_length=1, max_length=128)
+    segment_schema_version: Literal["longitudinal-segment-v1"]
+    segment_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cache_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    statistics_algorithm_versions: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("statistics_algorithm_versions")
+    @classmethod
+    def _canonical_algorithms(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not value.strip() or len(value) > 128 for value in values):
+            raise ValueError("statistics algorithms must be nonempty and bounded")
+        return tuple(sorted(set(values)))
+
+
+class DefinitionBindingDTO(WebDTO):
+    definition_kind: Literal["feature", "opening", "strategy", "trend", "match_metric"]
+    definition_id: str = Field(min_length=1, max_length=256)
+    definition_version: str = Field(min_length=1, max_length=128)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    scope_type: str = Field(min_length=1, max_length=128)
+    window_policy_version: str = Field(min_length=1, max_length=128)
+    faction_comparability: Literal["same_faction_only", "declared_cross_faction"]
+    taxonomy_version: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Freeze player history around exact identity, report, and longitudinal bindings. (#TBD)
+class PlayerIndexQueryDTO(WebDTO):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+    search: str | None = Field(default=None, max_length=256)
+    faction: str | None = Field(default=None, max_length=64)
+    opponent_faction: str | None = Field(default=None, max_length=64)
+    map_public_id: PublicId | None = None
+    patch: str | None = Field(default=None, max_length=64)
+    active_only: bool = True
+    sort: Literal["display_name", "recent_match", "match_count"] = "display_name"
+
+    @field_validator("search", "faction", "opponent_faction", "patch")
+    @classmethod
+    def _normalize_player_filter(cls, value: str | None) -> str | None:
+        return None if value is None or not value.strip() else value.strip()
+
+
+class PlayerSummaryDTO(WebDTO):
+    player_public_id: PublicId
+    display_name: str = Field(min_length=1, max_length=256)
+    identity_revision: int = Field(ge=0)
+    state: Literal["active", "retired"]
+    match_count: int = Field(ge=0)
+    latest_match_at_utc: AwareDatetime | None = None
+    availability: AvailabilityDTO
+
+    @field_validator("latest_match_at_utc")
+    @classmethod
+    def _utc_latest_match(cls, value: datetime | None) -> datetime | None:
+        return _require_utc_datetime(value, label="latest match")
+
+
+class PlayerIndexPageDTO(WebDTO):
+    query: PlayerIndexQueryDTO
+    items: tuple[PlayerSummaryDTO, ...]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total_items: int = Field(ge=0)
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _match_player_page(self) -> Self:
+        if (self.page, self.page_size) != (self.query.page, self.query.page_size):
+            raise ValueError("player page must match its fixed query")
+        return self
+
+
+class PlayerProfileSelectionDTO(WebDTO):
+    player_public_id: PublicId
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+    faction: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_faction: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_player_public_id: PublicId | None = None
+    map_public_id: PublicId | None = None
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+    start_position: str | None = Field(default=None, min_length=1, max_length=64)
+    date_from_utc: AwareDatetime | None = None
+    date_to_utc: AwareDatetime | None = None
+    quality_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("date_from_utc", "date_to_utc")
+    @classmethod
+    def _utc_profile_filter(cls, value: datetime | None) -> datetime | None:
+        return _require_utc_datetime(value, label="profile filter")
+
+    @model_validator(mode="after")
+    def _ordered_profile_dates(self) -> Self:
+        if self.date_from_utc is not None and self.date_to_utc is not None and self.date_from_utc >= self.date_to_utc:
+            raise ValueError("profile UTC interval must be nonempty")
+        return self
+
+
+class PlayerProfileQueryDTO(PlayerProfileSelectionDTO):
+    expected_identity_revision: int = Field(ge=0)
+    longitudinal_run_ids: tuple[PublicId, ...]
+    report_public_ids: tuple[PublicId, ...]
+    definition_binding_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile_input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _canonical_profile_bindings(self) -> Self:
+        object.__setattr__(self, "longitudinal_run_ids", tuple(sorted(set(self.longitudinal_run_ids))))
+        object.__setattr__(self, "report_public_ids", tuple(sorted(set(self.report_public_ids))))
+        return self
+
+
+class PlayerProfileResolutionDTO(WebDTO):
+    state: Literal["resolved", "unavailable"]
+    fixed_query: PlayerProfileQueryDTO | None = None
+    reason_codes: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _valid_profile_resolution(self) -> Self:
+        if self.state == "resolved" and (self.fixed_query is None or self.reason_codes):
+            raise ValueError("resolved profile requires only one fixed query")
+        if self.state == "unavailable" and (self.fixed_query is not None or not self.reason_codes):
+            raise ValueError("unavailable profile requires reasons and no query")
+        return self
+
+
+class EmbeddedAliasDTO(WebDTO):
+    alias_public_id: PublicId
+    namespace: Literal["embedded_replay_name"]
+    original_name: str = Field(min_length=1, max_length=256)
+    normalized_name: str = Field(min_length=1, max_length=256)
+
+
+class ProviderIdentityDTO(WebDTO):
+    alias_public_id: PublicId
+    provider_namespace: str = Field(min_length=1, max_length=128)
+    external_subject: str = Field(min_length=1, max_length=256)
+    attachment_operation_public_id: PublicId
+    label: Literal["manually_attached_provider_identity"]
+
+
+class StrataProvenanceDTO(WebDTO):
+    source_public_id: PublicId
+    replay_public_id: PublicId
+    strata_match_id: str | None = Field(default=None, min_length=1, max_length=128)
+    strata_source_user_token: str | None = Field(default=None, min_length=1, max_length=128)
+    label: Literal["provenance_not_identity"]
+    availability: AvailabilityDTO
+
+
+class ReplayHistoryItemDTO(WebDTO):
+    replay_public_id: PublicId
+    replay_player_public_id: PublicId
+    observed_name: str = Field(min_length=1, max_length=256)
+    faction: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_factions: tuple[str, ...]
+    opponent_player_public_ids: tuple[PublicId, ...]
+    map_public_id: PublicId | None = None
+    map_display_name: str | None = Field(default=None, min_length=1, max_length=256)
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    start_position: str | None = Field(default=None, min_length=1, max_length=64)
+    result: str | None = Field(default=None, min_length=1, max_length=64)
+    started_at_utc: AwareDatetime | None = None
+    terminal_quality: TerminalQualityDTO
+    fixed_report: FixedReportReferenceDTO | None = None
+    availability: AvailabilityDTO
+
+    @field_validator("started_at_utc")
+    @classmethod
+    def _utc_history_start(cls, value: datetime | None) -> datetime | None:
+        return _require_utc_datetime(value, label="replay start")
+
+
+class DistributionIntervalDTO(WebDTO):
+    lower: float
+    upper: float
+    confidence_level: float = Field(gt=0, lt=1)
+    method: str = Field(min_length=1, max_length=128)
+    algorithm_version: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _finite_ordered_interval(self) -> Self:
+        if any(
+            not math.isfinite(value) or value == 0.0 and math.copysign(1.0, value) < 0
+            for value in (self.lower, self.upper, self.confidence_level)
+        ):
+            raise ValueError("distribution interval must be finite without negative zero")
+        if self.lower > self.upper:
+            raise ValueError("distribution interval must be ordered")
+        return self
+
+
+class PlayerInsightDTO(WebDTO):
+    insight_kind: Literal[
+        "recurring_opening",
+        "timing_distribution",
+        "transition_preference",
+        "spatial_habit",
+        "personal_baseline_deviation",
+        "opponent_associated_difference",
+        "trend",
+        "change_point_candidate",
+        "consistency",
+    ]
+    result_public_id: PublicId
+    definition: DefinitionBindingDTO
+    label: str = Field(min_length=1, max_length=256)
+    raw_value: object | None
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    frame_start: int | None = Field(default=None, ge=0)
+    frame_end: int | None = Field(default=None, ge=0)
+    sample_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    interval: DistributionIntervalDTO | None = None
+    quality_exclusion_codes: tuple[str, ...] = ()
+    availability: AvailabilityDTO
+    evidence: tuple[PublicEvidenceReferenceDTO, ...] = ()
+
+    @field_validator("raw_value", mode="before")
+    @classmethod
+    def _canonical_player_value(cls, value: object) -> object:
+        return _freeze_optional_canonical_value(value)
+
+    @model_validator(mode="after")
+    def _valid_player_insight(self) -> Self:
+        if (self.frame_start is None) != (self.frame_end is None):
+            raise ValueError("insight frame window must be complete and ordered")
+        if self.frame_start is not None and self.frame_end is not None and self.frame_end < self.frame_start:
+            raise ValueError("insight frame window must be complete and ordered")
+        if self.availability.state == "unavailable" and self.raw_value is not None:
+            raise ValueError("unavailable insight cannot expose a value")
+        object.__setattr__(self, "quality_exclusion_codes", tuple(sorted(set(self.quality_exclusion_codes))))
+        object.__setattr__(
+            self, "evidence", tuple(sorted(self.evidence, key=lambda item: (item.tier, item.evidence_public_id)))
+        )
+        return self
+
+
+class PlayerProfileVersionDTO(WebDTO):
+    schema_version: Literal["replay-player-profile-v1"]
+    display_policy_version: Literal["replay-player-profile-display-v1"]
+    profile_public_id: PublicId
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    longitudinal: tuple[LongitudinalBindingDTO, ...]
+    fixed_reports: tuple[FixedReportReferenceDTO, ...]
+    definition_bindings: tuple[DefinitionBindingDTO, ...]
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PlayerProfileDTO(WebDTO):
+    version: PlayerProfileVersionDTO
+    query: PlayerProfileQueryDTO
+    player: PlayerSummaryDTO
+    embedded_aliases: tuple[EmbeddedAliasDTO, ...]
+    provider_identities: tuple[ProviderIdentityDTO, ...]
+    strata_provenance: tuple[StrataProvenanceDTO, ...]
+    replay_history: tuple[ReplayHistoryItemDTO, ...]
+    history_page: int = Field(ge=1)
+    history_page_size: int = Field(ge=1, le=100)
+    history_total_items: int = Field(ge=0)
+    insights: tuple[PlayerInsightDTO, ...]
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _valid_profile_graph(self) -> Self:
+        identity = (self.query.player_public_id, self.query.expected_identity_revision)
+        if (
+            identity != (self.version.player_public_id, self.version.identity_revision)
+            or self.player.player_public_id != identity[0]
+        ):
+            raise ValueError("player profile identity must match its fixed query")
+        if (self.history_page, self.history_page_size) != (self.query.page, self.query.page_size):
+            raise ValueError("player history page must match its fixed query")
+        if tuple(item.run_id for item in self.version.longitudinal) != self.query.longitudinal_run_ids:
+            raise ValueError("profile longitudinal bindings must match its fixed query")
+        if tuple(item.report_public_id for item in self.version.fixed_reports) != self.query.report_public_ids:
+            raise ValueError("profile report bindings must match its fixed query")
+        object.__setattr__(
+            self,
+            "embedded_aliases",
+            tuple(
+                sorted(
+                    self.embedded_aliases,
+                    key=lambda item: (item.normalized_name, item.original_name, item.alias_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "provider_identities",
+            tuple(
+                sorted(
+                    self.provider_identities,
+                    key=lambda item: (item.provider_namespace, item.external_subject, item.alias_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "strata_provenance",
+            tuple(sorted(self.strata_provenance, key=lambda item: (item.replay_public_id, item.source_public_id))),
+        )
+        return self
+
+
+@runtime_checkable
+class PlayerHistoryPort(Protocol):
+    def list_players(self, query: PlayerIndexQueryDTO) -> PlayerIndexPageDTO: ...
+    def resolve_profile(self, selection: PlayerProfileSelectionDTO) -> PlayerProfileResolutionDTO: ...
+    def get_profile(self, query: PlayerProfileQueryDTO) -> PlayerProfileDTO: ...
+
+
+class RevisionPreconditionDTO(WebDTO):
+    player_public_id: PublicId
+    expected_revision: int = Field(ge=0)
+
+
+class MergeIdentityDraftDTO(WebDTO):
+    operation_kind: Literal["merge_players"]
+    target_player_public_id: PublicId
+    source_player_public_ids: tuple[PublicId, ...] = Field(min_length=1)
+    expected_revisions: tuple[RevisionPreconditionDTO, ...] = Field(min_length=2)
+
+
+class SplitIdentityDraftDTO(WebDTO):
+    operation_kind: Literal["split_alias"]
+    alias_public_id: PublicId
+    replay_player_public_ids: tuple[PublicId, ...] = Field(min_length=1)
+    new_display_name: str = Field(min_length=1, max_length=256)
+    expected_revisions: tuple[RevisionPreconditionDTO, ...] = Field(min_length=1)
+
+
+class InverseIdentityDraftDTO(WebDTO):
+    operation_kind: Literal["inverse"]
+    operation_public_id: PublicId
+    expected_revisions: tuple[RevisionPreconditionDTO, ...] = Field(min_length=1)
+
+
+IdentityDraftDTO = Annotated[
+    MergeIdentityDraftDTO | SplitIdentityDraftDTO | InverseIdentityDraftDTO,
+    Field(discriminator="operation_kind"),
+]
+
+
+class IdentityImpactDTO(WebDTO):
+    canonical_player_count: int = Field(ge=0)
+    alias_count: int = Field(ge=0)
+    replay_player_count: int = Field(ge=0)
+    replay_count: int = Field(ge=0)
+    feature_set_count: int = Field(ge=0)
+    longitudinal_run_count: int = Field(ge=0)
+    longitudinal_result_count: int = Field(ge=0)
+    report_count: int = Field(ge=0)
+    invalidation_stage_counts: tuple[tuple[str, int], ...]
+
+
+class IdentityPreviewDTO(WebDTO):
+    schema_version: Literal["player-identity-preview-v1"]
+    draft: IdentityDraftDTO
+    before_snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_after_snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    impact: IdentityImpactDTO
+    can_execute: bool
+    reason_codes: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _valid_preview_state(self) -> Self:
+        if self.can_execute == bool(self.reason_codes):
+            raise ValueError("identity preview execute state and reasons are inconsistent")
+        return self
+
+
+class ExecuteIdentityChangeDTO(WebDTO):
+    draft: IdentityDraftDTO
+    expected_before_snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operator_label: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=1024)
+
+
+class InvalidationJobReferenceDTO(WebDTO):
+    job_public_id: PublicId
+    stage: str = Field(min_length=1, max_length=128)
+    state: Literal["pending", "already_queued", "durable_retry_required"]
+    reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class IdentityOperationSummaryDTO(WebDTO):
+    operation_public_id: PublicId
+    operation_kind: IdentityOperationKind
+    inverse_of_operation_public_id: PublicId | None = None
+    operator_label: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=1024)
+    created_at_utc: AwareDatetime
+    affected_player_revisions: tuple[RevisionPreconditionDTO, ...]
+    inverse_allowed: bool
+    inverse_reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("created_at_utc")
+    @classmethod
+    def _utc_identity_operation(cls, value: datetime) -> datetime:
+        result = _require_utc_datetime(value, label="identity operation time")
+        assert result is not None
+        return result
+
+
+class IdentityMutationReceiptDTO(WebDTO):
+    operation: IdentityOperationSummaryDTO
+    invalidation_jobs: tuple[InvalidationJobReferenceDTO, ...] = Field(min_length=1)
+    audit_public_id: PublicId
+
+
+class IdentityAuditPageDTO(WebDTO):
+    player_public_id: PublicId
+    current_identity_revision: int = Field(ge=0)
+    operations: tuple[IdentityOperationSummaryDTO, ...]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total_items: int = Field(ge=0)
+    availability: AvailabilityDTO
+
+
+@runtime_checkable
+class PlayerIdentityWorkflowPort(Protocol):
+    def audit(self, player_public_id: str, page: int, page_size: int) -> IdentityAuditPageDTO: ...
+    def preview(self, draft: IdentityDraftDTO) -> IdentityPreviewDTO: ...
+    def execute(self, command: ExecuteIdentityChangeDTO) -> IdentityMutationReceiptDTO: ...
+    def retry_invalidation(self, operation_public_id: str) -> tuple[InvalidationJobReferenceDTO, ...]: ...
+
+
+class PlayerCohortSubjectDTO(WebDTO):
+    subject_kind: Literal["player_cohort"]
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    longitudinal: LongitudinalBindingDTO
+
+    @model_validator(mode="after")
+    def _valid_longitudinal_identity(self) -> Self:
+        if (self.player_public_id, self.identity_revision) != (
+            self.longitudinal.player_public_id,
+            self.longitudinal.identity_revision,
+        ):
+            raise ValueError("subject identity must match its longitudinal binding")
+        return self
+
+
+class SegmentBaselineSubjectDTO(WebDTO):
+    subject_kind: Literal["segment_baseline"]
+    baseline_public_id: PublicId
+    longitudinal: LongitudinalBindingDTO
+    population_definition_version: str = Field(min_length=1, max_length=128)
+
+
+class MatchSubjectDTO(WebDTO):
+    subject_kind: Literal["match"]
+    report: FixedReportReferenceDTO
+    feature_set_public_ids: tuple[PublicId, ...]
+
+
+class OpeningSubjectDTO(WebDTO):
+    subject_kind: Literal["opening"]
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    longitudinal: LongitudinalBindingDTO
+    result_public_id: PublicId
+    opening_definition_id: str = Field(min_length=1, max_length=256)
+    opening_definition_version: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _valid_longitudinal_identity(self) -> Self:
+        if (self.player_public_id, self.identity_revision) != (
+            self.longitudinal.player_public_id,
+            self.longitudinal.identity_revision,
+        ):
+            raise ValueError("subject identity must match its longitudinal binding")
+        return self
+
+
+class StrategySubjectDTO(WebDTO):
+    subject_kind: Literal["strategy"]
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    longitudinal: LongitudinalBindingDTO
+    result_public_id: PublicId
+    strategy_id: str = Field(min_length=1, max_length=256)
+    taxonomy_version: str = Field(min_length=1, max_length=128)
+    rule_version: str = Field(min_length=1, max_length=128)
+    method: Literal["rule"]
+
+    @model_validator(mode="after")
+    def _valid_longitudinal_identity(self) -> Self:
+        if (self.player_public_id, self.identity_revision) != (
+            self.longitudinal.player_public_id,
+            self.longitudinal.identity_revision,
+        ):
+            raise ValueError("subject identity must match its longitudinal binding")
+        return self
+
+
+class TimePeriodSubjectDTO(WebDTO):
+    subject_kind: Literal["time_period"]
+    player_public_id: PublicId
+    identity_revision: int = Field(ge=0)
+    start_inclusive_utc: AwareDatetime
+    end_exclusive_utc: AwareDatetime
+    longitudinal: LongitudinalBindingDTO
+
+    @model_validator(mode="after")
+    def _valid_utc_period(self) -> Self:
+        if (self.player_public_id, self.identity_revision) != (
+            self.longitudinal.player_public_id,
+            self.longitudinal.identity_revision,
+        ):
+            raise ValueError("subject identity must match its longitudinal binding")
+        start = _require_utc_datetime(self.start_inclusive_utc, label="period start")
+        end = _require_utc_datetime(self.end_exclusive_utc, label="period end")
+        if start is None or end is None or start >= end:
+            raise ValueError("time period must be a nonempty UTC interval")
+        return self
+
+
+ComparisonSubjectDTO = Annotated[
+    PlayerCohortSubjectDTO
+    | SegmentBaselineSubjectDTO
+    | MatchSubjectDTO
+    | OpeningSubjectDTO
+    | StrategySubjectDTO
+    | TimePeriodSubjectDTO,
+    Field(discriminator="subject_kind"),
+]
+
+
+class FixedComparisonQueryDTO(WebDTO):
+    schema_version: Literal["replay-comparison-query-v1"]
+    kind: ComparisonKind
+    left: ComparisonSubjectDTO
+    right: ComparisonSubjectDTO
+    metric_definition_ids: tuple[str, ...] = Field(min_length=1)
+    definition_bindings: tuple[DefinitionBindingDTO, ...] = Field(min_length=1)
+    minimum_sample_size: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _valid_comparison_subjects(self) -> Self:
+        valid = {
+            "players": isinstance(self.left, PlayerCohortSubjectDTO)
+            and isinstance(self.right, (PlayerCohortSubjectDTO, SegmentBaselineSubjectDTO)),
+            "matches": isinstance(self.left, MatchSubjectDTO) and isinstance(self.right, MatchSubjectDTO),
+            "openings": isinstance(self.left, OpeningSubjectDTO) and isinstance(self.right, OpeningSubjectDTO),
+            "strategies": isinstance(self.left, StrategySubjectDTO) and isinstance(self.right, StrategySubjectDTO),
+            "time_periods": isinstance(self.left, TimePeriodSubjectDTO)
+            and isinstance(self.right, TimePeriodSubjectDTO),
+        }[self.kind]
+        if not valid:
+            raise ValueError("comparison subjects do not match the selected kind")
+        if isinstance(self.left, TimePeriodSubjectDTO) and isinstance(self.right, TimePeriodSubjectDTO):
+            if (self.left.player_public_id, self.left.identity_revision) != (
+                self.right.player_public_id,
+                self.right.identity_revision,
+            ):
+                raise ValueError("time periods must bind one player revision")
+            if not (
+                self.left.end_exclusive_utc <= self.right.start_inclusive_utc
+                or self.right.end_exclusive_utc <= self.left.start_inclusive_utc
+            ):
+                raise ValueError("time periods must be disjoint")
+        object.__setattr__(self, "metric_definition_ids", tuple(sorted(set(self.metric_definition_ids))))
+        return self
+
+
+class ComparisonValueDTO(WebDTO):
+    raw_value: object | None
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    sample_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    interval: DistributionIntervalDTO | None = None
+    quality_exclusion_codes: tuple[str, ...] = ()
+    availability: AvailabilityDTO
+    evidence: tuple[PublicEvidenceReferenceDTO, ...] = ()
+
+    @field_validator("raw_value", mode="before")
+    @classmethod
+    def _canonical_comparison_value(cls, value: object) -> object:
+        return _freeze_optional_canonical_value(value)
+
+    @model_validator(mode="after")
+    def _valid_comparison_value(self) -> Self:
+        if self.availability.state == "unavailable" and self.raw_value is not None:
+            raise ValueError("unavailable comparison value cannot expose raw data")
+        object.__setattr__(self, "quality_exclusion_codes", tuple(sorted(set(self.quality_exclusion_codes))))
+        object.__setattr__(
+            self, "evidence", tuple(sorted(self.evidence, key=lambda item: (item.tier, item.evidence_public_id)))
+        )
+        return self
+
+
+class ComparisonMetricDTO(WebDTO):
+    section: Literal["overview", "openings", "timings", "transitions", "strategy", "spatial", "trend"]
+    metric_id: str = Field(min_length=1, max_length=256)
+    label: str = Field(min_length=1, max_length=256)
+    value_kind: Literal["scalar", "distribution", "categorical_share", "timing_band", "transition", "trend"]
+    definition: DefinitionBindingDTO
+    left: ComparisonValueDTO
+    right: ComparisonValueDTO
+    derived_difference: object | None
+    difference_evidence: tuple[PublicEvidenceReferenceDTO, ...] = ()
+    state: ComparisonState
+    reason_codes: tuple[str, ...] = ()
+
+    @field_validator("derived_difference", mode="before")
+    @classmethod
+    def _canonical_difference(cls, value: object) -> object:
+        return _freeze_optional_canonical_value(value)
+
+    @model_validator(mode="after")
+    def _valid_metric_state(self) -> Self:
+        if self.state in {"not_comparable", "unavailable"} and (
+            self.derived_difference is not None or self.difference_evidence
+        ):
+            raise ValueError("unaligned comparison metric cannot expose a difference")
+        object.__setattr__(
+            self,
+            "difference_evidence",
+            tuple(sorted(self.difference_evidence, key=lambda item: (item.tier, item.evidence_public_id))),
+        )
+        return self
+
+
+class ComparisonVersionDTO(WebDTO):
+    schema_version: Literal["replay-comparison-v1"]
+    comparison_definition_version: Literal["replay-comparison-definition-v1"]
+    display_policy_version: Literal["replay-comparison-display-v1"]
+    comparison_public_id: PublicId
+    query_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    identity_bindings: tuple[tuple[PublicId, int], ...]
+    longitudinal_bindings: tuple[LongitudinalBindingDTO, ...]
+    report_bindings: tuple[FixedReportReferenceDTO, ...]
+    definition_bindings: tuple[DefinitionBindingDTO, ...]
+
+
+class ComparisonDTO(WebDTO):
+    version: ComparisonVersionDTO
+    query: FixedComparisonQueryDTO
+    state: ComparisonState
+    reason_codes: tuple[str, ...]
+    metrics: tuple[ComparisonMetricDTO, ...]
+    availability: AvailabilityDTO
+
+
+class ComparisonFiltersDTO(WebDTO):
+    faction: str | None = Field(default=None, min_length=1, max_length=64)
+    subfaction: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_faction: str | None = Field(default=None, min_length=1, max_length=64)
+    opponent_player_public_id: PublicId | None = None
+    map_public_id: PublicId | None = None
+    start_position: str | None = Field(default=None, min_length=1, max_length=64)
+    patch: str | None = Field(default=None, min_length=1, max_length=64)
+    date_from_utc: AwareDatetime | None = None
+    date_to_utc: AwareDatetime | None = None
+    quality_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ComparisonSelectionDTO(WebDTO):
+    kind: ComparisonKind
+    left_public_id: PublicId | None
+    right_public_id: PublicId | None
+    baseline_requested: bool
+    metric_definition_ids: tuple[str, ...]
+    filters: ComparisonFiltersDTO
+
+
+class ComparisonResolutionDTO(WebDTO):
+    state: Literal["resolved", "unavailable"]
+    fixed_query: FixedComparisonQueryDTO | None = None
+    reason_codes: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _valid_comparison_resolution(self) -> Self:
+        if self.state == "resolved" and (self.fixed_query is None or self.reason_codes):
+            raise ValueError("resolved comparison requires one fixed query")
+        if self.state == "unavailable" and (self.fixed_query is not None or not self.reason_codes):
+            raise ValueError("unavailable comparison requires reasons")
+        return self
+
+
+@runtime_checkable
+class ComparisonQueryPort(Protocol):
+    def resolve(self, selection: ComparisonSelectionDTO) -> ComparisonResolutionDTO: ...
+    def compare(self, query: FixedComparisonQueryDTO) -> ComparisonDTO: ...
+
+
+EditableSettingKey = Literal[
+    "ollama_url",
+    "ollama_model",
+    "movement_sample_frames",
+    "import_mode",
+    "minimum_longitudinal_sample_size",
+]
+SettingsSource = Literal["default", "persisted", "environment"]
+DiagnosticKind = Literal[
+    "data_root_writable",
+    "sqlite_integrity",
+    "engine_launch_version",
+    "ollama_model_available",
+    "ollama_minimal_generation",
+]
+AffectedStageFamily = Literal[
+    "future_imports",
+    "telemetry",
+    "spatial",
+    "features",
+    "strategy",
+    "longitudinal",
+    "ollama",
+    "report",
+]
+_EDITABLE_SETTING_KEYS: tuple[EditableSettingKey, ...] = (
+    "import_mode",
+    "minimum_longitudinal_sample_size",
+    "movement_sample_frames",
+    "ollama_model",
+    "ollama_url",
+)
+_AFFECTED_STAGE_ORDER: tuple[AffectedStageFamily, ...] = (
+    "future_imports",
+    "telemetry",
+    "spatial",
+    "features",
+    "strategy",
+    "longitudinal",
+    "ollama",
+    "report",
+)
+
+
+def _validated_setting_value(key: EditableSettingKey, value: StrictInt | str) -> StrictInt | str:
+    if key == "movement_sample_frames":
+        if type(value) is not int or not 1 <= value <= 3600:
+            raise ValueError("movement_sample_frames must be a strict integer from 1 through 3600")
+        return value
+    if key == "minimum_longitudinal_sample_size":
+        if type(value) is not int or not 1 <= value <= 100_000:
+            raise ValueError("minimum_longitudinal_sample_size must be a strict integer from 1 through 100000")
+        return value
+    if key == "import_mode":
+        if type(value) is not str or value not in {"copy", "reference"}:
+            raise ValueError("import_mode must use the closed copy or reference policy")
+        return value
+    if key == "ollama_url":
+        try:
+            return normalize_ollama_endpoint(value)
+        except SettingsStoreError:
+            raise ValueError("ollama_url must be an explicit literal loopback endpoint") from None
+    if key == "ollama_model":
+        try:
+            return validate_ollama_model_name(value)
+        except SettingsStoreError:
+            raise ValueError("ollama_model must use the closed local model identifier grammar") from None
+    raise ValueError("unknown editable setting key")
+
+
+class SettingValueDTO(WebDTO):
+    key: EditableSettingKey
+    value: StrictInt | str
+    source: SettingsSource
+    editable: bool
+    unavailable_reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _valid_effective_setting(self) -> Self:
+        object.__setattr__(self, "value", _validated_setting_value(self.key, self.value))
+        if self.source == "environment" and (self.editable or self.unavailable_reason_code is None):
+            raise ValueError("environment-owned settings must be read-only with a stable reason")
+        if self.editable and self.unavailable_reason_code is not None:
+            raise ValueError("editable settings cannot have an unavailable reason")
+        return self
+
+
+class RedactedLocationDTO(WebDTO):
+    kind: Literal[
+        "data_root",
+        "database",
+        "managed_replays",
+        "map_cache",
+        "cache",
+        "logs",
+        "engine_executable",
+        "game_data",
+        "watched_folder",
+    ]
+    public_id: PublicId | None
+    label: str = Field(min_length=1, max_length=256)
+    configured: bool
+    location_class: Literal["platform_default", "custom_external", "not_configured"]
+    basename: Literal["generalszh.exe", "replay-analyzer.sqlite3"] | None
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _valid_redacted_location(self) -> Self:
+        if self.configured == (self.location_class == "not_configured"):
+            raise ValueError("configured state and location class must agree")
+        if self.kind == "watched_folder" and self.public_id is None:
+            raise ValueError("watched folders require an opaque public identity")
+        if self.kind != "watched_folder" and self.public_id is not None:
+            raise ValueError("only repeated watched folders use a public identity")
+        if self.basename == "generalszh.exe" and self.kind != "engine_executable":
+            raise ValueError("engine basename can only describe the configured engine")
+        if self.basename == "replay-analyzer.sqlite3" and self.kind != "database":
+            raise ValueError("database basename can only describe the configured database")
+        return self
+
+
+class ComponentIdentityDTO(WebDTO):
+    component: Literal[
+        "analyzer",
+        "parser",
+        "telemetry_schema",
+        "exporter",
+        "message_catalog",
+        "game_data_catalog",
+        "map_asset",
+        "database_schema",
+    ]
+    version: str | None = Field(default=None, min_length=1, max_length=255)
+    content_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    build_identity: str | None = Field(default=None, min_length=1, max_length=255)
+    availability: AvailabilityDTO
+
+
+class ModelIdentityDTO(WebDTO):
+    provider: Literal["ollama"]
+    endpoint: str
+    model_name: str
+    configured_model_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    discovered_model_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _valid_model_identity(self) -> Self:
+        try:
+            endpoint = normalize_ollama_endpoint(self.endpoint)
+            model_name = validate_ollama_model_name(self.model_name)
+        except SettingsStoreError:
+            raise ValueError("model identity must use the closed local Ollama policy") from None
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "model_name", model_name)
+        return self
+
+
+class SettingsSnapshotDTO(WebDTO):
+    schema_version: Literal[1]
+    revision: int = Field(ge=0)
+    effective_settings_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    values: tuple[SettingValueDTO, ...]
+    locations: tuple[RedactedLocationDTO, ...]
+    components: tuple[ComponentIdentityDTO, ...]
+    model: ModelIdentityDTO
+    restart_required: bool
+    availability: AvailabilityDTO
+
+    @model_validator(mode="after")
+    def _canonical_settings_snapshot(self) -> Self:
+        values = {value.key: value for value in self.values}
+        if len(values) != len(self.values) or set(values) != set(_EDITABLE_SETTING_KEYS):
+            raise ValueError("settings snapshot requires exactly one of every safe scalar")
+        components = {component.component: component for component in self.components}
+        if len(components) != len(self.components):
+            raise ValueError("component identities must be unique")
+        location_identities = tuple((location.kind, location.public_id or "") for location in self.locations)
+        if len(location_identities) != len(set(location_identities)):
+            raise ValueError("redacted location identities must be unique")
+        object.__setattr__(self, "values", tuple(values[key] for key in _EDITABLE_SETTING_KEYS))
+        object.__setattr__(self, "components", tuple(components[key] for key in sorted(components)))
+        object.__setattr__(
+            self,
+            "locations",
+            tuple(sorted(self.locations, key=lambda item: (item.kind, item.public_id or "", item.label))),
+        )
+        return self
+
+
+class SettingChangeDTO(WebDTO):
+    key: EditableSettingKey
+    value: StrictInt | str
+
+    @model_validator(mode="after")
+    def _valid_setting_change(self) -> Self:
+        object.__setattr__(self, "value", _validated_setting_value(self.key, self.value))
+        return self
+
+
+def _canonical_changes(changes: tuple[SettingChangeDTO, ...]) -> tuple[SettingChangeDTO, ...]:
+    if not changes:
+        raise ValueError("settings commands require at least one change")
+    by_key = {change.key: change for change in changes}
+    if len(by_key) != len(changes):
+        raise ValueError("settings command keys must be unique")
+    return tuple(by_key[key] for key in _EDITABLE_SETTING_KEYS if key in by_key)
+
+
+class SettingsPreviewCommandDTO(WebDTO):
+    expected_revision: int = Field(ge=0)
+    changes: tuple[SettingChangeDTO, ...] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def _canonical_preview_changes(self) -> Self:
+        object.__setattr__(self, "changes", _canonical_changes(self.changes))
+        return self
+
+
+class SettingsImpactDTO(WebDTO):
+    expected_revision: int = Field(ge=0)
+    impact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    normalized_changes: tuple[SettingChangeDTO, ...] = Field(min_length=1, max_length=5)
+    affected_stage_families: tuple[AffectedStageFamily, ...] = Field(min_length=1, max_length=8)
+    invalidates_existing_results: bool
+    requires_confirmation: bool
+    restart_required: bool
+    messages: tuple[DiagnosticDTO, ...]
+
+    @model_validator(mode="after")
+    def _canonical_impact(self) -> Self:
+        object.__setattr__(self, "normalized_changes", _canonical_changes(self.normalized_changes))
+        families = set(self.affected_stage_families)
+        if len(families) != len(self.affected_stage_families):
+            raise ValueError("affected stage families must be unique")
+        object.__setattr__(
+            self,
+            "affected_stage_families",
+            tuple(family for family in _AFFECTED_STAGE_ORDER if family in families),
+        )
+        return self
+
+
+class ApplySettingsCommandDTO(WebDTO):
+    expected_revision: int = Field(ge=0)
+    changes: tuple[SettingChangeDTO, ...] = Field(min_length=1, max_length=5)
+    expected_impact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirm_invalidating_change: Literal[True]
+
+    @model_validator(mode="after")
+    def _canonical_apply_changes(self) -> Self:
+        object.__setattr__(self, "changes", _canonical_changes(self.changes))
+        return self
+
+
+class SettingsMutationDTO(WebDTO):
+    result_code: Literal["updated", "unchanged"]
+    snapshot: SettingsSnapshotDTO
+    impact: SettingsImpactDTO
+    analysis_jobs_queued: Literal[False]
+
+
+class DiagnosticCommandDTO(WebDTO):
+    kind: DiagnosticKind
+    expected_settings_revision: int = Field(ge=0)
+
+
+class DiagnosticResultDTO(WebDTO):
+    kind: DiagnosticKind
+    state: Literal["passed", "failed", "unavailable"]
+    code: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=MAX_DIAGNOSTIC_MESSAGE_LENGTH)
+    settings_revision: int = Field(ge=0)
+    component: ComponentIdentityDTO | None
+    model: ModelIdentityDTO | None
+    duration_milliseconds: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _valid_diagnostic_identity_family(self) -> Self:
+        if self.component is not None and self.model is not None:
+            raise ValueError("diagnostic result cannot expose component and model identities together")
+        if self.kind.startswith("ollama_") and self.component is not None:
+            raise ValueError("Ollama diagnostics cannot expose component identity")
+        if not self.kind.startswith("ollama_") and self.model is not None:
+            raise ValueError("deterministic diagnostics cannot expose model identity")
+        return self
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Isolate settings and active diagnostics behind immutable path-free web contracts. (#TBD)
+@runtime_checkable
+class SettingsQueryPort(Protocol):
+    def get_settings(self) -> SettingsSnapshotDTO: ...
+    def preview_settings(self, command: SettingsPreviewCommandDTO) -> SettingsImpactDTO: ...
+
+
+@runtime_checkable
+class SettingsCommandPort(Protocol):
+    def apply_settings(self, command: ApplySettingsCommandDTO) -> SettingsMutationDTO: ...
+
+
+@runtime_checkable
+class DiagnosticsCommandPort(Protocol):
+    def run_diagnostic(self, command: DiagnosticCommandDTO) -> DiagnosticResultDTO: ...

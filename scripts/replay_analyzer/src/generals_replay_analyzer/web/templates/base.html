@@ -46,14 +46,6 @@
             {% endfor %}
           </ul>
         </nav>
-        <details class="upcoming-navigation">
-          <summary>Upcoming areas</summary>
-          <ul>
-            {% for item in shell.navigation if item.availability == "unavailable" %}
-            <li><span aria-disabled="true">{{ item.label }}: {{ item.unavailable_reason_code }}</span></li>
-            {% endfor %}
-          </ul>
-        </details>
       </div>
     </header>
     <div id="app-feedback" class="visually-hidden" aria-live="polite"></div>
@@ -73,7 +65,10 @@
         <li><a href="/">Dashboard</a></li>
         <li><a href="/players">Players</a></li>
         <li><a href="/replays">Library</a></li>
+        <li><a href="/maps">Maps</a></li>
+        <li><a href="/compare">Compare</a></li>
         <li><a href="/jobs">Jobs</a></li>
+        <li><a href="/settings">Settings</a></li>
         <li><span aria-disabled="true">Import: opaque_ingress_handoff_pending</span></li>
       </ul>
     </dialog>

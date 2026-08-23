@@ -42,7 +42,7 @@ class PresentationDTO(BaseModel):
 
 def _presentation_strings(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return () if value in {"/", "/players", "/replays", "/jobs"} else (value,)
+        return () if value in {"/", "/players", "/replays", "/maps", "/compare", "/jobs", "/settings"} else (value,)
     if isinstance(value, BaseModel):
         return tuple(text for field in type(value).model_fields for text in _presentation_strings(getattr(value, field)))
     if isinstance(value, tuple):
@@ -60,11 +60,14 @@ class NavigationItemDTO(PresentationDTO):
     unavailable_reason_code: str | None = None
 
 
+NavigationPath = Literal["/", "/players", "/replays", "/maps", "/compare", "/jobs", "/settings"]
+
+
 class ShellContextDTO(PresentationDTO):
     """Immutable values shared by every first-party shell page."""
 
     page_title: str
-    current_path: Literal["/", "/players", "/replays", "/jobs"]
+    current_path: NavigationPath
     navigation: tuple[NavigationItemDTO, ...]
     pipeline: PipelineStateDTO | None
     availability: AvailabilityDTO
@@ -72,13 +75,13 @@ class ShellContextDTO(PresentationDTO):
     correlation_id: str | None = None
 
 
-_UPCOMING_ITEMS = ("Compare", "Settings")
 _HTML_MEDIA_RANGE_PRECEDENCE = {"*/*": 0, "text/*": 1, "text/html": 2}
 _QVALUE = re.compile(r"(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\Z")
 
 
-def _navigation(current_path: Literal["/", "/players", "/replays", "/jobs"]) -> tuple[NavigationItemDTO, ...]:
-    available = (
+def _navigation(current_path: NavigationPath) -> tuple[NavigationItemDTO, ...]:
+    # TheSuperHackers @feature Leex 23/08/2026 Expose every installed evidence workspace through one canonical nav. (#TBD)
+    return (
         NavigationItemDTO(
             label="Dashboard", href="/", active=current_path == "/", availability="available"
         ),
@@ -89,20 +92,36 @@ def _navigation(current_path: Literal["/", "/players", "/replays", "/jobs"]) -> 
             label="Library", href="/replays", active=current_path == "/replays", availability="available"
         ),
         NavigationItemDTO(
+            label="Maps", href="/maps", active=current_path == "/maps", availability="available"
+        ),
+        NavigationItemDTO(
+            label="Compare", href="/compare", active=current_path == "/compare", availability="available"
+        ),
+        NavigationItemDTO(
             label="Jobs", href="/jobs", active=current_path == "/jobs", availability="available"
         ),
-    )
-    upcoming = tuple(
         NavigationItemDTO(
-            label=label,
-            href=None,
-            active=False,
-            availability="unavailable",
-            unavailable_reason_code="feature_not_installed",
-        )
-        for label in _UPCOMING_ITEMS
+            label="Settings", href="/settings", active=current_path == "/settings", availability="available"
+        ),
     )
-    return available + upcoming
+
+
+def feature_shell(
+    *,
+    page_title: str,
+    current_path: NavigationPath,
+    availability: AvailabilityDTO,
+    terminal_quality: TerminalQualityDTO | None = None,
+) -> ShellContextDTO:
+    """Build a canonical shell for an installed read-only feature surface."""
+    return ShellContextDTO(
+        page_title=page_title,
+        current_path=current_path,
+        navigation=_navigation(current_path),
+        pipeline=None,
+        availability=availability,
+        terminal_quality=terminal_quality,
+    )
 
 
 def _first_pipeline(snapshot: DashboardDTO) -> PipelineStateDTO | None:

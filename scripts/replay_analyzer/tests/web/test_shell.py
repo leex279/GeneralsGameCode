@@ -31,15 +31,15 @@ def test_fake_snapshots_render_package_shell_for_each_reserved_page() -> None:
 
     assert dashboard.status_code == players.status_code == 200
     assert "<h1>Replay dashboard</h1>" in dashboard.text
-    assert "<h1>Player identity</h1>" in players.text
+    assert "<h1>Player Evidence</h1>" in players.text
     for response, active in ((dashboard, 'href="/" aria-current="page"'), (players, 'href="/players" aria-current="page"')):
         assert 'href="/">Dashboard</a>' in response.text
         assert 'href="/players">Players</a>' in response.text
         assert active in response.text
-        assert "Maps" not in response.text
-        assert "Upcoming areas" in response.text
-        assert 'aria-disabled="true"' in response.text
-        assert "feature_not_installed" in response.text
+        assert 'href="/maps">Maps</a>' in response.text
+        assert 'href="/compare">Compare</a>' in response.text
+        assert 'href="/settings">Settings</a>' in response.text
+        assert "Upcoming areas" not in response.text
 
 
 def test_shell_mappers_keep_availability_pipeline_and_quality_separate() -> None:

@@ -15,6 +15,12 @@ from generals_replay_analyzer.web.ports import (
     IdentityLandingDTO,
     ImportRootDTO,
     ImportSubmissionDTO,
+    PlayerIndexPageDTO,
+    PlayerIndexQueryDTO,
+    PlayerProfileDTO,
+    PlayerProfileQueryDTO,
+    PlayerProfileResolutionDTO,
+    PlayerProfileSelectionDTO,
     ReadinessDTO,
     ReplayLibraryPageDTO,
     ReplayLibraryQueryDTO,
@@ -53,6 +59,28 @@ class FakeWebApplicationPort:
                 evidence_references=(),
             ),
         )
+
+    def list_players(self, query: PlayerIndexQueryDTO) -> PlayerIndexPageDTO:
+        return PlayerIndexPageDTO(
+            query=query,
+            items=(),
+            page=query.page,
+            page_size=query.page_size,
+            total_items=0,
+            availability=AvailabilityDTO(
+                state="unavailable",
+                reason_codes=("player_history_adapter_pending",),
+            ),
+        )
+
+    def resolve_profile(self, _selection: PlayerProfileSelectionDTO) -> PlayerProfileResolutionDTO:
+        return PlayerProfileResolutionDTO(
+            state="unavailable",
+            reason_codes=("player_history_adapter_pending",),
+        )
+
+    def get_profile(self, _query: PlayerProfileQueryDTO) -> PlayerProfileDTO:
+        raise RuntimeError("fake player profile is unavailable")
 
     def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO:
         return ReplayLibraryPageDTO(

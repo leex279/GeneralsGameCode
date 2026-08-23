@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from platformdirs import PlatformDirs
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+if TYPE_CHECKING:
+    from generals_replay_analyzer.configuration import ConfigurationStore, EffectiveSettingsSnapshot
+
 _ENV_PREFIX = "GENERALS_REPLAY_ANALYZER_"
+_PERSISTED_SAFE_SETTING_KEYS = (
+    "import_mode",
+    "minimum_longitudinal_sample_size",
+    "movement_sample_frames",
+    "ollama_model",
+    "ollama_url",
+)
 _ALLOW_REPOSITORY_OUTPUTS_FOR_TESTING: ContextVar[bool] = ContextVar(
     "allow_repository_outputs_for_testing",
     default=False,
@@ -64,6 +75,8 @@ class AnalyzerSettings(BaseSettings):
     watched_folders: tuple[Path, ...] = ()
     import_mode: Literal["copy", "reference"] = "copy"
     minimum_longitudinal_sample_size: int = Field(default=5, ge=1)
+    # TheSuperHackers @feature Leex 23/08/2026 Unify the effective movement sampling interval across analyzer stages. (#TBD)
+    movement_sample_frames: int = Field(default=15, ge=1, le=3600)
 
     @classmethod
     def _for_testing_with_repository_outputs(cls, **values: Any) -> Self:
@@ -148,3 +161,67 @@ class AnalyzerSettings(BaseSettings):
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeConfiguration:
+    """One process-lifetime settings object bound to its exact configuration identity."""
+
+    settings: AnalyzerSettings
+    store: ConfigurationStore
+    snapshot: EffectiveSettingsSnapshot
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Activate persisted safe settings through one process-lifetime configuration identity. (#TBD)
+def load_runtime_configuration(
+    *,
+    configuration_root: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+    values: Mapping[str, object] | None = None,
+    version_identities: Sequence[tuple[str, str]] = (),
+) -> RuntimeConfiguration:
+    """Resolve programmatic, environment, persisted, and default settings exactly once."""
+
+    from generals_replay_analyzer.configuration import ConfigurationStore
+
+    supplied = dict(values or {})
+    composition_overrides = {
+        key: supplied[key]
+        for key in _PERSISTED_SAFE_SETTING_KEYS
+        if key in supplied
+    }
+    store = ConfigurationStore(
+        configuration_root=configuration_root,
+        environment=environment,
+        composition_overrides=composition_overrides,
+        version_identities=version_identities,
+    )
+    snapshot = store.read()
+    resolved = dict(supplied)
+    for key in _PERSISTED_SAFE_SETTING_KEYS:
+        resolved[key] = snapshot.value(key)
+
+    if environment is not None:
+        known_environment = {
+            f"{_ENV_PREFIX}{field_name}".upper(): field_name
+            for field_name in AnalyzerSettings.model_fields
+        }
+        unknown = tuple(
+            name
+            for name in environment
+            if name.upper().startswith(_ENV_PREFIX) and name.upper() not in known_environment
+        )
+        if unknown:
+            raise ValueError("Unknown analyzer environment setting")
+        for environment_name, field_name in known_environment.items():
+            raw = environment.get(environment_name)
+            if (
+                field_name not in _PERSISTED_SAFE_SETTING_KEYS
+                and field_name not in supplied
+                and raw is not None
+                and raw != ""
+            ):
+                resolved[field_name] = raw
+
+    settings = AnalyzerSettings.model_validate(resolved)
+    return RuntimeConfiguration(settings=settings, store=store, snapshot=snapshot)

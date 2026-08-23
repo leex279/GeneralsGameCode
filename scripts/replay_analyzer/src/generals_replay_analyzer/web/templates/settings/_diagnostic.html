@@ -1,0 +1,7 @@
+<section id="diagnostic-result" role="status" aria-live="polite" aria-labelledby="diagnostic-result-title">
+  <h2 id="diagnostic-result-title">Diagnostic result</h2>
+  <dl><div><dt>Diagnostic</dt><dd>{{ result.kind }}</dd></div><div><dt>State</dt><dd>{{ result.state }}</dd></div><div><dt>Code</dt><dd>{{ result.code }}</dd></div><div><dt>Settings revision</dt><dd>{{ result.settings_revision }}</dd></div><div><dt>Duration</dt><dd>{{ result.duration_milliseconds if result.duration_milliseconds is not none else 'unavailable' }} ms</dd></div></dl>
+  <p>{{ result.message }}</p>
+  {% if result.component %}<p>Component {{ result.component.component }} / {{ result.component.version or 'version unavailable' }}</p>{% endif %}
+  {% if result.model %}<p>Model {{ result.model.model_name }} / {{ result.model.discovered_model_digest or 'digest unavailable' }}</p>{% endif %}
+</section>

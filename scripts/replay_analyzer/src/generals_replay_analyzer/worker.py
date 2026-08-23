@@ -11,6 +11,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
+from pathlib import Path
 from threading import Event, Lock, Thread
 from types import FrameType
 from typing import NoReturn, Protocol
@@ -323,19 +324,22 @@ class SubprocessSupervisorFactory:
         return SubprocessSupervisor(process, execution_public_id)
 
 
-def _worker_service() -> tuple[object, object, object]:
+def _worker_service(*, configuration_root: Path | None = None) -> tuple[object, object, object]:
     """Compose Analytics ports after exact schema verification; never migrate."""
     from datetime import UTC, datetime
 
     from generals_replay_analyzer import __version__
     from generals_replay_analyzer.analysis_pipeline.composition import create_production_import_service
-    from generals_replay_analyzer.config import AnalyzerSettings
+    from generals_replay_analyzer.config import load_runtime_configuration
     from generals_replay_analyzer.db import create_database_engine, create_session_factory
     from generals_replay_analyzer.parser import parse_replay
     from generals_replay_analyzer.storage import ContentAddressedStore
     from generals_replay_analyzer.web.bootstrap import PackageMigrationAdapter, SchemaIdentityStore
 
-    settings = AnalyzerSettings.model_validate({})
+    settings = load_runtime_configuration(
+        configuration_root=configuration_root,
+        version_identities=(("analyzer", __version__),),
+    ).settings
     migrations = PackageMigrationAdapter()
     current = migrations.current_revision(settings.database_path)
     head = migrations.head_revision(settings.database_path)

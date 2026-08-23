@@ -79,7 +79,7 @@ def test_unready_dependency_returns_sanitized_problem_with_stable_diagnostics(
     ("path", "expected_heading", "expected_reason"),
     [
         ("/", "Replay dashboard", "analytics_adapter_pending"),
-        ("/players", "Player identity", "identity_adapter_pending"),
+        ("/players", "Player Evidence", "player_history_adapter_pending"),
     ],
 )
 def test_reserved_routes_render_fake_port_snapshots_and_close_each_scope(
@@ -95,7 +95,7 @@ def test_reserved_routes_render_fake_port_snapshots_and_close_each_scope(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert f"<h1>{expected_heading}</h1>" in response.text
-    assert "Availability: unavailable" in response.text
+    assert "unavailable" in response.text
     assert expected_reason in response.text
     assert port_factory.created == port_factory.closed == 1
 
@@ -136,7 +136,7 @@ def test_reserved_pages_publish_distinct_semantic_names_and_non_color_availabili
     schema = _app(port_factory, bootstrapper).openapi()
 
     assert schema["paths"]["/"]["get"]["summary"] == "Dashboard"
-    assert schema["paths"]["/players"]["get"]["summary"] == "Identity management"
+    assert schema["paths"]["/players"]["get"]["summary"] == "Player directory"
 
 
 def test_public_dtos_reject_absolute_paths_internal_ids_and_noncanonical_public_ids() -> None:

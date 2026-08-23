@@ -94,6 +94,27 @@ WEB_REPORT_TEMPLATE_STATIC_RESOURCES = {
     "generals_replay_analyzer/web/templates/evidence/detail.html",
     "generals_replay_analyzer/web/static/js/report.js",
 }
+WEB_MAP_TEMPLATE_STATIC_RESOURCES = {
+    "generals_replay_analyzer/web/templates/maps/index.html",
+    "generals_replay_analyzer/web/templates/maps/detail.html",
+    "generals_replay_analyzer/web/static/css/map.css",
+    "generals_replay_analyzer/web/static/js/map.js",
+}
+WEB_PLAYER_TEMPLATE_STATIC_RESOURCES = {
+    "generals_replay_analyzer/web/templates/players/index.html",
+    "generals_replay_analyzer/web/templates/players/detail.html",
+    "generals_replay_analyzer/web/templates/players/identity.html",
+    "generals_replay_analyzer/web/templates/players/_history.html",
+    "generals_replay_analyzer/web/templates/players/_identity_confirmation.html",
+    "generals_replay_analyzer/web/templates/compare/index.html",
+    "generals_replay_analyzer/web/templates/compare/_result.html",
+    "generals_replay_analyzer/web/static/js/compare.js",
+}
+WEB_SETTINGS_TEMPLATE_RESOURCES = {
+    "generals_replay_analyzer/web/templates/settings/index.html",
+    "generals_replay_analyzer/web/templates/settings/_impact.html",
+    "generals_replay_analyzer/web/templates/settings/_diagnostic.html",
+}
 WEB_JOB_SOURCE_RESOURCES = {
     "generals_replay_analyzer/worker.py",
     "generals_replay_analyzer/watching/__init__.py",
@@ -111,6 +132,9 @@ WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = (
     | WEB_LIBRARY_TEMPLATE_RESOURCES
     | WEB_JOB_TEMPLATE_RESOURCES
     | WEB_REPORT_TEMPLATE_STATIC_RESOURCES
+    | WEB_MAP_TEMPLATE_STATIC_RESOURCES
+    | WEB_PLAYER_TEMPLATE_STATIC_RESOURCES
+    | WEB_SETTINGS_TEMPLATE_RESOURCES
 )
 
 
@@ -339,6 +363,7 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
             IdentityLandingDTO,
             ImportSubmissionDTO,
             JobPageDTO,
+            PlayerIndexPageDTO,
             ReadinessDTO,
             ReplayLibraryPageDTO,
         )
@@ -368,6 +393,12 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
                 return ImportSubmissionDTO(submission_public_id="123e4567-e89b-42d3-a456-426614174021", availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)), problem_code="dependency_unavailable")
             def list_jobs(self, query):
                 return JobPageDTO(query=query, items=(), availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+            def list_players(self, query):
+                return PlayerIndexPageDTO(query=query, items=(), page=query.page, page_size=query.page_size, total_items=0, availability=AvailabilityDTO(state="unavailable", reason_codes=("wheel_fixture",)))
+            def resolve_profile(self, selection):
+                raise AssertionError("wheel index proof must not resolve a profile")
+            def get_profile(self, query):
+                raise AssertionError("wheel index proof must not load a profile")
         class Factory:
             def __enter__(self): return Port()
             def __exit__(self, *args): return None
@@ -381,7 +412,7 @@ def test_installed_wheel_renders_package_owned_shell_and_local_assets(tmp_path: 
             assert hashlib.sha256(resource.read_bytes()).hexdigest() == expected_hash
         manifest = json.loads(package_resource("web/static/vendor/vendor-manifest.json").read_text(encoding="utf-8"))
         with TestClient(create_app(object(), port_factory=lambda: Factory(), bootstrapper=Bootstrapper())) as client:
-            for path, heading in (("/", "Replay dashboard"), ("/players", "Player identity")):
+            for path, heading in (("/", "Replay dashboard"), ("/players", "Player Evidence")):
                 response = client.get(path, headers={"host": "localhost", "accept": "text/html"})
                 assert response.status_code == 200
                 assert heading in response.text

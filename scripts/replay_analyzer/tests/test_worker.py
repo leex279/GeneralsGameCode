@@ -1061,6 +1061,40 @@ def test_worker_composition_verifies_bootstrapped_schema_without_migrating(
     runtime_engine.dispose()
 
 
+def test_worker_fresh_composition_activates_persisted_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The external worker must restart with the same persisted settings as Web and CLI."""
+
+    from generals_replay_analyzer.config import load_runtime_configuration
+    from generals_replay_analyzer.configuration import ConfigurationStore, SettingChange
+    from generals_replay_analyzer.web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
+
+    configuration_root = tmp_path / "external-configuration"
+    data_root = tmp_path / "product-data"
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+    ConfigurationStore(configuration_root=configuration_root, environment={}).apply(
+        expected_revision=0,
+        changes=(
+            SettingChange("movement_sample_frames", 120),
+            SettingChange("minimum_longitudinal_sample_size", 29),
+            SettingChange("import_mode", "reference"),
+        ),
+    )
+    runtime = load_runtime_configuration(configuration_root=configuration_root)
+    create_production_bootstrapper(BootstrapReadinessState()).prepare(runtime.settings)
+
+    service, engine, settings = worker_module._worker_service(configuration_root=configuration_root)
+    try:
+        assert settings.movement_sample_frames == 120
+        assert settings.minimum_longitudinal_sample_size == 29
+        assert settings.import_mode == "reference"
+        assert service.worker_control_port().registered_stages()
+    finally:
+        engine.dispose()
+
+
 def test_private_stage_entrypoint_prints_only_outcome_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: object,

@@ -24,7 +24,21 @@ from generals_replay_analyzer.web.bootstrap import BootstrapSettings
 from generals_replay_analyzer.web.dependencies import WebApplicationPortFactory
 from generals_replay_analyzer.web.errors import apply_security_headers, install_problem_handlers, problem_response
 from generals_replay_analyzer.web.resources import package_resource
-from generals_replay_analyzer.web.routes import dashboard, evidence, health, identity, imports, jobs, replays, reports
+from generals_replay_analyzer.web.routes import (
+    comparisons,
+    dashboard,
+    evidence,
+    health,
+    imports,
+    jobs,
+    maps,
+    players,
+    replays,
+    reports,
+)
+from generals_replay_analyzer.web.routes import (
+    settings as settings_routes,
+)
 
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1"})
 _LOCAL_HOST = re.compile(r"^(?:localhost|127\.0\.0\.1)(?::([0-9]{1,5}))?$|^\[::1\](?::([0-9]{1,5}))?$")
@@ -220,11 +234,15 @@ def create_app(
     install_problem_handlers(app)
     app.include_router(health.router)
     app.include_router(dashboard.router)
-    app.include_router(identity.router)
     # TheSuperHackers @feature Leex 22/08/2026 Register replay-library routes through the existing request-scoped port seam. (#0)
     app.include_router(replays.router)
     app.include_router(reports.router)
     app.include_router(evidence.router)
+    # TheSuperHackers @feature Leex 23/08/2026 Register installed map, player, comparison, and settings workspaces. (#TBD)
+    app.include_router(maps.router)
+    app.include_router(players.router)
+    app.include_router(comparisons.router)
+    app.include_router(settings_routes.router)
     app.include_router(imports.router)
     app.include_router(jobs.router)
     # TheSuperHackers @feature Leex 22/08/2026 Serve only package-owned local shell assets. (#TBD)

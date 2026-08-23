@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="page-heading">
+  <div><span class="eyebrow">System / Configuration</span><h1>Analyzer settings</h1><p>Inspect versioned local configuration and run explicit bounded diagnostics.</p></div>
+</header>
+
+{% if mutation %}
+<section class="notice" role="status" aria-live="polite" aria-labelledby="mutation-title">
+  <h2 id="mutation-title">Settings {{ mutation.result_code }}</h2>
+  <p>Existing outputs remain version-pinned. No analysis jobs were queued.</p>
+  <p>Restart required: {{ "yes" if mutation.snapshot.restart_required else "no" }}.</p>
+</section>
+{% endif %}
+
+<section aria-labelledby="configuration-identity-title">
+  <div class="section-heading"><div><span class="eyebrow">Immutable state</span><h2 id="configuration-identity-title">Configuration identity</h2></div></div>
+  <dl class="detail-grid">
+    <div><dt>Schema</dt><dd>{{ settings.snapshot.schema_version }}</dd></div>
+    <div><dt>Revision</dt><dd>Revision {{ settings.snapshot.revision }}</dd></div>
+    <div><dt>Effective digest</dt><dd><code>{{ settings.snapshot.effective_settings_digest }}</code></dd></div>
+    <div><dt>Restart required</dt><dd>{{ "Yes" if settings.snapshot.restart_required else "No" }}</dd></div>
+  </dl>
+</section>
+
+<section aria-labelledby="safe-settings-title">
+  <div class="section-heading"><div><span class="eyebrow">Safe scalar controls</span><h2 id="safe-settings-title">Editable settings</h2><p>Preview one change before applying it. Path-bearing locations are never accepted here.</p></div></div>
+  <div class="table-wrap"><table><caption>Effective safe settings, source, and editability</caption><thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Source</th><th scope="col">Action</th></tr></thead><tbody>
+  {% for control in settings.controls %}
+    <tr><th scope="row">{{ control.label }}<small id="help-{{ control.setting.key }}">{{ control.help_text }}</small></th><td><code>{{ control.rendered_value }}</code></td><td>{{ control.setting.source }}{% if not control.setting.editable %}: read-only — {{ control.setting.unavailable_reason_code }}{% endif %}</td><td>
+      {% if control.setting.editable %}
+      <form method="post" action="/settings/preview" aria-describedby="help-{{ control.setting.key }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="expected_revision" value="{{ settings.snapshot.revision }}">
+        <input type="hidden" name="setting_key" value="{{ control.setting.key }}">
+        <label for="setting-{{ control.setting.key }}">New {{ control.label }}</label>
+        {% if control.input_kind == "select" %}<select id="setting-{{ control.setting.key }}" name="setting_value">{% for choice in control.choices %}<option value="{{ choice }}"{% if choice == control.rendered_value %} selected{% endif %}>{{ choice }}</option>{% endfor %}</select>
+        {% elif control.input_kind == "number" %}<input id="setting-{{ control.setting.key }}" name="setting_value" type="number" value="{{ control.rendered_value }}" min="{{ control.minimum }}" max="{{ control.maximum }}" required>
+        {% else %}<input id="setting-{{ control.setting.key }}" name="setting_value" type="text" value="{{ control.rendered_value }}" maxlength="255" required>{% endif %}
+        <button type="submit">Preview {{ control.label }}</button>
+      </form>
+      {% else %}<span aria-disabled="true">Unavailable for web edits</span>{% endif %}
+    </td></tr>
+  {% endfor %}
+  </tbody></table></div>
+  <div id="settings-impact" role="status" aria-live="polite"><p>No settings change has been previewed.</p></div>
+</section>
+
+<section aria-labelledby="locations-title"><div class="section-heading"><h2 id="locations-title">Redacted locations</h2></div><div class="table-wrap"><table><caption>Configured location classes without filesystem locators</caption><thead><tr><th scope="col">Location</th><th scope="col">Class</th><th scope="col">State</th></tr></thead><tbody>{% for location in settings.snapshot.locations %}<tr><th scope="row">{{ location.label }}</th><td>{{ location.location_class }}{% if location.basename %} / {{ location.basename }}{% endif %}</td><td>{{ location.availability.state }} — {{ location.availability.reason_codes|join(', ') or 'available' }}</td></tr>{% else %}<tr><td colspan="3">No redacted location adapter is available.</td></tr>{% endfor %}</tbody></table></div></section>
+
+<section aria-labelledby="components-title"><div class="section-heading"><h2 id="components-title">Component identities</h2></div><div class="table-wrap"><table><caption>Accepted component versions and content identities</caption><thead><tr><th scope="col">Component</th><th scope="col">Version</th><th scope="col">Digest / build</th><th scope="col">Availability</th></tr></thead><tbody>{% for component in settings.snapshot.components %}<tr><th scope="row">{{ component.component }}</th><td>{{ component.version or 'unavailable' }}</td><td>{{ component.content_digest or component.build_identity or 'unavailable' }}</td><td>{{ component.availability.state }} — {{ component.availability.reason_codes|join(', ') or 'available' }}</td></tr>{% else %}<tr><td colspan="4">No component identity adapter is available.</td></tr>{% endfor %}</tbody></table></div></section>
+
+<section aria-labelledby="model-title"><div class="section-heading"><h2 id="model-title">Optional local model</h2></div><dl class="detail-grid"><div><dt>Provider</dt><dd>{{ settings.snapshot.model.provider }}</dd></div><div><dt>Endpoint</dt><dd>{{ settings.snapshot.model.endpoint }}</dd></div><div><dt>Model</dt><dd>{{ settings.snapshot.model.model_name }}</dd></div><div><dt>Availability</dt><dd>{{ settings.snapshot.model.availability.state }} — {{ settings.snapshot.model.availability.reason_codes|join(', ') or 'available' }}</dd></div></dl><p><strong>Ollama is optional.</strong> Deterministic replay analysis, diagnostics, CLI work, and reports remain available offline.</p></section>
+
+<section aria-labelledby="diagnostics-title"><div class="section-heading"><div><span class="eyebrow">Explicit active checks</span><h2 id="diagnostics-title">Diagnostics</h2><p>Each action is revision-scoped, bounded, and runs only when submitted.</p></div></div><div class="table-wrap"><table><caption>Available explicit diagnostics and their consequences</caption><thead><tr><th scope="col">Diagnostic</th><th scope="col">What it does</th><th scope="col">Action</th></tr></thead><tbody>{% for diagnostic in settings.diagnostics %}<tr><th scope="row">{{ diagnostic.label }}</th><td>{{ diagnostic.description }}</td><td><form method="post" action="/settings/diagnostics/{{ diagnostic.kind }}"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="expected_settings_revision" value="{{ settings.snapshot.revision }}"><button type="submit">Run {{ diagnostic.label }}</button></form></td></tr>{% endfor %}</tbody></table></div><div id="diagnostic-result" role="status" aria-live="polite"><p>No active diagnostic has run on this page.</p></div></section>
+{% endblock %}
