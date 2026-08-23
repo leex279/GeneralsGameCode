@@ -33,11 +33,17 @@ class ReportResources:
     document_schema_sha256: str
 
 
+# TheSuperHackers @fix Leex 23/08/2026 Keep pinned report bytes deterministic when Git checks text resources out with Windows newlines. (#TBD)
+def _canonicalize_text_resource(payload: bytes) -> bytes:
+    return payload.replace(b"\r\n", b"\n")
+
+
 def _checked_resource(name: str, expected_sha256: str) -> bytes:
     try:
         payload = resources.files("generals_replay_analyzer").joinpath("data").joinpath(name).read_bytes()
     except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
         raise ReportResourceError(f"required report resource is unavailable: {name}") from exc
+    payload = _canonicalize_text_resource(payload)
     actual_sha256 = hashlib.sha256(payload).hexdigest()
     if actual_sha256 != expected_sha256:
         raise ReportResourceError(f"report resource digest mismatch: {name}")

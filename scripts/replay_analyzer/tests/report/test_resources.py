@@ -23,6 +23,12 @@ _REPLAY_ID = "00000000-0000-4000-8000-000000000002"
 _SHA256 = "a" * 64
 
 
+def test_report_resource_newlines_are_canonical_across_windows_checkouts() -> None:
+    windows_payload = b"first\r\nsecond\r\n"
+
+    assert resource_module._canonicalize_text_resource(windows_payload) == b"first\nsecond\n"
+
+
 def _document(evidence_count: int = 1) -> ReportDocument:
     evidence = tuple(
         ReportEvidenceRef(
