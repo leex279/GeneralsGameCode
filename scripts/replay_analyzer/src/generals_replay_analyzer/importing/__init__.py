@@ -1,5 +1,6 @@
 """Public transactional replay-import application boundary."""
 
+from .engine_acquirer import EngineTelemetryAcquirer
 from .job_contracts import (
     CancelJobCommandDTO,
     CancellationReasonCode,
@@ -29,7 +30,6 @@ from .job_contracts import (
     WorkerLeaseDTO,
 )
 from .job_lifecycle import JobLifecycleService
-from .engine_acquirer import EngineTelemetryAcquirer
 from .jobs import StageFailure
 from .service import (
     AcquisitionDiagnostic,
