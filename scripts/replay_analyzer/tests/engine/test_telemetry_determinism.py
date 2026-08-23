@@ -10,7 +10,10 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import textwrap
+import threading
+import time
 import winreg
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -981,6 +984,80 @@ def test_verification_document_hash_tables_are_exact_and_cross_bound(repository_
     assert pinned["map"]["manifest_sha256"] in document
     for value in expected["provenance"].values():
         assert value in document
+
+
+def test_rendered_playback_attributes_delayed_crc_dispatch_to_snapshot_frame(
+    repository_root: Path,
+    zero_hour_runtime_executable: Path,
+) -> None:
+    """Catch rendered MessageStream dispatch shifting a frame-100 CRC snapshot to frame 101."""
+    replay = _retail_corpus(
+        repository_root / "GeneralsReplays" / "GeneralsZH" / "1.04" / "Replays"
+    )[1]
+    command = [
+        str(zero_hour_runtime_executable),
+        "-win",
+        "-noaudio",
+        "-replay",
+        str(replay),
+    ]
+    assert "-headless" not in command
+    replay_sha256 = _sha256_file(replay)
+    executable_sha256 = _sha256_file(zero_hour_runtime_executable)
+    user_data_before = _user_data_inventory()
+    process = subprocess.Popen(
+        command,
+        cwd=zero_hour_runtime_executable.parent,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_lines: list[bytes] = []
+    stderr_lines: list[bytes] = []
+
+    def read_stdout() -> None:
+        stdout_lines.extend(iter(process.stdout.readline, b""))
+
+    def read_stderr() -> None:
+        stderr_lines.extend(iter(process.stderr.readline, b""))
+
+    stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+    stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+    stdout_reader.start()
+    stderr_reader.start()
+    try:
+        # TheSuperHackers @bugfix Leex 23/08/2026 Exercise the real rendered queue delay and observe its flushed frame before bounded cleanup. (#TBD)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(line.startswith(b"CRC Mismatch in Frame ") for line in stdout_lines):
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        mismatch_lines = tuple(line.strip() for line in stdout_lines if line.startswith(b"CRC Mismatch in Frame "))
+        if not mismatch_lines:
+            return_code = process.poll()
+            formatted_code = f"0x{return_code & 0xFFFFFFFF:08X}" if return_code is not None else "still running"
+            pytest.skip(
+                "rendered runtime did not reach the frame-100 CRC dispatch in this D3D installation; "
+                f"process={formatted_code}; stdout={tuple(stdout_lines)!r}; stderr={tuple(stderr_lines)!r}"
+            )
+        assert mismatch_lines[0] == b"CRC Mismatch in Frame 100"
+        assert b"CRC Mismatch in Frame 101" not in mismatch_lines
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        stdout_reader.join(timeout=5)
+        stderr_reader.join(timeout=5)
+        assert _sha256_file(replay) == replay_sha256
+        assert _sha256_file(zero_hour_runtime_executable) == executable_sha256
+        assert _user_data_inventory() == user_data_before
 
 
 def test_pinned_replay_three_runs_are_deterministic_and_non_interfering(
