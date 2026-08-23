@@ -729,6 +729,23 @@ def test_analyze_parent_and_stage_child_share_the_exact_production_composition(
         child_engine.dispose()
 
 
+def test_configured_foreground_analyze_composition_registers_engine_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch foreground analysis omitting telemetry jobs configured for its worker child."""
+    executable = tmp_path / "generalszh.exe"
+    executable.write_bytes(b"engine")
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(tmp_path / "product"))
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", str(executable))
+
+    application = cli_module._analyze_application()
+    try:
+        assert "telemetry" in application._runtime.control.registered_stages()
+    finally:
+        application.close()
+
+
 def test_analyze_application_disposes_engine_when_runtime_shutdown_fails() -> None:
     """Catch a foreground cleanup fault leaking the SQLite engine."""
     class Command:

@@ -16,6 +16,24 @@ from generals_replay_analyzer.storage import ContentAddressedStore
 from generals_replay_analyzer.strategy.service import StrategyAssessmentService
 
 
+def test_configured_engine_telemetry_acquirer_is_present_only_when_engine_is_configured(
+    tmp_path: Path,
+) -> None:
+    """Catch production composition enabling engine launch without an explicit executable."""
+    unconfigured = AnalyzerSettings(data_root=tmp_path / "unconfigured")
+    executable = tmp_path / "generalszh.exe"
+    executable.write_bytes(b"engine")
+    configured = AnalyzerSettings(
+        data_root=tmp_path / "configured",
+        engine_executable=executable,
+    )
+
+    assert composition.configured_engine_telemetry_acquirer(unconfigured) is None
+    acquirer = composition.configured_engine_telemetry_acquirer(configured)
+    assert acquirer is not None
+    assert acquirer.settings is configured
+
+
 def test_public_factory_registers_the_exact_production_stage_set(
     session_factory: sessionmaker[Session], clock: datetime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

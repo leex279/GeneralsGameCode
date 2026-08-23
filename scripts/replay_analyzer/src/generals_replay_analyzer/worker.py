@@ -329,7 +329,11 @@ def _worker_service(*, configuration_root: Path | None = None) -> tuple[object, 
     from datetime import UTC, datetime
 
     from generals_replay_analyzer import __version__
-    from generals_replay_analyzer.analysis_pipeline.composition import create_production_import_service
+    from generals_replay_analyzer.analysis_pipeline.composition import (
+        ENGINE_TELEMETRY_ACQUIRER_VERSION,
+        configured_engine_telemetry_acquirer,
+        create_production_import_service,
+    )
     from generals_replay_analyzer.config import load_runtime_configuration
     from generals_replay_analyzer.db import create_database_engine, create_session_factory
     from generals_replay_analyzer.parser import parse_replay
@@ -349,17 +353,20 @@ def _worker_service(*, configuration_root: Path | None = None) -> tuple[object, 
         raise IncompatibleSchemaError("worker schema identity is incompatible")
     SchemaIdentityStore().verify_worker_schema(settings.data_root, current)
     engine = create_database_engine(settings.database_path)
-    # TheSuperHackers @feature Leex 22/08/2026 Consume the single production analysis registration root. (#TBD)
+    # TheSuperHackers @fix Leex 23/08/2026 Bind configured engine telemetry to the launch-capable worker process. (#TBD)
+    telemetry_acquirer = configured_engine_telemetry_acquirer(settings)
     service = create_production_import_service(
         create_session_factory(engine),
         settings,
         ContentAddressedStore(settings.managed_replay_directory),
         ContentAddressedStore(settings.cache_directory / "artifacts"),
         parser=parse_replay,
-        telemetry_acquirer=None,
+        telemetry_acquirer=telemetry_acquirer,
         clock=lambda: datetime.now(UTC),
         parser_version=__version__,
-        telemetry_acquirer_version="none",
+        telemetry_acquirer_version=(
+            ENGINE_TELEMETRY_ACQUIRER_VERSION if telemetry_acquirer is not None else "none"
+        ),
     )
     return service, engine, settings
 

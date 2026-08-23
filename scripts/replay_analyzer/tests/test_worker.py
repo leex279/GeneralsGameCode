@@ -1061,6 +1061,30 @@ def test_worker_composition_verifies_bootstrapped_schema_without_migrating(
     runtime_engine.dispose()
 
 
+def test_configured_worker_registers_engine_telemetry_with_the_production_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the external worker silently retaining parser-only composition."""
+    from generals_replay_analyzer.config import AnalyzerSettings
+    from generals_replay_analyzer.web.bootstrap import BootstrapReadinessState, create_production_bootstrapper
+
+    data_root = tmp_path / "product"
+    executable = tmp_path / "generalszh.exe"
+    executable.write_bytes(b"engine")
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", str(executable))
+    settings = AnalyzerSettings.model_validate({})
+    create_production_bootstrapper(BootstrapReadinessState()).prepare(settings)
+
+    service, engine, _composed_settings = worker_module._worker_service()
+    try:
+        assert "telemetry" in service.worker_control_port().registered_stages()
+        assert service._telemetry_acquirer_version == "engine-telemetry-v1"
+    finally:
+        engine.dispose()
+
+
 def test_worker_fresh_composition_activates_persisted_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

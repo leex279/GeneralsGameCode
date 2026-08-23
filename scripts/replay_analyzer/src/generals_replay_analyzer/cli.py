@@ -423,7 +423,11 @@ class _AnalyzeApplication:
 def _analyze_application() -> _AnalyzeApplication:
     """Compose planning and foreground execution from the sole production stage root."""
     from .analysis_pipeline.command import AnalysisCommandService
-    from .analysis_pipeline.composition import create_production_import_service
+    from .analysis_pipeline.composition import (
+        ENGINE_TELEMETRY_ACQUIRER_VERSION,
+        configured_engine_telemetry_acquirer,
+        create_production_import_service,
+    )
     from .analysis_pipeline.planner import AnalysisPlanner
     from .db import create_database_engine, create_session_factory
     from .storage import ContentAddressedStore
@@ -434,16 +438,20 @@ def _analyze_application() -> _AnalyzeApplication:
     engine = create_database_engine(settings.database_path)
     session_factory = create_session_factory(engine)
     clock = lambda: datetime.now(UTC)
+    # TheSuperHackers @fix Leex 23/08/2026 Bind configured engine telemetry to explicit foreground execution. (#TBD)
+    telemetry_acquirer = configured_engine_telemetry_acquirer(settings)
     service = create_production_import_service(
         session_factory,
         settings,
         ContentAddressedStore(settings.managed_replay_directory),
         ContentAddressedStore(settings.cache_directory / "artifacts"),
         parser=parse_replay,
-        telemetry_acquirer=None,
+        telemetry_acquirer=telemetry_acquirer,
         clock=clock,
         parser_version=__version__,
-        telemetry_acquirer_version="none",
+        telemetry_acquirer_version=(
+            ENGINE_TELEMETRY_ACQUIRER_VERSION if telemetry_acquirer is not None else "none"
+        ),
     )
     planner = AnalysisPlanner(session_factory, clock=clock)
     # TheSuperHackers @feature Leex 23/08/2026 Defer foreground worker capability until explicit execution. (#TBD)

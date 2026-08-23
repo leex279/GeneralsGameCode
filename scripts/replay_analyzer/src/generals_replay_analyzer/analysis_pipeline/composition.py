@@ -16,6 +16,7 @@ from ..features.combat import CombatExtractor
 from ..features.economy import EconomyExtractor
 from ..features.production import ProductionExtractor
 from ..features.service import FeatureExtractionService, RegisteredExtractor
+from ..importing.engine_acquirer import EngineTelemetryAcquirer
 from ..importing.parser_import import ParserObservationImporter
 from ..importing.service import (
     ImportService,
@@ -40,6 +41,16 @@ from .handlers import (
     DeriveFeaturesHandler,
     RenderReportHandler,
 )
+
+ENGINE_TELEMETRY_ACQUIRER_VERSION = "engine-telemetry-v1"
+
+
+# TheSuperHackers @feature Leex 23/08/2026 Enable engine telemetry only in explicitly configured launch-capable processes. (#TBD)
+def configured_engine_telemetry_acquirer(settings: AnalyzerSettings) -> EngineTelemetryAcquirer | None:
+    """Return the configured engine adapter, or preserve parser-only composition."""
+    if settings.engine_executable is None:
+        return None
+    return EngineTelemetryAcquirer(settings)
 
 
 # TheSuperHackers @feature Leex 22/08/2026 Centralize the exact production analysis registration graph. (#TBD)
