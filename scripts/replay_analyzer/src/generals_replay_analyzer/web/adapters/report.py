@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 
-from generals_replay_analyzer.report.model import ReportAvailability, ReportValue, thaw_report_value
+from generals_replay_analyzer.report.model import ReportAvailability, ReportQualityIssue, ReportValue, thaw_report_value
 from generals_replay_analyzer.report.query import (
     EvidenceQuery,
     FixedReportQuery,
@@ -202,6 +202,18 @@ def _section_availability(claims: tuple[ReportClaimDTO, ...]) -> AvailabilityDTO
     return _availability("partial", "section_evidence_partial", evidence)
 
 
+def _quality_issue(value: ReportQualityIssue) -> QualityIssueDTO:
+    details = thaw_report_value(value.details)
+    raw_boundary = details.get("crc_mismatch_frame") if isinstance(details, dict) else None
+    frame_end = raw_boundary if type(raw_boundary) is int else None
+    message = (
+        f"CRC mismatch at frame {frame_end}"
+        if value.issue_code == "crc_mismatch" and frame_end is not None
+        else value.issue_code.replace("_", " ")
+    )
+    return QualityIssueDTO(code=value.issue_code, message=message, frame_end=frame_end)
+
+
 def _web_link(value: AnalyticsEvidenceLinkDTO) -> EvidenceLinkDTO:
     return EvidenceLinkDTO(public_id=value.public_id, tier=value.tier, role=value.role)
 
@@ -293,13 +305,7 @@ class AnalyticsReportAdapter:
             (item for item in graph.identity.players if item.public_id == document.replay_player_public_id),
             None,
         )
-        quality_issues = tuple(
-            QualityIssueDTO(
-                code=item.issue_code,
-                message=item.issue_code.replace("_", " "),
-            )
-            for item in document.quality_issues
-        )
+        quality_issues = tuple(_quality_issue(item) for item in document.quality_issues)
         ollama = document.ollama
         return ReplayReportDTO(
             schema_version="web-replay-report-v1",

@@ -951,7 +951,19 @@ class TelemetryObservationImporter:
                 )
             complete = normalized.bundle.complete.payload
             if complete.crc_mismatch:
-                self._add_issue(session, replay, run, "crc_mismatch", "error", {"final_frame": complete.final_frame}, now)
+                # TheSuperHackers @fix Leex 23/08/2026 Preserve the exact CRC boundary for honest report horizons. (#TBD)
+                self._add_issue(
+                    session,
+                    replay,
+                    run,
+                    "crc_mismatch",
+                    "error",
+                    {
+                        "final_frame": complete.final_frame,
+                        "crc_mismatch_frame": complete.crc_mismatch_frame,
+                    },
+                    now,
+                )
             elif complete.replay_truncated or complete.terminal_reason == "replay_truncated":
                 self._add_issue(
                     session, replay, run, "telemetry_truncated", "warning", {"final_frame": complete.final_frame}, now

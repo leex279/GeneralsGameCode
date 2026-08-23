@@ -144,7 +144,16 @@ def _evidence_end(report: ReplayReportDTO, timeline: TimelineChartDTO) -> int | 
             continue
         frames.extend(point.frame for point in series.points)
         frames.extend(interval.frame_end for interval in series.intervals)
-    return max(frames) if frames else None
+    if not frames:
+        return None
+    observed_end = max(frames)
+    # TheSuperHackers @fix Leex 23/08/2026 Cap coaching at the engine's terminal evidence boundary. (#TBD)
+    terminal_boundaries = tuple(
+        issue.frame_end
+        for issue in report.terminal_quality.issues
+        if issue.code in {"crc_mismatch", "telemetry_truncated"} and issue.frame_end is not None
+    )
+    return min(observed_end, *terminal_boundaries) if terminal_boundaries else observed_end
 
 
 def _horizon(report: ReplayReportDTO, timeline: TimelineChartDTO) -> EvidenceHorizonView:

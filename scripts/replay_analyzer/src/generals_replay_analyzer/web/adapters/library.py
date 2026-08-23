@@ -446,7 +446,7 @@ class AnalyticsLibraryAdapter:
         parser_ids = tuple(parser_by_replay.values())
         players_by_replay: dict[int, list[ReplayPlayerDisplayDTO]] = defaultdict(list)
         if parser_ids:
-            for replay_player, canonical_name in session.execute(
+            player_rows = tuple(session.execute(
                 select(ReplayPlayer, Player.display_name)
                 .outerjoin(Player, Player.id == ReplayPlayer.player_id)
                 .where(
@@ -454,10 +454,38 @@ class AnalyticsLibraryAdapter:
                     ReplayPlayer.slot_kind.in_(("human", "ai")),
                 )
                 .order_by(ReplayPlayer.replay_id, ReplayPlayer.slot_index, ReplayPlayer.public_id)
-            ):
+            ))
+            replay_player_ids = tuple(replay_player.id for replay_player, _canonical_name in player_rows)
+            report_ranked = (
+                select(
+                    Report.id.label("report_id"),
+                    Report.replay_player_id.label("replay_player_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=Report.replay_player_id,
+                        order_by=(Report.created_at.desc(), Report.public_id.desc()),
+                    )
+                    .label("rank"),
+                )
+                .where(Report.replay_player_id.in_(replay_player_ids))
+                .subquery()
+            )
+            reports_by_player = {
+                report.replay_player_id: report
+                for report in session.scalars(
+                    select(Report).join(
+                        report_ranked,
+                        and_(Report.id == report_ranked.c.report_id, report_ranked.c.rank == 1),
+                    )
+                )
+            }
+            for replay_player, canonical_name in player_rows:
                 label = canonical_name or replay_player.original_name or f"Player slot {replay_player.slot_index + 1}"
+                player_report = reports_by_player.get(replay_player.id)
                 players_by_replay[replay_player.replay_id].append(
                     ReplayPlayerDisplayDTO(
+                        replay_player_public_id=replay_player.public_id if player_report is not None else None,
+                        report_public_id=player_report.public_id if player_report is not None else None,
                         display_name=label,
                         slot=replay_player.slot_index + 1,
                         faction=replay_player.faction,
@@ -585,7 +613,10 @@ class AnalyticsLibraryAdapter:
             players=players,
             sources=(source,) if source is not None else (),
             evidence=(evidence,) if evidence is not None else (),
-            report_public_id=report.public_id if report is not None else None,
+            report_public_id=next(
+                (player.report_public_id for player in players if player.report_public_id is not None),
+                report.public_id if report is not None else None,
+            ),
             pipeline=_pipeline(job, replay.public_id),
         )
 

@@ -41,6 +41,7 @@ MAP_ID = "123e4567-e89b-42d3-a456-426614174120"
 SOURCE_ALPHA = "123e4567-e89b-42d3-a456-426614174130"
 REPORT_OLD = "123e4567-e89b-42d3-a456-426614174140"
 REPORT_FIXED = "123e4567-e89b-42d3-a456-426614174141"
+PLAYER_REPORT = "123e4567-e89b-42d3-a456-426614174142"
 EVIDENCE_OBSERVED = "123e4567-e89b-42d3-a456-426614174150"
 EVIDENCE_DERIVED = "123e4567-e89b-42d3-a456-426614174151"
 
@@ -169,16 +170,19 @@ def _seed_library(factory: sessionmaker[Session]) -> None:
         session.flush()
         closed_slot = _replay_player(alpha, alpha_run, None, 2, "Closed Slot", "China", "win", "105")
         closed_slot.slot_kind = "closed"
+        leex_replay_player = _replay_player(alpha, alpha_run, leex.id, 0, "leex279", "USA", "win", "100")
+        fox_replay_player = _replay_player(alpha, alpha_run, fox.id, 1, "FOX27", "GLA", "loss", "101")
         session.add_all(
             (
-                _replay_player(alpha, alpha_run, leex.id, 0, "leex279", "USA", "win", "100"),
-                _replay_player(alpha, alpha_run, fox.id, 1, "FOX27", "GLA", "loss", "101"),
+                leex_replay_player,
+                fox_replay_player,
                 closed_slot,
                 _replay_player(alpha, poisoned_run, None, 0, r"C:\poison\not-a-player", "China", "win", "102"),
                 _replay_player(beta, beta_run, None, 0, "Beta One", "China", "draw", "103"),
                 _replay_player(beta, beta_run, None, 1, "Beta Two", "USA", "loss", "104"),
             )
         )
+        session.flush()
         observed = EvidenceItem(
             public_id=EVIDENCE_OBSERVED,
             replay_id=alpha.id,
@@ -227,6 +231,13 @@ def _seed_library(factory: sessionmaker[Session]) -> None:
             (
                 _report(alpha.id, REPORT_OLD, "old-wide", observed_alpha.replace(hour=10)),
                 _report(alpha.id, REPORT_FIXED, "fixed-wide", observed_alpha.replace(hour=11)),
+                _report(
+                    alpha.id,
+                    PLAYER_REPORT,
+                    "player-first",
+                    observed_alpha.replace(hour=12),
+                    replay_player_id=leex_replay_player.id,
+                ),
             )
         )
 
@@ -304,10 +315,18 @@ def _replay_player(
     )
 
 
-def _report(replay_id: int, public_id: str, version: str, created_at: datetime) -> Report:
+def _report(
+    replay_id: int,
+    public_id: str,
+    version: str,
+    created_at: datetime,
+    *,
+    replay_player_id: int | None = None,
+) -> Report:
     return Report(
         public_id=public_id,
         replay_id=replay_id,
+        replay_player_id=replay_player_id,
         report_version=version,
         input_digest=public_id.replace("-", "") * 2,
         cache_key=(public_id.replace("-", "")[::-1]) * 2,
@@ -327,7 +346,7 @@ def _adapter(database: tuple[AnalyzerSettings, sessionmaker[Session]]) -> Analyt
     )
 
 
-def test_library_uses_latest_succeeded_parser_and_fixed_latest_replay_wide_report(
+def test_library_uses_latest_succeeded_parser_and_opens_the_first_player_report(
     library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
 ) -> None:
     page = _adapter(library_database).list_replays(ReplayLibraryQueryDTO(page_size=1))
@@ -336,7 +355,9 @@ def test_library_uses_latest_succeeded_parser_and_fixed_latest_replay_wide_repor
     assert len(page.items) == 1
     item = page.items[0]
     assert item.replay_public_id == REPLAY_ALPHA
-    assert item.report_public_id == REPORT_FIXED
+    assert item.report_public_id == PLAYER_REPORT
+    assert item.players[0].replay_player_public_id == "123e4567-e89b-42d3-a456-426614174100"
+    assert item.players[0].report_public_id == PLAYER_REPORT
     assert [(player.display_name, player.slot, player.faction, player.result) for player in item.players] == [
         ("leex279", 1, "USA", "win"),
         ("FOX27", 2, "GLA", "loss"),

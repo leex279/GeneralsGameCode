@@ -286,6 +286,7 @@ class PipelineStateDTO(WebDTO):
 class QualityIssueDTO(WebDTO):
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
+    frame_end: int | None = Field(default=None, ge=0)
     evidence_references: tuple[str, ...] = ()
 
 

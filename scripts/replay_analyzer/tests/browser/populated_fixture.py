@@ -411,7 +411,7 @@ def _write_fixture_trace(trace_root: Path, pinned_replay: Path) -> Path:
     )
     for sequence, record in enumerate(records):
         record["sequence"] = sequence
-    return cast(
+    trace = cast(
         Path,
         finish_economy_trace(
             trace_root / "browser-fixture.ndjson",
@@ -422,10 +422,47 @@ def _write_fixture_trace(trace_root: Path, pinned_replay: Path) -> Path:
             ],
         ),
     )
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    outcome = next(record for record in records if record["event_type"] == "match_outcome")
+    complete = next(record for record in records if record["event_type"] == "complete")
+    outcome["frame"] = 108
+    outcome["logic_time_seconds"] = 108 / 30.0
+    outcome["payload"].update(
+        terminal_reason="crc_mismatch",
+        crc_mismatch=True,
+        crc_mismatch_frame=105,
+        clean_shutdown=False,
+    )
+    complete["frame"] = 108
+    complete["logic_time_seconds"] = 108 / 30.0
+    complete["payload"].update(
+        final_frame=108,
+        command_count=16,
+        terminal_reason="crc_mismatch",
+        crc_mismatch=True,
+        crc_mismatch_frame=105,
+        replay_truncated=False,
+        clean_shutdown=False,
+    )
+    prior = b"".join(
+        json.dumps(record, separators=(",", ":")).encode() + b"\n"
+        for record in records[:-1]
+    )
+    complete["payload"]["trace_sha256"] = hashlib.sha256(prior).hexdigest()
+    trace.write_bytes(
+        b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
+    )
+    return trace
 
 
 class _FixtureTelemetryAcquirer:
-    def __init__(self, trace: Path, *, replay_quality: str = "complete", strategy_analysis_scope: str = "full") -> None:
+    def __init__(
+        self,
+        trace: Path,
+        *,
+        replay_quality: str = "partial",
+        strategy_analysis_scope: str = "observed_boundary_only",
+    ) -> None:
         self._trace = trace
         self._replay_quality = replay_quality
         self._strategy_analysis_scope = strategy_analysis_scope
@@ -474,8 +511,8 @@ def build_populated_fixture(
     *,
     project_root: Path,
     telemetry_trace: Path | None = None,
-    telemetry_replay_quality: str = "complete",
-    telemetry_strategy_analysis_scope: str = "full",
+    telemetry_replay_quality: str = "partial",
+    telemetry_strategy_analysis_scope: str = "observed_boundary_only",
 ) -> PopulatedFixtureResult:
     """Build one populated external database without an engine, Ollama, or direct ORM seeding."""
     root = runtime_root.resolve()

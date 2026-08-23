@@ -21,6 +21,9 @@ from generals_replay_analyzer.web.ports import (
     TerminalQualityDTO,
     TimelineChartDTO,
     TimelineChartQueryDTO,
+    TimelineFamilyOptionDTO,
+    TimelinePointDTO,
+    TimelineSeriesDTO,
 )
 from generals_replay_analyzer.web.viewmodels.coaching import coaching_view
 
@@ -171,7 +174,7 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
         terminal_quality=TerminalQualityDTO(
             lifecycle="desynced" if partial else "engine_verified",
             issues=(
-                QualityIssueDTO(code="crc_mismatch", message="CRC mismatch at frame 105"),
+                QualityIssueDTO(code="crc_mismatch", message="CRC mismatch at frame 105", frame_end=105),
             )
             if partial
             else (),
@@ -183,15 +186,37 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
     )
 
 
-def _timeline() -> TimelineChartDTO:
+def _timeline(*, late_parser_frame: int | None = None) -> TimelineChartDTO:
+    series = (
+        TimelineSeriesDTO(
+            series_id="parser-commands",
+            label="Parser commands",
+            kind="marker",
+            player_public_id=None,
+            event_family="activity",
+            unit=None,
+            availability=AvailabilityDTO(state="available", evidence_references=(METRIC_EVIDENCE,)),
+            points=(
+                TimelinePointDTO(
+                    frame=late_parser_frame,
+                    value=None,
+                    label="Parser command",
+                    evidence=(ReportEvidenceReferenceDTO(public_id=METRIC_EVIDENCE, tier="observed"),),
+                ),
+            ),
+            intervals=(),
+        ),
+    ) if late_parser_frame is not None else ()
     return TimelineChartDTO(
         schema_version="web-report-timeline-v1",
         query=TimelineChartQueryDTO(replay_public_id=REPLAY, report_public_id=REPORT),
-        availability=AvailabilityDTO(state="unavailable", reason_codes=("fixture",)),
+        availability=AvailabilityDTO(state="available") if series else AvailabilityDTO(
+            state="unavailable", reason_codes=("fixture",)
+        ),
         timebase_fps=30,
         available_players=(),
-        available_families=(),
-        series=(),
+        available_families=(TimelineFamilyOptionDTO(value="activity", label="Activity"),) if series else (),
+        series=series,
     )
 
 
@@ -216,7 +241,7 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
 
 
 def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
-    coaching = coaching_view(_report(partial=True), _timeline())
+    coaching = coaching_view(_report(partial=True), _timeline(late_parser_frame=56_003))
 
     assert coaching.horizon.status == "partial"
     assert coaching.horizon.title == "Observed opening through 0:03.5"
