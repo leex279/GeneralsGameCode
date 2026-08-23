@@ -43,7 +43,7 @@ def test_pinned_replay_opens_an_honest_strategy_first_report_from_the_installed_
     expect(page).to_have_url(f"{origin}{manifest.player_reports[0].fixed_url}")
     expect(page.locator("#timeline-axis-frame")).to_be_enabled()
 
-    expect(page.get_by_role("heading", name="Observed opening through 0:03.5", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", name="Observed opening through 0:03.3", exact=True)).to_be_visible()
     expect(page.get_by_text("Opening-only analysis:", exact=False)).to_be_visible()
     expect(page.get_by_text("result and later phases are not established", exact=False)).to_be_visible()
     expect(page.get_by_role("heading", name="What happened", exact=True)).to_be_visible()

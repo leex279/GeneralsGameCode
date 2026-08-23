@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +42,7 @@ from generals_replay_analyzer.db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
+from generals_replay_analyzer.identity.service import PlayerIdentityService
 from generals_replay_analyzer.importing import (
     AcquisitionDiagnostic,
     ImportRequest,
@@ -51,6 +53,7 @@ from generals_replay_analyzer.importing import (
 )
 from generals_replay_analyzer.importing import telemetry_import as telemetry_import_module
 from generals_replay_analyzer.importing.evidence_identity import telemetry_event_evidence_identity
+from generals_replay_analyzer.importing.identity_import import IdentityResolvingParserObservationImporter
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.map_import import normalize_map_asset
 from generals_replay_analyzer.importing.parser_import import ParserImportResult, ParserObservationImporter
@@ -63,7 +66,7 @@ from generals_replay_analyzer.importing.telemetry_import import (
     TelemetryImportResult,
     TelemetryObservationImporter,
 )
-from generals_replay_analyzer.parser import parse_replay
+from generals_replay_analyzer.parser import ParsedReplay, parse_replay
 from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 from generals_replay_analyzer.telemetry import load_validated_telemetry_bundle
 from generals_replay_analyzer.telemetry.map_asset import BridgeFeature, Position3, WaypointFeature
@@ -97,6 +100,31 @@ class DeterministicUUIDs:
         value = UUID(int=self._value)
         self._value += 1
         return value
+
+
+def _identity_parser_importer(
+    session_factory: sessionmaker[Session],
+    data_root: Path,
+    *,
+    parser: Callable[[Path], ParsedReplay],
+    parser_version: str,
+    schema_version: int,
+    clock: Callable[[], datetime],
+    uuid_factory: Callable[[], UUID],
+) -> IdentityResolvingParserObservationImporter:
+    """Use the production identity boundary in observation-handler integration tests."""
+    return IdentityResolvingParserObservationImporter(
+        ParserObservationImporter(
+            session_factory,
+            data_root,
+            parser=parser,
+            parser_version=parser_version,
+            schema_version=schema_version,
+            clock=clock,
+            uuid_factory=uuid_factory,
+        ),
+        PlayerIdentityService(session_factory, now_factory=clock),
+    )
 
 
 def _record(version: int, run_id: str, sequence: int, event_type: str, payload: dict[str, object]) -> dict[str, object]:
@@ -1655,9 +1683,11 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
             self,
             replay_sha256: str,
             *,
+            replay_public_id: str,
             parser_version: str,
             idempotency_key: str | None = None,
         ) -> ParserImportResult:
+            assert replay_public_id == "replay-public-id"
             self.calls.append((replay_sha256, parser_version, idempotency_key))
             return ParserImportResult("parser-run", "succeeded", "complete", 9, False)
 
@@ -2196,7 +2226,7 @@ def test_real_dag_post_copy_registration_failure_is_typed_and_links_only_verifie
             return artifact
 
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,
@@ -2312,7 +2342,7 @@ def test_real_dag_producer_rejects_and_redacts_residual_pathlike_diagnostics(
             return artifact
 
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory, settings.data_root, parser=parse_replay, parser_version="test-parser-1",
             schema_version=1, clock=clock, uuid_factory=DeterministicUUIDs(65_000),
         ),
@@ -2384,7 +2414,7 @@ def test_real_dag_failed_telemetry_persists_attempt_assets_issues_and_zero_child
             assert replay.is_file() and len(replay_sha256) == 64
             return artifact
 
-    parser_importer = ParserObservationImporter(
+    parser_importer = _identity_parser_importer(
         session_factory,
         settings.data_root,
         parser=parse_replay,
@@ -2509,7 +2539,7 @@ def test_real_dag_artifact_validation_failure_retains_typed_attempt_and_zero_chi
             return artifact
 
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,
@@ -2650,7 +2680,7 @@ def test_real_dag_mid_copy_failure_links_only_completed_asset_and_zero_children(
 
     failing_store = FailEverySecondCopy(artifact_store)
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,
@@ -2757,7 +2787,7 @@ def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
     def failing_parser(_path: Path) -> object:
         raise ValueError("parser rejected fixture bytes")
 
-    parser_importer = ParserObservationImporter(
+    parser_importer = _identity_parser_importer(
         session_factory,
         settings.data_root,
         parser=parse_replay,
@@ -2840,7 +2870,7 @@ def test_handler_failed_parser_and_succeeded_telemetry_imports_with_null_player_
     bundle = load_validated_telemetry_bundle(trace)
     attempt = _attempt(session_factory, settings, trace, run_id)
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,
@@ -2964,7 +2994,7 @@ def test_parser_failure_handler_replay_after_lease_expiry_reuses_exact_attempt(
         raise ValueError("parser rejected crash-window fixture")
 
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,
@@ -3113,7 +3143,7 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
             return artifact
 
     handler = ObservationImportHandler(
-        ParserObservationImporter(
+        _identity_parser_importer(
             session_factory,
             settings.data_root,
             parser=parse_replay,

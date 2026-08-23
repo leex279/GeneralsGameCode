@@ -33,11 +33,12 @@ from ..db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
+from ..identity.service import IdentityBusyError, IdentityError
 from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundle
 from .evidence_identity import telemetry_event_evidence_identities, validate_observed_evidence_identity
+from .identity_import import ParserObservationImportPort
 from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
-from .parser_import import ParserObservationImporter
 from .service import FrozenJSONValue, StageDependencyOutput, StageExecutionContext
 from .stages import canonical_json
 
@@ -1432,7 +1433,7 @@ class ObservationImportHandler:
 
     def __init__(
         self,
-        parser_importer: ParserObservationImporter,
+        parser_importer: ParserObservationImportPort,
         telemetry_importer: TelemetryObservationImporter,
     ) -> None:
         self._parser_importer = parser_importer
@@ -1458,24 +1459,52 @@ class ObservationImportHandler:
         if parse_dependency.status == "succeeded":
             parse_output = _succeeded_dependency_output(parse_dependency)
             parser_version = _validated_parser_dependency(parse_output, context.replay_sha256)
-            parser_result = self._parser_importer.import_replay(
-                context.replay_sha256,
-                parser_version=parser_version,
-                idempotency_key=context.idempotency_key,
-            )
+            try:
+                parser_result = self._parser_importer.import_replay(
+                    context.replay_sha256,
+                    replay_public_id=context.replay_public_id,
+                    parser_version=parser_version,
+                    idempotency_key=context.idempotency_key,
+                )
+            except IdentityBusyError as error:
+                raise StageFailure(
+                    "identity_resolution_busy",
+                    "player identity resolution is busy",
+                    retryable=True,
+                ) from error
+            except IdentityError as error:
+                # TheSuperHackers @fix Leex 23/08/2026 Keep identity internals outside durable public job failures. (#TBD)
+                raise StageFailure(
+                    "identity_resolution_failed",
+                    "player identity resolution failed",
+                    retryable=False,
+                ) from error
             if parser_result.status != "succeeded":
                 raise StageFailure("parser_import_failed", "parser observations failed validation", retryable=False)
         elif parse_dependency.status == "failed":
             parser_version = _failed_parser_version(context)
             code, message, details = _failed_dependency_error(parse_dependency)
-            parser_result = self._parser_importer.record_failed_dependency(
-                context.replay_sha256,
-                parser_version=parser_version,
-                idempotency_key=context.idempotency_key,
-                error_code=code,
-                error_message=message,
-                error_details=details,
-            )
+            try:
+                parser_result = self._parser_importer.record_failed_dependency(
+                    context.replay_sha256,
+                    parser_version=parser_version,
+                    idempotency_key=context.idempotency_key,
+                    error_code=code,
+                    error_message=message,
+                    error_details=details,
+                )
+            except IdentityBusyError as error:
+                raise StageFailure(
+                    "identity_resolution_busy",
+                    "player identity resolution is busy",
+                    retryable=True,
+                ) from error
+            except IdentityError as error:
+                raise StageFailure(
+                    "identity_resolution_failed",
+                    "player identity resolution failed",
+                    retryable=False,
+                ) from error
         else:
             raise StageFailure("parser_dependency_invalid", "parser dependency is not terminal", retryable=False)
         telemetry_result: TelemetryImportResult | None = None

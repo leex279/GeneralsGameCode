@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from map_asset_support import write_test_map_asset  # type: ignore[import-not-found]
+from sqlalchemy import select
 from telemetry.test_economy_production_contract import (  # type: ignore[import-not-found]
     ENGINE_IDENTITY,
     _object_created,
@@ -35,13 +36,12 @@ from generals_replay_analyzer.analysis_pipeline.planner import AnalysisPlanner
 from generals_replay_analyzer.config import load_runtime_configuration
 from generals_replay_analyzer.configuration import ConfigurationStore, SettingChange
 from generals_replay_analyzer.db import create_database_engine, create_session_factory
-from generals_replay_analyzer.identity.service import PlayerIdentityService
+from generals_replay_analyzer.db.models import Replay, ReplayPlayer
 from generals_replay_analyzer.importing import (
     AcquisitionDiagnostic,
     JobDTO,
     TelemetryArtifact,
 )
-from generals_replay_analyzer.importing.parser_import import ParserObservationImporter
 from generals_replay_analyzer.llm.provider import CancellationSignal, JSONValue, OllamaClientConfig, TransportResponse
 from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.storage import ContentAddressedStore
@@ -63,7 +63,7 @@ from generals_replay_analyzer.web.ports import (
 from generals_replay_analyzer.web.routes.comparisons import _fixed_url as comparison_fixed_url
 from generals_replay_analyzer.web.routes.players import _fixed_profile_url
 
-_SCHEMA_VERSION = "populated-browser-fixture-v1"
+_SCHEMA_VERSION = "populated-browser-fixture-v2"
 _MANIFEST_NAME = "populated-browser-fixture.json"
 _PINNED_REPLAY = Path("tests/fixtures/zero_hour_1_04/leex279_vs_fox27.rep")
 _NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -629,26 +629,18 @@ def build_populated_fixture(
             raise AssertionError("fixture import did not produce exactly one replay")
         replay_public_id = replay_ids.pop()
         import_result = service.result_for_replay(replay_public_id)
-        def reject_reparse(_path: Path) -> Any:
-            raise AssertionError("fixture parser cache lookup attempted to reparse the watched replay")
-
-        parser_result = ParserObservationImporter(
-            factory,
-            runtime.settings.data_root,
-            parser=reject_reparse,
-            parser_version="browser-fixture-parser-v1",
-            schema_version=1,
-            clock=lambda: _NOW,
-        ).import_replay(import_result.sha256)
-        identity_batch = PlayerIdentityService(factory, now_factory=lambda: _NOW).resolve_parser_run(
-            replay_public_id=replay_public_id,
-            parser_run_id=parser_result.run_id,
-        )
-        linked_names = {
-            decision.normalized_name
-            for decision in identity_batch.decisions
-            if decision.player_public_id is not None
-        }
+        with factory() as session:
+            linked_names = {
+                name.casefold()
+                for name in session.scalars(
+                    select(ReplayPlayer.original_name).where(
+                        ReplayPlayer.replay_id
+                        == select(Replay.id).where(Replay.public_id == replay_public_id).scalar_subquery(),
+                        ReplayPlayer.player_id.is_not(None),
+                    )
+                )
+                if name is not None
+            }
         if linked_names != {"leex279", "fox27"}:
             raise AssertionError(f"fixture identities did not resolve: {linked_names!r}")
         plan = AnalysisPlanner(factory, clock=lambda: _NOW).ensure_analysis_plan(replay_public_id, False)

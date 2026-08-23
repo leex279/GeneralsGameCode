@@ -1,6 +1,12 @@
 """Public transactional replay-import application boundary."""
 
 from .engine_acquirer import EngineTelemetryAcquirer
+from .identity_import import (
+    IdentityResolutionContractError,
+    IdentityResolutionPort,
+    IdentityResolvingParserObservationImporter,
+    ParserObservationImportPort,
+)
 from .job_contracts import (
     CancelJobCommandDTO,
     CancellationReasonCode,
@@ -56,6 +62,9 @@ __all__ = [
     "CancellationReasonCode",
     "EngineTelemetryAcquirer",
     "FrozenJSONValue",
+    "IdentityResolutionContractError",
+    "IdentityResolutionPort",
+    "IdentityResolvingParserObservationImporter",
     "ImportRequest",
     "ImportResultDTO",
     "ImportService",
@@ -80,6 +89,7 @@ __all__ = [
     "JobState",
     "JobSummaryDTO",
     "OwnedExecutionSettlementDTO",
+    "ParserObservationImportPort",
     "PublicJobReasonCode",
     "RetryJobCommandDTO",
     "StageDependencyOutput",

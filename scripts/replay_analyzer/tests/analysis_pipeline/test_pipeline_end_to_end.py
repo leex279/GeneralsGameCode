@@ -5,14 +5,26 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.analysis_pipeline.codecs import decode_feature_output, decode_llm_output
 from generals_replay_analyzer.analysis_pipeline.composition import create_production_import_service
 from generals_replay_analyzer.analysis_pipeline.planner import AnalysisPlanner
 from generals_replay_analyzer.config import AnalyzerSettings
-from generals_replay_analyzer.db.models import Feature, FeatureSet, Job, Replay
+from generals_replay_analyzer.db.models import (
+    Feature,
+    FeatureSet,
+    Job,
+    Player,
+    PlayerAlias,
+    PlayerIdentityOperation,
+    Replay,
+    ReplayPlayer,
+)
+from generals_replay_analyzer.identity.service import PlayerIdentityService
+from generals_replay_analyzer.importing.identity_import import IdentityResolvingParserObservationImporter
+from generals_replay_analyzer.importing.parser_import import ParserObservationImporter
 from generals_replay_analyzer.importing.service import ImportRequest
 from generals_replay_analyzer.llm.provider import (
     CancellationSignal,
@@ -94,6 +106,61 @@ def test_production_pipeline_executes_all_five_stages_with_opt_in_isolation(
         replay = session.scalar(select(Replay))
         assert replay is not None
         replay_public_id = replay.public_id
+        slots = tuple(
+            session.execute(
+                select(ReplayPlayer.original_name, ReplayPlayer.slot_kind, Player.public_id)
+                .outerjoin(Player, Player.id == ReplayPlayer.player_id)
+                .order_by(ReplayPlayer.slot_index)
+            )
+        )
+        observation_job = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        canonical_player_public_ids = tuple(
+            session.scalars(select(Player.public_id).order_by(Player.public_id))
+        )
+        identity_revisions = tuple(
+            session.execute(select(Player.public_id, Player.identity_revision).order_by(Player.public_id))
+        )
+        assert [(name, kind, player_id is not None) for name, kind, player_id in slots] == [
+            ("leex279", "human", True),
+            ("FOX27", "human", True),
+            *[(None, "closed", False) for _ in range(6)],
+        ]
+        assert set(session.scalars(select(PlayerAlias.normalized_name))) == {"leex279", "fox27"}
+        assert session.scalar(select(func.count()).select_from(PlayerIdentityOperation)) == 2
+        assert observation_job is not None and set(observation_job.output_json) == {
+            "idempotency_key",
+            "parser_run_id",
+            "parser_command_count",
+            "telemetry_run_id",
+            "telemetry_event_count",
+        }
+        assert all(public_id not in str(observation_job.output_json) for public_id in canonical_player_public_ids)
+        assert "leex279" not in str(observation_job.output_json).casefold()
+
+    retry_result = IdentityResolvingParserObservationImporter(
+        ParserObservationImporter(
+            session_factory,
+            settings.data_root,
+            parser=lambda _path: (_ for _ in ()).throw(
+                AssertionError("cached parser success must not reparse during job retry")
+            ),
+            parser_version="parser-v1",
+            schema_version=1,
+            clock=lambda: clock,
+        ),
+        PlayerIdentityService(session_factory, now_factory=lambda: clock),
+    ).import_replay(
+        replay.sha256,
+        replay_public_id=replay_public_id,
+        parser_version="parser-v1",
+        idempotency_key=observation_job.idempotency_key,
+    )
+    assert retry_result.cache_hit is True
+    with session_factory() as session:
+        assert tuple(
+            session.execute(select(Player.public_id, Player.identity_revision).order_by(Player.public_id))
+        ) == identity_revisions
+        assert session.scalar(select(func.count()).select_from(PlayerIdentityOperation)) == 2
 
     planner = AnalysisPlanner(session_factory, clock=lambda: clock)
     deterministic = planner.ensure_analysis_plan(replay_public_id, False)
@@ -112,6 +179,7 @@ def test_production_pipeline_executes_all_five_stages_with_opt_in_isolation(
     )
     assert len(replay_wide) == 1 and len(replay_wide[0].feature_set_public_ids) == 1
     assert player_scoped and all(len(selection.feature_set_public_ids) == 6 for selection in player_scoped)
+    assert all(selection.canonical_player_public_id is not None for selection in player_scoped)
     selected_feature_sets = {
         public_id for selection in feature_selections for public_id in selection.feature_set_public_ids
     }

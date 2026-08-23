@@ -16,7 +16,9 @@ from ..features.combat import CombatExtractor
 from ..features.economy import EconomyExtractor
 from ..features.production import ProductionExtractor
 from ..features.service import FeatureExtractionService, RegisteredExtractor
+from ..identity.service import PlayerIdentityService
 from ..importing.engine_acquirer import EngineTelemetryAcquirer
+from ..importing.identity_import import IdentityResolvingParserObservationImporter
 from ..importing.parser_import import ParserObservationImporter
 from ..importing.service import (
     ImportService,
@@ -88,13 +90,16 @@ def create_production_import_service(
     longitudinal = LongitudinalAnalysisService(session_factory, analyzer_settings=settings)
     reports = ReportService(session_factory, settings=settings)
     observation = ObservationImportHandler(
-        ParserObservationImporter(
-            session_factory,
-            settings.data_root,
-            parser=parser,
-            parser_version=parser_version,
-            schema_version=1,
-            clock=clock,
+        IdentityResolvingParserObservationImporter(
+            ParserObservationImporter(
+                session_factory,
+                settings.data_root,
+                parser=parser,
+                parser_version=parser_version,
+                schema_version=1,
+                clock=clock,
+            ),
+            PlayerIdentityService(session_factory, now_factory=clock),
         ),
         TelemetryObservationImporter(
             session_factory,
