@@ -202,6 +202,7 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         reports: object,
         maps: object,
         *,
+        library: object | None = None,
         players: object | None = None,
         settings: object | None = None,
     ) -> None:
@@ -209,6 +210,7 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         self._jobs = jobs
         self._reports = reports
         self._maps = maps
+        self._library = library
         self._players = players
         self._settings = settings
 
@@ -216,6 +218,23 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         if self._players is None:
             raise PublicProblem(status=503, code="player_adapter_pending", detail="Player analysis is unavailable")
         return self._players
+
+    def _library_port(self) -> object:
+        if self._library is None:
+            raise PublicProblem(status=503, code="replay_library_adapter_pending", detail="Replay library is unavailable")
+        return self._library
+
+    def dashboard(self) -> DashboardDTO:
+        return self._library_port().dashboard()  # type: ignore[attr-defined,no-any-return]
+
+    def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO:
+        return self._library_port().list_replays(query)  # type: ignore[attr-defined,no-any-return]
+
+    def import_roots(self) -> tuple[ImportRootDTO, ...]:
+        return self._library_port().import_roots()  # type: ignore[attr-defined,no-any-return]
+
+    def submit_root_selection(self, command: RootImportCommandDTO) -> ImportSubmissionDTO:
+        return self._library_port().submit_root_selection(command)  # type: ignore[attr-defined,no-any-return]
 
     def _settings_port(self) -> object:
         if self._settings is None:
@@ -431,18 +450,21 @@ class AnalyticsPortFactory:
 
     @contextmanager
     def __call__(self) -> Iterator[WebApplicationPort]:
+        from generals_replay_analyzer import __version__
         from generals_replay_analyzer.analysis_pipeline import AnalysisPlanner
         from generals_replay_analyzer.comparison.service import ReplayComparisonService
         from generals_replay_analyzer.db import create_database_engine, create_session_factory
         from generals_replay_analyzer.identity.query import PlayerQueryService
         from generals_replay_analyzer.identity.service import PlayerIdentityService
         from generals_replay_analyzer.identity.workflow import PlayerIdentityWorkflowService
-        from generals_replay_analyzer.importing import JobLifecycleService
+        from generals_replay_analyzer.importing import ImportService, JobLifecycleService
+        from generals_replay_analyzer.parser import parse_replay
         from generals_replay_analyzer.report.query import ReportQueryService
         from generals_replay_analyzer.spatial.query import MapSceneQueryService
         from generals_replay_analyzer.storage import ContentAddressedStore
         from generals_replay_analyzer.watching import FileWatchStatusStore
         from generals_replay_analyzer.web.adapters.analytics import AnalyticsJobsAdapter
+        from generals_replay_analyzer.web.adapters.library import AnalyticsLibraryAdapter
         from generals_replay_analyzer.web.adapters.map import AnalyticsMapSceneAdapter
         from generals_replay_analyzer.web.adapters.players import AnalyticsPlayersAdapter
         from generals_replay_analyzer.web.adapters.report import AnalyticsReportAdapter
@@ -470,6 +492,24 @@ class AnalyticsPortFactory:
                 )
             )
             session_factory = cast("sessionmaker[Session]", request_sessions)
+            # TheSuperHackers @feature Leex 23/08/2026 Share one path-free verified import service with the request transaction. (#TBD)
+            import_service = ImportService(
+                session_factory,
+                self._settings,
+                ContentAddressedStore(self._settings.managed_replay_directory),
+                ContentAddressedStore(self._settings.cache_directory / "artifacts"),
+                parser=parse_replay,
+                telemetry_acquirer=None,
+                clock=lambda: datetime.now(UTC),
+                parser_version=__version__,
+                telemetry_acquirer_version="none",
+            )
+            library = AnalyticsLibraryAdapter(
+                session_factory,
+                settings=self._settings,
+                import_service=import_service,
+                clock=lambda: datetime.now(UTC),
+            )
             players = AnalyticsPlayersAdapter(
                 PlayerQueryService(session_factory),
                 PlayerIdentityWorkflowService(
@@ -488,6 +528,7 @@ class AnalyticsPortFactory:
                 ),
                 reports,
                 maps,
+                library=library,
                 players=players,
                 settings=self._settings_adapter,
             )

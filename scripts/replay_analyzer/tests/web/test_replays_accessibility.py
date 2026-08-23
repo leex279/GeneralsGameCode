@@ -63,8 +63,8 @@ def test_import_dialog_has_labelled_native_controls_and_no_inline_behavior() -> 
     assert any(tag == "input" and attrs.get("id") == "upload-file" and "disabled" in attrs for tag, attrs in parser.tags)
     assert "opaque_ingress_handoff_pending" in html
     assert "<noscript>" in html
-    assert "<script" not in html.casefold()
-    assert " on" not in html.casefold()
+    assert all("src" in attrs for tag, attrs in parser.tags if tag == "script")
+    assert all(not any(name.casefold().startswith("on") for name in attrs) for _tag, attrs in parser.tags)
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
     assert ":focus-visible" in css
     assert "prefers-reduced-motion: reduce" in css

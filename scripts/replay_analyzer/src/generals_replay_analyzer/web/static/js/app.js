@@ -68,4 +68,41 @@
       announce("All replay filters closed");
     });
   }
+
+  // TheSuperHackers @feature Leex 23/08/2026 Restore focus after closing an enhanced replay-import dialog. (#TBD)
+  let importInvoker = null;
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    const trigger = target instanceof Element ? target.closest("[data-import-dialog-open]") : null;
+    if (trigger instanceof HTMLElement) {
+      importInvoker = trigger;
+    }
+  });
+
+  const activateImportDialog = (root) => {
+    const dialog = root.querySelector("#import-dialog");
+    const close = root.querySelector("[data-import-dialog-close]");
+    if (!(dialog instanceof HTMLDialogElement) || !(close instanceof HTMLButtonElement)) {
+      return;
+    }
+    close.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => {
+      const host = document.querySelector("#import-modal-host");
+      if (host instanceof HTMLElement) {
+        host.replaceChildren();
+      }
+      if (importInvoker instanceof HTMLElement && importInvoker.isConnected) {
+        importInvoker.focus();
+      }
+      announce("Replay import dialog closed");
+    }, { once: true });
+    dialog.showModal();
+    close.focus();
+    announce("Replay import dialog opened");
+  };
+
+  document.addEventListener("htmx:afterSwap", (event) => {
+    const root = event.target instanceof Element ? event.target : document;
+    activateImportDialog(root);
+  });
 })();

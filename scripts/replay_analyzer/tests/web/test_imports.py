@@ -18,6 +18,8 @@ from generals_replay_analyzer.web.ports import (
     AvailabilityDTO,
     ImportRootDTO,
     ImportSubmissionDTO,
+    ReplayLibraryPageDTO,
+    ReplayLibraryQueryDTO,
     RootImportCommandDTO,
 )
 
@@ -36,6 +38,16 @@ class _ImportPort:
         self._state = state
         self._submission_problem = submission_problem
         self._has_roots = has_roots
+
+    def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO:
+        return ReplayLibraryPageDTO(
+            query=query,
+            items=(),
+            page=query.page,
+            page_size=query.page_size,
+            total_items=0,
+            availability=AvailabilityDTO(state="available"),
+        )
 
     def import_roots(self) -> tuple[ImportRootDTO, ...]:
         if not self._has_roots:
@@ -118,6 +130,36 @@ def test_import_dialog_labels_the_blocked_upload_and_disables_unavailable_roots(
     assert "Tournament archives" in response.text
     assert "root_fixture_reason" in response.text
     assert "<noscript>" in response.text
+
+
+def test_direct_import_navigation_renders_full_shell_with_real_library_return_link() -> None:
+    port = _ImportPort()
+
+    with _client(port) as client:
+        response = client.get("/imports/dialog", headers={"host": "localhost", "accept": "text/html"})
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text.casefold()
+    assert '<dialog id="import-dialog" open' in response.text
+    assert '<a href="/replays">Return to replay library</a>' in response.text
+
+
+def test_enhanced_import_request_returns_modal_fragment_with_close_and_focus_hooks() -> None:
+    port = _ImportPort()
+
+    with _client(port) as client:
+        library = client.get("/replays", headers={"host": "localhost"})
+        fragment = client.get(
+            "/imports/dialog",
+            headers={"host": "localhost", "accept": "text/html", "hx-request": "true"},
+        )
+
+    assert 'data-import-dialog-open hx-get="/imports/dialog" hx-target="#import-modal-host"' in library.text
+    assert '<div id="import-modal-host"' in library.text
+    assert "<!doctype html>" not in fragment.text.casefold()
+    assert '<dialog id="import-dialog"' in fragment.text
+    assert '<dialog id="import-dialog" open' not in fragment.text
+    assert "data-import-dialog-close" in fragment.text
 
 
 @pytest.mark.parametrize(

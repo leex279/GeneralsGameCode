@@ -11,13 +11,14 @@
   <label for="replay-page-size{% if suffix %}-{{ suffix }}{% endif %}">Rows per page <select id="replay-page-size{% if suffix %}-{{ suffix }}{% endif %}" name="page_size">{% for size in (25, 50, 100) %}<option value="{{ size }}"{% if query.page_size == size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></label>
 {%- endmacro %}
 {% block content %}
+  {# TheSuperHackers @feature Leex 23/08/2026 Keep replay import usable as direct navigation and enhanced modal navigation. (#TBD) #}
   <header class="page-heading">
     <div>
       <span class="eyebrow">Evidence / Library</span>
       <h1>Replay library</h1>
       <p>Search, filter, and inspect every replay without flattening analysis state into a single score.</p>
     </div>
-    <a class="button button-primary" href="/imports/dialog">Import replay</a>
+    <a class="button button-primary" href="/imports/dialog" data-import-dialog-open hx-get="/imports/dialog" hx-target="#import-modal-host" hx-swap="innerHTML" aria-haspopup="dialog" aria-controls="import-dialog">Import replay</a>
   </header>
 
   <div class="library-workspace">
@@ -78,4 +79,5 @@
     </section>
     {% include "replays/_table.html" %}
   </div>
+  <div id="import-modal-host" aria-live="polite"></div>
 {% endblock %}

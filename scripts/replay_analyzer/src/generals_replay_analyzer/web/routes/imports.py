@@ -59,15 +59,18 @@ def import_dialog(request: Request, port: Annotated[WebApplicationPort, Depends(
     root_token = request.app.state.form_csrf_token_registry.issue(
         "/imports/root-selections", upload_token.cookie_value
     )
+    # TheSuperHackers @feature Leex 23/08/2026 Render direct imports in the shell and enhanced imports as a modal fragment. (#TBD)
+    enhanced = request.headers.get("hx-request", "").casefold() == "true"
     response = template_response(
         request,
-        "imports/dialog.html",
+        "imports/dialog.html" if enhanced else "imports/page.html",
         replay_library_shell(shell_availability),
         context={
             "roots": roots,
             "csrf_token": root_token.hidden_value,
             "upload_csrf_token": upload_token.hidden_value,
             "has_available_roots": any(root.availability.state == "available" for root in roots),
+            "standalone": not enhanced,
         },
     )
     response.set_cookie("_csrf", upload_token.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")

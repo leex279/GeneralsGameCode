@@ -1,7 +1,8 @@
-<dialog id="import-dialog" open role="dialog" aria-modal="true" aria-labelledby="import-dialog-title">
+{# TheSuperHackers @feature Leex 23/08/2026 Provide an explicit standalone return and an enhanced close control. (#TBD) #}
+<dialog id="import-dialog"{% if standalone %} open{% endif %} role="dialog" aria-modal="true" aria-labelledby="import-dialog-title">
   <h1 id="import-dialog-title">Import replay</h1>
   <p>Choose a configured replay root or provide an upload after opaque ingress is available.</p>
-  <form method="dialog"><button type="submit" autofocus aria-label="Close import dialog">Close</button></form>
+  {% if standalone %}<form action="/replays" method="get"><button type="submit" autofocus aria-label="Close import dialog">Return to replay library</button></form><a href="/replays">Return to replay library</a>{% else %}<button type="button" autofocus data-import-dialog-close aria-label="Close import dialog">Close</button>{% endif %}
   <form action="/imports/uploads" method="post">
     <input type="hidden" name="_csrf" value="{{ upload_csrf_token }}">
     <label for="upload-file">Replay upload (.rep, maximum 64 MiB)</label>
