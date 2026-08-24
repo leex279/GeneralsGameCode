@@ -152,6 +152,95 @@ class CameraPlanV1(VideoContract):
         return self.model_dump_json(indent=None, by_alias=True, exclude_none=True)
 
 
+# TheSuperHackers @feature Leex 23/08/2026 Keep replay commentary bound to the same accepted frame evidence as camera direction. (#TBD)
+CommentaryRole = Literal["intro", "play_by_play", "analysis", "transition", "outro"]
+
+
+class CommentaryEventV1(VideoContract):
+    event_id: PublicId
+    start_frame: int = Field(ge=0)
+    latest_end_frame: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=500)
+    subtitle_text: str = Field(min_length=1, max_length=500)
+    role: CommentaryRole
+    player_public_ids: tuple[PublicId, ...] = ()
+    strategy_identity: str | None = Field(default=None, min_length=1, max_length=160)
+    evidence: tuple[EvidenceCitationV1, ...] = Field(min_length=1, max_length=16)
+    confidence_tier: Literal["observed", "derived"]
+    camera_segment_id: PublicId
+    template_version: Literal["commentary-template-v1"] = "commentary-template-v1"
+    ollama_run_public_id: PublicId | None = None
+
+    @model_validator(mode="after")
+    def _validate_evidence_window(self) -> Self:
+        if self.latest_end_frame < self.start_frame:
+            raise ValueError("commentary event frame window must be ordered")
+        if any(
+            citation.frame_start > self.start_frame or citation.frame_end < self.latest_end_frame
+            for citation in self.evidence
+        ):
+            raise ValueError("commentary event must fit inside every cited evidence window")
+        ordered_players = tuple(sorted(set(self.player_public_ids)))
+        ordered_evidence = tuple(
+            sorted(set(self.evidence), key=lambda item: (item.frame_start, item.frame_end, item.evidence_public_id, item.tier))
+        )
+        object.__setattr__(self, "player_public_ids", ordered_players)
+        object.__setattr__(self, "evidence", ordered_evidence)
+        return self
+
+
+class CommentaryPlanV1(VideoContract):
+    schema_version: Literal[1] = 1
+    logic_hz: Literal[30] = 30
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    evidence_horizon: EvidenceHorizonV1
+    events: tuple[CommentaryEventV1, ...] = Field(min_length=1, max_length=20_000)
+
+    @model_validator(mode="after")
+    def _validate_timeline(self) -> Self:
+        ordered = tuple(sorted(self.events, key=lambda item: (item.start_frame, item.event_id)))
+        if ordered != self.events:
+            raise ValueError("commentary events must already be deterministically ordered")
+        if len({item.event_id for item in ordered}) != len(ordered):
+            raise ValueError("commentary event identities must be unique")
+        for previous, current in pairwise(ordered):
+            if current.start_frame <= previous.latest_end_frame:
+                raise ValueError("commentary events must not overlap")
+        if any(item.latest_end_frame > self.evidence_horizon.frame_end for item in ordered):
+            raise ValueError("commentary event exceeds the accepted evidence horizon")
+        return self
+
+    def canonical_json(self) -> str:
+        return self.model_dump_json(indent=None, by_alias=True, exclude_none=True)
+
+
+class CommentaryEnrichmentSentenceV1(VideoContract):
+    event_id: PublicId
+    text: str = Field(min_length=1, max_length=500)
+    evidence_public_ids: tuple[PublicId, ...] = Field(min_length=1, max_length=16)
+    frame_start: int = Field(ge=0)
+    frame_end: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> Self:
+        if self.frame_end < self.frame_start:
+            raise ValueError("enrichment sentence frame window must be ordered")
+        object.__setattr__(self, "evidence_public_ids", tuple(sorted(set(self.evidence_public_ids))))
+        return self
+
+
+class ValidatedCommentaryEnrichmentV1(VideoContract):
+    ollama_run_public_id: PublicId
+    sentences: tuple[CommentaryEnrichmentSentenceV1, ...] = Field(min_length=1, max_length=20_000)
+
+    @model_validator(mode="after")
+    def _unique_sentences(self) -> Self:
+        if len({item.event_id for item in self.sentences}) != len(self.sentences):
+            raise ValueError("enrichment may contain one sentence per commentary event")
+        return self
+
+
 class VideoSettingsV1(VideoContract):
     schema_version: Literal[1] = 1
     width: int = Field(ge=640, le=7680)
