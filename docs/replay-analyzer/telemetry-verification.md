@@ -199,9 +199,22 @@ Raw matrix-bit logging proved that the modern cross-product path produced positi
 zero. Constructing the equivalent planar basis directly now makes modern and VC6 component logs identical through
 frame 100; both finish that frame at `0x1A6CF7D6`. A direct local-CRC oracle applied to source commit `3eea7151e`
 produced the same `0x1A6CF7D6`, so this remaining mismatch is not a regression introduced between that January source
-baseline and the analyzer branch. This is a proven compiler-parity repair, not yet a proven retail field-level cause:
-retail records only the aggregate `0x582083DA` and provides no per-component log. Replay compatibility therefore
+baseline and the analyzer branch. This is a proven compiler-parity repair, not yet a proven recorder field-level cause:
+the replay records only the aggregate `0x582083DA` and provides no per-component log. Replay compatibility therefore
 remains unverified and no CRC bypass was applied.
+
+The replay is not an original EA retail recording despite its `Version 1.04` label. Its header build time
+`Jun 20 2026 23:29:03` and executable CRC `0x48D67663` identify the installed Generals Online recorder
+`GeneralsOnlineZH_60.exe` (SHA-256 `15619eba088abd6a24e790d8203b95f84925fcf0ea04c7b8203a29c9fdfe5ca6`).
+That binary embeds source commit `b7cfeaf08e53044240c8674ea1960738d49776b7` from
+`GeneralsOnlineDevelopmentTeam/GameClient` and the same build time. A disposable modern Release build of that exact
+commit, with passive frame-100 output only, computed `0x582083DA`, exactly matching the replay. Disabling only its
+`GENERALS_ONLINE_HIGH_FPS_SERVER` build profile changed frame 100 to `0x7F5F4EBC`; disabling only
+`GENERALS_ONLINE_IBRA_STARTING_POS_LOGIC` retained `0x582083DA`. The replay setup field itself records `max_fps=0`, so
+the required 60 Hz simulation semantics come from recorder executable provenance, not that field. This proves the
+frame-100 mismatch is a missing Generals Online simulation-profile compatibility path, not a retail-versus-modern
+compiler failure. It does not yet prove full-replay compatibility: the disposable instrumented build was only used as
+a direct frame-100 oracle and did not produce a validated terminal replay outcome.
 
 The staged Steam root contains optional UI, localization, and GenTool assets, so runtime identity was checked rather
 than assumed. The replay header records INI CRC `0xFEAAE3F3` and map CRC `0xFFFE2DB4`; a temporary passive runtime
