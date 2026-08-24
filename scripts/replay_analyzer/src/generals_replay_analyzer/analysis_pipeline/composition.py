@@ -15,6 +15,7 @@ from ..features.build_order import BuildOrderExtractor
 from ..features.combat import CombatExtractor
 from ..features.economy import EconomyExtractor
 from ..features.production import ProductionExtractor
+from ..features.scorekeeper import ScoreKeeperExtractor
 from ..features.service import FeatureExtractionService, RegisteredExtractor
 from ..identity.service import PlayerIdentityService
 from ..importing.engine_acquirer import EngineTelemetryAcquirer
@@ -81,6 +82,7 @@ def create_production_import_service(
             CombatExtractor(),
             EconomyExtractor(),
             ProductionExtractor(),
+            ScoreKeeperExtractor(),
             SpatialFeatureExtractor(),
         ),
     )

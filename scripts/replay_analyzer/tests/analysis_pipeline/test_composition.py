@@ -78,6 +78,7 @@ def test_public_factory_registers_the_exact_production_stage_set(
         "combat",
         "economy",
         "production",
+        "scorekeeper",
         "spatial",
     )
     assert strategy_arguments == {"data_root": settings.data_root}

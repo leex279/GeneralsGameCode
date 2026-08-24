@@ -10,6 +10,7 @@ from generals_replay_analyzer.features.base import (
     FeatureWindow,
     complete_value,
     unavailable_value,
+    validate_feature_value,
 )
 from generals_replay_analyzer.features.context import FeatureContext
 from generals_replay_analyzer.features.evidence import ObservedEvidence, fact
@@ -23,6 +24,10 @@ class EconomyExtractor:
     feature_names = (
         "economy.cash_balance_final",
         "economy.cash_change_total",
+        "economy.cash_per_minute_latest",
+        "economy.cash_per_minute_peak",
+        "economy.cash_per_minute_reconciled_share",
+        "economy.cash_per_minute_series",
         "economy.supply_collected_total",
         "economy.supply_collection_rate",
         "economy.supply_source_resolved_share",
@@ -43,7 +48,7 @@ class EconomyExtractor:
         relevant = tuple(
             item
             for item in context.observed
-            if item.event_type in ("cash_changed", "supply_collected", "complete")
+            if item.event_type in ("cash_changed", "cash_per_minute_snapshot", "supply_collected", "complete")
         )
         if any(fact(item, "replay_player_public_id") != context.replay_player_public_id for item in relevant):
             return FeatureBundle(
@@ -55,10 +60,12 @@ class EconomyExtractor:
                 ),
             )
         cash = tuple(item for item in relevant if item.event_type == "cash_changed")
+        cash_per_minute = tuple(item for item in relevant if item.event_type == "cash_per_minute_snapshot")
         supply = tuple(item for item in relevant if item.event_type == "supply_collected")
         terminal = tuple(item for item in relevant if item.event_type == "complete")
         values: list[FeatureValue] = []
         values.extend(self._cash_values(context, window, cash))
+        values.extend(self._cash_per_minute_values(context, window, cash, cash_per_minute))
         values.extend(self._supply_values(context, window, supply))
         if len(terminal) == 1 and type(fact(terminal[0], "final_cash_balance")) in (int, float):
             values.append(
@@ -100,6 +107,96 @@ class EconomyExtractor:
             complete_value("economy.cash_change_total", total, context.scope, window, refs, BASE_REGISTRY),
             complete_value("economy.tracked_income_total", tracked, context.scope, window, refs, BASE_REGISTRY),
         )
+
+    # TheSuperHackers @feature Leex 23/08/2026 Fold only observed engine CPM snapshots and their explicit bucket provenance. (#0)
+    def _cash_per_minute_values(
+        self,
+        context: FeatureContext,
+        window: FeatureWindow,
+        cash_events: tuple[ObservedEvidence, ...],
+        snapshots: tuple[ObservedEvidence, ...],
+    ) -> tuple[FeatureValue, ...]:
+        names = (
+            "economy.cash_per_minute_latest",
+            "economy.cash_per_minute_peak",
+            "economy.cash_per_minute_reconciled_share",
+            "economy.cash_per_minute_series",
+        )
+        ordered = tuple(sorted(snapshots, key=lambda item: (item.frame if item.frame is not None else -1, item.ref.source_key, item.ref.public_id)))
+        usable = tuple(
+            item
+            for item in ordered
+            if item.frame is not None and type(fact(item, "cash_per_minute")) is int
+        )
+        if not usable:
+            return tuple(
+                unavailable_value(name, context.scope, window, "missing_cash_per_minute_snapshots", BASE_REGISTRY)
+                for name in names
+            )
+        refs = tuple(item.ref for item in usable)
+        series = tuple(
+            {"frame": cast(int, item.frame), "cash_per_minute": cast(int, fact(item, "cash_per_minute"))}
+            for item in usable
+        )
+        values: list[FeatureValue] = [
+            complete_value("economy.cash_per_minute_latest", series[-1]["cash_per_minute"], context.scope, window, refs, BASE_REGISTRY),
+            complete_value("economy.cash_per_minute_peak", max(item["cash_per_minute"] for item in series), context.scope, window, refs, BASE_REGISTRY),
+            complete_value("economy.cash_per_minute_series", series, context.scope, window, refs, BASE_REGISTRY),
+        ]
+        bucket_values = [0] * 60
+        current_bucket = 0
+        complete_provenance = True
+        reconciled = 0
+        applicable = 0
+        combined = tuple(sorted(
+            (*cash_events, *usable),
+            key=lambda item: (item.frame if item.frame is not None else -1, item.ref.source_key, item.ref.public_id),
+        ))
+        for item in combined:
+            if item.event_type == "cash_changed":
+                if fact(item, "track_income") is not True:
+                    continue
+                amount = fact(item, "tracked_income_amount")
+                bucket = fact(item, "income_bucket_index")
+                if item.frame is None or type(amount) is not int or type(bucket) is not int or not 0 <= bucket < 60:
+                    complete_provenance = False
+                    continue
+                target = (item.frame // 30) % 60
+                if bucket == target and current_bucket != target:
+                    bucket_values[target] = 0
+                    current_bucket = target
+                elif bucket != current_bucket:
+                    complete_provenance = False
+                    continue
+                bucket_values[bucket] = (bucket_values[bucket] + amount) % (2**32)
+                continue
+            assert item.frame is not None
+            target = (item.frame // 30) % 60
+            if current_bucket != target:
+                bucket_values[target] = 0
+                current_bucket = target
+            applicable += 1
+            if complete_provenance and sum(bucket_values) % (2**32) == fact(item, "cash_per_minute"):
+                reconciled += 1
+        reconciliation_refs = tuple(sorted({item.ref for item in (*cash_events, *usable)}, key=lambda ref: (ref.source_key, ref.public_id)))
+        quality_reason = None if complete_provenance else "missing_income_bucket_provenance"
+        values.append(
+            validate_feature_value(
+                FeatureValue(
+                    "economy.cash_per_minute_reconciled_share",
+                    "real",
+                    reconciled / applicable,
+                    "ratio",
+                    context.scope,
+                    window,
+                    "complete" if quality_reason is None else "partial",
+                    quality_reason,
+                    reconciliation_refs,
+                ),
+                BASE_REGISTRY,
+            )
+        )
+        return tuple(values)
 
     def _supply_values(
         self, context: FeatureContext, window: FeatureWindow, events: tuple[ObservedEvidence, ...]

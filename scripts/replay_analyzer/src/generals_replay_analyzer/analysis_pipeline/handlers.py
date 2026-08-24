@@ -65,7 +65,7 @@ from .identity_scope import (
     IdentityScopeError,
 )
 
-PRODUCTION_EXTRACTOR_NAMES = ("activity", "build", "combat", "economy", "production", "spatial")
+PRODUCTION_EXTRACTOR_NAMES = ("activity", "build", "combat", "economy", "production", "scorekeeper", "spatial")
 _LONGITUDINAL_METRICS = ("economy.cash_change_total",)
 _LONGITUDINAL_PATTERNS = (
     "change_point.economy_cash_change_total",
