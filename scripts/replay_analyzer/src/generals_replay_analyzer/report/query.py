@@ -82,6 +82,7 @@ from generals_replay_analyzer.importing.telemetry_import import (
     _attempt_from_dependency,
     _attempt_from_failed_dependency,
     _attempt_settings,
+    _contains_pathlike_text,
     _failed_dependency_error,
     _succeeded_dependency_output,
     _validated_parser_dependency,
@@ -1255,6 +1256,16 @@ class ReportQueryService:
                                 "logic_timebase_source": authoritative_source,
                             }
                         )
+                manifest_engine_build_is_authoritative = (
+                    telemetry is not None
+                    and expected_telemetry_status == "succeeded"
+                    and attempt.engine_build is None
+                    and type(telemetry.engine_build) is str
+                    and bool(telemetry.engine_build)
+                    and telemetry.engine_build.isprintable()
+                    and "\x00" not in telemetry.engine_build
+                    and not _contains_pathlike_text(telemetry.engine_build)
+                )
                 if (
                     telemetry is None
                     or telemetry.replay_id != replay.id
@@ -1263,7 +1274,11 @@ class ReportQueryService:
                     or telemetry.runner_status != attempt.runner_status
                     or telemetry.strategy_analysis_scope != attempt.strategy_analysis_scope
                     or telemetry.process_exit_code != attempt.process_exit_code
-                    or telemetry.engine_build != (attempt.engine_build or "unavailable")
+                    # TheSuperHackers @bugfix Leex 25/08/2026 Accept a validated manifest build when acquisition could not predeclare it. (#TBD)
+                    or (
+                        not manifest_engine_build_is_authoritative
+                        and telemetry.engine_build != (attempt.engine_build or "unavailable")
+                    )
                     or telemetry.engine_executable_sha256 != attempt.engine_executable_sha256
                     or telemetry.diagnostics_json != [dict(item) for item in attempt.diagnostics]
                     or telemetry.settings_json != expected_telemetry_settings

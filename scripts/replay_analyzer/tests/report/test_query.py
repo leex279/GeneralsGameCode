@@ -753,6 +753,8 @@ def _add_legacy_report_claimant(
     import_mode = "reference" if poison == "parse_run_mismatch" else "copy"
     telemetry_variant = poison if poison in {
         "cross_branch",
+        "telemetry_manifest_engine",
+        "telemetry_manifest_engine_pathlike",
         "telemetry_success",
         "telemetry_failed",
         "telemetry_run_mismatch",
@@ -884,6 +886,8 @@ def _add_legacy_report_claimant(
             "runner_status": "success",
             "strategy_analysis_scope": "full",
         }
+        if telemetry_variant in {"telemetry_manifest_engine", "telemetry_manifest_engine_pathlike"}:
+            telemetry_attempt["engine_build"] = None
         telemetry_status = "succeeded"
         telemetry_retryable = False
         telemetry_error_code = None
@@ -1099,7 +1103,15 @@ def _add_legacy_report_claimant(
             map_asset_id=None,
             map_id=None,
             schema_version=0 if failed_telemetry else 1,
-            engine_build=cast(str, telemetry_attempt["engine_build"]),
+            engine_build=(
+                (
+                    "C:\\private\\engine.exe"
+                    if telemetry_variant == "telemetry_manifest_engine_pathlike"
+                    else "fixture-engine-v1"
+                )
+                if telemetry_variant in {"telemetry_manifest_engine", "telemetry_manifest_engine_pathlike"}
+                else cast(str, telemetry_attempt["engine_build"])
+            ),
             engine_executable_sha256=cast(str, telemetry_attempt["engine_executable_sha256"]),
             settings_json={
                 "replay_quality": telemetry_attempt["replay_quality"],
@@ -1630,6 +1642,7 @@ def test_fixed_query_accepts_structurally_identical_successful_stage_graph_claim
     ("telemetry_variant", "expected_run_id"),
     (
         ("telemetry_success", "run"),
+        ("telemetry_manifest_engine", "run"),
         ("telemetry_failed", "run"),
         ("telemetry_dependency_failed", None),
     ),
@@ -1664,6 +1677,31 @@ def test_legacy_observation_authenticates_exact_production_telemetry_success_and
     assert telemetry_run_id == (
         stable_uuid(f"{label}-telemetry-run") if expected_run_id == "run" else None
     )
+
+
+def test_legacy_observation_rejects_pathlike_manifest_engine_identity(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    label = "query-production-telemetry-manifest-engine-pathlike"
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None and isinstance(original.output_json, dict)
+        _add_legacy_report_claimant(
+            session,
+            original,
+            datetime(2026, 8, 23, 10, 6, tzinfo=UTC),
+            label=label,
+            poison="telemetry_manifest_engine_pathlike",
+        )
+        replay = session.get(Replay, original.replay_id)
+        observation = session.scalar(
+            select(Job).where(Job.public_id == stable_uuid(f"{label}-observation"))
+        )
+        assert replay is not None and observation is not None
+        with pytest.raises(ReportGraphContractError, match="telemetry run is not authoritative"):
+            published_graph.service._validate_observation_authority(session, replay, observation)
 
 
 def test_report_identity_excludes_closed_slots_outside_the_exact_parser_subjects(
