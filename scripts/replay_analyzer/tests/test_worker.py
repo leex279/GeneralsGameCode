@@ -1048,6 +1048,7 @@ def test_worker_composition_verifies_bootstrapped_schema_without_migrating(
         "import_observations",
         "manage_copy",
         "parse",
+        "reconcile_identities",
         "render_report",
     )
     engine.dispose()

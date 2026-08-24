@@ -792,6 +792,7 @@ def test_analyze_parent_and_stage_child_share_the_exact_production_composition(
             "import_observations",
             "manage_copy",
             "parse",
+            "reconcile_identities",
             "render_report",
         )
     finally:
