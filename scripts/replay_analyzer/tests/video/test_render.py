@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import wave
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -183,6 +185,7 @@ class _ProcessRunner:
         mutate_after_stage: tuple[str, Path] | None = None,
         cancellation: _Cancellation | None = None,
         capture_result: dict[str, object] | None = None,
+        inspect_engine_capture: Callable[[VideoProcessSpec], None] | None = None,
     ) -> None:
         self.stages = stages
         self.specs: list[VideoProcessSpec] = []
@@ -190,10 +193,13 @@ class _ProcessRunner:
         self.mutate_after_stage = mutate_after_stage
         self.cancellation = cancellation
         self.capture_result = capture_result
+        self.inspect_engine_capture = inspect_engine_capture
 
     def run(self, spec: VideoProcessSpec) -> VideoProcessResult:
         self.specs.append(spec)
         self.stages.append(spec.stage)
+        if spec.stage == "engine_capture" and self.inspect_engine_capture is not None:
+            self.inspect_engine_capture(spec)
         if spec.stage == self.fail_stage:
             raise VideoProcessError(f"{spec.stage} launch failed")
         output = Path(spec.argv[spec.argv.index("-recordVideo") + 1]) if spec.stage == "engine_capture" else Path(spec.argv[-1])
@@ -415,6 +421,45 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
         "final_video",
     }
     assert all(artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts)
+
+
+def test_render_stages_engine_capture_beside_runtime_and_removes_it_after_the_process_settles(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path)
+    staged: list[Path] = []
+    configured = (tmp_path / "tools with spaces & metacharacters" / "generalszh & safe.exe").resolve()
+    runtime = (tmp_path / "installed Zero Hour").resolve()
+
+    def inspect(spec: VideoProcessSpec) -> None:
+        launch = Path(spec.argv[0])
+        staged.append(launch)
+        assert launch.parent == runtime
+        assert launch.exists()
+        assert os.path.samefile(launch, configured)
+
+    stages: list[str] = []
+    process = _ProcessRunner(stages, inspect_engine_capture=inspect)
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+    service.render(request)
+
+    assert len(staged) == 1
+    assert not staged[0].exists()
+    assert any(artifact.name == "engine_executable" for artifact in publisher.manifests[0].artifacts)
+
+
+def test_render_removes_staged_engine_after_engine_capture_launch_failure(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path)
+    staged: list[Path] = []
+
+    def inspect(spec: VideoProcessSpec) -> None:
+        staged.append(Path(spec.argv[0]))
+        assert staged[-1].exists()
+
+    stages: list[str] = []
+    process = _ProcessRunner(stages, fail_stage="engine_capture", inspect_engine_capture=inspect)
+    service, _, _, _, _ = _service(tmp_path, request, camera, commentary, process=process)
+    with pytest.raises(VideoProcessError, match="engine_capture"):
+        service.render(request)
+    assert len(staged) == 1 and not staged[0].exists()
 
 
 def test_render_detects_replay_or_executable_identity_changes_after_external_stages(tmp_path: Path) -> None:
