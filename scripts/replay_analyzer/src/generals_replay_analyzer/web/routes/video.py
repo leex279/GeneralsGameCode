@@ -85,8 +85,5 @@ def download_video_media(
         public_id = _public_id(job_public_id)
     except ValueError:
         return problem_response(422, title="Invalid video ID", code="invalid_video_id", detail="Video ID is invalid")
-    reader = getattr(port, "_video", None)
-    if reader is None or not hasattr(reader, "read_verified_media"):
-        return problem_response(503, title="Video unavailable", code="video_adapter_pending", detail="Replay video production is unavailable")
-    content, media_type, filename = reader.read_verified_media(public_id, request.url.path.endswith("/manifest"))
-    return StreamingResponse(iter((content,)), media_type=media_type, headers={"content-disposition": f'attachment; filename="{filename}"', "x-content-type-options": "nosniff"})
+    media = port.read_verified_video_media(public_id, request.url.path.endswith("/manifest"))
+    return StreamingResponse(media.chunks(), media_type=media.media_type, headers={"content-disposition": f'attachment; filename="{media.filename}"', "x-content-type-options": "nosniff"})
