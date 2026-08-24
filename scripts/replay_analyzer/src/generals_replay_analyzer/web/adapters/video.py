@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -10,7 +12,8 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from generals_replay_analyzer.db.models import Job, Replay, Report
+from generals_replay_analyzer.config import AnalyzerSettings
+from generals_replay_analyzer.db.models import Job, JobStageResult, Replay, Report
 from generals_replay_analyzer.importing.jobs import JobCoordinator
 from generals_replay_analyzer.importing.stages import RENDER_REPORT
 from generals_replay_analyzer.video.jobs import VideoJobPlanner, VideoJobRequestError
@@ -21,8 +24,9 @@ from generals_replay_analyzer.web.ports import AvailabilityDTO, VideoCastRequest
 class AnalyticsVideoAdapter:
     """Enqueue a cast through public identities; it never starts a renderer."""
 
-    def __init__(self, session_factory: sessionmaker[Session], *, clock: Callable[[], datetime]) -> None:
+    def __init__(self, session_factory: sessionmaker[Session], settings: AnalyzerSettings, *, clock: Callable[[], datetime]) -> None:
         self._session_factory = session_factory
+        self._settings = settings
         self._clock = clock
 
     # TheSuperHackers @feature Leex 24/08/2026 Enqueue evidence-scoped replay casts without exposing execution capabilities. (#TBD)
@@ -64,3 +68,36 @@ class AnalyticsVideoAdapter:
             diagnostic_preview=command.diagnostic_preview,
             availability=AvailabilityDTO(state="available"),
         )
+
+    def read_verified_media(self, job_public_id: str, manifest: bool) -> tuple[bytes, str, str]:
+        with self._session_factory() as session:
+            row = session.scalar(select(Job).where(Job.public_id == job_public_id, Job.stage == "render_video", Job.status == "succeeded"))
+            result = None if row is None else session.scalar(select(JobStageResult).where(JobStageResult.job_id == row.id))
+            output = None if result is None else result.output_json
+        if not isinstance(output, dict):
+            raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
+        run_id, final_hash, manifest_hash = output.get("run_public_id"), output.get("final_video_sha256"), output.get("manifest_sha256")
+        if not all(isinstance(value, str) for value in (run_id, final_hash, manifest_hash)):
+            raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
+        assert isinstance(run_id, str) and isinstance(final_hash, str) and isinstance(manifest_hash, str)
+        directory = (self._settings.video_run_directory / run_id).resolve()
+        root = self._settings.video_run_directory.resolve()
+        if directory.parent != root:
+            raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
+        path = directory / ("video-manifest-v1.json" if manifest else f"final-{final_hash}.mp4")
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable") from error
+        expected = manifest_hash if manifest else final_hash
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified replay cast identity changed")
+        if manifest:
+            try:
+                document = json.loads(content)
+            except ValueError as error:
+                raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified manifest is invalid") from error
+            if document.get("render_public_id") != run_id or document.get("verification_passed") is not True:
+                raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified manifest is invalid")
+            return content, "application/json", "video-manifest-v1.json"
+        return content, "video/mp4", f"replay-cast-{run_id}.mp4"

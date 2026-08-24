@@ -550,7 +550,7 @@ class AnalyticsPortFactory:
                 library=library,
                 players=players,
                 settings=self._settings_adapter,
-                video=AnalyticsVideoAdapter(session_factory, clock=lambda: datetime.now(UTC)),
+                video=AnalyticsVideoAdapter(session_factory, self._settings, clock=lambda: datetime.now(UTC)),
             )
             request_sessions.commit()
         except BaseException:
