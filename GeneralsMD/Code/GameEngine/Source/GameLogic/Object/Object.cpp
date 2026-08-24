@@ -4051,6 +4051,14 @@ void Object::crc( Xfer *xfer )
 	}
 #endif // DEBUG_CRC
 
+#ifdef DEBUG_CRC
+	if (doLogging)
+	{
+		// TheSuperHackers @feature Leex 24/08/2026 Dump exact object transform bits only when detailed CRC logging is requested. (#TBD)
+		DUMPMATRIX3DNAMED(getTransformMatrix(), "Object::getTransformMatrix()");
+	}
+#endif // DEBUG_CRC
+
 
 	xfer->xferUser(&m_id,															sizeof(m_id));
 #ifdef DEBUG_CRC
