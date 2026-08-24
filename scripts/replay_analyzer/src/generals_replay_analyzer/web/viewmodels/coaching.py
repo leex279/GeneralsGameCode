@@ -114,6 +114,15 @@ class ReviewPromptView(_FrozenView):
     evidence: tuple[ReportEvidenceReferenceDTO, ...]
 
 
+class KeyMomentView(_FrozenView):
+    frame: int
+    time_label: str
+    category_label: str
+    title: str
+    review_prompt: str
+    evidence: tuple[ReportEvidenceReferenceDTO, ...]
+
+
 class CoachingViewModel(_FrozenView):
     schema_version: Literal["coaching-view-v1"] = "coaching-view-v1"
     horizon: EvidenceHorizonView
@@ -122,6 +131,7 @@ class CoachingViewModel(_FrozenView):
     build_order: tuple[BuildOrderStepView, ...]
     highlights: tuple[CoachingHighlightView, ...]
     prompts: tuple[ReviewPromptView, ...]
+    key_moments: tuple[KeyMomentView, ...]
     limitations: tuple[str, ...]
     local_model_summary: str | None
 
@@ -357,6 +367,106 @@ def _prompts(strategies: tuple[PlayerStrategyView, ...]) -> tuple[ReviewPromptVi
     )[:5]
 
 
+def _event_rows(report: ReplayReportDTO, label: str) -> tuple[tuple[dict[str, object], ReportClaimDTO], ...]:
+    rows: list[tuple[dict[str, object], ReportClaimDTO]] = []
+    for section in report.sections:
+        for claim in section.claims:
+            if (
+                claim.label != label
+                or claim.availability not in ("available", "partial")
+                or not claim.claim_id.startswith(f"feature:{label}:")
+                or not claim.evidence
+            ):
+                continue
+            raw = _thaw(claim.raw_value)
+            if isinstance(raw, list):
+                rows.extend((cast(dict[str, object], row), claim) for row in raw if isinstance(row, dict))
+    return tuple(rows)
+
+
+# TheSuperHackers @feature Leex 24/08/2026 Turn observed tactical events into a bounded chronological review queue. (#TBD)
+def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[KeyMomentView, ...]:
+    if horizon.frame_end is None:
+        return ()
+    moments: list[KeyMomentView] = []
+    swing_keys: set[tuple[int, str]] = set()
+
+    for row, claim in _event_rows(report, "scouting.first_observed_clear_timing"):
+        frame, template_name = row.get("frame"), row.get("template_name")
+        if type(frame) is int and 0 <= frame <= horizon.frame_end and type(template_name) is str:
+            moments.append(
+                KeyMomentView(
+                    frame=frame,
+                    time_label=f"Frame {frame:,}",
+                    category_label="Scouting",
+                    title=f"{game_label(template_name)} first observed",
+                    review_prompt="Review what changed after this information became visible.",
+                    evidence=_claim_evidence(claim),
+                )
+            )
+
+    for row, claim in _event_rows(report, "production.special_power_timing"):
+        frame, item_name = row.get("frame"), row.get("item_name")
+        if type(frame) is int and 0 <= frame <= horizon.frame_end and type(item_name) is str:
+            moments.append(
+                KeyMomentView(
+                    frame=frame,
+                    time_label=f"Frame {frame:,}",
+                    category_label="Power use",
+                    title=f"{game_label(item_name)} used",
+                    review_prompt="Review whether this timing created useful information, pressure, or protection.",
+                    evidence=_claim_evidence(claim),
+                )
+            )
+
+    for row, claim in _event_rows(report, "combat.turning_point_timing"):
+        frame = row.get("frame")
+        attacker = row.get("attacker_template_name")
+        victim = row.get("victim_template_name")
+        if (
+            type(frame) is int
+            and 0 <= frame <= horizon.frame_end
+            and type(attacker) is str
+            and type(victim) is str
+        ):
+            swing_keys.add((frame, victim))
+            moments.append(
+                KeyMomentView(
+                    frame=frame,
+                    time_label=f"Frame {frame:,}",
+                    category_label="Engagement",
+                    title=f"{game_label(attacker)} over {game_label(victim)}",
+                    review_prompt=(
+                        "Review the positioning, trade, and follow-up around this evidence-backed swing candidate."
+                    ),
+                    evidence=_claim_evidence(claim),
+                )
+            )
+
+    for row, claim in _event_rows(report, "combat.observed_kill_timing"):
+        frame, victim = row.get("frame"), row.get("victim_template_name")
+        if (
+            type(frame) is int
+            and 0 <= frame <= horizon.frame_end
+            and type(victim) is str
+            and (frame, victim) not in swing_keys
+        ):
+            moments.append(
+                KeyMomentView(
+                    frame=frame,
+                    time_label=f"Frame {frame:,}",
+                    category_label="Combat",
+                    title=f"{game_label(victim)} destroyed",
+                    review_prompt="Review the trade, positioning, and immediate follow-up around this observed kill.",
+                    evidence=_claim_evidence(claim),
+                )
+            )
+
+    return tuple(
+        sorted(moments, key=lambda item: (item.frame, item.category_label, item.title))[:8]
+    )
+
+
 def _summary(
     report: ReplayReportDTO,
     horizon: EvidenceHorizonView,
@@ -424,6 +534,7 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
         build_order=build_order,
         highlights=highlights,
         prompts=_prompts(strategies),
+        key_moments=_key_moments(report, horizon),
         limitations=_limitations(report, horizon),
         local_model_summary=_local_model_summary(report),
     )

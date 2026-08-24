@@ -290,6 +290,33 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
     assert coaching.prompts[0].evidence[0].public_id == STRATEGY_EVIDENCE
 
 
+def test_key_moments_turn_event_evidence_into_a_chronological_review_queue() -> None:
+    """Catch tactical events being buried as unordered metric text or duplicate kill records."""
+    coaching = coaching_view(_report(), _timeline())
+
+    assert [
+        (item.frame, item.category_label, item.title, item.time_label)
+        for item in coaching.key_moments
+    ] == [
+        (150, "Scouting", "War Factory first observed", "Frame 150"),
+        (
+            240,
+            "Power use",
+            "Superweapon Spy Satellite (unrecognized) used",
+            "Frame 240",
+        ),
+        (300, "Engagement", "Humvee over War Factory", "Frame 300"),
+    ]
+    assert coaching.key_moments[0].review_prompt == (
+        "Review what changed after this information became visible."
+    )
+    assert coaching.key_moments[0].evidence[0].public_id == SCOUTING_EVIDENCE
+    assert coaching.key_moments[-1].review_prompt == (
+        "Review the positioning, trade, and follow-up around this evidence-backed swing candidate."
+    )
+    assert coaching.key_moments[-1].evidence[0].public_id == TURNING_EVIDENCE
+
+
 def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
     coaching = coaching_view(_report(partial=True), _timeline(late_parser_frame=56_003))
 
@@ -306,6 +333,7 @@ def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
     assert all(token not in combined for token in ("winner", "won", "lost", "victory", "mid game", "late game"))
     assert coaching.limitations == ("CRC mismatch at frame 105",)
     assert coaching.local_model_summary is None
+    assert coaching.key_moments == ()
 
 
 def test_ollama_state_cannot_change_deterministic_coaching() -> None:

@@ -43,7 +43,8 @@
   <nav class="command-strip" aria-label="Jump to report section">
     <a href="#what-happened"><span class="command-index">01</span><span>What happened</span></a>
     <a href="#strategy"><span class="command-index">02</span><span>Strategy</span></a>
-    {% if coaching.prompts %}<a href="#worth-reviewing"><span class="command-index">03</span><span>Worth reviewing</span></a>{% endif %}
+    {% if coaching.key_moments %}<a href="#key-moments"><span class="command-index">03</span><span>Key moments</span></a>{% endif %}
+    {% if coaching.prompts %}<a href="#worth-reviewing"><span class="command-index">04</span><span>Worth reviewing</span></a>{% endif %}
     <a href="#report-timeline"><span>Timeline</span></a>
     {% if coaching.build_order %}<a href="#build-order"><span>Build order</span></a>{% endif %}
     <a href="#technical-evidence"><span>Technical evidence</span></a>
@@ -78,6 +79,23 @@
       </div>
     {% else %}<p>A named strategy was not established from the available evidence. The build order and measured signals below remain reviewable.</p>{% endif %}
   </section>
+
+  {% if coaching.key_moments %}
+    <!-- TheSuperHackers @feature Leex 24/08/2026 Surface observed tactical events as a chronological evidence-backed review queue. (#TBD) -->
+    <section id="key-moments" class="workspace-panel" aria-labelledby="key-moments-title">
+      <div class="section-heading"><div><span class="eyebrow">Chronological checkpoints</span><h2 id="key-moments-title">Key moments to review</h2></div></div>
+      <p>Observed facts are ordered by replay time. The questions guide review without claiming why the match changed.</p>
+      <ol class="key-moment-list">
+        {% for moment in coaching.key_moments %}
+          <li>
+            <div class="key-moment-time"><time>{{ moment.time_label }}</time><span>{{ moment.category_label }}</span></div>
+            <div class="key-moment-content"><h3>{{ moment.title }}</h3><p>{{ moment.review_prompt }}</p></div>
+            <div class="evidence-links">{% for evidence in moment.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
+          </li>
+        {% endfor %}
+      </ol>
+    </section>
+  {% endif %}
 
   {% if coaching.prompts %}
     <section id="worth-reviewing" class="workspace-panel" aria-labelledby="worth-reviewing-title">

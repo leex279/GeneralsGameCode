@@ -340,6 +340,81 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
         )
 
 
+def test_report_surfaces_timestamped_tactical_review_moments_before_the_raw_timeline() -> None:
+    """Catch scouting and engagement evidence being buried in metric prose or technical rows."""
+    report = _report()
+
+    def event_claim(section: str, label: str, raw_value: object) -> ReportClaimDTO:
+        return ReportClaimDTO(
+            claim_id=f"feature:{label}:fixture",
+            section=section,  # type: ignore[arg-type]
+            label=label,
+            raw_value=raw_value,
+            display_value="fixture events",
+            unit="json",
+            availability="available",
+            unavailable_reason=None,
+            scope={"scope_type": "player", "public_id": PLAYER_ID},
+            frame_window=(0, 3_600),
+            confidence=None,
+            evidence=(ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="observed"),),
+            details={"definition_version": "fixture-v1"},
+        )
+
+    replacements = {
+        "activity": (
+            event_claim(
+                "activity",
+                "scouting.first_observed_clear_timing",
+                [{"frame": 150, "object_id": 42, "template_name": "ChinaWarFactory"}],
+            ),
+        ),
+        "combat_engagements": (
+            event_claim(
+                "combat_engagements",
+                "combat.turning_point_timing",
+                [
+                    {
+                        "frame": 300,
+                        "attacker_template_name": "AmericaVehicleHumvee",
+                        "victim_template_name": "ChinaWarFactory",
+                        "criterion": "engagement-swing-v1",
+                    }
+                ],
+            ),
+            event_claim(
+                "combat_engagements",
+                "combat.observed_kill_timing",
+                [{"frame": 300, "victim_template_name": "ChinaWarFactory"}],
+            ),
+        ),
+    }
+    report = _replace_report(
+        report,
+        sections=tuple(
+            section.model_copy(update={"claims": replacements[section.key]})
+            if section.key in replacements
+            else section
+            for section in report.sections
+        ),
+    )
+
+    with _client(_ReportPort(report)) as client:
+        response = client.get(
+            f"/replays/{REPLAY_ID}/reports/{REPORT_ID}",
+            headers={"host": "localhost", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    assert response.text.index('id="key-moments"') < response.text.index('id="report-timeline"')
+    assert "War Factory first observed" in response.text
+    assert "Frame 150" in response.text
+    assert "Review what changed after this information became visible." in response.text
+    assert "Humvee over War Factory" in response.text
+    assert "War Factory destroyed" not in response.text
+    assert f'/evidence/observed/{EVIDENCE_ID}?report_id={REPORT_ID}' in response.text
+
+
 class _ReportPort:
     def __init__(self, report: ReplayReportDTO) -> None:
         self.report = report
