@@ -99,6 +99,8 @@ def test_video_route_renders_failed_state_with_actionable_semantic_status() -> N
     assert response.status_code == 200
     assert "Cast production failed" in response.text
     assert "This job can be retried" in response.text
+    assert "No progress counter was recorded before this job ended" in response.text
+    assert "Progress will appear" not in response.text
 
 
 def test_video_route_does_not_offer_retry_for_terminal_failure() -> None:
@@ -122,6 +124,8 @@ def test_video_route_exposes_verified_download_labels_without_private_paths() ->
     assert "C:\\" not in response.text
     assert "/srv/" not in response.text
     assert '<meta http-equiv="refresh"' not in response.text
+    assert "Media verification completed" in response.text
+    assert "Progress will appear" not in response.text
 
 
 def test_video_route_rejects_noncanonical_public_ids() -> None:
