@@ -240,8 +240,13 @@ void Thing::setOrientation( Real angle )
 		u.y = Sin(angle);
 		u.z = 0.0f;
 
-		y.crossProduct( z, u, y );
-		x.crossProduct( y, z, x );
+		// TheSuperHackers @bugfix Leex 24/08/2026 Build the planar basis directly so modern compilers preserve the retail signed-zero layout. (#TBD)
+		x.x = u.x;
+		x.y = u.y;
+		x.z = 0.0f;
+		y.x = -u.y;
+		y.y = u.x;
+		y.z = 0.0f;
 
 		m_transform.Set(  x.x, y.x, z.x, pos.x,
 											x.y, y.y, z.y, pos.y,
