@@ -7,27 +7,46 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# TheSuperHackers @feature Leex 24/08/2026 Render one explicit installed SAPI voice to deterministic mono PCM WAV. (#TBD)
+# TheSuperHackers @bugfix Leex 24/08/2026 Select the exact configured SAPI token name and render deterministic mono PCM without fragile System.Speech enumeration. (#TBD)
 try {
-    Add-Type -AssemblyName System.Speech
-    $synthesizer = New-Object System.Speech.Synthesis.SpeechSynthesizer
+    if ($SampleRate -ne 48000) {
+        [Console]::Error.WriteLine('unsupported_sample_rate')
+        exit 23
+    }
+    $synthesizer = New-Object -ComObject SAPI.SpVoice
+    $stream = $null
     try {
-        $installedNames = @($synthesizer.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name })
-        if ($installedNames -cnotcontains $VoiceName) {
+        $selectedVoice = $null
+        foreach ($token in @($synthesizer.GetVoices())) {
+            $name = [string]$token.GetAttribute('Name')
+            if ($name -ceq $VoiceName) {
+                $selectedVoice = $token
+                break
+            }
+        }
+        if ($null -eq $selectedVoice) {
             [Console]::Error.WriteLine('voice_not_found')
             exit 21
         }
         $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TextBase64))
-        $bits = [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen
-        $channels = [System.Speech.AudioFormat.AudioChannel]::Mono
-        $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo($SampleRate, $bits, $channels)
-        $synthesizer.SelectVoice($VoiceName)
-        $synthesizer.SetOutputToWaveFile($Destination, $format)
+        $synthesizer.Voice = $selectedVoice
+        $format = New-Object -ComObject SAPI.SpAudioFormat
+        # SAPI format type 38 is 48 kHz, 16-bit, mono PCM.
+        $format.Type = 38
+        $stream = New-Object -ComObject SAPI.SpFileStream
+        $stream.Format = $format
+        $stream.Open($Destination, 3, $false)
+        $synthesizer.AudioOutputStream = $stream
         $synthesizer.Speak($text)
-        $synthesizer.SetOutputToNull()
+        $stream.Close()
     }
     finally {
-        $synthesizer.Dispose()
+        if ($null -ne $stream) {
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($stream) | Out-Null
+        }
+        if ($null -ne $synthesizer) {
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($synthesizer) | Out-Null
+        }
     }
 }
 catch {

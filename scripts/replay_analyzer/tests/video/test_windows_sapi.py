@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import wave
+from array import array
 from pathlib import Path
 
 import pytest
@@ -36,7 +39,38 @@ def _event(text: str = "Safe; $(not-a-shell) 'quoted'") -> CommentaryEventV1:
 
 def test_packaged_sapi_script_exists() -> None:
     assert packaged_script_path().is_file()
-    assert "System.Speech" in packaged_script_path().read_text(encoding="utf-8")
+    script = packaged_script_path().read_text(encoding="utf-8")
+    assert "SAPI.SpVoice" in script
+    assert "GetVoices()" in script
+    assert "GetInstalledVoices" not in script
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires locally installed Windows SAPI")
+def test_sapi_renders_configured_default_voice_as_audible_mono_pcm(tmp_path: Path) -> None:
+    provider = WindowsSapiVoiceProvider(
+        Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+        "Microsoft Zira Desktop",
+    )
+
+    clip = provider.render(_event("Offline replay narration is working."), tmp_path / "voice.wav")
+
+    with wave.open(str(clip.source_path), "rb") as rendered:
+        frames = rendered.readframes(rendered.getnframes())
+        assert rendered.getnchannels() == 1
+        assert rendered.getsampwidth() == 2
+        assert rendered.getframerate() == 48_000
+    assert max(abs(sample) for sample in array("h", frames)) > 500
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires locally installed Windows SAPI")
+def test_sapi_rejects_a_description_instead_of_the_configured_exact_voice_name(tmp_path: Path) -> None:
+    provider = WindowsSapiVoiceProvider(
+        Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+        "Microsoft Zira Desktop - English (United States)",
+    )
+
+    with pytest.raises(VoiceProviderError, match="voice_not_found"):
+        provider.render(_event(), tmp_path / "voice.wav")
 
 
 def test_sapi_uses_argv_without_shell_and_returns_measured_clip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
