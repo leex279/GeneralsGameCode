@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from importlib.resources import files
 from importlib.resources.abc import Traversable
@@ -75,6 +75,7 @@ class StrategyAssessmentReceipt:
     taxonomy_version: str
     taxonomy_sha256: str
     assessments: tuple[RuleAssessment, ...]
+    derived_evidence: tuple[EvidenceRef, ...]
 
 
 def _uuid(identity: str) -> str:
@@ -93,6 +94,12 @@ def _evidence_ref(row: EvidenceItem) -> EvidenceRef:
         row.source_key,
         _schema_label(row),
     )
+
+
+# TheSuperHackers @fix Leex 25/08/2026 Bound strategy evidence lookups for full-match telemetry on SQLite. (#TBD)
+def _evidence_id_batches(public_ids: tuple[str, ...], batch_size: int = 500) -> Iterator[tuple[str, ...]]:
+    for offset in range(0, len(public_ids), batch_size):
+        yield public_ids[offset : offset + batch_size]
 
 
 def _raw_value(row: Feature) -> CanonicalValue:
@@ -145,7 +152,8 @@ def _parse_finite_float(value: str) -> float:
 
 # TheSuperHackers @feature Leex 23/08/2026 Reverify managed catalog semantics before strategy use. (#TBD)
 def _catalog_document(data_root: Path, asset: ManagedAsset) -> dict[str, object] | None:
-    if asset.kind != "telemetry_catalog" or asset.media_type != "application/json":
+    # TheSuperHackers @fix Leex 25/08/2026 Reverify catalogs imported before telemetry JSON media types were persisted. (#TBD)
+    if asset.kind != "telemetry_catalog" or asset.media_type not in (None, "application/json"):
         return None
     candidate = data_root.joinpath(*asset.relative_path.split("/"))
     try:
@@ -675,6 +683,7 @@ class StrategyAssessmentService:
             raise ValueError("partial strategy cache graph exists")
         by_source = {item.source_key: item for item in evidence_rows}
         loaded: list[RuleAssessment] = []
+        derived_evidence: list[EvidenceRef] = []
         for expected_assessment, source_key in zip(expected, source_keys, strict=True):
             evidence = by_source[source_key]
             if evidence.tier != "derived" or evidence.replay_id != replay.id or evidence.schema_version != 1:
@@ -703,6 +712,7 @@ class StrategyAssessmentService:
             ):
                 raise ValueError("strategy cache identity details do not match exact request")
             supporting, contradicting = self._assessment_links(session, row, replay.id)
+            derived_evidence.append(_evidence_ref(evidence))
             loaded.append(
                 RuleAssessment(
                     row.strategy_label,
@@ -716,7 +726,11 @@ class StrategyAssessmentService:
                 )
             )
         receipt = StrategyAssessmentReceipt(
-            cache_key, taxonomy.taxonomy_version, taxonomy.content_sha256, tuple(loaded)
+            cache_key,
+            taxonomy.taxonomy_version,
+            taxonomy.content_sha256,
+            tuple(loaded),
+            tuple(derived_evidence),
         )
         if receipt.assessments != expected:
             raise ValueError("strategy cache evidence graph does not match exact request")
@@ -824,7 +838,7 @@ class StrategyAssessmentService:
                     or selected_parser.completion_status != "complete"
                 ):
                     raise ValueError("strategy parser evidence owner is not authoritative")
-            for assessment in assessments:
+            derived_evidence = tuple(
                 self._insert_assessment(
                     session,
                     replay,
@@ -836,10 +850,18 @@ class StrategyAssessmentService:
                     parser_run_id,
                     telemetry_run_id,
                 )
+                for assessment in assessments
+            )
             session.flush()
             self._after_graph_insert(session)
             session.commit()
-            return StrategyAssessmentReceipt(cache_key, taxonomy.taxonomy_version, taxonomy.content_sha256, assessments)
+            return StrategyAssessmentReceipt(
+                cache_key,
+                taxonomy.taxonomy_version,
+                taxonomy.content_sha256,
+                assessments,
+                derived_evidence,
+            )
         except IntegrityError as error:
             session.rollback()
             winner = self._load_receipt(
@@ -898,12 +920,14 @@ class StrategyAssessmentService:
         }
         if any(context_refs.get(public_id) != ref for public_id, ref in assessment_refs.items()):
             raise ValueError("assessment cites evidence outside the exact strategy context")
-        rows = {
-            item.public_id: item
-            for item in session.scalars(
-                select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(context_refs)))
-            ).all()
-        }
+        rows: dict[str, EvidenceItem] = {}
+        for batch in _evidence_id_batches(tuple(context_refs)):
+            rows.update(
+                (item.public_id, item)
+                for item in session.scalars(
+                    select(EvidenceItem).where(EvidenceItem.public_id.in_(batch))
+                ).all()
+            )
         if set(rows) != set(context_refs):
             raise ValueError("unknown strategy context evidence public ID")
         for public_id, ref in context_refs.items():
@@ -925,7 +949,7 @@ class StrategyAssessmentService:
         authorized: Mapping[str, EvidenceItem],
         parser_run_id: int | None,
         telemetry_run_id: int | None,
-    ) -> None:
+    ) -> EvidenceRef:
         supporting_ids = {ref.public_id for ref in assessment.supporting_evidence}
         contradicting_ids = {ref.public_id for ref in assessment.contradicting_evidence}
         if not supporting_ids.isdisjoint(contradicting_ids):
@@ -981,6 +1005,8 @@ class StrategyAssessmentService:
                         role=role,
                     )
                 )
+        # TheSuperHackers @fix Leex 25/08/2026 Expose the persisted rule node for bounded provider citations. (#TBD)
+        return _evidence_ref(evidence)
 
     @staticmethod
     def _rule_version(taxonomy: StrategyTaxonomy, strategy_id: str) -> str:

@@ -36,13 +36,23 @@ from generals_replay_analyzer.db.models import (
 from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence
 from generals_replay_analyzer.features.registry import BASE_REGISTRY, FeatureRegistry
 from generals_replay_analyzer.strategy.rules import CatalogProof, StrategyContext
-from generals_replay_analyzer.strategy.service import StrategyAssessmentService
+from generals_replay_analyzer.strategy.service import StrategyAssessmentService, _evidence_id_batches
 
 from .conftest import MemoryResource
 
 REPLAY = "00000000-0000-4000-8000-000000000301"
 PLAYER = "00000000-0000-4000-8000-000000000302"
 FEATURE_SET = "00000000-0000-4000-8000-000000000303"
+
+
+def test_strategy_evidence_id_batches_stay_below_sqlite_bind_limit() -> None:
+    public_ids = tuple(f"evidence-{index}" for index in range(40_000))
+
+    batches = tuple(_evidence_id_batches(public_ids))
+
+    assert tuple(public_id for batch in batches for public_id in batch) == public_ids
+    assert len(batches) == 80
+    assert all(1 <= len(batch) <= 500 for batch in batches)
 
 
 class _InjectedApplicabilityService(StrategyAssessmentService):
@@ -469,6 +479,7 @@ def _seed_persisted_applicability(
     data_root: Path,
     *,
     catalog_build_time: object = 0.0,
+    catalog_media_type: str | None = "application/json",
 ) -> tuple[str, str]:
     catalog = {
         "schema_version": 1,
@@ -480,11 +491,11 @@ def _seed_persisted_applicability(
             _catalog_template(
                 0,
                 "AmericaTankDozer",
-                "FactionAmerica",
+                "America",
                 "builder",
                 configured_build_time_seconds=catalog_build_time,
             ),
-            _catalog_template(1, "ChinaDozer", "FactionChina", "builder"),
+            _catalog_template(1, "ChinaDozer", "China", "builder"),
         ],
         "upgrades": [],
         "sciences": [],
@@ -513,7 +524,7 @@ def _seed_persisted_applicability(
             kind="telemetry_catalog",
             relative_path=relative_path,
             size_bytes=len(catalog_bytes),
-            media_type="application/json",
+            media_type=catalog_media_type,
             created_at=now,
         )
         session.add(asset)
@@ -770,10 +781,12 @@ def test_named_service_persists_exact_applicability_feature_and_contradiction_ro
     assert sum(role == "contradicting" for role, _ in roles) == 2
 
 
+@pytest.mark.parametrize("catalog_media_type", ["application/json", None])
 def test_service_builds_named_strategy_applicability_from_persisted_telemetry(
     strategy_factory: sessionmaker[Session],
     strategy_data_root: Path,
     taxonomy_resource: Callable[[dict[str, Any] | bytes | None], MemoryResource],
+    catalog_media_type: str | None,
 ) -> None:
     """Catch production strategy assessment discarding imported faction, map, and catalog proof."""
     _seed_feature_set(strategy_factory, include_opponent=True, complete_runs=False)
@@ -796,6 +809,7 @@ def test_service_builds_named_strategy_applicability_from_persisted_telemetry(
     manifest_public_id, players_public_id = _seed_persisted_applicability(
         strategy_factory,
         strategy_data_root,
+        catalog_media_type=catalog_media_type,
     )
 
     receipt = StrategyAssessmentService(

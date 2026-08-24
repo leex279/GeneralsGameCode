@@ -618,6 +618,34 @@ def test_oversize_feature_can_cite_its_persisted_derived_evidence(
     assert thaw_canonical(claim.value)["name"] == feature.name  # type: ignore[index]
 
 
+def test_oversize_rule_can_cite_its_persisted_derived_evidence(
+    public_ids: tuple[str, ...],
+) -> None:
+    refs = tuple(_observed_ref(public_ids[index]) for index in range(33))
+    assessment = RuleAssessment(
+        strategy_id="scouted_pressure",
+        phase="early",
+        window=FeatureWindow(0, 900),
+        quality="available",
+        rule_score=1.0,
+        supporting_evidence=refs,
+        contradicting_evidence=(),
+        details={"formula_version": "strategy-rule-score-v1"},
+    )
+    derived = EvidenceRef(
+        public_ids[33],
+        "derived",
+        "strategy_rule",
+        "strategy-rule:scouted-pressure",
+        "strategy_rule-v1",
+    )
+
+    claim = EvidenceClaim.from_derived_rule_assessment(assessment, evidence=derived)
+
+    assert claim.evidence_ids == (derived.public_id,)
+    assert thaw_canonical(claim.value)["strategy_id"] == assessment.strategy_id  # type: ignore[index]
+
+
 def test_feature_factory_reowns_forged_task6_value(public_ids: tuple[str, ...]) -> None:
     attacker: list[object] = [1]
     feature, observed = _feature(public_ids[0], FrozenMapping((("samples", attacker),)))

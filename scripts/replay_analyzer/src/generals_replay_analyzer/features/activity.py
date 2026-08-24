@@ -57,7 +57,16 @@ class ActivityExtractor:
 
     def _scouting_values(self, context: FeatureContext, window: FeatureWindow) -> tuple[FeatureValue, ...]:
         transitions = tuple(item for item in context.observed if item.event_type == "object_visibility_changed")
-        first_clear = tuple(item for item in transitions if fact(item, "first_observed_clear") is True)
+        # TheSuperHackers @fix Leex 25/08/2026 Report opponent scouting reveals instead of own units and ambient map objects. (#TBD)
+        first_clear = tuple(
+            item
+            for item in transitions
+            if fact(item, "first_observed_clear") is True
+            and type(fact(item, "object_owner_replay_player_public_id")) is str
+            and fact(item, "object_owner_replay_player_public_id") != context.replay_player_public_id
+            and type(fact(item, "object_kind_of_flags")) is tuple
+            and "SELECTABLE" in cast(tuple[object, ...], fact(item, "object_kind_of_flags"))
+        )
         if not transitions:
             return (
                 unavailable_value("scouting.first_observed_clear_timing", context.scope, window, "no_observed_events", BASE_REGISTRY),

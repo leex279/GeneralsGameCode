@@ -1719,6 +1719,9 @@ def test_service_scopes_visibility_to_resolved_observer_and_rejects_invalid_obse
     peer_visibility = [item for item in peer_context.observed if item.event_type == "object_visibility_changed"]
     assert len(target_visibility) == 1 and target_visibility[0].facts != peer_visibility[0].facts
     assert len(peer_visibility) == 1
+    assert thaw_canonical(target_visibility[0].facts)["object_owner_replay_player_public_id"] == target
+    assert thaw_canonical(peer_visibility[0].facts)["object_owner_replay_player_public_id"] == target
+    assert thaw_canonical(target_visibility[0].facts)["object_kind_of_flags"] == ["MOBILE"]
     with feature_factory() as session:
         replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
         telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay_row.id)) if replay_row else None

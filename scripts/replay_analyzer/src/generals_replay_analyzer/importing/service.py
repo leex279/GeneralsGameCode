@@ -1503,9 +1503,10 @@ class ImportService:
 
     def _register_asset(self, session: Session, stored: StoredContent, kind: str) -> ManagedAsset:
         relative_path = self._asset_relative_path(stored)
+        media_type = self._asset_media_type(kind)
         asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
         if asset is not None:
-            if not self._asset_registration_matches(asset, stored, kind, relative_path):
+            if not self._asset_registration_matches(asset, stored, kind, relative_path, media_type):
                 raise _ManagedAssetRegistrationConflict
             return asset
         session.execute(
@@ -1516,14 +1517,19 @@ class ImportService:
                 kind=kind,
                 relative_path=relative_path,
                 size_bytes=stored.size,
-                media_type=None,
+                media_type=media_type,
             )
             .on_conflict_do_nothing()
         )
         asset = session.scalar(select(ManagedAsset).where(ManagedAsset.sha256 == stored.sha256))
-        if asset is None or not self._asset_registration_matches(asset, stored, kind, relative_path):
+        if asset is None or not self._asset_registration_matches(asset, stored, kind, relative_path, media_type):
             raise _ManagedAssetRegistrationConflict
         return asset
+
+    @staticmethod
+    def _asset_media_type(kind: str) -> str | None:
+        # TheSuperHackers @fix Leex 25/08/2026 Persist catalog JSON semantics required by named strategy assessment. (#TBD)
+        return "application/json" if kind == "telemetry_catalog" else None
 
     def _asset_relative_path(self, stored: StoredContent) -> str:
         try:
@@ -1542,6 +1548,7 @@ class ImportService:
         stored: StoredContent,
         kind: str,
         relative_path: str,
+        media_type: str | None,
     ) -> bool:
         try:
             public_id = UUID(asset.public_id)
@@ -1554,7 +1561,7 @@ class ImportService:
             and asset.kind == kind
             and asset.relative_path == relative_path
             and asset.size_bytes == stored.size
-            and asset.media_type is None
+            and asset.media_type == media_type
         )
 
     def _source_path_for_replay(self, sha256: str, mode: str) -> Path | None:
@@ -1590,7 +1597,7 @@ class ImportService:
                 relative_path = self._asset_relative_path(stored)
             except _ManagedAssetRegistrationConflict:
                 relative_path = ""
-            if not self._asset_registration_matches(asset, stored, "replay", relative_path):
+            if not self._asset_registration_matches(asset, stored, "replay", relative_path, None):
                 raise StageFailure(
                     "managed_asset_invalid",
                     "managed replay metadata does not match its immutable bytes",

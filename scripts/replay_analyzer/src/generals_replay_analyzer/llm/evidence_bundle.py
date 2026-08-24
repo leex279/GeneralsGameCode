@@ -385,6 +385,54 @@ class EvidenceClaim:
         )
 
     @classmethod
+    def from_derived_rule_assessment(
+        cls,
+        assessment: RuleAssessment,
+        *,
+        evidence: FeatureEvidenceRef,
+    ) -> EvidenceClaim:
+        """Cite one persisted strategy node whose graph retains the full rule evidence."""
+        if type(assessment) is not RuleAssessment or type(evidence) is not FeatureEvidenceRef:
+            raise EvidenceBundleError("invalid_source_dto")
+        quality_map: dict[str, EvidenceQuality] = {
+            "available": "complete",
+            "partial": "partial",
+            "unavailable": "unavailable",
+        }
+        if assessment.quality not in quality_map:
+            raise EvidenceBundleError("invalid_source_dto")
+        quality = quality_map[assessment.quality]
+        details = assessment.details
+        if type(details) is not FrozenMapping:
+            raise EvidenceBundleError("invalid_source_dto")
+        raw_reason = next((item for key, item in details if key == "reason"), None)
+        reason = None if quality == "complete" else raw_reason
+        if quality != "complete" and (type(reason) is not str or not reason or reason != reason.strip()):
+            raise EvidenceBundleError("invalid_source_dto")
+        if evidence.tier != "derived" or evidence.source_kind != "strategy_rule":
+            raise EvidenceBundleError("unauthorized_evidence")
+        # TheSuperHackers @fix Leex 25/08/2026 Bound named strategy citations through the persisted rule provenance node. (#TBD)
+        evidence_ids = _authorize_refs((evidence,), (evidence,))
+        projection = {
+            "strategy_id": assessment.strategy_id,
+            "phase": assessment.phase,
+            "window": {
+                "frame_start": assessment.window.frame_start,
+                "frame_end": assessment.window.frame_end,
+            },
+            "rule_score": assessment.rule_score,
+            "details": details,
+        }
+        return cls._create(
+            assessment.strategy_id,
+            "rule_candidate",
+            projection,
+            quality,
+            cast(str | None, reason),
+            evidence_ids,
+        )
+
+    @classmethod
     def from_longitudinal_result(
         cls,
         result: LongitudinalResultDTO,

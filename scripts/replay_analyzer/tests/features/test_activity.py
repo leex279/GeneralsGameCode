@@ -235,11 +235,14 @@ def test_activity_exposes_observed_visibility_timing(
     observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
 ) -> None:
     player = "00000000-0000-4000-8000-000000000250"
+    opponent = "00000000-0000-4000-8000-000000000251"
     item = observed(
         event_type="object_visibility_changed",
         frame=90,
         facts={
             "replay_player_public_id": player,
+            "object_owner_replay_player_public_id": opponent,
+            "object_kind_of_flags": ["SELECTABLE", "IMMOBILE", "STRUCTURE"],
             "object_id": 42,
             "template_name": "ChinaWarFactory",
             "status": "clear",
@@ -252,3 +255,44 @@ def test_activity_exposes_observed_visibility_timing(
         {"frame": 90, "object_id": 42, "template_name": "ChinaWarFactory"}
     ]
     assert values["scouting.visibility_transition_count"].raw_value == 1  # type: ignore[attr-defined]
+
+
+def test_activity_limits_scouting_timing_to_opponent_owned_objects(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    opponent = "00000000-0000-4000-8000-000000000251"
+
+    def visibility(
+        object_id: int, template_name: str, owner: str | None, kind_of_flags: list[str]
+    ) -> ObservedEvidence:
+        return observed(
+            public_id=f"00000000-0000-4000-8000-{object_id:012d}",
+            source_key=f"telemetry:visibility:{object_id}",
+            event_type="object_visibility_changed",
+            frame=object_id,
+            facts={
+                "replay_player_public_id": player,
+                "object_owner_replay_player_public_id": owner,
+                "object_kind_of_flags": kind_of_flags,
+                "object_id": object_id,
+                "template_name": template_name,
+                "status": "clear",
+                "previous_status": "unseen",
+                "first_observed_clear": True,
+            },
+        )
+
+    values = _values(
+        player_context(
+            visibility(10, "OwnDozer", player, ["SELECTABLE", "DOZER"]),
+            visibility(20, "EnemyWarFactory", opponent, ["SELECTABLE", "IMMOBILE", "STRUCTURE"]),
+            visibility(30, "AmbientBird", None, []),
+            visibility(40, "EnemyRocketProjectile", opponent, ["PROJECTILE", "SMALL_MISSILE"]),
+        )
+    )
+
+    assert thaw_canonical(values["scouting.first_observed_clear_timing"].raw_value) == [  # type: ignore[attr-defined]
+        {"frame": 20, "object_id": 20, "template_name": "EnemyWarFactory"}
+    ]
+    assert values["scouting.visibility_transition_count"].raw_value == 4  # type: ignore[attr-defined]

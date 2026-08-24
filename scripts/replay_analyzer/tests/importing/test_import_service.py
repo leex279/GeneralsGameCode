@@ -1265,6 +1265,10 @@ def test_v2_bundle_manifest_retains_safe_loader_relative_topology(
             "trace.ndjson",
         ]
         assert all({"asset_public_id", "kind", "logical_path", "sha256", "size_bytes"} == set(entry) for entry in manifest)
+        catalog_asset = session.scalar(
+            select(ManagedAsset).where(ManagedAsset.kind == "telemetry_catalog")
+        )
+        assert catalog_asset is not None and catalog_asset.media_type == "application/json"
         persisted = json.dumps(telemetry.output_json, sort_keys=True)
         assert str(bundle_root) not in persisted
         assert "private-run-root" not in persisted

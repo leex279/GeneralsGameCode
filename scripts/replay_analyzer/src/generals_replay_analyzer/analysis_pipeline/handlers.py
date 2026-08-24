@@ -457,7 +457,7 @@ class AssessStrategiesHandler:
                     feature_set_ids,
                     SPATIAL_REGISTRY,
                 )
-                claims = self._claims(receipts, strategy.assessments)
+                claims = self._claims(receipts, strategy.assessments, strategy.derived_evidence)
                 longitudinal_status: LongitudinalStatus = "not_applicable"
                 longitudinal_run_id = None
                 if player.replay_player_public_id is not None and player.canonical_player_public_id is None:
@@ -509,8 +509,12 @@ class AssessStrategiesHandler:
 
     @staticmethod
     def _claims(
-        receipts: tuple[FeatureSetReceipt, ...], assessments: tuple[RuleAssessment, ...]
+        receipts: tuple[FeatureSetReceipt, ...],
+        assessments: tuple[RuleAssessment, ...],
+        derived_assessments: tuple[EvidenceRef, ...],
     ) -> list[EvidenceClaim]:
+        if len(derived_assessments) != len(assessments):
+            raise PipelineCodecError("derived strategy citation selection is incomplete")
         values = tuple(value for receipt in receipts for value in receipt.features)
         refs: dict[str, EvidenceRef] = {}
         for value in values:
@@ -542,11 +546,22 @@ class AssessStrategiesHandler:
                         evidence=derived_evidence[index],
                     )
                 )
-        claims.extend(
-            EvidenceClaim.from_rule_assessment(assessment, authorized_evidence=authorized)
-            for assessment in assessments
-            if assessment.supporting_evidence + assessment.contradicting_evidence
-        )
+        for assessment, derived_evidence in zip(assessments, derived_assessments, strict=True):
+            assessment_refs = assessment.supporting_evidence + assessment.contradicting_evidence
+            if not assessment_refs:
+                continue
+            if len({ref.public_id for ref in assessment_refs}) <= MAX_CITATIONS_PER_CLAIM:
+                claims.append(
+                    EvidenceClaim.from_rule_assessment(assessment, authorized_evidence=authorized)
+                )
+                continue
+            # TheSuperHackers @fix Leex 25/08/2026 Cite persisted named strategies when full-match rule provenance exceeds the provider envelope. (#TBD)
+            claims.append(
+                EvidenceClaim.from_derived_rule_assessment(
+                    assessment,
+                    evidence=derived_evidence,
+                )
+            )
         return claims
 
     def _longitudinal_claims(self, results: tuple[LongitudinalResultDTO, ...]) -> list[EvidenceClaim]:

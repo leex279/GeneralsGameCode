@@ -674,7 +674,7 @@ def test_assess_rejects_wrong_planned_parser_version_before_service_calls(
     class Strategies:
         def assess_rule_candidates(self, *_args: object) -> object:
             calls.append("strategies")
-            return SimpleNamespace(cache_key="d" * 64, assessments=())
+            return SimpleNamespace(cache_key="d" * 64, assessments=(), derived_evidence=())
 
     class Longitudinal:
         def analyze(self, _request: object) -> object:
@@ -944,7 +944,7 @@ def test_assess_marks_missing_canonical_player_explicitly(tmp_path: Path) -> Non
 
     class Strategies:
         def assess_rule_candidates(self, *_args: object) -> object:
-            return SimpleNamespace(cache_key="d" * 64, assessments=())
+            return SimpleNamespace(cache_key="d" * 64, assessments=(), derived_evidence=())
 
     class Longitudinal:
         def analyze(self, _request: object) -> object:
@@ -990,7 +990,7 @@ def test_assess_requests_the_complete_fixed_production_longitudinal_output_set(
 
     class Strategies:
         def assess_rule_candidates(self, *_args: object) -> object:
-            return SimpleNamespace(cache_key="d" * 64, assessments=())
+            return SimpleNamespace(cache_key="d" * 64, assessments=(), derived_evidence=())
 
     class Longitudinal:
         def analyze(self, request: object) -> object:
@@ -1092,7 +1092,7 @@ def test_assess_namespaces_longitudinal_claim_ids_that_collide_with_feature_name
 
     class Strategies:
         def assess_rule_candidates(self, *_args: object) -> object:
-            return SimpleNamespace(cache_key="d" * 64, assessments=())
+            return SimpleNamespace(cache_key="d" * 64, assessments=(), derived_evidence=())
 
     class Longitudinal:
         def analyze(self, _request: object) -> object:
@@ -1179,6 +1179,7 @@ def test_assess_uses_derived_feature_citation_when_raw_inputs_exceed_provider_ca
 
     claims = AssessStrategiesHandler._claims(
         (SimpleNamespace(features=(feature,), derived_evidence=(derived,)),),
+        (),
         (),
     )
 

@@ -265,7 +265,12 @@ def _applicability(
         return False, "missing_catalog_semantics", {"status": "unavailable"}
     if fact(catalog.evidence, "catalog_identity") != catalog.catalog_identity:
         return False, "catalog_identity_mismatch", {"status": "unavailable"}
-    factions = {faction for _, faction in catalog.factions_by_template if faction is not None}
+    catalog_factions = {faction for _, faction in catalog.factions_by_template if faction is not None}
+    # TheSuperHackers @fix Leex 25/08/2026 Match FactionTemplate identifiers to catalog ThingTemplate faction values. (#TBD)
+    factions = catalog_factions | {
+        faction if faction.startswith("Faction") else f"Faction{faction}"
+        for faction in catalog_factions
+    }
     if (
         context.player_faction_evidence is None
         or context.opponent_faction_evidence is None

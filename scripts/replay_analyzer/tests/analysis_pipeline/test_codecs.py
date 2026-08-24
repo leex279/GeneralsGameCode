@@ -11,6 +11,7 @@ from generals_replay_analyzer.analysis_pipeline.codecs import (
     PlayerAssessmentSelection,
     PlayerFeatureSelection,
     PlayerLLMSelection,
+    _path_free,
     decode_assessment_output,
     decode_bundle,
     decode_feature_output,
@@ -24,6 +25,22 @@ from generals_replay_analyzer.llm.evidence_bundle import EvidenceClaim, build_ev
 
 REPLAY_ID = "00000000-0000-4000-8000-000000000201"
 REPLAY_SHA = "a" * 64
+
+
+def test_path_free_codec_preserves_game_names_containing_reserved_substrings() -> None:
+    _path_free(
+        {
+            "AirF_AmericaInfantryPathfinder": 3,
+            "Ghost": 1,
+            "hostile_unit_count": 4,
+        }
+    )
+
+
+@pytest.mark.parametrize("key", ["managed_path", "providerEndpoint", "sourceURL", "service_host"])
+def test_path_free_codec_rejects_reserved_field_tokens(key: str) -> None:
+    with pytest.raises(PipelineCodecError, match="forbidden field"):
+        _path_free({key: "redacted"})
 
 
 def test_feature_codec_preserves_sorted_unique_public_player_selections() -> None:

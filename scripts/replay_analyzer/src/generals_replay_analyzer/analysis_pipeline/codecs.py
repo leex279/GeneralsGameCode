@@ -46,10 +46,17 @@ def _array(value: object, label: str) -> tuple[object, ...]:
     return tuple(cast(list[object] | tuple[object, ...], value))
 
 
+def _forbidden_field_name(value: str) -> bool:
+    # TheSuperHackers @fix Leex 25/08/2026 Distinguish locator field tokens from game names such as Pathfinder. (#TBD)
+    snake_case = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).casefold()
+    tokens = tuple(re.findall(r"[a-z0-9]+", snake_case))
+    return any(marker in tokens for marker in ("path", "endpoint", "url", "host"))
+
+
 def _path_free(value: object) -> None:
     if isinstance(value, Mapping):
         for key, child in cast(Mapping[object, object], value).items():
-            if type(key) is not str or any(marker in key.casefold() for marker in ("path", "endpoint", "url", "host")):
+            if type(key) is not str or _forbidden_field_name(key):
                 raise PipelineCodecError("pipeline data contains a forbidden field")
             _path_free(child)
         return

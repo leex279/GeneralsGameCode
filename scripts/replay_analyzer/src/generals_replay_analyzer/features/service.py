@@ -445,6 +445,7 @@ class FeatureExtractionService:
                 if item.initial_owner_player_index is not None
                 else None,
                 evidence_by_sequence.get(item.creation_sequence) if item.creation_sequence is not None else None,
+                tuple(cast(list[str], item.kind_of_flags_json)),
             )
             for item in entity_rows
         }
@@ -761,7 +762,7 @@ class FeatureExtractionService:
         self,
         event: TelemetryEvent,
         players: Mapping[int, str],
-        entities: Mapping[int, tuple[str, str | None, str | None]],
+        entities: Mapping[int, tuple[str, str | None, str | None, tuple[str, ...]]],
         replay_player: ReplayPlayer | None,
         projected_slots: list[dict[str, object]] | None = None,
         engine_player_indices: frozenset[int] | None = None,
@@ -927,7 +928,14 @@ class FeatureExtractionService:
             # TheSuperHackers @feature Leex 24/08/2026 Bind engine visibility transitions to the resolved observer for player-scoped coaching. (#TBD)
             if type(player_index) is not int or player_index not in valid_engine_players:
                 raise FeatureExtractionError("telemetry visibility observer mapping is invalid")
+            object_id = facts.get("object_id")
+            entity = entities.get(object_id) if type(object_id) is int else None
+            if projected_slots is not None and entity is None:
+                raise FeatureExtractionError("telemetry visibility object identity is unknown")
             facts["replay_player_public_id"] = players[player_index]
+            # TheSuperHackers @fix Leex 25/08/2026 Preserve resolved ownership so scouting analysis excludes own and ambient map objects. (#TBD)
+            facts["object_owner_replay_player_public_id"] = None if entity is None else entity[1]
+            facts["object_kind_of_flags"] = () if entity is None else entity[3]
         elif event_type == "players_initialized":
             if projected_slots is None:
                 raise FeatureExtractionError("telemetry player mapping initialization projection is unavailable")
