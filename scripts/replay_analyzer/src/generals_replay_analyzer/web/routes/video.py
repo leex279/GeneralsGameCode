@@ -12,6 +12,8 @@ from starlette.responses import RedirectResponse, Response
 from generals_replay_analyzer.web.dependencies import application_port
 from generals_replay_analyzer.web.errors import PublicProblem, problem_response
 from generals_replay_analyzer.web.ports import VideoCastRequestDTO, WebApplicationPort
+from generals_replay_analyzer.web.presentation.shell import feature_shell, template_response
+from generals_replay_analyzer.web.viewmodels.video import video_detail_view
 
 router = APIRouter(tags=["video"])
 
@@ -50,4 +52,24 @@ async def queue_video_cast(
     except (ValueError, ValidationError):
         return problem_response(422, title="Invalid video request", code="invalid_video_request", detail="Video request is invalid")
     submission = port.submit_video_cast(command)
-    return RedirectResponse(f"/jobs/{submission.job_public_id}", status_code=303)
+    return RedirectResponse(f"/video/{submission.job_public_id}", status_code=303)
+
+
+@router.get("/video/{job_public_id}", summary="Commented replay cast")
+def video_detail(
+    request: Request,
+    job_public_id: str,
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
+    try:
+        detail = port.get_job(_public_id(job_public_id))
+    except ValueError:
+        return problem_response(422, title="Invalid video ID", code="invalid_video_id", detail="Video ID is invalid")
+    if detail.summary.stage != "render_video":
+        return problem_response(404, title="Video not found", code="video_not_found", detail="Replay cast was not found")
+    return template_response(
+        request,
+        "video/detail.html",
+        feature_shell(page_title="Replay cast | Generals Replay Analyzer", current_path="/jobs", availability=detail.availability),
+        context={"video": video_detail_view(detail)},
+    )
