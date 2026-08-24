@@ -61,6 +61,8 @@ exclude = [
 "src/generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json" = "generals_replay_analyzer/data/strategy-taxonomy-v1.schema.json"
 "src/generals_replay_analyzer/data/replay-report-v1.html" = "generals_replay_analyzer/data/replay-report-v1.html"
 "src/generals_replay_analyzer/data/replay-report-v1.schema.json" = "generals_replay_analyzer/data/replay-report-v1.schema.json"
+# TheSuperHackers @build Leex 24/08/2026 Package the fixed argv-only Windows SAPI renderer with every wheel. (#TBD)
+"src/generals_replay_analyzer/video/windows_sapi.ps1" = "generals_replay_analyzer/video/windows_sapi.ps1"
 "src/generals_replay_analyzer/web/templates/base.html" = "generals_replay_analyzer/web/templates/base.html"
 "src/generals_replay_analyzer/web/templates/dashboard.html" = "generals_replay_analyzer/web/templates/dashboard.html"
 "src/generals_replay_analyzer/web/templates/identity/landing.html" = "generals_replay_analyzer/web/templates/identity/landing.html"
