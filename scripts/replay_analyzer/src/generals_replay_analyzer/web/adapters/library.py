@@ -25,7 +25,7 @@ from generals_replay_analyzer.db.models import (
     Source,
     StrategyAssessment,
 )
-from generals_replay_analyzer.presentation import format_frame, strategy_label
+from generals_replay_analyzer.presentation import faction_label, format_frame, strategy_label
 from generals_replay_analyzer.watching import (
     RootRegistryError,
     WatchDiscoveryError,
@@ -585,7 +585,7 @@ class AnalyticsLibraryAdapter:
                         report_public_id=player_report.public_id if player_report is not None else None,
                         display_name=label,
                         slot=replay_player.slot_index + 1,
-                        faction=replay_player.faction,
+                        faction=faction_label(replay_player.faction),
                         result=replay_player.result,
                     )
                 )

@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 
+from generals_replay_analyzer.presentation import faction_label
 from generals_replay_analyzer.report.model import ReportAvailability, ReportQualityIssue, ReportValue, thaw_report_value
 from generals_replay_analyzer.report.query import (
     EvidenceQuery,
@@ -299,7 +300,7 @@ class AnalyticsReportAdapter:
                 report_public_id=report_ids_by_player.get(item.public_id),
                 display_name=item.display_name,
                 slot=item.slot,
-                faction=item.faction,
+                faction=faction_label(item.faction),
                 result=item.result,
             )
             for item in graph.identity.players

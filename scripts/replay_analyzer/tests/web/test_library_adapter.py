@@ -10,7 +10,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.config import AnalyzerSettings
@@ -467,6 +467,26 @@ def test_dashboard_projects_available_players_map_and_detected_opening_without_c
     assert recent.map_name == "Tournament Desert"
     assert recent.strategy_labels == ()
     assert recent.observed_horizon is None
+
+
+def test_library_and_dashboard_do_not_present_unresolved_numeric_faction_codes(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        session.execute(text("DROP TRIGGER trg_replay_players_succeeded_no_observation_update"))
+        replay_player = session.scalar(
+            select(ReplayPlayer).where(ReplayPlayer.public_id == "123e4567-e89b-42d3-a456-426614174100")
+        )
+        assert replay_player is not None
+        replay_player.faction = "7"
+
+    adapter = _adapter(library_database)
+    item = adapter.list_replays(ReplayLibraryQueryDTO(page_size=1)).items[0]
+    recent = adapter.dashboard().recent_replays[0]
+
+    assert item.players[0].faction is None
+    assert recent.player_factions == ("leex279", "FOX27 (GLA)")
 
 
 def test_dashboard_uses_the_fixed_report_observed_evidence_horizon(

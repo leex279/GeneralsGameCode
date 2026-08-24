@@ -115,6 +115,7 @@ _REASON_LABELS = MappingProxyType(
 )
 
 _WORD_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NUMERIC_SLOT_CODE = re.compile(r"[-+]?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)\Z")
 
 
 def _readable_identity(value: str) -> str:
@@ -131,6 +132,18 @@ def game_label(identity: str) -> str:
 
     known = _GAME_LABELS.get(identity)
     return known if known is not None else f"{_readable_identity(identity)} (unrecognized)"
+
+
+# TheSuperHackers @fix Leex 24/08/2026 Keep unresolved replay slot codes out of player-facing faction labels. (#TBD)
+def faction_label(identity: str | None) -> str | None:
+    """Present a resolved faction name, or no claim while the engine identity is unresolved."""
+
+    if identity is None:
+        return None
+    normalized = identity.strip()
+    if not normalized or _NUMERIC_SLOT_CODE.fullmatch(normalized) is not None:
+        return None
+    return game_label(normalized) if normalized.startswith("Faction") else normalized
 
 
 def feature_label(feature_name: str) -> str:

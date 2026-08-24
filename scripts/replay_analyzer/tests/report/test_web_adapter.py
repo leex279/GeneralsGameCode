@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
 from generals_replay_analyzer.db.models import ParserRun, Replay, ReplayPlayer
+from generals_replay_analyzer.report.query import FixedReportQuery
 from generals_replay_analyzer.web.adapters.report import AnalyticsReportAdapter, _display_value
 from generals_replay_analyzer.web.app import create_app
 from generals_replay_analyzer.web.dependencies import AnalyticsPortFactory
@@ -179,6 +182,35 @@ def test_web_report_excludes_a_fabricated_closed_slot_outside_parser_subjects(
     )
 
     assert tuple(player.display_name for player in report.players) == ("Player",)
+
+
+def test_web_report_does_not_present_an_unresolved_numeric_faction_code(
+    report_database: SeededReportDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published = _publish_graph(report_database)
+    graph = published.service.get_report(
+        FixedReportQuery(published.replay_public_id, published.player_report_id)
+    )
+    unresolved_identity = replace(
+        graph.identity,
+        players=(replace(graph.identity.players[0], faction="7"),),
+    )
+
+    monkeypatch.setattr(
+        published.service,
+        "get_report",
+        lambda _query: replace(graph, identity=unresolved_identity),
+    )
+
+    report = AnalyticsReportAdapter(published.service).get_report(
+        FixedReportQueryDTO(
+            replay_public_id=published.replay_public_id,
+            report_public_id=published.player_report_id,
+        )
+    )
+
+    assert report.players[0].faction is None
 
 
 def test_production_web_adapter_reports_honest_not_generated_state(
