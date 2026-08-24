@@ -196,6 +196,22 @@ def _win_mark_delete(handle: int) -> None:
         raise _win_error("owned-link deletion")
 
 
+def _win_cleanup_staged_link(
+    destination: Path,
+    expected: _WindowsFileIdentity,
+    staged_handle: int | None,
+) -> None:
+    """Delete an owned link only after reopening and revalidating its identity."""
+    handle = staged_handle
+    try:
+        if handle is None:
+            handle = _win_open_staged_lock(destination, expected)
+        _win_mark_delete(handle)
+    finally:
+        if handle is not None:
+            _win_close(handle)
+
+
 def _win_same_object(left: _WindowsFileIdentity, right: _WindowsFileIdentity) -> bool:
     return left.volume_serial == right.volume_serial and left.file_index == right.file_index
 
@@ -292,6 +308,8 @@ def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBind
     runtime_handle: int | None = None
     staged_handle: int | None = None
     owns_staged_link = False
+    destination: Path | None = None
+    primary_error: BaseException | None = None
     try:
         runtime_handle, runtime_identity = _win_open_verified_runtime(runtime)
         source_handle, source_identity = _win_open_verified_source(source, staged=staged)
@@ -302,8 +320,11 @@ def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBind
 
         destination = runtime / f"generalszh_replay_analyzer_{uuid4()}.exe"
         _win_create_hardlink(source, destination)
-        staged_handle = _win_open_staged_lock(destination, source_identity)
+        # Ownership begins at the successful CreateHardLinkW boundary.  If the
+        # first protected open fails, cleanup must still reopen and verify this
+        # exact object before marking it for deletion.
         owns_staged_link = True
+        staged_handle = _win_open_staged_lock(destination, source_identity)
         _win_revalidate_source(source, source_identity)
         protected_source_handle, protected_source_identity = _win_open_verified_source(source, staged=False)
         if not _win_same_object(protected_source_identity, source_identity):
@@ -312,24 +333,42 @@ def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBind
         _win_close(source_handle)
         source_handle = protected_source_handle
         yield RuntimeExecutableBinding(source, destination, True)
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
+        cleanup_error: BaseException | None = None
+
+        def cleanup(action: Any) -> None:
+            nonlocal cleanup_error
+            try:
+                action()
+            except BaseException as error:  # noqa: BLE001 - cleanup must not mask cancellation or launch failures
+                if cleanup_error is None:
+                    cleanup_error = error
+
         try:
             if owns_staged_link and staged_handle is not None:
-                try:
-                    _win_mark_delete(staged_handle)
-                finally:
-                    _win_close(staged_handle)
-                    staged_handle = None
-            elif staged_handle is not None:
-                _win_close(staged_handle)
+                assert destination is not None
+                owned_destination = destination
+                owned_identity = source_identity
+                cleanup(lambda: _win_cleanup_staged_link(owned_destination, owned_identity, staged_handle))
                 staged_handle = None
+            elif owns_staged_link and destination is not None:
+                owned_destination = destination
+                owned_identity = source_identity
+                cleanup(lambda: _win_cleanup_staged_link(owned_destination, owned_identity, None))
         finally:
-            try:
-                if source_handle is not None:
-                    _win_close(source_handle)
-            finally:
-                if runtime_handle is not None:
-                    _win_close(runtime_handle)
+            if source_handle is not None:
+                cleanup(lambda: _win_close(source_handle))
+            if runtime_handle is not None:
+                cleanup(lambda: _win_close(runtime_handle))
+
+        if cleanup_error is not None:
+            if primary_error is not None:
+                primary_error.add_note(f"runtime binding cleanup failed: {cleanup_error!r}")
+            else:
+                raise cleanup_error
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Hold the exact runtime executable object against mutation and delete its owned link by handle. (#TBD)
