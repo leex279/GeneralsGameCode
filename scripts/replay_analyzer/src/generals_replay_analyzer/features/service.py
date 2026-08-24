@@ -192,14 +192,19 @@ class FeatureExtractionService:
         if unknown:
             raise FeatureExtractionError(f"unknown extractor: {min(unknown)}")
         receipts: list[FeatureSetReceipt] = []
+        contexts: dict[ObservationPolicy, FeatureContext] = {}
         for extractor_name in request.extractor_names:
             extractor = self._extractors[extractor_name]
             observation_policy = self._observation_policy(extractor)
-            context = (
-                self._build_context(request)
-                if observation_policy == "target_player"
-                else self._build_context_with_policy(request, observation_policy)
-            )
+            context = contexts.get(observation_policy)
+            if context is None:
+                # TheSuperHackers @performance Leex 24/08/2026 Memoize each observation policy per request. (#TBD)
+                context = (
+                    self._build_context(request)
+                    if observation_policy == "target_player"
+                    else self._build_context_with_policy(request, observation_policy)
+                )
+                contexts[observation_policy] = context
             digest = input_digest(context)
             key = cache_key(context, extractor.name, extractor.version, registry_schema=self._registry.schema_version)
             hit = self._load_receipt(key, cache_hit=True)

@@ -1939,6 +1939,30 @@ def test_replay_wide_policy_includes_peer_facts_and_projects_selected_parser_own
     assert all(item.event_type != "player_start_assignment" for item in context.observed)
 
 
+def test_extract_reuses_context_for_extractors_with_same_observation_policy(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, _, _, _ = _seed_replay_wide_observations(feature_factory)
+    first = _context_capture_extractor("replay_wide_telemetry")
+    second = _context_capture_extractor("replay_wide_telemetry")
+    first.name = "context_capture_first"  # type: ignore[attr-defined]
+    second.name = "context_capture_second"  # type: ignore[attr-defined]
+    service = FeatureExtractionService(feature_factory, extractors=(cast(object, first), cast(object, second)))
+    calls = 0
+    original = service._build_context_with_policy
+
+    def counted_context(request: ExtractFeaturesRequest, policy: str) -> FeatureContext:
+        nonlocal calls
+        calls += 1
+        return original(request, policy)  # type: ignore[arg-type]
+
+    service._build_context_with_policy = counted_context  # type: ignore[assignment, method-assign]
+
+    service.extract(ExtractFeaturesRequest(replay, target, (first.name, second.name)))  # type: ignore[attr-defined]
+
+    assert calls == 1
+
+
 def test_replay_wide_peer_evidence_is_authorized_and_changes_digest(
     feature_factory: sessionmaker[Session],
 ) -> None:
