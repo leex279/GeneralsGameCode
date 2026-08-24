@@ -42,6 +42,7 @@ _GAME_LABELS = MappingProxyType(
     }
 )
 
+# TheSuperHackers @feature Leex 24/08/2026 Name observed science and special-power timing metrics without rewriting engine identities. (#TBD)
 _FEATURE_LABELS = MappingProxyType(
     {
         "activity.effective_actions_per_minute": "Observed effective APM",
@@ -53,6 +54,8 @@ _FEATURE_LABELS = MappingProxyType(
         "economy.supply_collection_rate": "Supply income",
         "production.completed_composition": "Army composition",
         "production.completed_count": "Units completed",
+        "production.science_purchase_timing": "Science purchase timing",
+        "production.special_power_timing": "Special power timing",
         "state.final_result": "Match result",
     }
 )

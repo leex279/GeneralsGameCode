@@ -154,6 +154,9 @@ def _report_section(value: ReportValue, tier: str) -> ReportSectionKey:
     if value.section == "longitudinal":
         return "longitudinal_context"
     normalized = f"{value.section} {value.label}".casefold()
+    # TheSuperHackers @feature Leex 24/08/2026 Keep observed science and special-power timings beside strategy evidence. (#TBD)
+    if any(token in normalized for token in ("special power", "science purchase")):
+        return "strategy_phases"
     if any(token in normalized for token in ("position", "movement", "spatial", "route", "map control", "density")):
         return "spatial_analysis"
     if any(token in normalized for token in ("construct", "build", "dozer", "opening")):

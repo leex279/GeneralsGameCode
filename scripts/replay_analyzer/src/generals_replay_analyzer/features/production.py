@@ -23,6 +23,8 @@ _EVENTS = {
     "upgrade_queued",
     "upgrade_cancelled",
     "upgrade_completed",
+    "science_purchased",
+    "special_power_used",
 }
 
 
@@ -36,6 +38,8 @@ class ProductionExtractor:
         "production.completed_count",
         "production.observed_duration_frames",
         "production.queued_count",
+        "production.science_purchase_timing",
+        "production.special_power_timing",
     )
 
     def extract(self, context: FeatureContext) -> FeatureBundle:
@@ -71,6 +75,33 @@ class ProductionExtractor:
             complete_value("production.completed_count", len(completed), context.scope, window, refs, BASE_REGISTRY),
             complete_value("production.queued_count", len(queued), context.scope, window, refs, BASE_REGISTRY),
         ]
+        # TheSuperHackers @feature Leex 24/08/2026 Surface observed science and special-power timing without inventing unresolved game labels. (#TBD)
+        science = tuple(item for item in context.observed if item.event_type == "science_purchased")
+        powers = tuple(item for item in context.observed if item.event_type == "special_power_used")
+        for name, timing_events in (
+            ("production.science_purchase_timing", science),
+            ("production.special_power_timing", powers),
+        ):
+            timing_rows = tuple(
+                {"frame": item.frame, "item_name": fact(item, "item_name")}
+                for item in timing_events
+                if item.frame is not None and type(fact(item, "item_name")) is str
+            )
+            if timing_rows:
+                values.append(
+                    complete_value(
+                        name,
+                        timing_rows,
+                        context.scope,
+                        window,
+                        tuple(item.ref for item in timing_events),
+                        BASE_REGISTRY,
+                    )
+                )
+            else:
+                values.append(
+                    unavailable_value(name, context.scope, window, "no_observed_events", BASE_REGISTRY)
+                )
         durations, duration_inputs = self._durations(queued, completed + cancelled)
         if durations:
             values.append(

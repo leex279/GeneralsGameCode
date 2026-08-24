@@ -73,3 +73,32 @@ def test_production_requires_catalog_and_never_fabricates_completion_or_duration
     assert values["production.completed_composition"].raw_value == ()  # type: ignore[attr-defined]
     assert values["production.observed_duration_frames"].raw_value is None  # type: ignore[attr-defined]
     assert values["production.observed_duration_frames"].quality_reason == "missing_complete_terminal_record"  # type: ignore[attr-defined]
+
+
+def test_production_exposes_observed_science_and_special_power_timing(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    science = observed(
+        public_id="00000000-0000-4000-8000-000000000277",
+        source_key="telemetry:science:1",
+        frame=120,
+        event_type="science_purchased",
+        facts={"item_name": "SCIENCE_ArtilleryBarrage1", "replay_player_public_id": player},
+    )
+    power = observed(
+        public_id="00000000-0000-4000-8000-000000000278",
+        source_key="telemetry:power:1",
+        frame=180,
+        event_type="special_power_used",
+        facts={"item_name": "SuperweaponSpySatellite", "replay_player_public_id": player},
+    )
+
+    values = _values(player_context(science, power))
+
+    assert thaw_canonical(values["production.science_purchase_timing"].raw_value) == [  # type: ignore[attr-defined]
+        {"frame": 120, "item_name": "SCIENCE_ArtilleryBarrage1"}
+    ]
+    assert thaw_canonical(values["production.special_power_timing"].raw_value) == [  # type: ignore[attr-defined]
+        {"frame": 180, "item_name": "SuperweaponSpySatellite"}
+    ]

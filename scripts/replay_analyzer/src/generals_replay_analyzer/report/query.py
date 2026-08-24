@@ -449,6 +449,23 @@ class ReportQueryService:
                 kind: Literal["marker", "band"]
                 if value.availability == "unavailable":
                     kind = "marker"
+                elif value.label in ("production.science_purchase_timing", "production.special_power_timing"):
+                    # TheSuperHackers @feature Leex 24/08/2026 Expand observed power timing rows into frame markers instead of one full-match band. (#TBD)
+                    raw_timing = thaw_report_value(value.raw_value) if value.raw_value is not None else ()
+                    timing_points = tuple(
+                        TimelinePointDTO(
+                            cast(int, item["frame"]),
+                            None,
+                            f"{value.label}: {cast(str, item['item_name'])}",
+                            evidence,
+                        )
+                        for item in raw_timing
+                        if isinstance(item, Mapping)
+                        and type(item.get("frame")) is int
+                        and type(item.get("item_name")) is str
+                    )
+                    kind = "marker"
+                    points = timing_points
                 elif start == end:
                     scalar = self._timeline_scalar(value.raw_value)
                     kind = "marker"

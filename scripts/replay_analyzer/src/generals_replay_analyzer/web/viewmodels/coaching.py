@@ -17,11 +17,14 @@ from generals_replay_analyzer.web.ports import (
     TimelineChartDTO,
 )
 
+# TheSuperHackers @feature Leex 24/08/2026 Project observed power timings into player evidence highlights with raw-name fallbacks. (#TBD)
 _PHASE_RANK = MappingProxyType({"opening": 0, "early": 1, "mid": 2, "late": 3, "cross_phase": 4})
 _HIGHLIGHT_ORDER = (
     "economy.supply_collection_rate",
     "economy.supply_collected_total",
     "production.completed_composition",
+    "production.science_purchase_timing",
+    "production.special_power_timing",
     "combat.observed_damage_trade_ratio",
     "activity.effective_actions_per_minute",
 )
@@ -30,6 +33,8 @@ _HIGHLIGHT_EXPLANATIONS = MappingProxyType(
         "economy.supply_collection_rate": "Measured from observed supply collection events in this report.",
         "economy.supply_collected_total": "Total supplies recorded inside the available evidence horizon.",
         "production.completed_composition": "Completed units and upgrades observed in the available trace.",
+        "production.special_power_timing": "Observed special-power uses with engine-provided names and frame timings; names remain raw when unrecognized.",
+        "production.science_purchase_timing": "Observed science purchases with engine-provided names and frame timings; names remain raw when unrecognized.",
         "combat.observed_damage_trade_ratio": "Observed applied damage dealt divided by observed damage taken.",
         "activity.effective_actions_per_minute": "Supported replay orders per observed minute, not raw click APM.",
     }
@@ -284,6 +289,12 @@ def _metric_value(claim: ReportClaimDTO) -> str:
         ]
         if composition:
             return ", ".join(composition)
+    if claim.label in ("production.science_purchase_timing", "production.special_power_timing") and isinstance(raw, list):
+        return ", ".join(
+            f"{game_label(item['item_name'])} at {format_frame(item['frame'])}"
+            for item in raw
+            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("item_name")) is str
+        ) or "No observed timing events"
     return claim.display_value or "Unavailable"
 
 

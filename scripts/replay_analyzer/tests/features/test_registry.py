@@ -32,6 +32,8 @@ EXPECTED_NAMES = (
     "production.completed_count",
     "production.observed_duration_frames",
     "production.queued_count",
+    "production.science_purchase_timing",
+    "production.special_power_timing",
     "scorekeeper.event_reconciliation",
     "scorekeeper.terminal_snapshot",
     "state.entity_transition_count",

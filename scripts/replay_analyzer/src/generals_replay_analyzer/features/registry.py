@@ -150,6 +150,8 @@ _BASE_DEFINITIONS = (
     _definition("production.completed_count", "integer", "count"),
     _definition("production.observed_duration_frames", "json", "frames"),
     _definition("production.queued_count", "integer", "count"),
+    _definition("production.science_purchase_timing", "json", "json"),
+    _definition("production.special_power_timing", "json", "json"),
     _definition("scorekeeper.event_reconciliation", "json", "json"),
     _definition("scorekeeper.terminal_snapshot", "json", "json"),
     _definition("state.entity_transition_count", "integer", "count"),
