@@ -188,3 +188,132 @@ def test_publisher_rejects_unverified_tampered_or_existing_publication(tmp_path:
             ),
             destination,
         )
+
+
+def test_publisher_rejects_symlink_artifacts_before_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    final = tmp_path / "final.mp4"
+    narration = tmp_path / "narration.wav"
+    final.write_bytes(b"final")
+    narration.write_bytes(b"narration")
+    manifest = VideoManifestV1(
+        render_public_id="10000000-0000-4000-8000-000000000001",
+        verification_passed=True,
+        requested_settings=VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="burned"),
+        verified_media=_verification(final, narration),
+        artifacts=(_artifact(final, "final_video"), _artifact(narration, "narration")),
+    )
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda candidate: candidate == final.resolve() or original_is_symlink(candidate),
+    )
+
+    with pytest.raises(ValueError, match="ordinary file"):
+        VideoManifestPublisher().publish(manifest, tmp_path / "video-manifest-v1.json")
+
+
+def test_publisher_load_revalidates_a_durable_public_manifest(tmp_path: Path) -> None:
+    final = tmp_path / "final.mp4"
+    narration = tmp_path / "narration.wav"
+    subtitles = tmp_path / "subtitles.vtt"
+    final.write_bytes(b"final")
+    narration.write_bytes(b"narration")
+    subtitles.write_bytes(b"WEBVTT")
+    manifest = VideoManifestV1(
+        render_public_id="10000000-0000-4000-8000-000000000001",
+        verification_passed=True,
+        requested_settings=VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="track"),
+        verified_media=_verification(final, narration, subtitles),
+        artifacts=(_artifact(final, "final_video"), _artifact(narration, "narration"), _artifact(subtitles, "subtitles")),
+    )
+    destination = tmp_path / "video-manifest-v1.json"
+    publisher = VideoManifestPublisher()
+    publisher.publish(manifest, destination)
+
+    loaded = publisher.load(
+        destination,
+        {
+            "final_video": final,
+            "narration": narration,
+            "subtitles": subtitles,
+        },
+    )
+
+    assert loaded == manifest
+
+
+def test_publisher_load_rehashes_every_bound_artifact(tmp_path: Path) -> None:
+    final = tmp_path / "final.mp4"
+    narration = tmp_path / "narration.wav"
+    subtitles = tmp_path / "subtitles.vtt"
+    final.write_bytes(b"final")
+    narration.write_bytes(b"narration")
+    subtitles.write_bytes(b"WEBVTT")
+    manifest = VideoManifestV1(
+        render_public_id="10000000-0000-4000-8000-000000000001",
+        verification_passed=True,
+        requested_settings=VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="track"),
+        verified_media=_verification(final, narration, subtitles),
+        artifacts=(_artifact(final, "final_video"), _artifact(narration, "narration"), _artifact(subtitles, "subtitles")),
+    )
+    destination = tmp_path / "video-manifest-v1.json"
+    publisher = VideoManifestPublisher()
+    publisher.publish(manifest, destination)
+    final.write_bytes(b"tampered")
+
+    with pytest.raises(ValueError, match="artifact hash"):
+        publisher.load(
+            destination,
+            {
+                "final_video": final,
+                "narration": narration,
+                "subtitles": subtitles,
+            },
+        )
+
+
+def test_publisher_load_does_not_trust_self_consistent_public_hash_tampering(tmp_path: Path) -> None:
+    final = tmp_path / "final.mp4"
+    narration = tmp_path / "narration.wav"
+    final.write_bytes(b"final")
+    narration.write_bytes(b"narration")
+    manifest = VideoManifestV1(
+        render_public_id="10000000-0000-4000-8000-000000000001",
+        verification_passed=True,
+        requested_settings=VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="burned"),
+        verified_media=_verification(final, narration),
+        artifacts=(_artifact(final, "final_video"), _artifact(narration, "narration")),
+    )
+    destination = tmp_path / "video-manifest-v1.json"
+    publisher = VideoManifestPublisher()
+    publisher.publish(manifest, destination)
+    document = json.loads(destination.read_text(encoding="utf-8"))
+    forged_hash = hashlib.sha256(b"forged video").hexdigest()
+    document["verified_media"]["final_video_sha256"] = forged_hash
+    next(item for item in document["artifacts"] if item["name"] == "final_video")["sha256"] = forged_hash
+    destination.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact hash"):
+        publisher.load(destination, {"final_video": final, "narration": narration})
+
+
+def test_publisher_load_rejects_a_manifest_symlink(tmp_path: Path) -> None:
+    destination = tmp_path / "video-manifest-v1.json"
+    destination.write_text("{}", encoding="utf-8")
+    link = tmp_path / "manifest-link.json"
+    try:
+        link.symlink_to(destination)
+    except OSError:
+        pytest.skip("symbolic links are unavailable in this Windows environment")
+
+    with pytest.raises(ValueError, match="ordinary file"):
+        VideoManifestPublisher().load(link, {})
+
+
+def test_publisher_load_rejects_a_corrupt_durable_manifest(tmp_path: Path) -> None:
+    destination = tmp_path / "video-manifest-v1.json"
+    destination.write_text('{"schema_version":"video-manifest-v1"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="published video manifest"):
+        VideoManifestPublisher().load(destination, {})
