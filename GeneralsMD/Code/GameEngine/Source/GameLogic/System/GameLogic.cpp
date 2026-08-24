@@ -269,6 +269,11 @@ GameLogic::GameLogic()
 
 	m_frame = 0;
 	m_hasUpdated = FALSE;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Initialize the legacy cadence clock used by the 60 Hz replay profile. (#TBD)
+	m_frameLegacy = 0;
+	m_frameLegacyLast = 0;
+#endif
 	m_frameObjectsChangedTriggerAreas = 0;
 	m_width = 0;
 	m_height = 0;
@@ -485,6 +490,10 @@ void GameLogic::reset()
 
 	m_frame = 0;
 	m_hasUpdated = FALSE;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	m_frameLegacy = 0;
+	m_frameLegacyLast = 0;
+#endif
 	m_width = DEFAULT_WORLD_WIDTH;
 	m_height = DEFAULT_WORLD_HEIGHT;
 	m_objList = nullptr;
@@ -1189,6 +1198,10 @@ void GameLogic::tryStartNewGame( Bool loadingSaveGame )
 	// reset the frame counter
 	m_frame = 0;
 	m_hasUpdated = FALSE;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	m_frameLegacy = 0;
+	m_frameLegacyLast = 0;
+#endif
 
 #ifdef DEBUG_CRC
 	// TheSuperHackers @info helmutbuhler 04/09/2025
@@ -3741,6 +3754,14 @@ void GameLogic::update()
 	USE_PERF_TIMER(GameLogic_update)
 	PROFILER_SECTION_COLOR(0x4CAF50);
 
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Latch the legacy 30 Hz edge before each paired 60 Hz simulation update. (#TBD)
+	if (m_frame % 2 != 0)
+	{
+		m_frameLegacyLast = m_frameLegacy;
+	}
+#endif
+
 	LatchRestore<Bool> inUpdateLatch(m_isInUpdate, TRUE);
 #ifdef DO_UNIT_TIMINGS
 	unitTimings();
@@ -4006,6 +4027,12 @@ void GameLogic::update()
 	{
 		m_frame++;
 		m_hasUpdated = TRUE;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+		if (m_frame % 2 == 0)
+		{
+			m_frameLegacy++;
+		}
+#endif
 	}
 }
 

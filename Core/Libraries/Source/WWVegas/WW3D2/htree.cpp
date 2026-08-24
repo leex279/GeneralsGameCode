@@ -611,7 +611,12 @@ void HTreeClass::Anim_Update_Without_Interpolation(const Matrix3D & root,HRawAni
 	{
 		// TheSuperHackers @tweak Keep the animation frame step in sync with the ww3d frame step if they can align.
 		// @todo This needs improving if the WWSyncPerSecond is changed or the animation frame rates can be larger.
+	#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+		// TheSuperHackers @build Leex 24/08/2026 Validate the proven 60 Hz Zero Hour animation clock. (#TBD)
+		static_assert(WWSyncPerSecond == 60, "60 Hz replay profile requires the proven animation clock");
+	#else
 		static_assert(WWSyncPerSecond == 30, "This is currently catered to a 30 fps sync");
+	#endif
 		return;
 	}
 

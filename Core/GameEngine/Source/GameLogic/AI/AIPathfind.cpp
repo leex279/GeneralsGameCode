@@ -5550,6 +5550,63 @@ Bool Pathfinder::adjustDestination(Object *obj, const LocomotorSet& locomotorSet
 	Bool center;
 	getRadiusAndCenter(obj, iRadius, center);
 	ICoord2D cell;
+
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	Coord3D adjustDest = *dest;
+	if (!center) {
+		adjustDest.x += PATHFIND_CELL_SIZE_F/2;
+		adjustDest.y += PATHFIND_CELL_SIZE_F/2;
+	}
+	worldToCell( &adjustDest, &cell );
+	PathfindLayerEnum layer = TheTerrainLogic->getLayerForDestination(dest);
+	if (groupDest) {
+		layer = TheTerrainLogic->getLayerForDestination(groupDest);
+	}
+
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical destination-adjustment spiral for opt-in replay compatibility. (#TBD)
+	Int limit = MAX_ADJUSTMENT_CELL_COUNT;
+	Int i, j;
+	i = cell.x;
+	j = cell.y;
+	if (checkForAdjust(obj, locomotorSet, isHuman, i,j, layer, iRadius, center, dest, groupDest)) {
+		return true;
+	}
+
+	Int delta=1;
+	Int count;
+	while (limit>0) {
+		for (count = delta; count>0; count--) {
+			i++;
+			limit--;
+			if (checkForAdjust(obj, locomotorSet, isHuman, i,j, layer, iRadius, center, dest, groupDest)) {
+				return true;
+			}
+		}
+		for (count = delta; count>0; count--) {
+			j++;
+			limit--;
+			if (checkForAdjust(obj, locomotorSet, isHuman, i,j, layer, iRadius, center, dest, groupDest)) {
+				return true;
+			}
+		}
+		delta++;
+		for (count = delta; count>0; count--) {
+			i--;
+			limit--;
+			if (checkForAdjust(obj, locomotorSet, isHuman, i,j, layer, iRadius, center, dest, groupDest)) {
+				return true;
+			}
+		}
+		for (count = delta; count>0; count--) {
+			j--;
+			limit--;
+			if (checkForAdjust(obj, locomotorSet, isHuman, i,j, layer, iRadius, center, dest, groupDest)) {
+				return true;
+			}
+		}
+		delta++;
+	}
+#else
 	Coord3D cellDest = *dest;
 	if (!center) {
 		cellDest.x += PATHFIND_CELL_SIZE_F/2;
@@ -5609,7 +5666,7 @@ Bool Pathfinder::adjustDestination(Object *obj, const LocomotorSet& locomotorSet
 			}
 		}
 	}
-
+#endif
 	if (groupDest) {
 		// Didn't work, so just do simple adjust.
 		return(adjustDestination(obj, locomotorSet, dest, nullptr));

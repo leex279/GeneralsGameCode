@@ -362,6 +362,10 @@ void PhysicsBehavior::applyShock( const Coord3D *force )
 {
 	Coord3D resistedForce = *force;
 	resistedForce.scale( 1.0f - min( 1.0f, max( 0.0f, getPhysicsBehaviorModuleData()->m_shockResistance ) ) );
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Scale shock impulses for the 60 Hz deterministic physics profile. (#TBD)
+	resistedForce.scale(0.5f);
+#endif
 
 	// Apply the processed shock force to the object
 	applyForce(&resistedForce);
@@ -381,6 +385,17 @@ void PhysicsBehavior::applyRandomRotation()
 
 	Real randomModifier;
 
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Scale shock rotation rates while preserving the legacy RNG call order at 60 Hz. (#TBD)
+	randomModifier = GameLogicRandomValue(-1.0f, 1.0f);
+	m_yawRate += (getPhysicsBehaviorModuleData()->m_shockMaxYaw / 2.0f) * randomModifier;
+
+	randomModifier = GameLogicRandomValue(-1.0f, 1.0f);
+	m_pitchRate += (getPhysicsBehaviorModuleData()->m_shockMaxPitch / 2.0f) * randomModifier;
+
+	randomModifier = GameLogicRandomValue(-1.0f, 1.0f);
+	m_rollRate += (getPhysicsBehaviorModuleData()->m_shockMaxRoll / 2.0f) * randomModifier;
+#else
 	randomModifier = GameLogicRandomValue(-1.0f, 1.0f);
 	m_yawRate += getPhysicsBehaviorModuleData()->m_shockMaxYaw * randomModifier;
 
@@ -389,6 +404,7 @@ void PhysicsBehavior::applyRandomRotation()
 
 	randomModifier = GameLogicRandomValue(-1.0f, 1.0f);
 	m_rollRate += getPhysicsBehaviorModuleData()->m_shockMaxRoll * randomModifier;
+#endif
 
 #ifdef SLEEPY_PHYSICS
 	if (getFlag(IS_IN_UPDATE))

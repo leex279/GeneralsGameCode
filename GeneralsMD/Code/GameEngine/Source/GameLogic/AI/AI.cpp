@@ -356,7 +356,15 @@ void AI::reset()
 void AI::update()
 {
 	// Do pathfinding.
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Process queued paths on the legacy cadence in the 60 Hz replay profile. (#TBD)
+	if (TheGameLogic->hasLegacyFrameAdvanced())
+	{
+#endif
 	m_pathfinder->processPathfindQueue();
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	}
+#endif
 
 	// run player updates
 	{

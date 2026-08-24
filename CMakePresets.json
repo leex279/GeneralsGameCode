@@ -115,6 +115,14 @@
             }
         },
         {
+            "name": "win32-replay-analyzer",
+            "inherits": "win32",
+            "displayName": "Windows 32bit Replay Analyzer",
+            "cacheVariables": {
+                "RTS_BUILD_OPTION_GENERALS_ONLINE_REPLAY_COMPAT": "ON"
+            }
+        },
+        {
             "name": "win32-debug",
             "inherits": "win32",
             "displayName": "Windows 32bit Debug",
@@ -237,6 +245,13 @@
             "configurePreset": "win32-profile",
             "displayName": "Build Windows 32bit Profile",
             "description": "Build Windows 32bit Profile",
+            "configuration": "Release"
+        },
+        {
+            "name": "win32-replay-analyzer",
+            "configurePreset": "win32-replay-analyzer",
+            "displayName": "Build Windows 32bit Replay Analyzer",
+            "description": "Build Windows 32bit Replay Analyzer",
             "configuration": "Release"
         },
         {
@@ -382,6 +397,19 @@
                 {
                     "type": "build",
                     "name": "win32-profile"
+                }
+            ]
+        },
+        {
+            "name": "win32-replay-analyzer",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "win32-replay-analyzer"
+                },
+                {
+                    "type": "build",
+                    "name": "win32-replay-analyzer"
                 }
             ]
         },

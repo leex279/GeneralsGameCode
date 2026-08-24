@@ -3869,7 +3869,8 @@ void AIUpdateInterface::privateExitInstantly( Object *objectToExit, CommandSourc
 	{
 		// TheSuperHackers @bugfix Caball009 / Okladnoj 10/08/2026 Don't process invalid exit commands,
 		// because an object should not attempt to exit something it's not contained by.
-#if !RETAIL_COMPATIBLE_CRC
+#if !RETAIL_COMPATIBLE_CRC && !defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+		// TheSuperHackers @fix Leex 24/08/2026 Preserve historical instant-exit handling in the 60 Hz replay profile. (#TBD)
 		const ContainModuleInterface *contain = objectToExit->getContain();
 		if (contain == nullptr || !contain->isContained(us))
 			return;

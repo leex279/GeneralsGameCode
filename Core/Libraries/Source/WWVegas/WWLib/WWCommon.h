@@ -43,7 +43,12 @@ enum
 {
 	// TheSuperHackers @info The original WWSync was 33 ms, ~30 fps, integer.
 	// Changing this will require tweaking all Drawable code that concerns the ww3d time step, including locomotion physics.
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Use the proven 60 Hz WW sync clock for modern Zero Hour replay compatibility. (#TBD)
+	WWSyncPerSecond = 60,
+#else
 	WWSyncPerSecond = 30,
+#endif
 	WWSyncMilliseconds = 1000 / WWSyncPerSecond,
 };
 

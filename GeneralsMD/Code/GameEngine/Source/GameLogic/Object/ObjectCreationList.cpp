@@ -590,6 +590,10 @@ static void calcRandomForce(Real minMag, Real maxMag, Real minPitch, Real maxPit
 	Real angle = GameLogicRandomValueReal(0, 2*PI);
 	Real pitch = GameLogicRandomValueReal(minPitch, maxPitch);
 	Real mag = GameLogicRandomValueReal(minMag, maxMag);
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Scale OCL impulse magnitude for the 60 Hz deterministic physics profile. (#TBD)
+	mag /= 2.0f;
+#endif
 
 	Matrix3D mtx(1);
 	mtx.Scale(mag);
@@ -1156,6 +1160,12 @@ protected:
 				Real yaw = GameLogicRandomValueReal( -yawRate, yawRate );
 				Real roll = GameLogicRandomValueReal( -rollRate, rollRate );
 				Real pitch = GameLogicRandomValueReal( -pitchRate, pitchRate );
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+				// TheSuperHackers @fix Leex 24/08/2026 Scale OCL debris rotation rates while retaining RNG order at 60 Hz. (#TBD)
+				yaw /= 2.0f;
+				roll /= 2.0f;
+				pitch /= 2.0f;
+#endif
 				DUMPREAL(yaw);
 				DUMPREAL(roll);
 				DUMPREAL(pitch);
@@ -1165,6 +1175,10 @@ protected:
 				{
 					Real horizForce = 4.0f * m_dispositionIntensity;		// 2
 					Real vertForce = 3.0f * m_dispositionIntensity;		// 3
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+					horizForce /= 2.0f;
+					vertForce /= 2.0f;
+#endif
 					force.x = GameLogicRandomValueReal( -horizForce, horizForce );
 					force.y = GameLogicRandomValueReal( -horizForce, horizForce );
 					force.z = GameLogicRandomValueReal( vertForce * 0.33f, vertForce );
@@ -1176,6 +1190,10 @@ protected:
 				{
 					Real horizForce = 2.0f * m_dispositionIntensity;
 					Real vertForce = 4.0f * m_dispositionIntensity;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+					horizForce /= 2.0f;
+					vertForce /= 2.0f;
+#endif
 
 					force.x = GameLogicRandomValueReal( -horizForce, horizForce );
 					force.y = GameLogicRandomValueReal( -horizForce, horizForce );

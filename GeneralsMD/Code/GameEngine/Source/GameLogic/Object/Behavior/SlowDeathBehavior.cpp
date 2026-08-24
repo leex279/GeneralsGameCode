@@ -294,6 +294,12 @@ void SlowDeathBehavior::beginSlowDeath(const DamageInfo *damageInfo)
 				Coord3D force;
 				calcRandomForce(d->m_flingForce, d->m_flingForce + d->m_flingForceVariance,
 												d->m_flingPitch, d->m_flingPitch + d->m_flingPitchVariance, force);
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+				// TheSuperHackers @fix Leex 24/08/2026 Scale slow-death fling forces for the 60 Hz deterministic physics profile. (#TBD)
+				force.x /= 2.f;
+				force.y /= 2.f;
+				force.z /= 2.f;
+#endif
 				physics->setAllowToFall(true);
 				physics->applyForce(&force);
 				physics->setExtraBounciness(-1.0);					// we don't want this guy to bounce at all

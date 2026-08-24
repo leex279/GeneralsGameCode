@@ -387,7 +387,8 @@ void TransitionDamageFX::onBodyDamageStateChange( const DamageInfo* damageInfo,
 				if( lastDamageInfo == nullptr ||
 						getDamageTypeFlag( modData->m_damageParticleTypes, lastDamageInfo->in.m_damageType ) )
 				{
-#if RETAIL_COMPATIBLE_CRC
+#if RETAIL_COMPATIBLE_CRC || defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+					// TheSuperHackers @fix Leex 24/08/2026 Preserve legacy damage-particle RNG side effects in the 60 Hz replay profile. (#TBD)
 					// TheSuperHackers @fix The particle system is now decoupled from the logic crc
 					// and the side effects on the logic random seed values are preserved for retail compatibility.
 					getLocalEffectPos( &modData->m_particleSystem[ newState ][ i ].locInfo, draw, LogicRandomValueClass() );

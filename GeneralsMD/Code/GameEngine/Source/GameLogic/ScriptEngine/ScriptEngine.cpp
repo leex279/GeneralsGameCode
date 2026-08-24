@@ -5516,6 +5516,10 @@ void ScriptEngine::update()
 */
 #endif
 #endif
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Keep script countdowns on their legacy cadence while scripts execute every 60 Hz frame. (#TBD)
+	const Bool legacyFrameAdvanced = TheGameLogic->hasLegacyFrameAdvanced();
+#endif
 	if (m_firstUpdate) {
 		createNamedCache();
 		particleEditorUpdate();
@@ -5564,7 +5568,13 @@ void ScriptEngine::update()
 		if (m_counters[i].isCountdownTimer) {
 			// If counter has any time left, decrement.  Counters go to -1 and stop.
 			if (m_counters[i].value >= 0) {
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+				if (legacyFrameAdvanced) {
+					m_counters[i].value--;
+				}
+#else
 				m_counters[i].value--;
+#endif
 			}
 		}
 	}
@@ -6743,7 +6753,12 @@ void ScriptEngine::setTimer( ScriptAction *pAction, Bool millisecondTimer, Bool 
 			Real randomValue = pAction->getParameter(2)->getReal();
 			value = GameLogicRandomValue(value, randomValue);
 		}
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+		// TheSuperHackers @fix Leex 24/08/2026 Retain the legacy 30 Hz base for millisecond script timers in the 60 Hz profile. (#TBD)
+		m_counters[counterNdx].value = REAL_TO_INT_CEIL(value * (Real)BaseFps);
+#else
 		m_counters[counterNdx].value = REAL_TO_INT_CEIL(ConvertDurationFromMsecsToFrames(value*1000));
+#endif
 	} else {
 		Int value = pAction->getParameter(1)->getInt();
 		if (random) {

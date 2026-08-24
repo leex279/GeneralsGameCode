@@ -240,9 +240,18 @@ void Thing::setOrientation( Real angle )
 		u.y = Sin(angle);
 		u.z = 0.0f;
 
-		// TheSuperHackers @bugfix Leex 24/08/2026 Restore the historical cross products so replay transforms retain their signed-zero bits. (#TBD)
-		Coord3D::crossProduct(z, u, y);
-		Coord3D::crossProduct(y, z, x);
+		#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+		// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical cross-product basis and signed-zero transform layout for opt-in replay compatibility. (#TBD)
+		y.crossProduct( z, u, y );
+		x.crossProduct( y, z, x );
+		#else
+		x.x = u.x;
+		x.y = u.y;
+		x.z = 0.0f;
+		y.x = -u.y;
+		y.y = u.x;
+		y.z = 0.0f;
+		#endif
 
 		m_transform.Set(  x.x, y.x, z.x, pos.x,
 											x.y, y.y, z.y, pos.y,

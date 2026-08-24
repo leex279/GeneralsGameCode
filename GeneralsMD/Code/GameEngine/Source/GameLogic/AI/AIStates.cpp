@@ -1021,11 +1021,15 @@ void AIStateMachine::clear()
 	m_goalWaypoint = nullptr;
 	m_goalSquad = nullptr;
 
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical AI clear sequence required by opt-in replay compatibility. (#TBD)
+#else
 #if !RETAIL_COMPATIBLE_CRC
 	if (m_temporaryState)
 		m_temporaryState->onExit(EXIT_RESET);
 
 	m_temporaryState = nullptr;
+#endif
 #endif
 
 	AIUpdateInterface* ai = getOwner()->getAI();

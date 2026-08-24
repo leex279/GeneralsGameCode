@@ -164,7 +164,12 @@ void BattleBusSlowDeathBehavior::beginSlowDeath( const DamageInfo *damageInfo )
 			Coord3D throwForce;
 			throwForce.x = 0;
 			throwForce.y = 0;
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+			// TheSuperHackers @fix Leex 24/08/2026 Scale Battle Bus ejection shock for the 60 Hz deterministic physics profile. (#TBD)
+			throwForce.z = data->m_throwForce / 2.0f;
+#else
 			throwForce.z = data->m_throwForce;
+#endif
 			me->getPhysics()->applyShock(&throwForce);
 			me->getPhysics()->applyRandomRotation();
 		}

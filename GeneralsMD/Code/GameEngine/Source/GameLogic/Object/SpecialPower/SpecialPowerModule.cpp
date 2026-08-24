@@ -102,7 +102,8 @@ SpecialPowerModule::SpecialPowerModule( Thing *thing, const ModuleData *moduleDa
 									: BehaviorModule( thing, moduleData )
 {
 
-#if RETAIL_COMPATIBLE_CRC
+#if RETAIL_COMPATIBLE_CRC || defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve legacy special-power availability initialization in the 60 Hz replay profile. (#TBD)
 	m_availableOnFrame = 0;
 #else
 	m_availableOnFrame = 0xFFFFFFFF;

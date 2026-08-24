@@ -1861,6 +1861,10 @@ void PartitionData::doCircleFill(
 	Int y = cellRadius - 1;
 	Int dec = 3 - 2*cellRadius;
 
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical partition circle-fill iteration for opt-in replay compatibility. (#TBD)
+	for (Int x = 0; x < cellRadius; x++)
+#else
 #if RETAIL_COMPATIBLE_CRC
 	// Cell coverage diverges at radii >= 240 between algorithms.
 	Int end = cellRadius - 1;
@@ -1868,6 +1872,7 @@ void PartitionData::doCircleFill(
 	for (Int x = 0; x <= endRef; ++x)
 #else
 	for (Int x = 0; x <= y; ++x)
+#endif
 #endif
 	{
 		hLineCircle(cellCenterX - x, cellCenterX + x, cellCenterY + y);
@@ -1901,13 +1906,24 @@ void PartitionData::doCircleFillPrecise(Real centerX, Real centerY, Real radius)
 	ThePartitionManager->worldToCell(centerX + radius, centerY + radius, &maxCellX, &maxCellY);
 
 	Real cellSize = ThePartitionManager->getCellSize();
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	Real halfCellSize = cellSize * 0.5f;
+#endif
 
 	for (Int x = minCellX; x <= maxCellX; ++x)
 	{
 		for (Int y = minCellY; y <= maxCellY; ++y)
 		{
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+			// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical partition-cell origin calculation for opt-in replay compatibility. (#TBD)
+			Real cellWorldX, cellWorldY;
+			ThePartitionManager->getCellCenterPos(x, y, cellWorldX, cellWorldY);
+			cellWorldX -= halfCellSize;
+			cellWorldY -= halfCellSize;
+#else
 			Real cellWorldX = x * cellSize;
 			Real cellWorldY = y * cellSize;
+#endif
 
 			if (doesCircleOverlapCell(centerX, centerY, radius, cellWorldX, cellWorldY, cellSize))
 			{

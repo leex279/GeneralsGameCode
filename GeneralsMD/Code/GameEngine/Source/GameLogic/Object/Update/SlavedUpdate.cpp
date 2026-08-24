@@ -109,6 +109,14 @@ void SlavedUpdate::onSlaverDamage( const DamageInfo *info )
 //-------------------------------------------------------------------------------------------------
 UpdateSleepTime SlavedUpdate::update()
 {
+#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Advance slave maintenance only on the legacy cadence in the 60 Hz replay profile. (#TBD)
+	if (!TheGameLogic->hasLegacyFrameAdvanced())
+	{
+		return UPDATE_SLEEP_NONE;
+	}
+#endif
+
 /// @todo srj use SLEEPY_UPDATE here
 	if( m_framesToWait > 0 )
 	{

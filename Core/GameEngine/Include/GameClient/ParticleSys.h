@@ -763,7 +763,8 @@ public:
 	ParticleSystemTemplate *newTemplate( const AsciiString &name );
 
 	/// given a template, instantiate a particle system
-#if RETAIL_COMPATIBLE_CRC
+#if RETAIL_COMPATIBLE_CRC || defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve legacy particle creation side effects in the 60 Hz replay profile. (#TBD)
 	virtual ParticleSystem *createParticleSystem( const ParticleSystemTemplate *sysTemplate, Bool createSlaves = TRUE );
 #else
 	ParticleSystem* createParticleSystem(const ParticleSystemTemplate* sysTemplate, Bool createSlaves = TRUE);
@@ -847,7 +848,8 @@ private:
 class ParticleSystemManagerDummy : public ParticleSystemManager
 {
 public:
-#if RETAIL_COMPATIBLE_CRC
+#if RETAIL_COMPATIBLE_CRC || defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve legacy dummy particle cleanup in the 60 Hz replay profile. (#TBD)
 	// The creation of particle systems needs to be handled explicitly,
 	// because they're not destroyed in the update function anymore.
 	virtual ParticleSystem* createParticleSystem(const ParticleSystemTemplate* sysTemplate, Bool createSlaves = TRUE) override { return nullptr; }

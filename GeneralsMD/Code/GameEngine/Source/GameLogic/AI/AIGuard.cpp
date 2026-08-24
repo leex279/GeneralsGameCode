@@ -179,7 +179,8 @@ AIGuardMachine::AIGuardMachine( Object *owner ) :
 	//Kris: Except that guard return is more like an attack move, and will acquire targets while moving there.
 	//This breaks deployAI units because they have to completely unpack before realizing that there is a target in range.
 	//So I'm making AI_GUARD_INNER the first state.
-#if RETAIL_COMPATIBLE_CRC
+#if RETAIL_COMPATIBLE_CRC || defined(GENERALS_ONLINE_HIGH_FPS_SERVER)
+	// TheSuperHackers @fix Leex 24/08/2026 Preserve the legacy guard transition target in the 60 Hz replay profile. (#TBD)
 	defineState( AI_GUARD_INNER,						newInstance(AIGuardInnerState)( this ), AI_GUARD_OUTER, AI_GUARD_OUTER, attackAggressors );
 	defineState( AI_GUARD_RETURN,						newInstance(AIGuardReturnState)( this ), AI_GUARD_IDLE, AI_GUARD_INNER, attackAggressors );
 #else
