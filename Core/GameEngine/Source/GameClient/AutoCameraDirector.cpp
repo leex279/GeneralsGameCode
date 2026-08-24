@@ -30,10 +30,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
+#include <cstring>
 #include <limits>
 #include <set>
-#include <sstream>
 #include <string>
 
 namespace
@@ -47,6 +46,29 @@ namespace
 	const Real MIN_CAMERA_YAW = -360.0f;
 	const Real MAX_CAMERA_YAW = 360.0f;
 	const size_t MAX_CAMERA_LINE_LENGTH = 1024;
+	// TheSuperHackers @info Leex 23/08/2026 Retain the exact startup-validated plan so later lifecycle initialization cannot reopen changed bytes. (#TBD)
+	AsciiString s_validatedCameraScript;
+	std::vector<AutoCameraSegment> s_validatedCameraSegments;
+
+	class ScopedCameraFile
+	{
+	public:
+		explicit ScopedCameraFile(FILE *file) : m_file(file) {}
+		~ScopedCameraFile()
+		{
+			if (m_file != nullptr)
+			{
+				fclose(m_file);
+			}
+		}
+
+		FILE *get() const { return m_file; }
+
+	private:
+		ScopedCameraFile(const ScopedCameraFile &);
+		ScopedCameraFile &operator=(const ScopedCameraFile &);
+		FILE *m_file;
+	};
 
 	void setError(AsciiString *error, const Char *message, UnsignedInt lineNumber = 0)
 	{
@@ -143,15 +165,17 @@ namespace
 	Bool splitCameraRow(const std::string &line, std::vector<std::string> *columns)
 	{
 		columns->clear();
-		std::istringstream stream(line);
-		std::string column;
-		while (std::getline(stream, column, ','))
+		size_t start = 0;
+		while (true)
 		{
-			columns->push_back(trim(column));
-		}
-		if (!line.empty() && line[line.length() - 1] == ',')
-		{
-			columns->push_back(std::string());
+			const size_t comma = line.find(',', start);
+			if (comma == std::string::npos)
+			{
+				columns->push_back(trim(line.substr(start)));
+				break;
+			}
+			columns->push_back(trim(line.substr(start, comma - start)));
+			start = comma + 1;
 		}
 		return columns->size() == EXPECTED_CAMERA_COLUMNS;
 	}
@@ -168,19 +192,28 @@ namespace
 			return FALSE;
 		}
 
-		std::ifstream file(filename.str(), std::ios::in);
-		if (!file.is_open())
+		ScopedCameraFile file(fopen(filename.str(), "rb"));
+		if (file.get() == nullptr)
 		{
 			setError(error, "camera script could not be opened");
 			return FALSE;
 		}
 
 		std::set<std::string> segmentIds;
-		std::string line;
 		UnsignedInt lineNumber = 0;
-		while (std::getline(file, line))
+		Char lineBuffer[MAX_CAMERA_LINE_LENGTH + 3];
+		while (fgets(lineBuffer, sizeof(lineBuffer), file.get()) != nullptr)
 		{
 			++lineNumber;
+			std::string line(lineBuffer);
+			if (!line.empty() && line[line.length() - 1] == '\n')
+			{
+				line.erase(line.length() - 1);
+			}
+			if (!line.empty() && line[line.length() - 1] == '\r')
+			{
+				line.erase(line.length() - 1);
+			}
 			if (line.length() > MAX_CAMERA_LINE_LENGTH)
 			{
 				setError(error, "camera row is too long", lineNumber);
@@ -219,6 +252,17 @@ namespace
 			}
 			else if (transition == "ease")
 			{
+				// TheSuperHackers @info Leex 23/08/2026 Ease rows are baked transition windows; exporters split later holds into same-target rows. (#TBD)
+				if (parsedSegments->empty())
+				{
+					setError(error, "ease transition cannot be the first camera row", lineNumber);
+					return FALSE;
+				}
+				if (segment.m_endFrame == segment.m_startFrame)
+				{
+					setError(error, "ease transition must span at least two frames", lineNumber);
+					return FALSE;
+				}
 				segment.m_transition = AUTO_CAMERA_TRANSITION_EASE;
 			}
 			else
@@ -260,7 +304,7 @@ namespace
 			parsedSegments->push_back(segment);
 		}
 
-		if (file.bad())
+		if (ferror(file.get()))
 		{
 			setError(error, "camera script could not be read completely");
 			return FALSE;
@@ -334,18 +378,26 @@ void AutoCameraDirector::reset()
 
 Bool AutoCameraDirector::validateCameraScript(const AsciiString &filename, AsciiString *error)
 {
-	std::vector<AutoCameraSegment> parsedSegments;
-	return parseCameraScript(filename, &parsedSegments, error);
-}
-
-Bool AutoCameraDirector::loadCameraScript(const AsciiString &filename, AsciiString *error)
-{
+	s_validatedCameraScript.clear();
+	s_validatedCameraSegments.clear();
 	std::vector<AutoCameraSegment> parsedSegments;
 	if (!parseCameraScript(filename, &parsedSegments, error))
 	{
 		return FALSE;
 	}
-	m_segments.swap(parsedSegments);
+	s_validatedCameraScript = filename;
+	s_validatedCameraSegments.swap(parsedSegments);
+	return TRUE;
+}
+
+Bool AutoCameraDirector::loadCameraScript(const AsciiString &filename, AsciiString *error)
+{
+	if (s_validatedCameraSegments.empty() || strcmp(filename.str(), s_validatedCameraScript.str()) != 0)
+	{
+		setError(error, "camera script does not match the validated startup snapshot");
+		return FALSE;
+	}
+	m_segments = s_validatedCameraSegments;
 	return TRUE;
 }
 
