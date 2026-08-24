@@ -96,6 +96,8 @@ def map_scene_url(scene: MapSceneDTO) -> str:
     if query.player_centric_subject_public_id is not None:
         parameters.append(("subject", query.player_centric_subject_public_id))
     parameters.append(("sample_budget", query.sample_budget))
+    if query.include_engine_heuristics:
+        parameters.append(("heuristics", "true"))
     return (
         f"/api/replays/{scene.replay_public_id}/reports/{scene.report_public_id}/map/scene?"
         + urlencode(parameters)
@@ -148,9 +150,12 @@ def map_detail_view(scene: MapSceneDTO, option_scene: MapSceneDTO | None = None)
     player_ids.update(item.replay_player_public_id for item in options.orders)
     for engagement in options.engagements:
         player_ids.update(engagement.participant_replay_player_public_ids)
+    player_ids.update(item.replay_player_public_id for item in options.visibility_transitions)
+    player_ids.update(item.replay_player_public_id for item in options.engine_heuristic_overlays)
     entity_ids = set(scene.query.entity_public_ids)
     entity_ids.update(item.entity_public_id for item in options.samples)
     entity_ids.update(item.entity_public_id for item in options.routes)
+    entity_ids.update(item.entity_public_id for item in options.visibility_transitions)
     sample_groups: dict[tuple[str, str | None], list[int]] = {}
     for sample in scene.samples:
         sample_groups.setdefault((sample.entity_public_id, sample.replay_player_public_id), []).append(sample.frame)

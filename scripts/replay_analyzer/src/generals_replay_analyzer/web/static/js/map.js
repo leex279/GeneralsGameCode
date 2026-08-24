@@ -73,6 +73,14 @@
 
   const pointPosition = (point, display) => suppliedPosition({position: point}, display);
   const present = (values) => values.filter((value) => Array.isArray(value));
+  const heuristicDatum = (cell, display, metric) => {
+    const position = suppliedPosition(cell, display);
+    if (!position) return null;
+    return {
+      value: [position[0], position[1], cell[metric]],
+      shroudStatus: cell.shroud_status,
+    };
+  };
 
   const rasterSeries = (display) => {
     const option = rasterSelect.selectedOptions[0];
@@ -131,7 +139,7 @@
   };
 
   const render = (scene) => {
-    if (scene.schema_version !== "replay-map-scene-v1"
+    if (scene.schema_version !== "replay-map-scene-v2"
         || scene.query.report_public_id !== scene.report_public_id) {
       throw new Error("Unexpected map scene schema");
     }
@@ -147,6 +155,9 @@
     const orderTargets = scene.orders
       .filter((order) => order.target_position)
       .map((order) => suppliedPosition({position: order.target_position}, display));
+    // TheSuperHackers @feature Leex 24/08/2026 Draw opt-in engine heuristics with explicit diagnostic labels beside observed scouting transitions. (#TBD)
+    const heuristicCells = scene.engine_heuristic_overlays.flatMap((overlay) => overlay.cells);
+    const shroudColors = {clear: "#77d6a4", fogged: "#9aa7b4", shrouded: "#394956"};
     const series = [
       ...rasterSeries(display),
       {name: "Starts", type: "scatter", symbol: "rect", data: present(scene.starts.map((item) => suppliedPosition(item, display)))},
@@ -157,6 +168,29 @@
       ...routes,
       {name: "Engagements", type: "scatter", symbol: "diamond", data: present(scene.engagements.map((item) => suppliedPosition({position: item.centroid}, display)))},
       {name: "Casualties", type: "scatter", symbol: "triangle", data: present(scene.casualties.map((item) => suppliedPosition(item, display)))},
+      {name: "First observed clear", type: "scatter", symbol: "emptyCircle", data: present(scene.visibility_transitions.filter((item) => item.first_observed_clear).map((item) => suppliedPosition(item, display)))},
+      {
+        name: "Sampled shroud status",
+        type: "scatter",
+        symbol: "rect",
+        symbolSize: 7,
+        itemStyle: {color: (params) => shroudColors[params.data.shroudStatus] || shroudColors.shrouded},
+        data: heuristicCells.map((cell) => heuristicDatum(cell, display, "threat_value")).filter(Boolean),
+      },
+      {
+        name: "Engine AI threat heuristic",
+        type: "scatter",
+        symbol: "diamond",
+        symbolSize: (value) => Math.min(24, 7 + Math.log2(1 + Number(value[2]))),
+        data: heuristicCells.map((cell) => heuristicDatum(cell, display, "threat_value")).filter(Boolean),
+      },
+      {
+        name: "Engine AI cash-value heuristic",
+        type: "scatter",
+        symbol: "triangle",
+        symbolSize: (value) => Math.min(24, 7 + Math.log2(1 + Number(value[2]))),
+        data: heuristicCells.map((cell) => heuristicDatum(cell, display, "cash_value")).filter(Boolean),
+      },
     ];
     chart.clear();
     chart.setOption({

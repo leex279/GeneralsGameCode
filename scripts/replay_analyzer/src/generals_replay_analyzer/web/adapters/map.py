@@ -67,6 +67,7 @@ class AnalyticsMapSceneAdapter:
                     query.coordinate_display,
                     query.player_centric_subject_public_id,
                     query.sample_budget,
+                    query.include_engine_heuristics,
                 )
             )
             return MapSceneDTO.model_validate(thaw_canonical(result.payload))

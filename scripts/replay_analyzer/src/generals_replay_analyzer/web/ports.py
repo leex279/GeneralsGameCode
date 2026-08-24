@@ -1361,7 +1361,17 @@ class ReportQueryPort(Protocol):
 EvidenceTier = Literal["observed", "derived"]
 CoordinateDisplay = Literal["raw", "map_normalized", "player_centric"]
 LocomotorSurface = Literal["ground", "amphibious"]
-MapEventFamily = Literal["samples", "orders", "routes", "structures", "engagements", "casualties", "presence"]
+MapEventFamily = Literal[
+    "samples",
+    "orders",
+    "routes",
+    "structures",
+    "engagements",
+    "casualties",
+    "presence",
+    "visibility",
+    "engine_heuristics",
+]
 MapAvailabilityFilter = Literal["available", "partial", "unavailable"]
 SampleReason = Literal["lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"]
 
@@ -1466,6 +1476,7 @@ class MapSceneQueryDTO(WebDTO):
     coordinate_display: CoordinateDisplay = "raw"
     player_centric_subject_public_id: PublicId | None = None
     sample_budget: int = Field(default=5000, ge=100, le=20_000)
+    include_engine_heuristics: bool = False
 
     @model_validator(mode="after")
     def _normalize_query(self) -> Self:
@@ -1816,6 +1827,87 @@ class MapControlWindowDTO(WebDTO):
         return self
 
 
+# TheSuperHackers @feature Leex 24/08/2026 Publish engine-observed scouting transitions and sampled AI heuristics without reinterpreting them as map control. (#TBD)
+class MapVisibilityTransitionDTO(WebDTO):
+    visibility_public_id: PublicId
+    replay_player_public_id: PublicId
+    entity_public_id: PublicId
+    frame: int = Field(ge=0)
+    template_name: str = Field(min_length=1, max_length=256)
+    previous_status: Literal["unseen", "clear", "fogged", "shrouded"]
+    status: Literal["clear", "fogged", "shrouded"]
+    first_observed_clear: bool
+    position: SpatialPositionDTO
+    sampling_cycle_id: int = Field(ge=0)
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if self.previous_status == self.status:
+            raise ValueError("visibility transition must change status")
+        if self.first_observed_clear != (self.previous_status == "unseen" and self.status == "clear"):
+            raise ValueError("first observed clear must identify the initial clear transition")
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapVisibilitySamplingSummaryDTO(WebDTO):
+    summary_public_id: PublicId
+    frame: int = Field(ge=0)
+    eligible_pair_count: int = Field(ge=0)
+    sampled_pair_count: int = Field(ge=0, le=8192)
+    maximum_pairs_per_pass: Literal[8192]
+    sampling_cycle_id: int = Field(ge=0)
+    cycle_complete: bool
+    coverage_state: Literal["complete", "incomplete"]
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        if self.sampled_pair_count > self.eligible_pair_count:
+            raise ValueError("sampled visibility pairs cannot exceed eligible pairs")
+        if self.cycle_complete != (self.coverage_state == "complete"):
+            raise ValueError("visibility coverage state must disclose incomplete cycles")
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapEngineHeuristicCellDTO(WebDTO):
+    cell_x: int = Field(ge=0)
+    cell_y: int = Field(ge=0)
+    position: SpatialPositionDTO
+    shroud_status: Literal["clear", "fogged", "shrouded"]
+    threat_value: int = Field(ge=0, le=4_294_967_295)
+    cash_value: int = Field(ge=0, le=4_294_967_295)
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
+class MapEngineHeuristicOverlayDTO(WebDTO):
+    overlay_public_id: PublicId
+    replay_player_public_id: PublicId
+    frame: int = Field(ge=0)
+    sampling_scheme: Literal["uniform_partition_lattice_v1"]
+    grid_complete: bool
+    threat_label: Literal["Engine AI threat heuristic"]
+    cash_label: Literal["Engine AI cash-value heuristic"]
+    cells: tuple[MapEngineHeuristicCellDTO, ...] = Field(min_length=1, max_length=128)
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...]
+
+    @model_validator(mode="after")
+    def _normalize(self) -> Self:
+        coordinates = tuple((item.cell_x, item.cell_y) for item in self.cells)
+        if len(coordinates) != len(set(coordinates)):
+            raise ValueError("engine heuristic overlay cells must be unique")
+        object.__setattr__(self, "cells", tuple(sorted(self.cells, key=lambda item: (item.cell_y, item.cell_x))))
+        object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
+        return self
+
+
 class DownsamplingDTO(WebDTO):
     algorithm_version: Literal["event-forced-stratified-v1"]
     requested_sample_budget: int = Field(ge=100, le=20_000)
@@ -1840,7 +1932,7 @@ class DownsamplingDTO(WebDTO):
 
 # TheSuperHackers @feature Leex 23/08/2026 Expose one fixed authoritative spatial scene without storage capabilities. (#TBD)
 class MapSceneDTO(WebDTO):
-    schema_version: Literal["replay-map-scene-v1"]
+    schema_version: Literal["replay-map-scene-v2"]
     replay_public_id: PublicId
     report_public_id: PublicId
     report_version: str = Field(min_length=1, max_length=128)
@@ -1862,6 +1954,9 @@ class MapSceneDTO(WebDTO):
     engagements: tuple[MapEngagementDTO, ...]
     casualties: tuple[MapCasualtyDTO, ...]
     control_windows: tuple[MapControlWindowDTO, ...]
+    visibility_transitions: tuple[MapVisibilityTransitionDTO, ...]
+    visibility_sampling_summaries: tuple[MapVisibilitySamplingSummaryDTO, ...]
+    engine_heuristic_overlays: tuple[MapEngineHeuristicOverlayDTO, ...]
     downsampling: DownsamplingDTO
     availability: AvailabilityDTO
     terminal_quality: TerminalQualityDTO
@@ -1880,6 +1975,8 @@ class MapSceneDTO(WebDTO):
             raise ValueError("map query must stay inside the available frame window")
         if self.downsampling.returned_sample_count != len(self.samples):
             raise ValueError("returned sample count must equal the scene sample tuple")
+        if not self.query.include_engine_heuristics and self.engine_heuristic_overlays:
+            raise ValueError("engine heuristic overlays require explicit query opt-in")
         semantic_identities: tuple[tuple[str, tuple[object, ...]], ...] = (
             ("rasters", tuple(item.raster_public_id for item in self.rasters)),
             ("starts", tuple(item.start_public_id for item in self.starts)),
@@ -1891,6 +1988,15 @@ class MapSceneDTO(WebDTO):
             ("engagements", tuple(item.engagement_public_id for item in self.engagements)),
             ("casualties", tuple(item.casualty_public_id for item in self.casualties)),
             ("control_windows", tuple(item.control_window_public_id for item in self.control_windows)),
+            ("visibility_transitions", tuple(item.visibility_public_id for item in self.visibility_transitions)),
+            (
+                "visibility_sampling_summaries",
+                tuple(item.summary_public_id for item in self.visibility_sampling_summaries),
+            ),
+            (
+                "engine_heuristic_overlays",
+                tuple(item.overlay_public_id for item in self.engine_heuristic_overlays),
+            ),
         )
         for field_name, identities in semantic_identities:
             if len(identities) != len(set(identities)):
@@ -1936,6 +2042,36 @@ class MapSceneDTO(WebDTO):
                 sorted(
                     self.control_windows,
                     key=lambda item: (item.frame_window.frame_start, item.control_window_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "visibility_transitions",
+            tuple(
+                sorted(
+                    self.visibility_transitions,
+                    key=lambda item: (item.frame, item.replay_player_public_id, item.entity_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "visibility_sampling_summaries",
+            tuple(
+                sorted(
+                    self.visibility_sampling_summaries,
+                    key=lambda item: (item.frame, item.sampling_cycle_id, item.summary_public_id),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "engine_heuristic_overlays",
+            tuple(
+                sorted(
+                    self.engine_heuristic_overlays,
+                    key=lambda item: (item.frame, item.replay_player_public_id, item.overlay_public_id),
                 )
             ),
         )

@@ -57,7 +57,7 @@ from generals_replay_analyzer.spatial.coordinates import (
     world_to_map_normalized,
 )
 
-_PUBLIC_NAMESPACE = uuid5(NAMESPACE_URL, "generals-replay-analyzer:map-scene-v1")
+_PUBLIC_NAMESPACE = uuid5(NAMESPACE_URL, "generals-replay-analyzer:map-scene-v2")
 _SAMPLE_REASONS = frozenset(
     {"lifecycle_forced", "order_forced", "state_forced", "changed", "periodic_moving_heartbeat"}
 )
@@ -132,12 +132,15 @@ class MapSceneReadQuery:
     coordinate_display: Literal["raw", "map_normalized", "player_centric"] = "raw"
     player_centric_subject_public_id: str | None = None
     sample_budget: int = 5000
+    include_engine_heuristics: bool = False
 
     def __post_init__(self) -> None:
         if type(self.frame_start) is not int or type(self.frame_end) is not int or not 0 <= self.frame_start <= self.frame_end:
             raise ValueError("map scene frame window must be ordered and nonnegative")
         if type(self.sample_budget) is not int or not 100 <= self.sample_budget <= 20_000:
             raise ValueError("sample budget must be from 100 through 20000")
+        if type(self.include_engine_heuristics) is not bool:
+            raise ValueError("engine heuristic overlay selection must be boolean")
         object.__setattr__(self, "replay_player_public_ids", tuple(sorted(set(self.replay_player_public_ids))))
         object.__setattr__(self, "entity_public_ids", tuple(sorted(set(self.entity_public_ids))))
         object.__setattr__(self, "event_families", tuple(sorted(set(self.event_families))))
@@ -282,6 +285,18 @@ def _number(value: object, label: str) -> float:
 def _integer(value: object, label: str) -> int:
     if type(value) is not int:
         raise MapSceneContractError(f"{label} is not an integer")
+    return value
+
+
+def _boolean(value: object, label: str) -> bool:
+    if type(value) is not bool:
+        raise MapSceneContractError(f"{label} is not boolean")
+    return value
+
+
+def _string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise MapSceneContractError(f"{label} is not a nonempty string")
     return value
 
 
@@ -751,10 +766,11 @@ class MapSceneQueryService:
             raw_samples, sample_reasons = self._samples(
                 session, telemetry, players, query, projection, report_evidence_ids
             )
-            entity_ids_by_public = {
-                item.public_id: item.id
-                for item in session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id))
-            }
+            entity_rows = tuple(
+                session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id))
+            )
+            entity_ids_by_public = {item.public_id: item.id for item in entity_rows}
+            entities_by_object_id = {item.object_id: item for item in entity_rows}
             if not set(query.entity_public_ids).issubset(entity_ids_by_public):
                 raise MapSceneNotFoundError("entity filter is outside the fixed scene")
             samples, downsampling = downsample_samples(raw_samples, query.sample_budget)
@@ -783,6 +799,176 @@ class MapSceneQueryService:
                         "evidence": _evidence(item.evidence_public_id),
                     }
                 )
+
+            # TheSuperHackers @feature Leex 24/08/2026 Project engine-native visibility and bounded AI grid evidence into the fixed replay map scene. (#TBD)
+            include_visibility = not query.event_families or "visibility" in query.event_families
+            include_engine_heuristics = query.include_engine_heuristics and (
+                not query.event_families or "engine_heuristics" in query.event_families
+            )
+            native_event_types: list[str] = []
+            if include_visibility:
+                native_event_types.extend(("object_visibility_changed", "visibility_sampling_summary"))
+            if include_engine_heuristics:
+                native_event_types.append("partition_engine_grid_sample")
+            native_rows = (
+                tuple(
+                    session.execute(
+                        select(TelemetryEvent, EvidenceItem)
+                        .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                        .where(
+                            TelemetryEvent.telemetry_run_id == telemetry.id,
+                            TelemetryEvent.frame >= query.frame_start,
+                            TelemetryEvent.frame <= query.frame_end,
+                            TelemetryEvent.event_type.in_(native_event_types),
+                        )
+                        .order_by(TelemetryEvent.frame, TelemetryEvent.sequence)
+                    )
+                )
+                if native_event_types
+                else ()
+            )
+            visibility_values: list[dict[str, object]] = []
+            visibility_summary_values: list[dict[str, object]] = []
+            latest_heuristic_rows: dict[str, tuple[TelemetryEvent, EvidenceItem]] = {}
+            native_evidence_ids: list[str] = []
+            for event, evidence in native_rows:
+                if evidence.tier != "observed" or evidence.public_id not in report_evidence_ids:
+                    continue
+                payload = _mapping(event.payload_json, f"{event.event_type} payload")
+                if event.event_type == "object_visibility_changed":
+                    player = players.get(_integer(payload.get("player_index"), "visibility player index"))
+                    entity = entities_by_object_id.get(
+                        _integer(payload.get("object_id"), "visibility object id")
+                    )
+                    if player is None or entity is None:
+                        raise MapSceneContractError("visibility identities are unresolved")
+                    if query.replay_player_public_ids and player.public_id not in query.replay_player_public_ids:
+                        continue
+                    if query.entity_public_ids and entity.public_id not in query.entity_public_ids:
+                        continue
+                    position_payload = _mapping(payload.get("position"), "visibility position")
+                    raw_position = Position3(
+                        _number(position_payload.get("x"), "visibility x"),
+                        _number(position_payload.get("y"), "visibility y"),
+                        _number(position_payload.get("z"), "visibility z"),
+                    )
+                    previous_status = _string(payload.get("previous_status"), "previous visibility status")
+                    status = _string(payload.get("status"), "visibility status")
+                    if previous_status not in {"unseen", "clear", "fogged", "shrouded"} or status not in {
+                        "clear",
+                        "fogged",
+                        "shrouded",
+                    }:
+                        raise MapSceneContractError("visibility status is outside the accepted domain")
+                    visibility_values.append(
+                        {
+                            "visibility_public_id": _public_id(
+                                "visibility", telemetry.run_id, event.sequence
+                            ),
+                            "replay_player_public_id": player.public_id,
+                            "entity_public_id": entity.public_id,
+                            "frame": event.frame,
+                            "template_name": _string(payload.get("template_name"), "visibility template"),
+                            "previous_status": previous_status,
+                            "status": status,
+                            "first_observed_clear": _boolean(
+                                payload.get("first_observed_clear"), "first observed clear"
+                            ),
+                            "position": self._position(raw_position, projection, selected_transform),
+                            "sampling_cycle_id": _integer(
+                                payload.get("sampling_cycle_id"), "visibility sampling cycle"
+                            ),
+                            "evidence": _evidence(evidence.public_id),
+                        }
+                    )
+                    native_evidence_ids.append(evidence.public_id)
+                elif event.event_type == "visibility_sampling_summary":
+                    cycle_complete = _boolean(payload.get("cycle_complete"), "visibility cycle complete")
+                    visibility_summary_values.append(
+                        {
+                            "summary_public_id": _public_id(
+                                "visibility-summary", telemetry.run_id, event.sequence
+                            ),
+                            "frame": event.frame,
+                            "eligible_pair_count": _integer(
+                                payload.get("eligible_pair_count"), "eligible visibility pairs"
+                            ),
+                            "sampled_pair_count": _integer(
+                                payload.get("sampled_pair_count"), "sampled visibility pairs"
+                            ),
+                            "maximum_pairs_per_pass": _integer(
+                                payload.get("maximum_pairs_per_pass"), "maximum visibility pairs"
+                            ),
+                            "sampling_cycle_id": _integer(
+                                payload.get("sampling_cycle_id"), "visibility summary cycle"
+                            ),
+                            "cycle_complete": cycle_complete,
+                            "coverage_state": "complete" if cycle_complete else "incomplete",
+                            "evidence": _evidence(evidence.public_id),
+                        }
+                    )
+                    native_evidence_ids.append(evidence.public_id)
+                elif include_engine_heuristics:
+                    player = players.get(_integer(payload.get("player_index"), "heuristic player index"))
+                    if player is None:
+                        raise MapSceneContractError("heuristic player identity is unresolved")
+                    if query.replay_player_public_ids and player.public_id not in query.replay_player_public_ids:
+                        continue
+                    latest_heuristic_rows[player.public_id] = (event, evidence)
+
+            heuristic_values: list[dict[str, object]] = []
+            for player_public_id, (event, evidence) in sorted(latest_heuristic_rows.items()):
+                payload = _mapping(event.payload_json, "partition heuristic payload")
+                grid = _mapping(payload.get("grid"), "partition heuristic grid")
+                raw_cells = payload.get("cells")
+                if not isinstance(raw_cells, list) or not raw_cells or len(raw_cells) > 128:
+                    raise MapSceneContractError("partition heuristic cells are not bounded")
+                cell_values: list[dict[str, object]] = []
+                for raw_cell in raw_cells:
+                    cell = _mapping(raw_cell, "partition heuristic cell")
+                    position_payload = _mapping(cell.get("world_position"), "partition heuristic position")
+                    raw_position = Position3(
+                        _number(position_payload.get("x"), "partition heuristic x"),
+                        _number(position_payload.get("y"), "partition heuristic y"),
+                        _number(position_payload.get("z"), "partition heuristic z"),
+                    )
+                    cell_values.append(
+                        {
+                            "cell_x": _integer(cell.get("cell_x"), "partition cell x"),
+                            "cell_y": _integer(cell.get("cell_y"), "partition cell y"),
+                            "position": self._position(raw_position, projection, selected_transform),
+                            "shroud_status": _string(cell.get("shroud_status"), "partition shroud status"),
+                            "threat_value": _integer(cell.get("threat_value"), "partition threat value"),
+                            "cash_value": _integer(cell.get("cash_value"), "partition cash value"),
+                            "evidence": _evidence(evidence.public_id),
+                        }
+                    )
+                heuristic_values.append(
+                    {
+                        "overlay_public_id": _public_id(
+                            "engine-heuristic-overlay", telemetry.run_id, event.sequence
+                        ),
+                        "replay_player_public_id": player_public_id,
+                        "frame": event.frame,
+                        "sampling_scheme": _string(
+                            payload.get("sampling_scheme"), "partition sampling scheme"
+                        ),
+                        "grid_complete": _boolean(grid.get("complete"), "partition grid complete"),
+                        "threat_label": "Engine AI threat heuristic",
+                        "cash_label": "Engine AI cash-value heuristic",
+                        "cells": cell_values,
+                        "evidence": _evidence(evidence.public_id),
+                    }
+                )
+                native_evidence_ids.append(evidence.public_id)
+            if include_visibility and not visibility_values:
+                omitted_reasons.append("visibility_observations_unavailable")
+            if include_visibility and any(
+                item["coverage_state"] == "incomplete" for item in visibility_summary_values
+            ):
+                omitted_reasons.append("visibility_sampling_incomplete")
+            if include_engine_heuristics and not heuristic_values:
+                omitted_reasons.append("engine_heuristic_samples_unavailable")
             starts = [
                 {
                     "start_public_id": _public_id("start", projection.content_sha256, item.waypoint_id, item.name),
@@ -912,11 +1098,16 @@ class MapSceneQueryService:
                 "coordinate_display": query.coordinate_display,
                 "player_centric_subject_public_id": query.player_centric_subject_public_id,
                 "sample_budget": query.sample_budget,
+                "include_engine_heuristics": query.include_engine_heuristics,
             }
-            evidence_ids = [manifest.public_id, *(item.evidence_public_id for item in samples)]
+            evidence_ids = [
+                manifest.public_id,
+                *(item.evidence_public_id for item in samples),
+                *native_evidence_ids,
+            ]
             state = "partial" if omitted_reasons else "available"
             payload = {
-                "schema_version": "replay-map-scene-v1",
+                "schema_version": "replay-map-scene-v2",
                 "replay_public_id": replay.public_id,
                 "report_public_id": document.report_public_id,
                 "report_version": document.report_version,
@@ -962,6 +1153,9 @@ class MapSceneQueryService:
                 "engagements": engagements,
                 "casualties": casualties,
                 "control_windows": [],
+                "visibility_transitions": visibility_values,
+                "visibility_sampling_summaries": visibility_summary_values,
+                "engine_heuristic_overlays": heuristic_values,
                 "downsampling": downsampling,
                 "availability": _availability(state, omitted_reasons, evidence_ids),
                 "terminal_quality": {
