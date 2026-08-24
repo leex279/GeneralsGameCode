@@ -11,6 +11,11 @@
     </div>
     <div class="page-actions">
       <a class="button" href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map">Open match map</a>
+      <form method="post" action="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/video" class="inline-form">
+        <input type="hidden" name="_csrf" value="{{ video_csrf.hidden_value }}">
+        {% if coaching.horizon.status != "complete" %}<input type="hidden" name="diagnostic_preview" value="true">{% endif %}
+        <button class="button" type="submit">{% if coaching.horizon.status == "complete" %}Generate commented cast{% else %}Generate diagnostic preview{% endif %}</button>
+      </form>
       <a class="button" href="/replays">Back to library</a>
     </div>
   </header>

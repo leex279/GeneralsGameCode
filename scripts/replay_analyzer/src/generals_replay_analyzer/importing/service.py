@@ -60,6 +60,8 @@ from .stages import (
     RECONCILE_IDENTITIES_VERSION,
     RENDER_REPORT,
     RENDER_REPORT_VERSION,
+    RENDER_VIDEO,
+    RENDER_VIDEO_VERSION,
     STAGES,
     TELEMETRY,
     TELEMETRY_VERSION,
@@ -85,6 +87,7 @@ _STAGE_VERSIONS = MappingProxyType(
         ASSESS_STRATEGIES: ASSESS_STRATEGIES_VERSION,
         ANALYZE_LLM: ANALYZE_LLM_VERSION,
         RENDER_REPORT: RENDER_REPORT_VERSION,
+        RENDER_VIDEO: RENDER_VIDEO_VERSION,
     }
 )
 _STAGE_ORDER = {stage: index for index, stage in enumerate(_STAGE_VERSIONS)}
@@ -97,6 +100,7 @@ _DIRECT_DEPENDENCY_STAGES: Mapping[str, frozenset[str]] = MappingProxyType(
         ASSESS_STRATEGIES: frozenset({DERIVE_FEATURES}),
         ANALYZE_LLM: frozenset({ASSESS_STRATEGIES}),
         RENDER_REPORT: frozenset({ASSESS_STRATEGIES}),
+        RENDER_VIDEO: frozenset({RENDER_REPORT}),
     }
 )
 

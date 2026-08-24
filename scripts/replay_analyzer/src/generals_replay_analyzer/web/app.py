@@ -35,6 +35,7 @@ from generals_replay_analyzer.web.routes import (
     players,
     replays,
     reports,
+    video,
 )
 from generals_replay_analyzer.web.routes import (
     settings as settings_routes,
@@ -290,6 +291,7 @@ def create_app(
     app.include_router(settings_routes.router)
     app.include_router(imports.router)
     app.include_router(jobs.router)
+    app.include_router(video.router)
     # TheSuperHackers @feature Leex 22/08/2026 Serve only package-owned local shell assets. (#TBD)
     app.mount("/static", StaticFiles(directory=str(package_resource("web/static"))), name="static")
     app.add_middleware(

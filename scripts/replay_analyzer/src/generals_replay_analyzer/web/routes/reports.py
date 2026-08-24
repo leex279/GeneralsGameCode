@@ -160,12 +160,21 @@ def fixed_report(
         raise PublicProblem(
             status=409, code="report_identity_mismatch", detail="Report identity is inconsistent"
         ) from error
-    return template_response(
+    video_csrf = request.app.state.form_csrf_token_registry.issue(
+        f"/replays/{query.replay_public_id}/reports/{query.report_public_id}/video", request.cookies.get("_csrf")
+    )
+    response = template_response(
         request,
         "replays/detail.html",
         replay_library_shell(report.availability),
-        context={"resolution": None, "report_view": view},
+        context={
+            "resolution": None,
+            "report_view": view,
+            "video_csrf": video_csrf,
+        },
     )
+    response.set_cookie("_csrf", video_csrf.cookie_value, max_age=600, httponly=True, samesite="strict", path="/")
+    return response
 
 
 @router.get(
