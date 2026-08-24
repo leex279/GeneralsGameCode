@@ -566,8 +566,8 @@ public:
 	Bool m_debugIgnoreAsserts;						///< Ignore all asserts.
 #endif
 
-	// TheSuperHackers @bugfix Leex 24/08/2026 Keep GlobalData's stack-trace field ABI-identical across modern engine and device targets. (#TBD)
-#if defined(DEBUG_STACKTRACE) || (!defined(IS_VS6_BUILD) && defined(IG_DEBUG_STACKTRACE))
+	// TheSuperHackers @bugfix Leex 24/08/2026 Keep this field in every modern target while preserving the legacy VC6 DEBUG_STACKTRACE layout. (#TBD)
+#if !defined(IS_VS6_BUILD) || defined(DEBUG_STACKTRACE)
 	Bool m_debugIgnoreStackTrace;					///< No stacktraces for asserts.
 #endif
 

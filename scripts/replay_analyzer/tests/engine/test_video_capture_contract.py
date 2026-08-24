@@ -253,20 +253,19 @@ def test_top_level_build_wiring_preserves_protected_device_cmake(repository_root
     assert "W3DVideoWriter" not in protected_cmake
 
 
-def test_zero_hour_device_target_matches_gameengine_globaldata_layout_defines(
+def test_zero_hour_globaldata_stacktrace_field_has_target_independent_layout(
     repository_root: Path,
 ) -> None:
-    """Prevent device code from compiling a different GlobalData layout than the engine owner."""
+    """Keep the modern Zero Hour GlobalData layout independent of target defines."""
     root_cmake = _source(repository_root, "CMakeLists.txt")
-    engine_cmake = _source(repository_root, "Core/GameEngine/CMakeLists.txt")
-
-    assert "target_compile_definitions(corei_gameengine_private INTERFACE\n    IG_DEBUG_STACKTRACE" in engine_cmake
-    protected_zero_hour_wiring = root_cmake.split(
-        "if(RTS_BUILD_ZEROHOUR AND NOT IS_VS6_BUILD)", maxsplit=1
-    )[1].split("endif()", maxsplit=1)[0]
-    assert "target_compile_definitions(z_gameenginedevice PRIVATE IG_DEBUG_STACKTRACE)" in protected_zero_hour_wiring
     global_data_header = _source(repository_root, "GeneralsMD/Code/GameEngine/Include/Common/GlobalData.h")
-    assert "defined(DEBUG_STACKTRACE) || (!defined(IS_VS6_BUILD) && defined(IG_DEBUG_STACKTRACE))" in global_data_header
+    global_data_source = _source(repository_root, "GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp")
+    layout_guard = "#if !defined(IS_VS6_BUILD) || defined(DEBUG_STACKTRACE)"
+
+    assert "target_compile_definitions(z_gameenginedevice PRIVATE IG_DEBUG_STACKTRACE)" not in root_cmake
+    assert "IG_DEBUG_STACKTRACE" not in global_data_header
+    assert layout_guard in global_data_header
+    assert layout_guard in global_data_source
 
 
 def test_rendered_analyzer_replay_exits_when_playback_reaches_terminal_state(repository_root: Path) -> None:

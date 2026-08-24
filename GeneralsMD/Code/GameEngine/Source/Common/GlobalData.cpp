@@ -620,7 +620,7 @@ GlobalData::GlobalData()
 	m_debugIgnoreAsserts = FALSE;
 #endif
 
-#ifdef DEBUG_STACKTRACE
+#if !defined(IS_VS6_BUILD) || defined(DEBUG_STACKTRACE)
 	m_debugIgnoreStackTrace = FALSE;
 #endif
 
