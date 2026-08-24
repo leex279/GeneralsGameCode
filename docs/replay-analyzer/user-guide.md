@@ -22,7 +22,7 @@ cmake --build build/win32 --target z_generals --config Release
 uv sync --project scripts/replay_analyzer
 ```
 
-Keep the instrumented development executable in the build output and point its working directory at a legal Zero Hour installation. The game loads its DLLs and runtime data from that separate directory; the analyzer never replaces the retail executable:
+Keep the instrumented development executable in the build output and set the legal Zero Hour installation as its runtime directory. For every telemetry or native-video run, the analyzer creates one random, exclusive hardlink to that build beside the installed runtime modules, verifies it is the same ordinary file, starts it without a shell, settles the child process tree, and deletes only that unchanged owned link. It never replaces, renames, or modifies the retail executable:
 
 ```powershell
 $env:GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE = (Resolve-Path 'build/win32/GeneralsMD/Release/generalszh.exe').Path

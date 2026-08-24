@@ -15,7 +15,7 @@ cmake --preset win32
 cmake --build build/win32 --target z_generals --config Release
 ```
 
-Set `GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE` to the absolute instrumented `generalszh.exe` build path and `GENERALS_REPLAY_ANALYZER_ENGINE_RUNTIME_DIRECTORY` to the legal Zero Hour installation directory, then restart both worker and web processes. The runtime directory supplies the game's DLLs and data without copying or replacing the retail executable. Telemetry is unavailable without it, but replay-byte inspection remains available.
+Set `GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE` to the absolute instrumented `generalszh.exe` build path and `GENERALS_REPLAY_ANALYZER_ENGINE_RUNTIME_DIRECTORY` to the legal Zero Hour installation directory, then restart both worker and web processes. The runtime directory supplies the game's DLLs and data through a temporary run-unique hardlink; it is removed only after the child tree settles and only if its identity and hash still match the configured build. The retail executable is never replaced. Telemetry is unavailable without it, but replay-byte inspection remains available.
 
 ## Replay version or parser mismatch
 

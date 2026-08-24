@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 from pydantic import Field
 
 from generals_replay_analyzer.config import AnalyzerSettings
+from generals_replay_analyzer.engine.config import EngineRunConfigurationError
 from generals_replay_analyzer.engine.runtime import bind_runtime_executable
 from generals_replay_analyzer.report.read_model import PublishedReportGraphDTO
 from generals_replay_analyzer.spatial.query import MapSceneReadModel
@@ -390,8 +391,9 @@ class VideoRenderService:
 
         gameplay_path = run_directory / "gameplay.mp4"
         # TheSuperHackers @feature Leex 24/08/2026 Launch the analyzer beside retail runtime modules without altering the configured build. (#TBD)
-        with bind_runtime_executable(engine, engine_runtime) as engine_binding:
-            engine_result = self._run_process(
+        try:
+            with bind_runtime_executable(engine, engine_runtime) as engine_binding:
+                engine_result = self._run_process(
                 VideoProcessSpec(
                 stage="engine_capture",
                 run_id=run_id,
@@ -415,7 +417,9 @@ class VideoRenderService:
                     cancellation=request.cancellation,
                 ),
                 immutable,
-            )
+                )
+        except EngineRunConfigurationError as error:
+            raise VideoRenderError(f"engine runtime binding failed: {error}") from error
         del engine_result
         gameplay_path = _require_ordinary_file(gameplay_path, "native gameplay capture")
         capture_result_path = _require_ordinary_file(
