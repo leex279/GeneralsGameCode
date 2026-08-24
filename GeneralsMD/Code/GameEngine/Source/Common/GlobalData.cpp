@@ -1001,6 +1001,14 @@ GlobalData::GlobalData()
 	m_simulateReplays.clear();
 	m_simulateReplayJobs = SIMULATE_REPLAYS_SEQUENTIAL;
 
+#if !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Default native capture to disabled until the closed command-line contract validates it. (#TBD)
+	m_recordVideoPath.clear();
+	m_videoCaptureWidth = 0;
+	m_videoCaptureHeight = 0;
+	m_videoCaptureFps = 0;
+#endif
+
 	for (i = LEVEL_FIRST; i <= LEVEL_LAST; ++i)
 		m_healthBonus[i] = 1.0f;
 

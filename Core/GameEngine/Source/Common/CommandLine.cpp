@@ -468,6 +468,20 @@ Int parseReplay(char *args[], int num)
 #if defined(RTS_REPLAY_ANALYZER)
 namespace
 {
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Validate native replay capture settings before any renderer or child process starts. (#TBD)
+	Bool s_hasRecordVideoPath = FALSE;
+	Bool s_hasVideoResolution = FALSE;
+	Bool s_hasVideoFps = FALSE;
+
+	void replayVideoCommandLineError(const char *message)
+	{
+		fprintf(stderr, "Replay video capture: %s\n", message);
+		fflush(stderr);
+		exit(1);
+	}
+#endif
+
 	AsciiString s_telemetryTracePath;
 	AsciiString s_telemetryRunId;
 	Int s_telemetryMovementFrames = 15;
@@ -544,6 +558,78 @@ namespace
 		}
 		return TRUE;
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	Int parseRecordVideo(char *args[], int num)
+	{
+		if (num <= 1 || !isAbsoluteAnalyzerPath(args[1]))
+		{
+			replayVideoCommandLineError("-recordVideo requires an absolute MP4 output path");
+		}
+		if (s_hasRecordVideoPath)
+		{
+			replayVideoCommandLineError("-recordVideo may only be specified once");
+		}
+		TheWritableGlobalData->m_recordVideoPath = args[1];
+		s_hasRecordVideoPath = TRUE;
+		return 2;
+	}
+
+	Int parseVideoResolution(char *args[], int num)
+	{
+		if (num <= 1 || s_hasVideoResolution)
+		{
+			replayVideoCommandLineError("-videoRes requires one unique even WIDTHxHEIGHT value");
+		}
+		const Char *lowerSeparator = strchr(args[1], 'x');
+		const Char *upperSeparator = strchr(args[1], 'X');
+		if ((lowerSeparator == nullptr) == (upperSeparator == nullptr))
+		{
+			replayVideoCommandLineError("-videoRes requires WIDTHxHEIGHT");
+		}
+		const Char *separator = lowerSeparator != nullptr ? lowerSeparator : upperSeparator;
+		if (separator == args[1] || separator[1] == '\0'
+			|| strchr(separator + 1, 'x') != nullptr || strchr(separator + 1, 'X') != nullptr)
+		{
+			replayVideoCommandLineError("-videoRes requires exactly one WIDTHxHEIGHT pair");
+		}
+		const std::string widthText(args[1], static_cast<size_t>(separator - args[1]));
+		Char *widthEnd = nullptr;
+		Char *heightEnd = nullptr;
+		errno = 0;
+		const long width = strtol(widthText.c_str(), &widthEnd, 10);
+		const long height = strtol(separator + 1, &heightEnd, 10);
+		if (errno == ERANGE || widthEnd == widthText.c_str() || *widthEnd != '\0'
+			|| heightEnd == separator + 1 || *heightEnd != '\0'
+			|| width < 16 || width > 7680 || height < 16 || height > 4320
+			|| (width % 2) != 0 || (height % 2) != 0)
+		{
+			replayVideoCommandLineError("-videoRes requires bounded even dimensions");
+		}
+		TheWritableGlobalData->m_videoCaptureWidth = static_cast<Int>(width);
+		TheWritableGlobalData->m_videoCaptureHeight = static_cast<Int>(height);
+		s_hasVideoResolution = TRUE;
+		return 2;
+	}
+
+	Int parseVideoFps(char *args[], int num)
+	{
+		if (num <= 1 || s_hasVideoFps)
+		{
+			replayVideoCommandLineError("-videoFps requires one unique 30 or 60 value");
+		}
+		Char *end = nullptr;
+		errno = 0;
+		const long fps = strtol(args[1], &end, 10);
+		if (errno == ERANGE || end == args[1] || *end != '\0' || (fps != 30 && fps != 60))
+		{
+			replayVideoCommandLineError("-videoFps accepts exactly 30 or 60");
+		}
+		TheWritableGlobalData->m_videoCaptureFps = static_cast<Int>(fps);
+		s_hasVideoFps = TRUE;
+		return 2;
+	}
+#endif
 
 	Bool canonicalAnalyzerDestination(const Char *path, AsciiString &result)
 	{
@@ -831,6 +917,60 @@ namespace
 			&& canonicalAnalyzerDestination(rightPath, rightIdentity)
 			&& _stricmp(leftIdentity.str(), rightIdentity.str()) == 0;
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	void validateReplayVideoOptions()
+	{
+		if (!s_hasRecordVideoPath)
+		{
+			if (s_hasVideoResolution || s_hasVideoFps)
+			{
+				replayVideoCommandLineError("-videoRes and -videoFps require -recordVideo");
+			}
+			return;
+		}
+		if (!s_hasVideoResolution || !s_hasVideoFps)
+		{
+			replayVideoCommandLineError("-recordVideo requires -videoRes and -videoFps");
+		}
+		if (TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+		{
+			replayVideoCommandLineError("-recordVideo requires exactly one rendered replay");
+		}
+		if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+		{
+			replayVideoCommandLineError("-recordVideo requires sequential replay playback");
+		}
+		if (!TheGlobalData->m_recordVideoPath.endsWithNoCase(".mp4"))
+		{
+			replayVideoCommandLineError("-recordVideo output must use the .mp4 extension");
+		}
+		if (strlen(TheGlobalData->m_recordVideoPath.str()) + strlen(".capture-result.json") >= MAX_PATH)
+		{
+			replayVideoCommandLineError("-recordVideo output and sidecar must fit below ANSI MAX_PATH");
+		}
+		if (!hasSafeWin32FinalComponent(TheGlobalData->m_recordVideoPath.str()))
+		{
+			replayVideoCommandLineError("-recordVideo has an unsafe Win32 final component");
+		}
+		const DWORD outputAttributes = GetFileAttributesA(TheGlobalData->m_recordVideoPath.str());
+		const std::string sidecarPath = std::string(TheGlobalData->m_recordVideoPath.str()) + ".capture-result.json";
+		const DWORD sidecarAttributes = GetFileAttributesA(sidecarPath.c_str());
+		if (outputAttributes != INVALID_FILE_ATTRIBUTES || sidecarAttributes != INVALID_FILE_ATTRIBUTES)
+		{
+			replayVideoCommandLineError("-recordVideo output and sidecar must not already exist");
+		}
+		AsciiString canonicalOutput;
+		if (!canonicalAnalyzerDestination(TheGlobalData->m_recordVideoPath.str(), canonicalOutput))
+		{
+			replayVideoCommandLineError("-recordVideo output parent could not be resolved");
+		}
+		if (analyzerPathIdentitiesMatch(TheGlobalData->m_recordVideoPath.str(), TheGlobalData->m_simulateReplays[0].str()))
+		{
+			replayVideoCommandLineError("-recordVideo output must not alias the replay input");
+		}
+	}
+#endif
 
 	void validateReplayTelemetryOptions()
 	{
@@ -1841,6 +1981,11 @@ static CommandLineParam paramsForStartup[] =
 	{ "-replay", parseReplay },
 
 #if defined(RTS_REPLAY_ANALYZER)
+#if !defined(IS_VS6_BUILD)
+	{ "-recordVideo", parseRecordVideo },
+	{ "-videoRes", parseVideoResolution },
+	{ "-videoFps", parseVideoFps },
+#endif
 	// TheSuperHackers @feature Leex 18/08/2026 Emit an observer-only authoritative replay parse dump to an absolute NDJSON path.
 	{ "-replay-parse-dump", parseReplayParseDump },
 	// TheSuperHackers @feature Leex 18/08/2026 Activate passive replay telemetry only for one validated headless replay. (#TBD)
@@ -2167,6 +2312,7 @@ void CommandLine::parseCommandLineForStartup()
 	parseCommandLine(paramsForStartup, ARRAY_SIZE(paramsForStartup));
 #if defined(RTS_REPLAY_ANALYZER)
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	validateReplayVideoOptions();
 	validateReplayUserDataRootOptions();
 	validateAutoCameraOptions();
 #endif
