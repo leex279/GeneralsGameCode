@@ -405,8 +405,13 @@ class VideoRenderService:
                     str(camera_script_path),
                     "-recordVideo",
                     str(gameplay_path),
+                    # TheSuperHackers @fix Leex 24/08/2026 Keep the native backbuffer and encoded replay cast at one fixed resolution. (#TBD)
                     "-videoRes",
                     f"{settings.width}x{settings.height}",
+                    "-xres",
+                    str(settings.width),
+                    "-yres",
+                    str(settings.height),
                     "-videoFps",
                     str(settings.fps),
                 ),

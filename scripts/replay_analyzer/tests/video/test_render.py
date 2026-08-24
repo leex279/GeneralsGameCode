@@ -404,6 +404,8 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert frozen_replay.name == "replay.rep"
     assert frozen_replay.read_bytes() == request.replay_path.read_bytes()
     assert engine_spec.argv[engine_spec.argv.index("-videoRes") + 1] == "640x360"
+    assert engine_spec.argv[engine_spec.argv.index("-xres") + 1] == "640"
+    assert engine_spec.argv[engine_spec.argv.index("-yres") + 1] == "360"
     assert engine_spec.argv[engine_spec.argv.index("-videoFps") + 1] == "30"
     assert mux_spec.argv[mux_spec.argv.index("-t") + 1] == "2.000000000"
     assert all(spec.argv[0] == str(spec.argv[0]) and spec.argv for spec in process.specs)
