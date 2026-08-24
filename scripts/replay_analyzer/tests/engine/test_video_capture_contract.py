@@ -69,6 +69,11 @@ def test_presentation_runner_pins_client_cadence_to_sixty_hz(repository_root: Pa
     game_engine = _source(
         repository_root, "GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp"
     )
+    cadence_guard = game_engine.split(
+        "TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates",
+        maxsplit=1,
+    )[0].rsplit("#if defined(", maxsplit=1)[1]
+    assert cadence_guard.startswith("RTS_REPLAY_ANALYZER)")
     update_cadence = game_engine.split(
         "TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates",
         maxsplit=1,

@@ -901,9 +901,9 @@ void GameEngine::update()
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
 			VERIFY_CRC
 
-#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 			// TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates to 60 Hz before camera/capture sampling. (#TBD)
-			if (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty())
+			if (!TheGlobalData->m_recordVideoPath.isEmpty())
 			{
 				TheFramePacer->setFramesPerSecondLimit(60);
 				TheWritableGlobalData->m_useFpsLimit = TRUE;
