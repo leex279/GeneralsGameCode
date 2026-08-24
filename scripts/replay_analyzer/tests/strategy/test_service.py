@@ -530,6 +530,7 @@ def _seed_persisted_applicability(
             "replay_version": "1.04",
             "map_identity": "maps/test/map.ini",
             "initial_seed": 4,
+            "logic_frames_per_second": 30,
             "exporter_settings": {"movement_sample_frames": 15, "audio_enabled": False, "order_coverage": []},
             "game_data_catalog": catalog_reference,
             "map_asset": None,

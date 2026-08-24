@@ -178,6 +178,7 @@ def _v2_manifest(reference: dict[str, object], map_reference: dict[str, object])
         "replay_version": "1.04",
         "map_identity": "maps/test.map",
         "initial_seed": 7,
+        "logic_frames_per_second": 60,
         "exporter_settings": {
             "movement_sample_frames": 15,
             "audio_enabled": False,
@@ -333,6 +334,7 @@ def test_public_bundle_loader_exposes_one_immutable_validated_v1_v2_authority(tm
     assert bundle.map_manifest_path is not None
     assert bundle.map_asset is not None
     assert bundle.map_asset.content_sha256 == bundle.manifest.payload.map_asset.content_sha256
+    assert bundle.manifest.payload.logic_frames_per_second == 60
     assert bundle.map_member_paths == tuple(
         sorted(
             (
@@ -371,6 +373,27 @@ def test_public_bundle_loader_exposes_one_immutable_validated_v1_v2_authority(tm
     assert v1_bundle.map_manifest_path is None
     assert v1_bundle.map_member_paths == ()
     assert v1_bundle.map_asset is None
+
+
+def test_v2_reader_uses_manifest_sixty_hertz_for_every_event_time(tmp_path: Path) -> None:
+    reference = _write_catalog(tmp_path)
+    trace = _write_v2_trace(tmp_path, reference, name="sixty-hertz.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    records[1]["frame"] = 60
+    records[1]["logic_time_seconds"] = 1.0
+    records[-1] = _completion(2, records[:-1])
+    valid = _write_records(tmp_path / "sixty-hertz-valid.ndjson", records)
+
+    assert load_validated_telemetry_bundle(valid).records[1].logic_time_seconds == 1.0
+
+    records[1]["logic_time_seconds"] = 2.0
+    records[-1] = _completion(2, records[:-1])
+    invalid = _write_records(tmp_path / "sixty-hertz-invalid.ndjson", records)
+    with pytest.raises(
+        TelemetryTraceValidationError,
+        match="logic_time_seconds must equal frame / manifest logic_frames_per_second",
+    ):
+        load_validated_telemetry_bundle(invalid)
 
 
 def test_reader_preserves_frozen_v1_order_and_custom_state_payloads(tmp_path: Path) -> None:

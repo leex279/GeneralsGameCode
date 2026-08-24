@@ -490,6 +490,7 @@ def _attach_spatial_projection(
             "replay_version": "1.04",
             "map_identity": "maps/fixture.map",
             "initial_seed": 4,
+            "logic_frames_per_second": 30,
             "exporter_settings": {
                 "audio_enabled": False,
                 "movement_sample_frames": 15,

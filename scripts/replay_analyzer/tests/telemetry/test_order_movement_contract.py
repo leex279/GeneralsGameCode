@@ -252,6 +252,7 @@ def _valid_records(tmp_path: Path, movement_sample_frames: int = 15) -> list[dic
                 "replay_version": "1.04",
                 "map_identity": "maps/test.map",
                 "initial_seed": 7,
+                "logic_frames_per_second": 30,
                 "exporter_settings": {
                     "movement_sample_frames": movement_sample_frames,
                     "audio_enabled": False,

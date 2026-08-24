@@ -240,6 +240,48 @@ def _attempt_settings(attempt: TelemetryAttempt, idempotency_key: str | None) ->
     }
 
 
+def _successful_attempt_settings(
+    attempt: TelemetryAttempt,
+    idempotency_key: str | None,
+    bundle: ValidatedTelemetryBundle,
+) -> dict[str, object]:
+    settings = _attempt_settings(attempt, idempotency_key)
+    settings["logic_frames_per_second"] = bundle.logic_frames_per_second
+    settings["logic_timebase_source"] = (
+        "engine_manifest"
+        if bundle.manifest.payload.logic_frames_per_second is not None
+        else "historical_v1_contract"
+    )
+    return settings
+
+
+def _engine_authoritative_header(
+    header: object,
+    bundle: ValidatedTelemetryBundle,
+) -> dict[str, object]:
+    existing = dict(header) if isinstance(header, dict) else {}
+    manifest_fps = bundle.manifest.payload.logic_frames_per_second
+    if manifest_fps is None:
+        return existing
+    prior = existing.get("timebase")
+    prior_timebase = prior if isinstance(prior, dict) else {}
+    authoritative: dict[str, object] = {
+        "logic_frames_per_second": manifest_fps,
+        "source": "engine_manifest",
+    }
+    observed = prior_timebase.get("observed_frames_per_second")
+    if type(observed) in {int, float}:
+        authoritative["observed_frames_per_second"] = observed
+    parser_fps = prior_timebase.get("logic_frames_per_second")
+    parser_source = prior_timebase.get("source")
+    if parser_source != "engine_manifest" and type(parser_fps) is int:
+        authoritative["parser_inferred_logic_frames_per_second"] = parser_fps
+    if parser_source != "engine_manifest" and isinstance(parser_source, str):
+        authoritative["parser_inference_source"] = parser_source
+    existing["timebase"] = authoritative
+    return existing
+
+
 _PATHLIKE_TEXT = re.compile(
     r"(?i)(?:file:(?:/{2,3}|\\{2})[^\s\"']*|(?<![a-z0-9])[a-z]:[\\/][^\s\"'>)\]]*|"
     r"\\\\(?:[?.]\\)?[^\s\"'>)\]]*|(?:^|[^a-z0-9/])/(?!/)[^\s\"'>)\]]*)"
@@ -361,6 +403,7 @@ class TelemetryObservationImporter:
         with self._session_factory() as session:
             replay = session.get(Replay, run.replay_id)
             settings = run.settings_json if isinstance(run.settings_json, dict) else {}
+            expected_attempt_settings = _attempt_settings(attempt, idempotency_key)
             matches = bool(
                 replay is not None
                 and replay.sha256 == replay_sha256
@@ -368,7 +411,7 @@ class TelemetryObservationImporter:
                 and run.strategy_analysis_scope == attempt.strategy_analysis_scope
                 and run.process_exit_code == attempt.process_exit_code
                 and run.engine_executable_sha256 == attempt.engine_executable_sha256
-                and settings == _attempt_settings(attempt, idempotency_key)
+                and all(settings.get(key) == value for key, value in expected_attempt_settings.items())
                 and run.diagnostics_json == [dict(diagnostic) for diagnostic in attempt.diagnostics]
             )
             if not matches or replay is None:
@@ -380,7 +423,17 @@ class TelemetryObservationImporter:
                 verified = self._reverify_artifacts(session, attempt.artifacts)
             except (OSError, ValueError):
                 return False
-            return self._run_asset_links_match(run, verified)
+            if not self._run_asset_links_match(run, verified):
+                return False
+            try:
+                normalized = self._load_normalized_bundle(verified, attempt)
+            except (OSError, ValueError):
+                return False
+            return settings == _successful_attempt_settings(
+                attempt,
+                idempotency_key,
+                normalized.bundle,
+            )
 
     # TheSuperHackers @bugfix Leex 23/08/2026 Reuse only telemetry graphs with canonical sequence citations. (#TBD)
     @staticmethod
@@ -835,6 +888,9 @@ class TelemetryObservationImporter:
                 replay.map_id = map_row.id
             run.schema_version = normalized.bundle.manifest.schema_version
             run.engine_build = normalized.bundle.manifest.payload.engine_build
+            # TheSuperHackers @feature Leex 24/08/2026 Persist the engine manifest timebase as product authority. (#TBD)
+            run.settings_json = _successful_attempt_settings(attempt, idempotency_key, normalized.bundle)
+            replay.header_json = _engine_authoritative_header(replay.header_json, normalized.bundle)
             run.final_frame = normalized.bundle.complete.payload.final_frame
             run.command_count = normalized.bundle.complete.payload.command_count
             run.trace_sha256 = normalized.bundle.complete.payload.trace_sha256

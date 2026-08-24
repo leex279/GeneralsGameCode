@@ -48,6 +48,7 @@ class ValidatedTelemetryBundle:
     records: tuple[TelemetryRecord, ...]
     manifest: ManifestRecord
     complete: CompleteRecord
+    logic_frames_per_second: int
     catalog_path: Path | None
     map_manifest_path: Path | None
     map_member_paths: tuple[Path, ...]
@@ -1983,6 +1984,7 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
     authoritative_map: MapAsset | None = None
     catalog_identities: _CatalogIdentities | None = None
     expected_engine_build: str | None = None
+    expected_logic_frames_per_second: int | None = None
     players_initialized_count = 0
     actual_event_counts: dict[str, int] = {}
     complete_seen = False
@@ -2087,6 +2089,24 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
                     f"order/state/sample frame {validated.frame} is less than previous frame {prior_order_movement_frame}",
                 )
             prior_order_movement_frame = validated.frame
+
+        if isinstance(validated, ManifestRecord):
+            expected_logic_frames_per_second = validated.payload.logic_frames_per_second
+            if expected_logic_frames_per_second is None:
+                if validated.schema_version != 1:
+                    raise _error(path, line_number, validated.sequence, "manifest logic timebase is unavailable")
+                expected_logic_frames_per_second = 30
+
+        if expected_logic_frames_per_second is None:
+            raise _error(path, line_number, validated.sequence, "manifest logic timebase is unavailable")
+        expected_logic_time = validated.frame / expected_logic_frames_per_second
+        if validated.logic_time_seconds != expected_logic_time:
+            raise _error(
+                path,
+                line_number,
+                validated.sequence,
+                "logic_time_seconds must equal frame / manifest logic_frames_per_second",
+            )
 
         if isinstance(validated, ManifestRecord):
             expected_catalog = validated.payload.game_data_catalog
@@ -2354,8 +2374,11 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
     complete = records[-1]
     assert isinstance(manifest, ManifestRecord)
     assert isinstance(complete, CompleteRecord)
+    assert expected_logic_frames_per_second is not None
     if expected_schema_version == 1:
-        return ValidatedTelemetryBundle(path, records, manifest, complete, None, None, (), None)
+        return ValidatedTelemetryBundle(
+            path, records, manifest, complete, expected_logic_frames_per_second, None, None, (), None
+        )
     assert expected_catalog is not None
     assert expected_map_reference is not None
     assert authoritative_map is not None
@@ -2367,6 +2390,7 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
         records,
         manifest,
         complete,
+        expected_logic_frames_per_second,
         catalog_path,
         map_manifest_path,
         map_member_paths,

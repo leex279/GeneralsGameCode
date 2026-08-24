@@ -361,7 +361,8 @@ namespace
 	std::string logicTime(UnsignedInt frame)
 	{
 		char value[64];
-		const Int valueLength = snprintf(value, sizeof(value), "%.17g", static_cast<double>(frame) / 30.0);
+		const Int valueLength = snprintf(
+			value, sizeof(value), "%.17g", static_cast<double>(frame) / LOGICFRAMES_PER_SECONDS_REAL);
 		if (valueLength <= 0 || valueLength >= static_cast<Int>(sizeof(value)))
 		{
 			setWriterError("format_failed", "could not format telemetry logic time", TRUE);
@@ -673,6 +674,8 @@ void ReplayTelemetry::initialize()
 		+ ",\"replay_version\":" + jsonString(s_replayVersion)
 		+ ",\"map_identity\":" + jsonString(s_mapIdentity)
 		+ ",\"initial_seed\":" + std::to_string(s_initialSeed)
+		// TheSuperHackers @feature Leex 24/08/2026 Bind telemetry timestamps to the active deterministic logic clock. (#TBD)
+		+ ",\"logic_frames_per_second\":" + std::to_string(LOGICFRAMES_PER_SECOND)
 		+ ",\"exporter_settings\":{\"movement_sample_frames\":" + std::to_string(s_movementSampleFrames)
 		+ ",\"audio_enabled\":" + (audioEnabled ? "true" : "false")
 		+ ",\"order_coverage\":" + ReplayMovementSampler::orderCoverageJson().str() + "}"

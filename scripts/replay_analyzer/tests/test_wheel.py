@@ -653,6 +653,7 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
                 "replay_version": "1.04",
                 "map_identity": "test.map",
                 "initial_seed": 1,
+                "logic_frames_per_second": 30,
                 "exporter_settings": {
                     "movement_sample_frames": 15,
                     "audio_enabled": False,

@@ -202,6 +202,7 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert manifest.frame == 0
     assert manifest.logic_time_seconds == 0.0
     assert manifest.schema_version == 2
+    assert manifest.payload.logic_frames_per_second in (30, 60)
     assert manifest.payload.exporter_settings["movement_sample_frames"] == 15
     assert manifest.payload.exporter_settings["audio_enabled"] is False
     order_coverage = manifest.payload.exporter_settings["order_coverage"]
@@ -218,7 +219,7 @@ def test_headless_replay_writes_a_valid_passive_telemetry_envelope(
     assert players.payload.game_data_catalog == manifest.payload.game_data_catalog
     assert complete.sequence == len(records) - 1
     assert complete.payload.final_frame == complete.frame
-    assert complete.logic_time_seconds == complete.frame / 30.0
+    assert complete.logic_time_seconds == complete.frame / manifest.payload.logic_frames_per_second
     assert complete.payload.command_count > 0
     expected_event_counts: dict[str, int] = {}
     for record in records:

@@ -231,6 +231,7 @@ def _write_v2_bundle(root: Path, run_id: str) -> Path:
         "replay_version": "1.04",
         "map_identity": "maps/test.map",
         "initial_seed": 7,
+        "logic_frames_per_second": 30,
         "exporter_settings": {
             "movement_sample_frames": 15,
             "audio_enabled": False,
@@ -673,6 +674,16 @@ def test_v2_import_uses_validated_map_and_stable_raw_event_evidence(
 ) -> None:
     """Catch map inference, path identity leakage, or duplicate telemetry graphs."""
     replay_sha256 = _replay(session_factory, settings)
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert replay is not None
+        replay.header_json = {
+            "timebase": {
+                "logic_frames_per_second": 60,
+                "source": "replay_header_wall_clock",
+                "observed_frames_per_second": 59.578,
+            }
+        }
     run_id = "123e4567-e89b-12d3-a456-426614174000"
     trace = _write_v2_bundle(settings.data_root / "runs" / run_id, run_id)
     assert len(load_validated_telemetry_bundle(trace).records) == 6
@@ -746,6 +757,16 @@ def test_v2_import_uses_validated_map_and_stable_raw_event_evidence(
         assert session.scalar(select(func.count(PlayerAlias.id))) == 0
         replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
         assert replay is not None and replay.lifecycle_state == "engine_verified" and replay.map_id == map_row.id
+        telemetry_run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert telemetry_run is not None
+        assert telemetry_run.settings_json["logic_frames_per_second"] == 30
+        assert replay.header_json["timebase"] == {
+            "logic_frames_per_second": 30,
+            "source": "engine_manifest",
+            "observed_frames_per_second": 59.578,
+            "parser_inferred_logic_frames_per_second": 60,
+            "parser_inference_source": "replay_header_wall_clock",
+        }
 
 
 def test_v1_import_preserves_direct_entity_and_event_family_fields_without_map(

@@ -168,6 +168,7 @@ def _v2_manifest(reference: dict[str, object], map_reference: dict[str, object])
         "replay_version": "1.04",
         "map_identity": "maps/test.map",
         "initial_seed": 7,
+        "logic_frames_per_second": 30,
         "exporter_settings": {
             "movement_sample_frames": 15,
             "audio_enabled": False,

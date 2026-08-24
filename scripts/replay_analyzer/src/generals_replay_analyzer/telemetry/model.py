@@ -857,6 +857,7 @@ class ManifestPayload(BaseModel):
     replay_version: str = Field(min_length=1)
     map_identity: str = Field(min_length=1)
     initial_seed: int
+    logic_frames_per_second: Literal[30, 60] | None = None
     exporter_settings: dict[str, object]
     game_data_catalog: "GameDataCatalogReference | None" = None
     map_asset: "MapAssetReference | None" = None
@@ -971,13 +972,7 @@ class TelemetryEnvelope(BaseModel):
     run_id: UUID
     sequence: NonNegativeInt
     frame: NonNegativeInt
-    logic_time_seconds: float
-
-    @model_validator(mode="after")
-    def _require_logic_time_for_30_fps(self) -> "TelemetryEnvelope":
-        if self.logic_time_seconds != self.frame / 30.0:
-            raise ValueError("logic_time_seconds must equal frame / 30.0")
-        return self
+    logic_time_seconds: float = Field(ge=0, allow_inf_nan=False)
 
 
 class V2OnlyTelemetryEnvelope(TelemetryEnvelope):
@@ -997,6 +992,8 @@ class ManifestRecord(TelemetryEnvelope):
     @model_validator(mode="after")
     def _require_bounded_v2_exporter_settings(self) -> "ManifestRecord":
         if self.schema_version == 2:
+            if self.payload.logic_frames_per_second is None:
+                raise ValueError("v2 manifest requires logic_frames_per_second")
             if self.payload.map_asset is None:
                 raise ValueError("v2 manifest requires a strict map_asset reference")
             self.payload.map_asset.require_strict_v2()

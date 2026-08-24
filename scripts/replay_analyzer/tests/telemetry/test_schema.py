@@ -9,7 +9,11 @@ from uuid import UUID
 import pytest
 
 from generals_replay_analyzer.telemetry.model import EVENT_TYPES
-from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
+from generals_replay_analyzer.telemetry.reader import (
+    TelemetryTraceValidationError,
+    iter_validated_trace,
+    load_validated_telemetry_bundle,
+)
 
 RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
 UINT32_MAX = 4_294_967_295
@@ -112,6 +116,13 @@ def test_reader_returns_validated_observed_records_with_immutable_evidence_ident
     assert records[1].run_id == UUID(RUN_ID)
     assert records[1].event_type == "object_created"
     assert records[1].payload.object_id == 248
+
+
+def test_historical_v1_manifest_retains_the_legacy_thirty_hertz_clock(tmp_path: Path) -> None:
+    bundle = load_validated_telemetry_bundle(_complete_trace(tmp_path))
+
+    assert bundle.manifest.payload.logic_frames_per_second is None
+    assert bundle.logic_frames_per_second == 30
 
 
 def test_v1_reader_preserves_schema_valid_unbounded_cash_and_absent_final_balances(tmp_path: Path) -> None:
