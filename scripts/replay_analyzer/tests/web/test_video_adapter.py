@@ -41,7 +41,7 @@ def _seed_result(factory: sessionmaker[Session], output: dict[str, object]) -> N
             public_id=JOB_ID,
             replay_id=None,
             stage="render_video",
-            component_version="6",
+            component_version="7",
             idempotency_key="render-video-security-boundary",
             status="succeeded",
             priority=100,
