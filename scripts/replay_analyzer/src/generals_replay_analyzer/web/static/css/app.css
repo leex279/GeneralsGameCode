@@ -99,6 +99,14 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .command-strip small { color: var(--cc-muted); font-size: 0.75rem; margin-top: 0.1rem; }
 .command-index { color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.75rem; }
 .dashboard-layout { display: grid; gap: var(--cc-space-4); grid-template-columns: minmax(0, 2fr) minmax(18rem, 0.8fr); }
+/* TheSuperHackers @feature Leex 24/08/2026 Match the reference scouting dossier with responsive evidence cards. (#TBD) */
+.dossier-context, .dossier-opening-grid { display: grid; gap: var(--cc-space-3); grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: var(--cc-space-3); }
+.dossier-context > div, .dossier-opening-grid article { background: var(--cc-surface-2); border: 1px solid var(--cc-rule); padding: var(--cc-space-3); }
+.dossier-context span, .dossier-opening-grid article > span { color: var(--cc-muted); display: block; font-family: var(--cc-mono); font-size: .7rem; text-transform: uppercase; }
+.dossier-context strong { color: var(--cc-pale); display: block; margin-top: .4rem; }
+.dossier-opening-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dossier-opening-grid h3 { margin: .45rem 0; }
+.dossier-opening-grid article > strong { color: var(--cc-pale); font-family: var(--cc-mono); }
 /* TheSuperHackers @feature Leex 24/08/2026 Match the reference dashboard with datastore-backed workspace totals. (#TBD) */
 .dashboard-kpi-grid { display: grid; gap: var(--cc-space-3); grid-template-columns: repeat(4, minmax(0, 1fr)); margin: var(--cc-space-4) 0; }
 .dashboard-kpi { background: var(--cc-surface-2); border: 1px solid var(--cc-rule); padding: var(--cc-space-3); }
@@ -375,6 +383,7 @@ dialog::backdrop { background: rgb(4 9 13 / 88%); }
 
 @media (max-width: 1023px) {
   .dashboard-layout { grid-template-columns: 1fr; }
+  .dossier-context, .dossier-opening-grid { grid-template-columns: 1fr; }
   .dashboard-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-strip { grid-template-columns: 1fr; }

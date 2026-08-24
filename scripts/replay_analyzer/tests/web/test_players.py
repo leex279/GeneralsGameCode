@@ -77,6 +77,70 @@ def test_player_index_query_normalizes_native_filters() -> None:
     }
 
 
+def test_player_profile_view_projects_evidence_backed_opponent_dossier() -> None:
+    profile = _full_profile()
+    second_opening = profile.insights[0].model_copy(
+        update={
+            "result_public_id": "123e4567-e89b-42d3-a456-426614174399",
+            "label": "Alternate Opening",
+            "sample_count": 4,
+        }
+    )
+    view = player_profile_view(profile.model_copy(update={"insights": (*profile.insights, second_opening)}))
+
+    assert [item.label for item in view.opponent_dossier_openings] == [
+        "Recurring Opening",
+        "Alternate Opening",
+    ]
+    assert view.opponent_dossier_sample_count == 10
+    assert view.opponent_dossier_factions == ("China",)
+    assert view.opponent_dossier_maps == ("Tournament Desert",)
+    assert view.opponent_dossier_threat == "Unavailable"
+
+
+def test_player_profile_evidence_links_require_one_unambiguous_fixed_report() -> None:
+    profile = _full_profile()
+    single_report_view = player_profile_view(profile)
+    no_report_view = player_profile_view(
+        profile.model_copy(
+            update={
+                "query": profile.query.model_copy(update={"report_public_ids": ()}),
+                "version": profile.version.model_copy(update={"fixed_reports": ()}),
+            }
+        )
+    )
+    second_report = profile.version.fixed_reports[0].model_copy(
+        update={"report_public_id": "123e4567-e89b-42d3-a456-426614174398"}
+    )
+    multiple_report_view = player_profile_view(
+        profile.model_copy(
+            update={
+                "query": profile.query.model_copy(
+                    update={"report_public_ids": (REPORT_ID, second_report.report_public_id)}
+                ),
+                "version": profile.version.model_copy(
+                    update={"fixed_reports": (*profile.version.fixed_reports, second_report)}
+                ),
+            }
+        )
+    )
+
+    assert single_report_view.evidence_report_public_id == REPORT_ID
+    assert no_report_view.evidence_report_public_id is None
+    assert multiple_report_view.evidence_report_public_id is None
+
+    for bounded_profile in (no_report_view.profile, multiple_report_view.profile):
+        with _client(_PlayerPort(bounded_profile)) as client:
+            rendered = client.get(
+                _fixed_profile_url(bounded_profile.query),
+                headers={"accept": "text/html"},
+            )
+
+        assert rendered.status_code == 200
+        assert 'href="/evidence/' not in rendered.text
+        assert "Direct evidence links require one fixed report." in rendered.text
+
+
 def test_player_index_url_is_stable_and_uses_public_filters_only() -> None:
     """Catch pagination links dropping filters or carrying mutable/private selectors."""
     query = PlayerIndexQueryDTO(page=2, search="Leex279", faction="China", sort="match_count")

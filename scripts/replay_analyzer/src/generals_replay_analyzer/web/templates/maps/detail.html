@@ -4,11 +4,42 @@
 {%- endmacro %}
 {% macro empty_row(columns, text) -%}<tr><td colspan="{{ columns }}">{{ text }}</td></tr>{%- endmacro %}
 {% block content %}
-  <link rel="stylesheet" href="/static/css/map.css">
+  <link rel="stylesheet" href="/static/css/map.css?v=2">
   <header class="page-heading">
     <div><span class="eyebrow">Fixed report / Spatial evidence</span><h1>{{ map_view.scene.map_display_name }}</h1><p>One immutable scene for report {{ map_view.scene.report_public_id }}.</p></div>
     <a href="{{ map_view.fixed_report_href }}">Back to fixed report</a>
   </header>
+
+  <!-- TheSuperHackers @feature Leex 24/08/2026 Lead spatial analysis with the replay reconstruction and a tactical event log. (#TBD) -->
+  <section class="workspace-panel battle-reconstruction" aria-labelledby="map-visual-heading">
+    <div class="section-heading">
+      <div><span class="eyebrow">Reconstruction / verified horizon</span><h2 id="map-visual-heading">Battle reconstruction</h2></div>
+      <span>{{ map_view.scene.query.frame_start }}&ndash;{{ map_view.scene.query.frame_end }} frames</span>
+    </div>
+    <div class="battle-reconstruction-grid">
+      <div class="battle-map-stage">
+        <p id="map-description">Observed positions, intent markers, validated routes, engagements, casualties, and scouting transitions over the authoritative map rectangle.</p>
+        <label for="raster-selector">Authoritative raster <select id="raster-selector" data-map-raster-select>{% for raster in map_view.rasters %}<option value="{{ raster.local_href }}" data-raw-minimum-x="{{ raster.descriptor.placement.raw_minimum_x }}" data-raw-minimum-y="{{ raster.descriptor.placement.raw_minimum_y }}" data-raw-maximum-x="{{ raster.descriptor.placement.raw_maximum_x }}" data-raw-maximum-y="{{ raster.descriptor.placement.raw_maximum_y }}">{{ raster.label }} &mdash; {{ raster.descriptor.availability.state }}</option>{% endfor %}</select></label>
+        <div id="map-scene-chart" role="img" aria-label="Authoritative replay map scene" aria-describedby="map-description" data-map-scene-url="{{ map_view.scene_url }}" data-map-chart></div>
+        <p id="map-chart-status" role="status" aria-live="polite">Loading the spatial scene.</p>
+        <noscript>The interactive chart requires JavaScript; use the complete filters, counts, tables, JSON, and raster links on this page.</noscript>
+        <div class="map-legend" aria-label="Map legend"><strong>Legend:</strong> observed sample; order target; validated route; engagement; casualty; grid = observed sample presence share.</div>
+        <p class="map-source-links"><a href="{{ map_view.scene_url }}">Canonical scene JSON</a>{% for raster in map_view.rasters %} &middot; <a href="{{ raster.local_href }}">{{ raster.label }} raster</a>{% endfor %}</p>
+      </div>
+      <aside class="tactical-event-log" aria-label="Tactical event log">
+        <div><span class="eyebrow">Verified events</span><h3>Tactical event log</h3></div>
+        {% if map_view.scene.visibility_transitions or map_view.scene.engagements or map_view.scene.casualties or map_view.scene.orders %}
+          <ol>
+            {% for item in map_view.scene.visibility_transitions[:4] %}<li><span>Frame {{ item.frame }}</span><strong>{% if item.first_observed_clear %}First observed clear{% else %}Visibility {{ item.previous_status }} to {{ item.status }}{% endif %}</strong><small>{{ item.template_name }}</small>{{ evidence_links(item.evidence) }}</li>{% endfor %}
+            {% for item in map_view.scene.engagements[:4] %}<li><span>Frames {{ item.frame_start }}&ndash;{{ item.frame_end }}</span><strong>Engagement</strong><small>{{ item.killing_blow_count }} killing blows &middot; {{ item.applied_damage_sum }} applied damage</small>{{ evidence_links(item.evidence) }}</li>{% endfor %}
+            {% for item in map_view.scene.casualties[:4] %}<li><span>Frame {{ item.frame }}</span><strong>Observed casualty</strong><small>{{ item.victim_replay_player_public_id or "unassigned" }}</small>{{ evidence_links(item.evidence) }}</li>{% endfor %}
+            {% for item in map_view.scene.orders[:4] %}<li><span>Frame {{ item.frame }}</span><strong>{{ item.label }}</strong><small>{{ item.target_kind }}</small>{{ evidence_links(item.evidence) }}</li>{% endfor %}
+          </ol>
+        {% else %}<p>No verified tactical events are available inside this evidence horizon.</p>{% endif %}
+      </aside>
+    </div>
+    <p class="map-enhancement-note">The chart is an enhancement. Every essential value and evidence link remains in the tables below.</p>
+  </section>
 
   <!-- TheSuperHackers @feature Leex 23/08/2026 Summarize only observed spatial collections before exposing map internals. (#TBD) -->
   <section class="workspace-panel spatial-briefing" aria-labelledby="spatial-briefing-title">
@@ -63,18 +94,6 @@
       <fieldset><legend>Event overlays</legend>{% for family in ('samples','orders','routes','structures','engagements','casualties','presence','visibility','engine_heuristics') %}<label><input type="checkbox" name="family" value="{{ family }}"{% if family in map_view.scene.query.event_families %} checked{% endif %}>{{ family }}</label>{% endfor %}</fieldset>
       <button type="submit">Apply spatial filters</button>
     </form>
-  </section>
-
-  <section aria-labelledby="map-visual-heading">
-    <h2 id="map-visual-heading">Spatial scene enhancement</h2>
-    <p id="map-description">Observed points, intent markers, validated grid routes, engagement centroids, casualties, and observed sample presence share over the authoritative raw map rectangle.</p>
-    <label for="raster-selector">Authoritative raster <select id="raster-selector" data-map-raster-select>{% for raster in map_view.rasters %}<option value="{{ raster.local_href }}" data-raw-minimum-x="{{ raster.descriptor.placement.raw_minimum_x }}" data-raw-minimum-y="{{ raster.descriptor.placement.raw_minimum_y }}" data-raw-maximum-x="{{ raster.descriptor.placement.raw_maximum_x }}" data-raw-maximum-y="{{ raster.descriptor.placement.raw_maximum_y }}">{{ raster.label }} — {{ raster.descriptor.availability.state }}</option>{% endfor %}</select></label>
-    <div id="map-scene-chart" role="img" aria-label="Authoritative replay map scene" aria-describedby="map-description" data-map-scene-url="{{ map_view.scene_url }}" data-map-chart></div>
-    <p id="map-chart-status" role="status" aria-live="polite">Loading the spatial scene.</p>
-    <p>The chart is an enhancement. Every essential value and evidence link remains in the tables below.</p>
-    <noscript>The interactive chart requires JavaScript; use the complete filters, counts, tables, JSON, and raster links on this page.</noscript>
-    <div aria-label="Map legend"><strong>Legend:</strong> ● observed sample; ◇ order target; ━ validated route; ✦ engagement; † casualty; grid = observed sample presence share.</div>
-    <p><a href="{{ map_view.scene_url }}">Canonical scene JSON</a>{% for raster in map_view.rasters %} · <a href="{{ raster.local_href }}">{{ raster.label }} raster</a>{% endfor %}</p>
   </section>
 
   <section aria-labelledby="downsampling-heading"><h2 id="downsampling-heading">Observed sample reduction</h2><dl><dt>Algorithm</dt><dd>{{ map_view.scene.downsampling.algorithm_version }}</dd><dt>Original samples</dt><dd>{{ map_view.scene.downsampling.original_sample_count }}</dd><dt>Mandatory samples</dt><dd>{{ map_view.scene.downsampling.mandatory_sample_count }}</dd><dt>Returned samples</dt><dd>{{ map_view.scene.downsampling.returned_sample_count }}</dd></dl></section>

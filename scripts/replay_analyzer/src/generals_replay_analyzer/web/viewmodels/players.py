@@ -34,6 +34,13 @@ class PlayerProfileViewModel(BaseModel):
     profile: PlayerProfileDTO
     supported_insights: tuple[PlayerInsightDTO, ...]
     canonical_json_url: str
+    # TheSuperHackers @feature Leex 24/08/2026 Project fixed player evidence into a bounded opponent scouting dossier. (#TBD)
+    opponent_dossier_openings: tuple[PlayerInsightDTO, ...] = ()
+    opponent_dossier_factions: tuple[str, ...] = ()
+    opponent_dossier_maps: tuple[str, ...] = ()
+    opponent_dossier_sample_count: int = 0
+    opponent_dossier_threat: str = "Unavailable"
+    evidence_report_public_id: str | None = None
 
 
 _INDEX_QUERY_ORDER = (
@@ -106,8 +113,30 @@ def player_profile_view(profile: PlayerProfileDTO) -> PlayerProfileViewModel:
         and insight.raw_value is not None
         and insight.sample_count > 0
     )
+    openings = tuple(item for item in supported if item.insight_kind == "recurring_opening")
+    factions = tuple(
+        sorted(
+            {
+                item.faction
+                for item in profile.replay_history
+                if item.faction and not item.faction.isdigit()
+            }
+        )
+    )
+    maps = tuple(sorted({item.map_display_name for item in profile.replay_history if item.map_display_name}))
+    # TheSuperHackers @fix Leex 24/08/2026 Link profile evidence only when one fixed report owns the boundary. (#TBD)
+    evidence_report_public_id = (
+        profile.version.fixed_reports[0].report_public_id
+        if len(profile.version.fixed_reports) == 1
+        else None
+    )
     return PlayerProfileViewModel(
         profile=profile,
         supported_insights=supported,
         canonical_json_url=profile_json_url(profile),
+        opponent_dossier_openings=openings,
+        opponent_dossier_factions=factions,
+        opponent_dossier_maps=maps,
+        opponent_dossier_sample_count=max((item.sample_count for item in openings), default=0),
+        evidence_report_public_id=evidence_report_public_id,
     )

@@ -73,8 +73,12 @@ def test_fixed_map_page_keeps_essential_evidence_semantic_without_javascript() -
     ):
         assert phrase in response.text
     assert "The chart is an enhancement" in response.text
+    assert "Battle reconstruction" in response.text
+    assert 'class="workspace-panel battle-reconstruction"' in response.text
+    assert 'aria-label="Tactical event log"' in response.text
     assert "Map evidence at a glance" in response.text
     assert 'class="workspace-panel spatial-briefing"' in response.text
+    assert response.text.index("Battle reconstruction") < response.text.index("Map evidence at a glance")
     assert response.text.index("Map evidence at a glance") < response.text.index("Authoritative map status")
     assert f"/api/maps/{MAP_ID}/rasters/" in response.text
     assert "/static/vendor/echarts.min.js" in response.text
@@ -146,7 +150,7 @@ def test_map_chart_has_bounded_responsive_geometry_and_accessible_time_sliders()
     stylesheet = Path("src/generals_replay_analyzer/web/static/css/map.css").read_text(encoding="utf-8")
 
     assert response.status_code == 200
-    assert 'href="/static/css/map.css"' in response.text
+    assert 'href="/static/css/map.css?v=2"' in response.text
     assert 'id="frame-start-slider" type="range"' in response.text
     assert 'id="frame-end-slider" type="range"' in response.text
     assert "aspect-ratio:" in stylesheet
