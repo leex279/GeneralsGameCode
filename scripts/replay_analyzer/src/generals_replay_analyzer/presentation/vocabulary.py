@@ -43,6 +43,7 @@ _GAME_LABELS = MappingProxyType(
 )
 
 # TheSuperHackers @feature Leex 24/08/2026 Name observed science and special-power timing metrics without rewriting engine identities. (#TBD)
+# TheSuperHackers @feature Leex 24/08/2026 Label evidence-backed engagement swing candidates without implying strategic causality. (#TBD)
 _FEATURE_LABELS = MappingProxyType(
     {
         "activity.effective_actions_per_minute": "Observed effective APM",
@@ -51,6 +52,7 @@ _FEATURE_LABELS = MappingProxyType(
         "build.completed_sequence": "Build order",
         "combat.applied_damage_taken": "Damage taken",
         "combat.observed_kill_timing": "Observed kills",
+        "combat.turning_point_timing": "Evidence-backed engagement swing candidates",
         "economy.supply_collected_total": "Supply collected",
         "economy.supply_collection_rate": "Supply income",
         "production.completed_composition": "Army composition",

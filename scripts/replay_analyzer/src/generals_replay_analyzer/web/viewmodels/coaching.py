@@ -19,12 +19,14 @@ from generals_replay_analyzer.web.ports import (
 
 # TheSuperHackers @feature Leex 24/08/2026 Project observed power timings into player evidence highlights with raw-name fallbacks. (#TBD)
 _PHASE_RANK = MappingProxyType({"opening": 0, "early": 1, "mid": 2, "late": 3, "cross_phase": 4})
+# TheSuperHackers @feature Leex 24/08/2026 Present engagement swing candidates beside observed kills while preserving the no-strategic-causality boundary. (#TBD)
 _HIGHLIGHT_ORDER = (
     "economy.supply_collection_rate",
     "economy.supply_collected_total",
     "production.completed_composition",
     "production.science_purchase_timing",
     "production.special_power_timing",
+    "combat.turning_point_timing",
     "combat.observed_kill_timing",
     "scouting.first_observed_clear_timing",
     "combat.observed_damage_trade_ratio",
@@ -37,7 +39,8 @@ _HIGHLIGHT_EXPLANATIONS = MappingProxyType(
         "production.completed_composition": "Completed units and upgrades observed in the available trace.",
         "production.special_power_timing": "Observed special-power uses with engine-provided names and frame timings; names remain raw when unrecognized.",
         "production.science_purchase_timing": "Observed science purchases with engine-provided names and frame timings; names remain raw when unrecognized.",
-        "combat.observed_kill_timing": "Observed killing blows with engine-provided frame and template facts; these are not causal turning-point claims.",
+        "combat.observed_kill_timing": "Observed killing blows with engine-provided frame and template facts; these do not establish strategic causality.",
+        "combat.turning_point_timing": "Reciprocal engagement swing candidates require the versioned combat and spatial criterion; they are not proof of strategic causality.",
         "scouting.first_observed_clear_timing": "Engine visibility transitions show when an object was first observed clear by this player.",
         "combat.observed_damage_trade_ratio": "Observed applied damage dealt divided by observed damage taken.",
         "activity.effective_actions_per_minute": "Supported replay orders per observed minute, not raw click APM.",
@@ -305,6 +308,17 @@ def _metric_value(claim: ReportClaimDTO) -> str:
             for item in raw
             if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("victim_template_name")) is str
         ) or "No observed kills"
+    if claim.label == "combat.turning_point_timing" and isinstance(raw, list):
+        return ", ".join(
+            f"{game_label(item['attacker_template_name'])} over {game_label(item['victim_template_name'])} at {format_frame(item['frame'])}"
+            for item in raw
+            if (
+                isinstance(item, dict)
+                and type(item.get("frame")) is int
+                and type(item.get("attacker_template_name")) is str
+                and type(item.get("victim_template_name")) is str
+            )
+        ) or "No evidence-backed engagement swing candidates"
     if claim.label == "scouting.first_observed_clear_timing" and isinstance(raw, list):
         return ", ".join(
             f"{game_label(item['template_name'])} at {format_frame(item['frame'])}"

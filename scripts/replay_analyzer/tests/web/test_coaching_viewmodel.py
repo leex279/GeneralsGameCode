@@ -125,6 +125,15 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
         frame_end=end,
     )
     turning = _claim(
+        claim_id="feature:combat.turning_point_timing:fixture",
+        section="combat_engagements",
+        label="combat.turning_point_timing",
+        raw_value=[{"frame": 300, "attacker_template_name": "AmericaVehicleHumvee", "victim_template_name": "ChinaWarFactory", "criterion": "engagement-swing-v1"}],
+        display_value='[{"frame":300,"victim_template_name":"ChinaWarFactory"}]',
+        evidence_id=TURNING_EVIDENCE,
+        frame_end=end,
+    )
+    observed_kills = _claim(
         claim_id="feature:combat.observed_kill_timing:fixture",
         section="combat_engagements",
         label="combat.observed_kill_timing",
@@ -146,7 +155,7 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
         "opening_build_order": (build,),
         "economy": (supply,),
         "production_composition": (power,),
-        "combat_engagements": (turning,),
+        "combat_engagements": (turning, observed_kills),
         "activity": (scouting,),
         "strategy_phases": () if partial else (strategy,),
     }
@@ -273,6 +282,8 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
         for item in coaching.highlights
     )
     assert any(item.title == "Observed kills" for item in coaching.highlights)
+    swing = next(item for item in coaching.highlights if item.title == "Evidence-backed engagement swing candidates")
+    assert swing.value == "Humvee over War Factory at 0:10.0 (frame 300)"
     assert any(item.title == "First scouting clears" for item in coaching.highlights)
     assert 1 <= len(coaching.prompts) <= 5
     assert coaching.prompts[0].strategy_id == "usa_humvee_pressure"
