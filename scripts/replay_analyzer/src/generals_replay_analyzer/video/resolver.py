@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,6 +21,22 @@ from generals_replay_analyzer.video.render import VideoRenderRequest
 
 class VideoResolutionError(ValueError):
     """The durable request does not resolve to one complete compatible authority."""
+
+
+# TheSuperHackers @fix Leex 24/08/2026 Validate every worker stage identity through the closed UUID and lowercase SHA contract. (#TBD)
+def _authority_from_payload(replay_id: str, report_id: str, replay_sha256: str, payload: Mapping[str, object], accepted_end: int) -> CameraPlanAuthorityV1:
+    try:
+        identities = {name: payload[name] for name in ("telemetry_run_public_id", "telemetry_trace_sha256", "map_public_id", "map_content_sha256")}
+        if any(type(value) is not str for value in identities.values()):
+            raise TypeError("stage identities must be strings")
+        return CameraPlanAuthorityV1(
+            replay_public_id=replay_id, replay_sha256=replay_sha256, report_public_id=report_id,
+            telemetry_run_public_id=cast(str, identities["telemetry_run_public_id"]), telemetry_trace_sha256=cast(str, identities["telemetry_trace_sha256"]),
+            map_public_id=cast(str, identities["map_public_id"]), map_content_sha256=cast(str, identities["map_content_sha256"]),
+            evidence_horizon=EvidenceHorizonV1(frame_end=accepted_end),
+        )
+    except (KeyError, TypeError, ValidationError) as error:
+        raise VideoResolutionError("map scene authority identities are invalid") from error
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Keep managed replay resolution inside the configured root after symlink resolution. (#TBD)
@@ -76,10 +94,5 @@ class VideoRequestResolver:
             raise VideoResolutionError("production cast requires complete telemetry horizon")
         if horizon == "partial" and not preview:
             raise VideoResolutionError("partial cast requires diagnostic preview")
-        authority = CameraPlanAuthorityV1(
-            replay_public_id=replay_id, replay_sha256=replay.sha256, report_public_id=report_id,
-            telemetry_run_public_id=payload["telemetry_run_public_id"], telemetry_trace_sha256=payload["telemetry_trace_sha256"],
-            map_public_id=payload["map_public_id"], map_content_sha256=payload["map_content_sha256"],
-            evidence_horizon=EvidenceHorizonV1(frame_end=accepted_end),
-        )
+        authority = _authority_from_payload(replay_id, report_id, replay.sha256, payload, accepted_end)
         return VideoRenderRequest(authority=authority, report=graph, scene=scene, replay_path=replay_path)
