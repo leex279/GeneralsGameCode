@@ -981,6 +981,15 @@ void GameEngine::execute()
 				{
 					// compute a frame
 					update();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+					// TheSuperHackers @feature Leex 24/08/2026 End analyzer-owned rendered replay capture at playback EOF instead of waiting for score-screen input. (#TBD)
+					if (TheGlobalData != nullptr && !TheGlobalData->m_recordVideoPath.isEmpty()
+						&& TheRecorder != nullptr
+						&& (TheRecorder->sawCRCMismatch() || !TheRecorder->isPlaybackInProgress()))
+					{
+						TheGameEngine->setQuitting(TRUE);
+					}
+#endif
 				}
 				catch (INIException e)
 				{

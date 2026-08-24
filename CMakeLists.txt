@@ -96,6 +96,9 @@ if(RTS_BUILD_ZEROHOUR)
 endif()
 
 if(RTS_BUILD_ZEROHOUR AND NOT IS_VS6_BUILD)
+	# TheSuperHackers @build Leex 24/08/2026 Keep device-side GlobalData ABI flags identical to the owning engine target. (#TBD)
+	target_compile_definitions(z_gameenginedevice PRIVATE IG_DEBUG_STACKTRACE)
+
     # TheSuperHackers @build Leex 23/08/2026 Compile native replay capture only into the modern Zero Hour device target. (#TBD)
     target_sources(z_gameenginedevice PRIVATE
         Core/GameEngineDevice/Include/W3DDevice/GameClient/W3DVideoWriter.h
