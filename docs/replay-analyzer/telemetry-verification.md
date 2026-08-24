@@ -176,6 +176,33 @@ a v1 asset cannot authorize the v2-only `exempt_map_loaded_unclassified_immobile
 - No unsupported telemetry event type was accepted by the strict reader. Any field not present in the validated v2
   records remains unknown; the verification does not synthesize it from replay headers, stdout, or disabled runs.
 
+## CRC divergence diagnostics
+
+Task 2 used the pinned replay (`ea085767bfa11d2cfc167d9007173ce2eb29b5f557702ffd042e2e9a1a8f6bb8`) and
+the same staged `[RANK] Sand Scorpion` files for paired `vc6-releaselog` and modern Debug runs. The VC6 executable was
+compiled by MSVC 6.0 (`12.0.8804`), linked successfully, and had SHA-256
+`8e347c62bdf9b80df2ed2d98f48f7882ff045a021fda4651f22914463c812956`. A temporary hardlink beside the Steam game
+data was required: launching the build executable with only the Steam directory as its working directory failed during
+initialization. The replay, installed executable, and real user-data files were not modified.
+
+Before orientation normalization, the authoritative modern `crc_pair` records computed frame 100 as `0x4D70DE82`
+and paired it with the replay-recorded `0x582083DA`. With identical
+`-DebugCRCFromFrame 0 -DebugCRCUntilFrame 100 -SaveDebugCRCPerFrame` arguments, the
+deterministic reader found the first VC6-versus-modern diagnostic difference at frame 0 in the object-list line:
+`0xD531BB29` versus `0x875D66F5`. The existing `-LogObjectCRCs` diagnostic narrowed that first line to object 170,
+`GLAInfantryWorker`, and its transform matrix: `0xEA52C503` under VC6 versus `0xEA52C303` under modern Debug. All other
+fields printed on that first object line were identical. `-CRCLogicModuleData` was not enabled because it inserts the
+module-factory snapshot after the already-divergent object and partition checkpoints and therefore cannot refine this
+earlier difference while preserving the authoritative stream.
+
+Raw matrix-bit logging proved that the modern cross-product path produced positive zero where VC6 produced negative
+zero. Constructing the equivalent planar basis directly now makes modern and VC6 component logs identical through
+frame 100; both finish that frame at `0x1A6CF7D6`. A direct local-CRC oracle applied to source commit `3eea7151e`
+produced the same `0x1A6CF7D6`, so this remaining mismatch is not a regression introduced between that January source
+baseline and the analyzer branch. This is a proven compiler-parity repair, not yet a proven retail field-level cause:
+retail records only the aggregate `0x582083DA` and provides no per-component log. Replay compatibility therefore
+remains unverified and no CRC bypass was applied.
+
 ## Acceptance status
 
 Verified: raw-byte normalization mutation sensitivity; pinned three-by-three trace determinism; pinned independent

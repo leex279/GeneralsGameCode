@@ -16,6 +16,23 @@ from generals_replay_analyzer.parity import (
 from generals_replay_analyzer.parser import parse_replay
 
 
+def test_object_crc_logging_exposes_exact_transform_bits(repository_root: Path) -> None:
+    """Keep field-level transform evidence passive and limited to the existing CRC debug switch."""
+    object_source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/GameLogic/Object/Object.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "#ifdef DEBUG_CRC\n"
+        "\tif (doLogging)\n"
+        "\t{\n"
+        "\t\t// TheSuperHackers @feature Leex 24/08/2026 Dump exact object transform bits only when detailed CRC logging is requested. (#TBD)\n"
+        "\t\tDUMPMATRIX3DNAMED(getTransformMatrix(), \"Object::getTransformMatrix()\");\n"
+        "\t}\n"
+        "#endif // DEBUG_CRC"
+    ) in object_source
+
+
 def test_zero_hour_orientation_constructs_signed_basis_directly(repository_root: Path) -> None:
     """Keep zero-angle orientation bytes independent of compiler cross-product optimization."""
     thing_source = (
