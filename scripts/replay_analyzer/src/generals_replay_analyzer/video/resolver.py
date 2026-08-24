@@ -38,7 +38,7 @@ def _resolve_authoritative_logic_fps(
     if isinstance(timebase, Mapping):
         fps = timebase.get("logic_frames_per_second")
         if timebase.get("source") == "engine_manifest" and fps in (30, 60):
-            candidates.add(cast(int, fps))
+            candidates.add(fps)
     has_v2 = False
     historical_v1 = False
     for schema_version, settings in telemetry_timebases:
@@ -46,7 +46,7 @@ def _resolve_authoritative_logic_fps(
         fps = settings.get("logic_frames_per_second")
         source = settings.get("logic_timebase_source")
         if source == "engine_manifest" and fps in (30, 60):
-            candidates.add(cast(int, fps))
+            candidates.add(fps)
         historical_v1 = historical_v1 or (
             schema_version == 1 and source == "historical_v1_contract" and fps == 30
         )
@@ -70,7 +70,7 @@ def _authority_from_payload(
     replay_sha256: str,
     payload: Mapping[str, object],
     accepted_end: int,
-    logic_frames_per_second: int,
+    logic_frames_per_second: Literal[30, 60],
 ) -> CameraPlanAuthorityV1:
     try:
         identities = {name: payload[name] for name in ("telemetry_run_public_id", "telemetry_trace_sha256", "map_public_id", "map_content_sha256")}

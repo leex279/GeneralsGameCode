@@ -135,7 +135,7 @@ def _logic_frames_per_second(telemetry: TelemetryRun | None) -> Literal[30, 60] 
     fps = settings.get("logic_frames_per_second")
     source = settings.get("logic_timebase_source")
     if fps in (30, 60) and source == "engine_manifest":
-        return cast(Literal[30, 60], fps)
+        return fps
     if telemetry.schema_version == 1 and fps == 30 and source == "historical_v1_contract":
         return 30
     return None

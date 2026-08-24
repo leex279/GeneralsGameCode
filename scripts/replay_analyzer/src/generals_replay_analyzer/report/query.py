@@ -452,7 +452,8 @@ class ReportQueryService:
                     kind = "marker"
                 elif value.label in ("production.science_purchase_timing", "production.special_power_timing"):
                     # TheSuperHackers @feature Leex 24/08/2026 Expand observed power timing rows into frame markers instead of one full-match band. (#TBD)
-                    raw_timing = thaw_report_value(value.raw_value) if value.raw_value is not None else ()
+                    thawed_timing = thaw_report_value(value.raw_value) if value.raw_value is not None else ()
+                    raw_timing = thawed_timing if isinstance(thawed_timing, (list, tuple)) else ()
                     timing_points = tuple(
                         TimelinePointDTO(
                             cast(int, item["frame"]),
@@ -1227,6 +1228,33 @@ class ReportQueryService:
                 telemetry = session.scalar(
                     select(TelemetryRun).where(TelemetryRun.run_id == attempt.run_id)
                 )
+                expected_telemetry_settings = _attempt_settings(
+                    attempt,
+                    observation.idempotency_key,
+                )
+                if telemetry is not None and expected_telemetry_status == "succeeded":
+                    actual_settings = telemetry.settings_json if isinstance(telemetry.settings_json, dict) else {}
+                    if actual_settings != expected_telemetry_settings:
+                        authoritative_fps = actual_settings.get("logic_frames_per_second")
+                        authoritative_source = actual_settings.get("logic_timebase_source")
+                        valid_timebase = (
+                            telemetry.schema_version == 1
+                            and authoritative_fps == 30
+                            and authoritative_source == "historical_v1_contract"
+                        ) or (
+                            telemetry.schema_version >= 2
+                            and authoritative_fps in (30, 60)
+                            and authoritative_source == "engine_manifest"
+                        )
+                        if not valid_timebase:
+                            raise ReportGraphContractError("legacy telemetry logic timebase is not authoritative")
+                        # TheSuperHackers @fix Leex 24/08/2026 Accept only the closed persisted replay-clock extension on legacy report branches. (#TBD)
+                        expected_telemetry_settings.update(
+                            {
+                                "logic_frames_per_second": authoritative_fps,
+                                "logic_timebase_source": authoritative_source,
+                            }
+                        )
                 if (
                     telemetry is None
                     or telemetry.replay_id != replay.id
@@ -1238,7 +1266,7 @@ class ReportQueryService:
                     or telemetry.engine_build != (attempt.engine_build or "unavailable")
                     or telemetry.engine_executable_sha256 != attempt.engine_executable_sha256
                     or telemetry.diagnostics_json != [dict(item) for item in attempt.diagnostics]
-                    or telemetry.settings_json != _attempt_settings(attempt, observation.idempotency_key)
+                    or telemetry.settings_json != expected_telemetry_settings
                     or output_json.get("telemetry_run_id") != telemetry.run_id
                 ):
                     raise ReportGraphContractError("legacy telemetry run is not authoritative")
