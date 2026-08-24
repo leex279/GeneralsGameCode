@@ -1956,6 +1956,14 @@ AGAIN:
 	static Int now;
 	now=timeGetTime();
 
+#if !defined(IS_VS6_BUILD)
+	if (s_replayVideoWriter != nullptr && TheTacticalView != nullptr)
+	{
+		// TheSuperHackers @bugfix Leex 24/08/2026 Bypass the legacy visual-speed throttle at the native capture boundary. (#TBD)
+		TheTacticalView->setTimeMultiplier(1);
+	}
+#endif
+
 	if (TheTacticalView->getTimeMultiplier()>1)
 	{
 		static Int timeMultiplierCounter = 1;

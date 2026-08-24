@@ -80,12 +80,16 @@ def test_presentation_runner_pins_client_cadence_to_sixty_hz(repository_root: Pa
     )[1].split("TheRadar->UPDATE();", maxsplit=1)[0]
     assert "TheFramePacer->setFramesPerSecondLimit(60)" in update_cadence
     assert "m_useFpsLimit = TRUE" in update_cadence
-    assert "TheTacticalView->setTimeMultiplier(1)" in update_cadence
 
     display = _source(
         repository_root,
         "GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp",
     )
+    capture_throttle_guard = display.split(
+        "if (TheTacticalView->getTimeMultiplier()>1)", maxsplit=1
+    )[0].rsplit("WW3D::Sync", maxsplit=1)[1]
+    assert "s_replayVideoWriter != nullptr" in capture_throttle_guard
+    assert "TheTacticalView->setTimeMultiplier(1)" in capture_throttle_guard
     visual_throttle = display.split(
         "if (TheTacticalView->getTimeMultiplier()>1)", maxsplit=1
     )[1].split("do {", maxsplit=1)[0]
