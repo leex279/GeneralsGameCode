@@ -121,6 +121,11 @@ public:
 	// Run game without graphics, input or audio.
 	Bool m_headless;
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Retain the validated native replay camera script only in modern Zero Hour analyzer builds. (#TBD)
+	AsciiString m_autoCameraScript;
+#endif
+
 	Bool m_windowed;
 	Int m_xResolution;
 	Int m_yResolution;

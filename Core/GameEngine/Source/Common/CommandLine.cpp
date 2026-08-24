@@ -37,6 +37,9 @@
 #endif
 #include "Common/version.h"
 #include "GameClient/ClientInstance.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "GameClient/AutoCameraDirector.h"
+#endif
 #include "GameClient/TerrainVisual.h" // for TERRAIN_LOD_MIN definition
 #include "GameClient/GameText.h"
 #include "GameNetwork/NetworkDefs.h"
@@ -477,6 +480,8 @@ namespace
 	// TheSuperHackers @feature Leex 21/08/2026 Store one validated process-local user-data root before map discovery begins. (#TBD)
 	AsciiString s_replayUserDataRoot;
 	Bool s_hasReplayUserDataRoot = FALSE;
+	AsciiString s_autoCameraScript;
+	Bool s_hasAutoCameraScript = FALSE;
 #endif
 
 	void telemetryCommandLineError(const char *message)
@@ -497,6 +502,13 @@ namespace
 	void replayUserDataCommandLineError(const char *message)
 	{
 		fprintf(stderr, "Replay user data: %s\n", message);
+		fflush(stderr);
+		exit(1);
+	}
+
+	void autoCameraCommandLineError(const char *message)
+	{
+		fprintf(stderr, "Replay camera: %s\n", message);
 		fflush(stderr);
 		exit(1);
 	}
@@ -977,6 +989,29 @@ namespace
 		TheWritableGlobalData->setReplayAnalyzerUserDataRoot(canonicalRoot);
 		TheWritableGlobalData->ensureReplayAnalyzerUserDataDirectory();
 	}
+
+	// TheSuperHackers @feature Leex 23/08/2026 Reject an invalid camera script before native replay startup can enable presentation control. (#TBD)
+	void validateAutoCameraOptions()
+	{
+		if (!s_hasAutoCameraScript)
+		{
+			return;
+		}
+		if (TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+		{
+			autoCameraCommandLineError("-autocamera requires exactly one rendered replay");
+		}
+		if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+		{
+			autoCameraCommandLineError("-autocamera requires sequential replay playback");
+		}
+		AsciiString error;
+		if (!AutoCameraDirector::validateCameraScript(s_autoCameraScript, &error))
+		{
+			autoCameraCommandLineError(error.str());
+		}
+		TheWritableGlobalData->m_autoCameraScript = s_autoCameraScript;
+	}
 #endif
 }
 
@@ -1096,6 +1131,22 @@ Int parseReplayUserDataRoot(char *args[], int num)
 	}
 	s_replayUserDataRoot = args[1];
 	s_hasReplayUserDataRoot = TRUE;
+	return 2;
+}
+
+// TheSuperHackers @feature Leex 23/08/2026 Accept one validated frame-based camera script for rendered replay playback. (#TBD)
+Int parseAutoCamera(char *args[], int num)
+{
+	if (num <= 1)
+	{
+		autoCameraCommandLineError("-autocamera requires a camera script path");
+	}
+	if (s_hasAutoCameraScript)
+	{
+		autoCameraCommandLineError("-autocamera may only be specified once");
+	}
+	s_autoCameraScript = args[1];
+	s_hasAutoCameraScript = TRUE;
 	return 2;
 }
 #endif
@@ -1801,6 +1852,8 @@ static CommandLineParam paramsForStartup[] =
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	// TheSuperHackers @feature Leex 21/08/2026 Route analyzer replay user-map discovery into one validated isolated directory. (#TBD)
 	{ "-replay-user-data-root", parseReplayUserDataRoot },
+	// TheSuperHackers @feature Leex 23/08/2026 Expose validated frame-based replay direction only in the modern Zero Hour analyzer. (#TBD)
+	{ "-autocamera", parseAutoCamera },
 #endif
 #endif
 
@@ -2115,6 +2168,7 @@ void CommandLine::parseCommandLineForStartup()
 #if defined(RTS_REPLAY_ANALYZER)
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	validateReplayUserDataRootOptions();
+	validateAutoCameraOptions();
 #endif
 	validateReplayTelemetryOptions();
 	validateReplayOutcomeOptions();
