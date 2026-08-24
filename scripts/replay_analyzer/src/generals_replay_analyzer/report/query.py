@@ -151,6 +151,8 @@ from generals_replay_analyzer.storage import ContentAddressedStore, ContentStora
 
 _ASSET_NAMESPACE = uuid5(NAMESPACE_URL, "replay-report-managed-asset-v1")
 _REPORT_NAMESPACE = uuid5(NAMESPACE_URL, "replay-report-public-id-v1")
+# TheSuperHackers @bugfix Leex 25/08/2026 Bound complete full-match chart series without truncating their evidence. (#TBD)
+_PUBLIC_VALUE_NODE_LIMIT = 16_384
 _EVIDENCE_SOURCE_KINDS: dict[str, tuple[str, ...]] = {
     "observed": ("parser_command", "telemetry_event"),
     "derived": ("feature", "strategy_rule", "longitudinal_corpus"),
@@ -308,7 +310,7 @@ def _safe_value(value: object) -> CanonicalValue:
     def visit(item: object, depth: int) -> None:
         nonlocal nodes, text_bytes
         nodes += 1
-        if nodes > 2048 or depth > 12:
+        if nodes > _PUBLIC_VALUE_NODE_LIMIT or depth > 12:
             raise ReportGraphContractError("evidence public value exceeds its structural bound")
         if isinstance(item, str):
             text_bytes += len(item.encode("utf-8"))
@@ -1909,11 +1911,20 @@ class ReportQueryService:
         selected_telemetry_run_id: str | None,
     ) -> None:
         index = self._document_evidence_index(document)
-        rows = (
-            tuple(session.scalars(select(EvidenceItem).where(EvidenceItem.public_id.in_(tuple(index)))))
-            if index
-            else ()
-        )
+        rows: tuple[EvidenceItem, ...] = ()
+        if index:
+            # TheSuperHackers @bugfix Leex 25/08/2026 Bind large report evidence sets once through SQLite JSON instead of exceeding SQL variables. (#TBD)
+            requested = func.json_each(
+                json.dumps(tuple(index), separators=(",", ":"), ensure_ascii=True)
+            ).table_valued("value")
+            rows = tuple(
+                session.scalars(
+                    select(EvidenceItem).join(
+                        requested,
+                        EvidenceItem.public_id == requested.c.value,
+                    )
+                )
+            )
         by_public_id = {row.public_id: row for row in rows}
         if set(by_public_id) != set(index):
             raise ReportGraphContractError("report cites unavailable evidence")

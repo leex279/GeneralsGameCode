@@ -1886,7 +1886,7 @@ def test_modern_evidence_authority_query_count_is_independent_of_evidence_count_
         selected_parser_run_id = parser.run_id
         selected_telemetry_run_id = telemetry.run_id
         evidence_ids: list[str] = []
-        for index in range(8):
+        for index in range(33_000):
             public_id = stable_uuid(f"query-batch-evidence-{index}")
             session.add(
                 EvidenceItem(
@@ -1957,7 +1957,7 @@ def test_modern_evidence_authority_query_count_is_independent_of_evidence_count_
         return len(selected) - 1  # Exclude the replay lookup outside the authority validator.
 
     one_count = select_count(with_evidence(1))
-    many_count = select_count(with_evidence(8))
+    many_count = select_count(with_evidence(33_000))
 
     assert one_count <= 3
     assert many_count == one_count
@@ -2571,6 +2571,12 @@ def test_query_contract_helpers_reject_unbounded_or_noncanonical_public_data(
         report_query._safe_value(nested)
     with pytest.raises(ReportGraphContractError, match="UTF-8 bound"):
         report_query._safe_value("x" * 65537)
+    production_sized_series = [
+        {"logic_time_seconds": index, "value": float(index)} for index in range(1024)
+    ]
+    assert report_query._safe_value(production_sized_series)
+    with pytest.raises(ReportGraphContractError, match="structural bound"):
+        report_query._safe_value(list(range(16384)))
     assert not report_query.ReportQueryService._mentions_assets(
         None,
         stable_uuid("structured"),
