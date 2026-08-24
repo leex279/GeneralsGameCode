@@ -26,13 +26,19 @@ SCHEMA = json.loads(
 SCHEMA_VALIDATOR = Draft202012Validator(SCHEMA)
 
 
-def _record(event_type: str, payload: Mapping[str, object], *, frame: int = 30) -> dict[str, object]:
+def _record(
+    event_type: str,
+    payload: Mapping[str, object],
+    *,
+    frame: int = 30,
+    logic_frames_per_second: int = 30,
+) -> dict[str, object]:
     return {
         "schema_version": 2,
         "run_id": RUN_ID,
         "sequence": 7,
         "frame": frame,
-        "logic_time_seconds": frame / 30.0,
+        "logic_time_seconds": frame / logic_frames_per_second,
         "event_type": event_type,
         "payload": dict(payload),
     }
@@ -354,11 +360,17 @@ def _creation(*, frame: int = 0, sequence: int = 1) -> TelemetryRecord:
     )
 
 
-def _validate_native(records: list[TelemetryRecord], *, final_frame: int) -> None:
+def _validate_native(
+    records: list[TelemetryRecord],
+    *,
+    final_frame: int,
+    logic_frames_per_second: int = 30,
+) -> None:
     _validate_v2_engine_native_trace(
         Path("engine-native.ndjson"),
         tuple(records),
         final_frame,
+        logic_frames_per_second,
         frozenset({0}),
         frozenset({0}),
     )
@@ -414,6 +426,46 @@ def test_cash_per_minute_family_requires_exact_cadence_final_domain_and_unsigned
     damaged["players"] = []
     with pytest.raises(ValidationError):
         _validated("cash_per_minute_snapshot", damaged, frame=30, sequence=4)
+
+
+def test_cash_per_minute_cadence_and_bucket_width_follow_the_60_hz_manifest() -> None:
+    cash = {
+        "player_index": 0,
+        "before": 0,
+        "delta": 100,
+        "after": 100,
+        "track_income": True,
+        "reason": "supply_income",
+        "tracked_income_amount": 100,
+        "income_bucket_index": 0,
+    }
+    sample = _cash_per_minute()
+    sample.update(sample_interval_frames=60, bucket_width_frames=60)
+    sample["players"] = [{"player_index": 0, "has_money": True, "cash_per_minute": 100}]
+    records = [
+        _validated("cash_changed", cash, frame=59, sequence=1),
+        _validated("cash_per_minute_snapshot", sample, frame=60, sequence=2),
+    ]
+
+    _validate_native(records, final_frame=60, logic_frames_per_second=60)
+
+    fixed_30_hz_payload = _cash_per_minute()
+    fixed_30_hz_payload["players"] = [
+        {"player_index": 0, "has_money": True, "cash_per_minute": 100}
+    ]
+    with pytest.raises(TelemetryTraceValidationError, match="manifest logic timebase"):
+        _validate_native(
+            [
+                _validated(
+                    "cash_per_minute_snapshot",
+                    fixed_30_hz_payload,
+                    frame=60,
+                    sequence=3,
+                )
+            ],
+            final_frame=60,
+            logic_frames_per_second=60,
+        )
 
 
 def test_cash_per_minute_accepts_deposits_before_and_after_the_boundary_rotation() -> None:
@@ -524,6 +576,7 @@ def test_engine_native_player_scope_uses_resolved_slots_not_the_full_engine_doma
         Path("engine-native.ndjson"),
         (score, outcome),
         100,
+        30,
         frozenset({0, 1, 12, 13}),
         frozenset({0, 1}),
     )
@@ -622,6 +675,36 @@ def test_visibility_summaries_and_partition_samples_use_exact_sampling_domains()
         _validate_native([grid], final_frame=600)
 
 
+def test_visibility_and_partition_cadence_follow_the_60_hz_manifest() -> None:
+    summary_payload = _visibility_summary()
+    summary_payload["sample_interval_frames"] = 30
+    grid_payload = _partition_grid()
+    grid_payload["sample_interval_frames"] = 600
+
+    summary = _validated(
+        "visibility_sampling_summary",
+        summary_payload,
+        frame=30,
+        sequence=1,
+    )
+    grid = _validated(
+        "partition_engine_grid_sample",
+        grid_payload,
+        frame=600,
+        sequence=2,
+    )
+
+    _validate_native([summary], final_frame=30, logic_frames_per_second=60)
+    _validate_native([grid], final_frame=600, logic_frames_per_second=60)
+
+    with pytest.raises(TelemetryTraceValidationError, match="manifest logic timebase"):
+        _validate_native(
+            [_validated("partition_engine_grid_sample", _partition_grid(), frame=600, sequence=3)],
+            final_frame=600,
+            logic_frames_per_second=60,
+        )
+
+
 def test_partition_world_geometry_must_match_across_players_in_one_frame() -> None:
     first_payload = _partition_grid()
     second_payload = deepcopy(first_payload)
@@ -637,6 +720,7 @@ def test_partition_world_geometry_must_match_across_players_in_one_frame() -> No
             Path("engine-native.ndjson"),
             records,
             300,
+            30,
             frozenset({0, 1}),
             frozenset({0, 1}),
         )

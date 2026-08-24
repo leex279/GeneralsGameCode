@@ -444,9 +444,9 @@ class CashPerMinutePlayer(ClosedObservationPayload):
 
 class CashPerMinuteSnapshotPayload(ClosedObservationPayload):
     source: Literal["Money::getCashPerMinute"]
-    sample_interval_frames: Literal[30]
+    sample_interval_frames: Literal[30, 60]
     income_window_buckets: Literal[60]
-    bucket_width_frames: Literal[30]
+    bucket_width_frames: Literal[30, 60]
     players: Annotated[list[CashPerMinutePlayer], Field(min_length=1)]
 
     @model_validator(mode="after")
@@ -467,7 +467,7 @@ class ObjectVisibilityChangedPayload(ClosedObservationPayload):
     position: RawPosition
     observation_basis: Literal["object_center_partition_cell"]
     source: Literal["PartitionManager::getShroudStatusForPlayer"]
-    sample_interval_frames: Literal[15]
+    sample_interval_frames: Literal[15, 30]
     sampling_cycle_id: NonNegativeInt
 
     @model_validator(mode="after")
@@ -491,7 +491,7 @@ class ObjectVisibilityChangedPayload(ClosedObservationPayload):
 
 class VisibilitySamplingSummaryPayload(ClosedObservationPayload):
     source: Literal["PartitionManager::getShroudStatusForPlayer"]
-    sample_interval_frames: Literal[15]
+    sample_interval_frames: Literal[15, 30]
     maximum_pairs_per_pass: Literal[8192]
     eligible_pair_count: NonNegativeInt
     sampled_pair_count: NonNegativeInt
@@ -570,7 +570,7 @@ def _uniform_partition_lattice_coordinates(
 
 class PartitionEngineGridSamplePayload(ClosedObservationPayload):
     player_index: NonNegativeInt
-    sample_interval_frames: Literal[300]
+    sample_interval_frames: Literal[300, 600]
     sampling_scheme: Literal["uniform_partition_lattice_v1"]
     heuristic_semantics: Literal["engine_ai_owner_contribution_heuristic"]
     grid: PartitionGridMetadata

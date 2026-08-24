@@ -28,15 +28,15 @@ Emit exactly once at the terminal frame, immediately before `match_outcome`. One
 
 ### `cash_per_minute_snapshot`
 
-Emit a sorted aggregate snapshot every 30 frames plus a forced terminal sample. Each resolved occupied player records `has_money` and `Money::getCashPerMinute()`. Extend `cash_changed` with optional `tracked_income_amount` and `income_bucket_index`, present exactly when the deposit tracks income, so the reader can reproduce the 60 one-second unsigned buckets across rotation-boundary deposits.
+Emit a sorted aggregate snapshot every logic second plus a forced terminal sample: 30 frames for retail profiles and 60 frames for the Generals Online high-FPS profile. Each resolved occupied player records `has_money` and `Money::getCashPerMinute()`. Extend `cash_changed` with optional `tracked_income_amount` and `income_bucket_index`, present exactly when the deposit tracks income, so the reader can reproduce the 60 one-second unsigned buckets across rotation-boundary deposits. The payload interval and bucket width must equal the manifest `logic_frames_per_second` value.
 
 ### `object_visibility_changed`
 
-Sample resolved-player/live-object pairs every 15 frames with a deterministic round-robin cursor and a maximum of 8,192 pairs per pass. Emit transitions among telemetry-owned `unseen` and engine states `clear|fogged|shrouded`, including `first_observed_clear`, object/template/player identities, sampled position, cycle identity, interval, source, and `object_center_partition_cell` basis. Emit a sampling summary for every pass so capped scans cannot appear exhaustive.
+Sample resolved-player/live-object pairs every half logic second (15 frames at 30 Hz, 30 frames at 60 Hz) with a deterministic round-robin cursor and a maximum of 8,192 pairs per pass. Emit transitions among telemetry-owned `unseen` and engine states `clear|fogged|shrouded`, including `first_observed_clear`, object/template/player identities, sampled position, cycle identity, interval, source, and `object_center_partition_cell` basis. Emit a sampling summary for every pass so capped scans cannot appear exhaustive.
 
 ### `partition_engine_grid_sample`
 
-Every 300 frames plus terminal, sample a deterministic row-major uniform lattice of at most 128 unique partition cells per resolved player, including map edges. Record cell index/world position, shroud status, `getThreatValue()`, and `getCashValue()`. Labels must say `Engine AI threat heuristic` and `Engine AI cash-value heuristic`; these values are not territory, danger probability, resources, or objective map control.
+Every ten logic seconds plus terminal (300 frames at 30 Hz, 600 frames at 60 Hz), sample a deterministic row-major uniform lattice of at most 128 unique partition cells per resolved player, including map edges. Record cell index/world position, shroud status, `getThreatValue()`, and `getCashValue()`. Labels must say `Engine AI threat heuristic` and `Engine AI cash-value heuristic`; these values are not territory, danger probability, resources, or objective map control.
 
 The lattice contract is exact. Choose integer `(sample_count_x, sample_count_y)` from the valid range `1..cell_count_x`, `1..cell_count_y` with a product no greater than 128. Maximize sample count first, minimize aspect distortion `abs(sample_count_x * cell_count_y - sample_count_y * cell_count_x)` second, then prefer the larger X count for a deterministic tie. For either axis with one sample use index `0`; otherwise axis sample `i` maps to `floor(i * (cell_count - 1) / (sample_count - 1))`. Emit the Cartesian product with Y outer and X inner. This produces true 2D coverage, includes all four available map corners, fixes row-major ordering, and remains cross-run comparable.
 

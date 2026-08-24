@@ -257,7 +257,7 @@ def test_partition_provider_bounds_players_cadence_terminal_and_event_order(
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayPartitionSampler.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "SAMPLE_INTERVAL_FRAMES = 300" in source
+    assert "SAMPLE_INTERVAL_FRAMES = LOGICFRAMES_PER_SECOND * 10" in source
     header = (
         repository_root / "GeneralsMD/Code/GameEngine/Include/Common/ReplayPartitionSampler.h"
     ).read_text(encoding="utf-8")

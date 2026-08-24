@@ -58,7 +58,7 @@ def test_visibility_sampler_wires_exact_cadence_cap_order_and_lifecycle(reposito
     ).read_text(encoding="utf-8")
     cmake = (repository_root / "GeneralsMD/Code/GameEngine/CMakeLists.txt").read_text(encoding="utf-8")
 
-    assert "SAMPLE_INTERVAL_FRAMES = 15" in source
+    assert "SAMPLE_INTERVAL_FRAMES = LOGICFRAMES_PER_SECOND / 2" in source
     assert "MAXIMUM_PAIRS_PER_PASS = 8192" in source
     assert "std::sort(playerIndices.begin(), playerIndices.end())" in source
     assert "std::sort(objectIds.begin(), objectIds.end())" in source

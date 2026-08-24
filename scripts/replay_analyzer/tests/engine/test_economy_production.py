@@ -309,6 +309,11 @@ def test_income_rate_sampler_is_bounded_to_cadence_and_resolved_occupied_slots(r
     assert "std::sort" in initialize
     assert "frame == 0 || frame % LOGICFRAMES_PER_SECOND != 0" in observer
     assert "updatedIncomePlayers" in observer
+    assert r'",\"sample_interval_frames\":" + std::to_string(LOGICFRAMES_PER_SECOND)' in source
+    assert (
+        r'",\"income_window_buckets\":60,\"bucket_width_frames\":"'
+        " + std::to_string(LOGICFRAMES_PER_SECOND)"
+    ) in source
 
 
 def test_authoritative_supply_source_is_captured_at_pickup_and_consumed_at_dropoff(repository_root: Path) -> None:

@@ -441,9 +441,11 @@ void ReplayEconomy::emitCashPerMinuteSnapshot(UnsignedInt frame)
 			+ (money != nullptr ? std::to_string(money->getCashPerMinute()) : "null") + "}";
 	}
 	players.push_back(']');
+	// TheSuperHackers @bugfix Leex 24/08/2026 Preserve one-second income buckets in both retail and high-FPS replay profiles. (#0)
 	const std::string payload = "{\"source\":\"Money::getCashPerMinute\""
-		",\"sample_interval_frames\":30,\"income_window_buckets\":60,\"bucket_width_frames\":30"
-		",\"players\":" + players + "}";
+		",\"sample_interval_frames\":" + std::to_string(LOGICFRAMES_PER_SECOND)
+		+ ",\"income_window_buckets\":60,\"bucket_width_frames\":" + std::to_string(LOGICFRAMES_PER_SECOND)
+		+ ",\"players\":" + players + "}";
 	ReplayTelemetry::emit(frame, "cash_per_minute_snapshot", AsciiString(payload.c_str()));
 	s_state.hasCashPerMinuteSnapshot = TRUE;
 	s_state.lastCashPerMinuteFrame = frame;

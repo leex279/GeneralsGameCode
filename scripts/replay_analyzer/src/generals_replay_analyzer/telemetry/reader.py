@@ -1708,10 +1708,15 @@ def _validate_v2_engine_native_trace(
     path: Path,
     records: tuple[TelemetryRecord, ...],
     final_frame: int,
+    logic_frames_per_second: int,
     engine_player_indices: frozenset[int],
     resolved_occupied_player_indices: frozenset[int],
 ) -> None:
     """Validate optional engine-native observation families as one trace-level authority."""
+    # TheSuperHackers @bugfix Leex 24/08/2026 Bind second-based engine samplers to the manifest timebase. (#0)
+    cash_sample_interval = logic_frames_per_second
+    visibility_sample_interval = logic_frames_per_second // 2
+    partition_sample_interval = logic_frames_per_second * 10
     score_indexes: list[int] = []
     cpm_by_frame: dict[int, TelemetryRecord] = {}
     grid_players_by_frame: dict[int, set[int]] = {}
@@ -1750,7 +1755,7 @@ def _validate_v2_engine_native_trace(
         last_income_frame = frame
 
     def rotate_player_to_frame(player_index: int, frame: int) -> None:
-        target_bucket = (frame // 30) % 60
+        target_bucket = (frame // cash_sample_interval) % 60
         if current_income_bucket[player_index] != target_bucket:
             income_buckets[player_index][target_bucket] = 0
             current_income_bucket[player_index] = target_bucket
@@ -1783,7 +1788,7 @@ def _validate_v2_engine_native_trace(
             if player_index not in resolved_occupied_player_indices:
                 fail(index, "cash_changed income provenance player is outside initialized domain")
             require_nondecreasing_income_frame(record.frame)
-            target_bucket = (record.frame // 30) % 60
+            target_bucket = (record.frame // cash_sample_interval) % 60
             if bucket == target_bucket and current_income_bucket[player_index] != target_bucket:
                 rotate_player_to_frame(player_index, record.frame)
             elif bucket != current_income_bucket[player_index]:
@@ -1791,6 +1796,11 @@ def _validate_v2_engine_native_trace(
             buckets = income_buckets[player_index]
             buckets[bucket] = (buckets[bucket] + amount) % _UINT32_MODULUS
         elif event_type == "cash_per_minute_snapshot":
+            if (
+                payload["sample_interval_frames"] != cash_sample_interval
+                or payload["bucket_width_frames"] != cash_sample_interval
+            ):
+                fail(index, "cash-per-minute sampling interval contradicts manifest logic timebase")
             if record.frame in cpm_by_frame:
                 fail(index, "duplicate cash-per-minute snapshot frame")
             cpm_by_frame[record.frame] = record
@@ -1809,8 +1819,10 @@ def _validate_v2_engine_native_trace(
                     if player["cash_per_minute"] != expected:
                         fail(index, "cash-per-minute snapshot contradicts unsigned income bucket fold")
         elif event_type == "object_visibility_changed":
-            if record.frame % 15 != 0:
-                fail(index, "object visibility sampling cadence must be every 15 frames")
+            if payload["sample_interval_frames"] != visibility_sample_interval:
+                fail(index, "object visibility sampling interval contradicts manifest logic timebase")
+            if record.frame % visibility_sample_interval != 0:
+                fail(index, "object visibility sampling cadence contradicts manifest logic timebase")
             player_index = cast(int, payload["player_index"])
             object_id = cast(int, payload["object_id"])
             if player_index not in resolved_occupied_player_indices:
@@ -1835,8 +1847,10 @@ def _validate_v2_engine_native_trace(
                 cast(int, payload["sampling_cycle_id"])
             )
         elif event_type == "visibility_sampling_summary":
-            if record.frame % 15 != 0:
-                fail(index, "visibility sampling cadence must be every 15 frames")
+            if payload["sample_interval_frames"] != visibility_sample_interval:
+                fail(index, "visibility sampling interval contradicts manifest logic timebase")
+            if record.frame % visibility_sample_interval != 0:
+                fail(index, "visibility sampling cadence contradicts manifest logic timebase")
             cycle_id = cast(int, payload["sampling_cycle_id"])
             cursor_start = cast(int, payload["cursor_start"])
             cursor_end = cast(int, payload["cursor_end"])
@@ -1870,11 +1884,13 @@ def _validate_v2_engine_native_trace(
             last_visibility_cycle_complete = cycle_complete
             last_visibility_eligible_count = eligible_count
         elif event_type == "partition_engine_grid_sample":
+            if payload["sample_interval_frames"] != partition_sample_interval:
+                fail(index, "partition sampling interval contradicts manifest logic timebase")
             player_index = cast(int, payload["player_index"])
             if player_index not in resolved_occupied_player_indices:
                 fail(index, "partition sample player is outside initialized domain")
-            if record.frame % 300 != 0 and record.frame != final_frame:
-                fail(index, "partition sampling cadence must be every 300 frames plus terminal")
+            if record.frame % partition_sample_interval != 0 and record.frame != final_frame:
+                fail(index, "partition sampling cadence contradicts manifest logic timebase")
             grid_key = (record.frame, player_index)
             if last_grid_key is not None and grid_key <= last_grid_key:
                 fail(index, "partition samples must be ordered by frame and player")
@@ -1921,18 +1937,20 @@ def _validate_v2_engine_native_trace(
         if score_index + 1 >= len(records) or records[score_index + 1].event_type != "match_outcome":
             fail(score_index, "scorekeeper_snapshot must immediately precede match_outcome")
     if cpm_by_frame:
-        expected_frames = set(range(30, final_frame + 1, 30))
+        expected_frames = set(range(cash_sample_interval, final_frame + 1, cash_sample_interval))
         expected_frames.add(final_frame)
         if set(cpm_by_frame) != expected_frames:
             raise TelemetryTraceValidationError(
-                f"trace '{path}': cash-per-minute sampling cadence must include every 30 frames plus terminal"
+                f"trace '{path}': cash-per-minute sampling cadence must follow the manifest timebase plus terminal"
             )
         if missing_income_provenance:
             raise TelemetryTraceValidationError(
                 f"trace '{path}': cash-per-minute snapshots require bucket provenance for tracked income"
             )
     if grid_players_by_frame:
-        expected_frames = set(range(300, final_frame + 1, 300))
+        expected_frames = set(
+            range(partition_sample_interval, final_frame + 1, partition_sample_interval)
+        )
         expected_frames.add(final_frame)
         if set(grid_players_by_frame) != expected_frames or any(
             players != resolved_occupied_player_indices for players in grid_players_by_frame.values()
@@ -1941,7 +1959,9 @@ def _validate_v2_engine_native_trace(
                 f"trace '{path}': partition sample player domain must cover every player at cadence and terminal"
             )
     if visibility_summaries_by_frame or visibility_transition_cycles_by_frame:
-        expected_frames = set(range(15, final_frame + 1, 15))
+        expected_frames = set(
+            range(visibility_sample_interval, final_frame + 1, visibility_sample_interval)
+        )
         if set(visibility_summaries_by_frame) != expected_frames:
             raise TelemetryTraceValidationError(
                 f"trace '{path}': visibility sampling requires one summary for every 15-frame pass"
@@ -2323,11 +2343,13 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
         assert complete_record is not None
         assert engine_player_indices is not None
         assert resolved_occupied_player_indices is not None
+        assert expected_logic_frames_per_second is not None
         _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player, engine_player_indices)
         _validate_v2_engine_native_trace(
             path,
             tuple(validated_records),
             complete_record.payload.final_frame,
+            expected_logic_frames_per_second,
             engine_player_indices,
             resolved_occupied_player_indices,
         )

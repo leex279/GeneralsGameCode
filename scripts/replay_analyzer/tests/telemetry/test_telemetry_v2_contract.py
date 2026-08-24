@@ -396,6 +396,49 @@ def test_v2_reader_uses_manifest_sixty_hertz_for_every_event_time(tmp_path: Path
         load_validated_telemetry_bundle(invalid)
 
 
+def test_v2_reader_threads_manifest_timebase_into_engine_native_cadence(tmp_path: Path) -> None:
+    reference = _write_catalog(tmp_path)
+    map_reference = write_test_map_asset(tmp_path, ENGINE_IDENTITY, "maps/test.map")
+    records = [
+        _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
+        _record(2, 1, "players_initialized", _v2_players(reference)),
+        _record(
+            2,
+            2,
+            "cash_per_minute_snapshot",
+            {
+                "source": "Money::getCashPerMinute",
+                "sample_interval_frames": 60,
+                "income_window_buckets": 60,
+                "bucket_width_frames": 60,
+                "players": [{"player_index": 0, "has_money": True, "cash_per_minute": 0}],
+            },
+        ),
+        _outcome(3),
+    ]
+    for record in records[2:]:
+        record["frame"] = 60
+        record["logic_time_seconds"] = 1.0
+    completion = _completion(2, records)
+    completion["frame"] = 60
+    completion["logic_time_seconds"] = 1.0
+    completion["payload"]["final_frame"] = 60
+    records.append(completion)
+
+    trace = _write_records(tmp_path / "native-sixty-hertz.ndjson", records)
+    assert load_validated_telemetry_bundle(trace).logic_frames_per_second == 60
+
+    records[2]["payload"]["sample_interval_frames"] = 30
+    records[2]["payload"]["bucket_width_frames"] = 30
+    records[-1] = _completion(2, records[:-1])
+    records[-1]["frame"] = 60
+    records[-1]["logic_time_seconds"] = 1.0
+    records[-1]["payload"]["final_frame"] = 60
+    invalid = _write_records(tmp_path / "native-fixed-thirty.ndjson", records)
+    with pytest.raises(TelemetryTraceValidationError, match="manifest logic timebase"):
+        load_validated_telemetry_bundle(invalid)
+
+
 def test_reader_preserves_frozen_v1_order_and_custom_state_payloads(tmp_path: Path) -> None:
     records = [
         _record(

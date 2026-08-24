@@ -31,7 +31,8 @@
 
 namespace
 {
-	const UnsignedInt SAMPLE_INTERVAL_FRAMES = 300;
+	// TheSuperHackers @bugfix Leex 24/08/2026 Preserve the ten-second grid cadence in high-FPS replay profiles. (#0)
+	const UnsignedInt SAMPLE_INTERVAL_FRAMES = LOGICFRAMES_PER_SECOND * 10;
 	const size_t MAXIMUM_SAMPLED_CELLS = ReplayPartitionSampler::MAXIMUM_SAMPLED_CELLS;
 	const char *SAMPLING_SCHEME = "uniform_partition_lattice_v1";
 	const char *HEURISTIC_SEMANTICS = "engine_ai_owner_contribution_heuristic";

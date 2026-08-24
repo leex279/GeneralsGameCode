@@ -35,7 +35,8 @@
 
 namespace
 {
-	const UnsignedInt SAMPLE_INTERVAL_FRAMES = 15;
+	// TheSuperHackers @bugfix Leex 24/08/2026 Preserve the half-second visibility cadence in high-FPS replay profiles. (#0)
+	const UnsignedInt SAMPLE_INTERVAL_FRAMES = LOGICFRAMES_PER_SECOND / 2;
 	const size_t MAXIMUM_PAIRS_PER_PASS = 8192;
 
 	enum VisibilityStatus
@@ -266,7 +267,7 @@ namespace
 				+ ",\"position\":" + positionValue
 				+ ",\"observation_basis\":\"object_center_partition_cell\""
 				+ ",\"source\":\"PartitionManager::getShroudStatusForPlayer\""
-				+ ",\"sample_interval_frames\":15"
+				+ ",\"sample_interval_frames\":" + std::to_string(SAMPLE_INTERVAL_FRAMES)
 				+ ",\"sampling_cycle_id\":" + std::to_string(s_cycleId) + "}";
 			ReplayTelemetry::emit(frame, "object_visibility_changed", AsciiString(payload.c_str()));
 		}
@@ -278,7 +279,8 @@ namespace
 	void emitSummary(UnsignedInt frame, size_t cursorStart, size_t cursorEnd, Bool cycleComplete)
 	{
 		const std::string payload = "{\"source\":\"PartitionManager::getShroudStatusForPlayer\""
-			",\"sample_interval_frames\":15,\"maximum_pairs_per_pass\":8192"
+			",\"sample_interval_frames\":" + std::to_string(SAMPLE_INTERVAL_FRAMES)
+			+ ",\"maximum_pairs_per_pass\":8192"
 			",\"eligible_pair_count\":" + std::to_string(s_cyclePairs.size())
 			+ ",\"sampled_pair_count\":" + std::to_string(cursorEnd - cursorStart)
 			+ ",\"cursor_start\":" + std::to_string(cursorStart)
