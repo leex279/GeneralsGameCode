@@ -355,6 +355,14 @@ public:
 	std::vector<AsciiString> m_simulateReplays; ///< If not empty, simulate this list of replays and exit.
 	Int m_simulateReplayJobs; ///< Maximum number of processes to use for simulation, or SIMULATE_REPLAYS_SEQUENTIAL for sequential simulation
 
+#if !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Hold modern replay capture settings outside deterministic GameLogic state. (#TBD)
+	AsciiString m_recordVideoPath;
+	Int m_videoCaptureWidth;
+	Int m_videoCaptureHeight;
+	Int m_videoCaptureFps;
+#endif
+
 	Int m_maxParticleCount;						///< maximum number of particles that can exist
 	Int m_maxFieldParticleCount;			///< maximum number of field-type particles that can exist (roughly)
 	WeaponBonusSet* m_weaponBonusSet;

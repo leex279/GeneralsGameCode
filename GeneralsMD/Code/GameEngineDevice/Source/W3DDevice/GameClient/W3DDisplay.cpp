@@ -72,6 +72,9 @@ static void drawFramerateBar();
 #include "W3DDevice/GameClient/W3DFileSystem.h"
 #include "W3DDevice/GameClient/W3DDynamicLight.h"
 #include "W3DDevice/GameClient/W3DProfilerFrameCapture.h"
+#if !defined(IS_VS6_BUILD)
+#include "W3DDevice/GameClient/W3DVideoWriter.h"
+#endif
 #include "W3DDevice/GameClient/HeightMap.h"
 #include "W3DDevice/GameClient/WorldHeightMap.h"
 #include "W3DDevice/GameClient/W3DScene.h"
@@ -115,6 +118,11 @@ static void drawFramerateBar();
 // DEFINE AND ENUMS ///////////////////////////////////////////////////////////
 
 #define no_SAMPLE_DYNAMIC_LIGHT	1
+#if !defined(IS_VS6_BUILD)
+// TheSuperHackers @feature Leex 23/08/2026 Keep the modern recorder in the rendered client lifecycle and outside GameLogic. (#TBD)
+static W3DVideoWriter *s_replayVideoWriter = nullptr;
+static Bool s_replayVideoCaptureSawReplay = FALSE;
+#endif
 #ifdef SAMPLE_DYNAMIC_LIGHT
 static W3DDynamicLight * theDynamicLight = nullptr;
 static Real theLightXOffset = 0.1f;
@@ -414,6 +422,14 @@ W3DDisplay::W3DDisplay()
 #ifdef PROFILER_ENABLED
 	m_profilerFrameCapture = NEW W3DProfilerFrameCapture();
 #endif
+#if !defined(IS_VS6_BUILD)
+	if (!TheGlobalData->m_recordVideoPath.isEmpty())
+	{
+		s_replayVideoWriter = NEW W3DVideoWriter(TheGlobalData->m_recordVideoPath.str(),
+			TheGlobalData->m_videoCaptureWidth, TheGlobalData->m_videoCaptureHeight,
+			TheGlobalData->m_videoCaptureFps);
+	}
+#endif
 }
 
 // W3DDisplay::~W3DDisplay ====================================================
@@ -421,6 +437,12 @@ W3DDisplay::W3DDisplay()
 //=============================================================================
 W3DDisplay::~W3DDisplay()
 {
+#if !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Finalize FFmpeg when replay/display teardown owns normal process shutdown. (#TBD)
+	delete s_replayVideoWriter;
+	s_replayVideoWriter = nullptr;
+	s_replayVideoCaptureSawReplay = FALSE;
+#endif
 #ifdef PROFILER_ENABLED
 	delete m_profilerFrameCapture;
 	m_profilerFrameCapture = nullptr;
@@ -1804,6 +1826,14 @@ void W3DDisplay::draw()
 	if (TheGlobalData->m_headless)
 		return;
 
+#if !defined(IS_VS6_BUILD)
+	if (s_replayVideoWriter != nullptr && s_replayVideoCaptureSawReplay && !TheGameLogic->isInReplayGame())
+	{
+		// TheSuperHackers @feature Leex 23/08/2026 Let replay completion close capture without asking the writer to quit the game. (#TBD)
+		s_replayVideoWriter->close();
+	}
+#endif
+
 	// TheSuperHackers @feature bobtista 10/07/2026 Show messages for screenshots finished by the screenshot thread.
 	W3D_UpdateScreenshotMessages();
 
@@ -2074,6 +2104,14 @@ AGAIN:
 				if (m_profilerFrameCapture && !TheGlobalData->m_headless)
 				{
 					m_profilerFrameCapture->Capture(getWidth(), getHeight());
+				}
+#endif
+#if !defined(IS_VS6_BUILD)
+				// TheSuperHackers @feature Leex 23/08/2026 Capture one rendered replay frame before End_Render presents or discards the backbuffer. (#TBD)
+				if (s_replayVideoWriter != nullptr && !s_replayVideoWriter->hasFailed() && TheGameLogic->isInReplayGame())
+				{
+					s_replayVideoCaptureSawReplay = TRUE;
+					s_replayVideoWriter->captureFrame(DX8Wrapper::_Get_D3D_Device8(), TheGameLogic->getFrame());
 				}
 #endif
 				// render is all done!

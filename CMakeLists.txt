@@ -89,6 +89,14 @@ if(RTS_BUILD_ZEROHOUR)
     add_subdirectory(GeneralsMD)
 endif()
 
+if(RTS_BUILD_ZEROHOUR AND NOT IS_VS6_BUILD)
+    # TheSuperHackers @build Leex 23/08/2026 Compile native replay capture only into the modern Zero Hour device target. (#TBD)
+    target_sources(z_gameenginedevice PRIVATE
+        Core/GameEngineDevice/Include/W3DDevice/GameClient/W3DVideoWriter.h
+        Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DVideoWriter.cpp
+    )
+endif()
+
 if(RTS_BUILD_GENERALS)
     add_subdirectory(Generals)
 endif()
