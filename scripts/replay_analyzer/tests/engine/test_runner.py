@@ -380,6 +380,28 @@ def test_isolated_replay_user_data_root_is_validated_and_bound_to_request(tmp_pa
     assert request_document["config"]["replay_user_data_root"] == str(isolated_user_data)
 
 
+def test_isolated_replay_uses_replay_leaf_in_engine_argv(tmp_path: Path) -> None:
+    """The retail command line resolves replay names below the isolated Replays directory."""
+    executable, _replay, data_root = _inputs(tmp_path)
+    isolated_user_data = (tmp_path / "isolated-user-data").resolve()
+    replay_directory = isolated_user_data / "Replays"
+    replay_directory.mkdir(parents=True)
+    replay = (replay_directory / "replay-short.rep").resolve()
+    replay.write_bytes(b"GENREP-isolated")
+
+    launcher = FakeLauncher(_publish_valid_evidence)
+    export_telemetry(
+        replay,
+        _config(executable, data_root, replay_user_data_root=isolated_user_data),
+        launcher=launcher,
+        run_id_factory=lambda: "123e4567-e89b-42d3-a456-426614174000",
+    )
+    request = launcher.requests[0]
+
+    replay_index = request.argv.index("-replay")
+    assert request.argv[replay_index + 1] == replay.name
+
+
 def test_isolated_replay_user_data_root_must_be_an_existing_plain_directory(tmp_path: Path) -> None:
     """Catch launch configuration accepting a missing path or an ordinary file as the user-data root."""
     executable, _replay, data_root = _inputs(tmp_path)

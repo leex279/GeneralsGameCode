@@ -576,12 +576,16 @@ def _export_telemetry_bound(
     outcome_path = run_dir / "replay-outcome.json"
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
+    # TheSuperHackers @bugfix Leex 24/08/2026 Pass isolated replay leaves so retail lookup stays below the user-data root. (#TBD)
+    replay_argument = str(replay)
+    if config.replay_user_data_root is not None and replay.parent == config.replay_user_data_root / "Replays":
+        replay_argument = replay.name
     argv_parts = [
         str(config.executable),
         "-headless",
         "-noaudio",
         "-replay",
-        str(replay),
+        replay_argument,
     ]
     if config.replay_user_data_root is not None:
         argv_parts.extend(("-replay-user-data-root", str(config.replay_user_data_root)))
