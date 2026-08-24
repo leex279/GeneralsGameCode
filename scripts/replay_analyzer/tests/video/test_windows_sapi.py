@@ -82,3 +82,16 @@ def test_sapi_surfaces_missing_voice_or_process_failure_without_publishing(tmp_p
     with pytest.raises(VoiceProviderError, match="voice_not_found"):
         provider.render(_event(), destination)
     assert not destination.exists()
+
+
+def test_sapi_wraps_invalid_provider_wav_as_typed_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        Path(argv[argv.index("-Destination") + 1]).write_bytes(b"not a wav")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    destination = tmp_path / "voice.wav"
+    provider = WindowsSapiVoiceProvider(Path("powershell.exe"), "Broken Voice")
+    with pytest.raises(VoiceProviderError, match="invalid WAV"):
+        provider.render(_event(), destination)
+    assert not destination.exists()
