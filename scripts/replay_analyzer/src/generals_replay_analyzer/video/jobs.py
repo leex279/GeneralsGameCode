@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from generals_replay_analyzer.importing.jobs import JobSpec
@@ -31,7 +31,7 @@ class VideoJobCoordinator(Protocol):
 
 
 class VideoRenderer(Protocol):
-    def render(self, request: object) -> object: ...
+    def render(self, request: Any) -> Any: ...
 
 
 class VideoRenderStageHandler:

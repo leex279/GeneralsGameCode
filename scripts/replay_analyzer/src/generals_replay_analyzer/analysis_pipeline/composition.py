@@ -40,6 +40,11 @@ from ..report.service import ReportService
 from ..spatial.features import SPATIAL_REGISTRY, SpatialFeatureExtractor
 from ..storage import ContentAddressedStore
 from ..strategy.service import StrategyAssessmentService
+from ..video.jobs import VideoRenderStageHandler
+from ..video.render import VideoRenderService
+from ..video.resolver import VideoRequestResolver
+from ..video.verify import MediaVerifier
+from ..video.windows_sapi import WindowsSapiVoiceProvider
 from .handlers import (
     AnalyzeLLMHandler,
     AssessStrategiesHandler,
@@ -123,7 +128,22 @@ def create_production_import_service(
             clock=clock,
         )
 
-    registrations = (
+    video_registration: tuple[StageHandlerRegistration, ...] = ()
+    if settings.engine_executable is not None and settings.ffmpeg_executable is not None and settings.ffprobe_executable is not None:
+        video_registration = (
+            StageHandlerRegistration(
+                "render_video", "1",
+                VideoRenderStageHandler(
+                    request_factory=VideoRequestResolver(session_factory, settings).resolve,
+                    renderer=VideoRenderService(
+                        settings=settings,
+                        voice_provider=WindowsSapiVoiceProvider(Path("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"), settings.video_voice_name),
+                        media_verifier=MediaVerifier(settings.ffprobe_executable),
+                    ),
+                ),
+            ),
+        )
+    registrations = (*video_registration,
         StageHandlerRegistration(
             "import_observations",
             "1",
