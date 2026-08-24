@@ -1,3 +1,5 @@
+"""Closed camera and video contract coverage."""
+
 from __future__ import annotations
 
 import math
