@@ -88,6 +88,8 @@
 
   <section id="report-timeline" class="workspace-panel" aria-labelledby="timeline-title">
     <div class="section-heading"><div><span class="eyebrow">Frame timebase · 30 FPS</span><h2 id="timeline-title">Match timeline</h2></div></div>
+    <!-- TheSuperHackers @fix Leex 24/08/2026 Explain why parser command markers can outlive a partial engine evidence horizon. (#TBD) -->
+    {% if coaching.horizon.status == "partial" %}<p class="analysis-scope-warning"><strong>Timeline boundary:</strong> Recorded command markers can continue beyond this boundary; economy, combat, and strategy conclusions stop at the observed engine horizon.</p>{% endif %}
     {% if report_view.timeline.availability.state == "unavailable" %}
       <p>Timeline unavailable. Reason: {{ report_view.timeline.availability.reason_codes|join(", ") }}</p>
     {% else %}

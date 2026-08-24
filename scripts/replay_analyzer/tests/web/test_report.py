@@ -715,5 +715,6 @@ def test_terminal_quality_failures_are_prominent_before_analysis(
     assert response.text.index(issue_code) > response.text.index("Technical evidence and provenance")
     assert issue_message in response.text
     assert "Opening-only analysis:" in response.text
+    assert "Recorded command markers can continue beyond this boundary" in response.text
     assert "Recorded result:" not in response.text
     assert "<em>won</em>" not in response.text
