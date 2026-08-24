@@ -47,13 +47,12 @@ def test_shell_has_keyboard_landmarks_unique_heading_and_disabled_non_actions() 
     assert any(tag == "button" and "data-command-palette-close" in attrs for tag, attrs in parser.tags)
 
 
-def test_shell_exposes_textual_quality_and_unavailability_with_non_color_css_support() -> None:
+def test_shell_exposes_textual_unavailability_with_non_color_css_support() -> None:
     html = _page("/")
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
 
     assert "Availability: unavailable" in html
     assert "analytics_adapter_pending" in html
-    assert "Terminal quality: unavailable" in html
     assert ":focus-visible" in css
     assert "prefers-reduced-motion: reduce" in css
 

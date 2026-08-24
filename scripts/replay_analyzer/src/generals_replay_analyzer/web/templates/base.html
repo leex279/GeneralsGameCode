@@ -13,7 +13,8 @@
   <body>
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
-      <div class="mode-banner" data-mode="{% if shell.availability.state == 'unavailable' %}unavailable{% else %}production{% endif %}">
+      {# TheSuperHackers @feature Leex 24/08/2026 Structure the shell as a truthful status strip, steel masthead, and tactical navigation band. (#TBD) #}
+      <div class="mode-banner status-strip" data-mode="{% if shell.availability.state == 'unavailable' %}unavailable{% else %}production{% endif %}">
         <span class="mode-label">Local workspace</span>
         {% if shell.availability.state == "unavailable" %}
         <strong>No analytics adapter</strong>
@@ -23,7 +24,7 @@
         <span>Views are backed by the local immutable analytics store.</span>
         {% endif %}
       </div>
-      <div class="utility-row">
+      <div class="utility-row steel-masthead">
         <a class="brand" href="/">
           <span class="brand-mark" aria-hidden="true">GRA</span>
           <span><strong>Generals Replay Analyzer</strong><small>Evidence command center</small></span>
@@ -35,14 +36,14 @@
           <span class="global-pipeline" aria-disabled="true">Pipeline unavailable</span>
           {% endif %}
           <span class="local-only">Local only</span>
-          <button class="command-trigger" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">
+          <button class="command-trigger clipped-control" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">
             <span>Navigate</span>
           </button>
         </div>
       </div>
-      <div class="primary-row">
+      <div class="primary-row tab-strip">
         <nav aria-label="Primary navigation">
-          <ul class="primary-navigation">
+          <ul class="primary-navigation tactical-tabs">
             {% for item in shell.navigation if item.availability == "available" %}
             <li><a href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
             {% endfor %}

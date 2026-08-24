@@ -56,13 +56,31 @@ def test_shell_has_a_persistent_mode_strip_and_keyboard_navigation_contract() ->
     html = _page("/")
     script = package_resource("web/static/js/app.js").read_text(encoding="utf-8")
 
-    assert 'class="mode-banner"' in html
+    assert 'class="mode-banner status-strip"' in html
     assert 'data-mode="unavailable"' in html
     assert "No analytics adapter" in html
-    assert 'class="utility-row"' in html
-    assert 'class="primary-row"' in html
+    assert 'class="utility-row steel-masthead"' in html
+    assert 'class="primary-row tab-strip"' in html
     assert ">Navigate<" in html
     assert "Ctrl+K" in script and "metaKey" in script
+
+
+def test_shell_uses_the_reference_three_band_chrome_and_clipped_active_navigation() -> None:
+    html = _page("/")
+    css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
+
+    assert 'class="mode-banner status-strip"' in html
+    assert 'class="utility-row steel-masthead"' in html
+    assert 'class="primary-row tab-strip"' in html
+    assert 'class="primary-navigation tactical-tabs"' in html
+    assert 'aria-current="page"' in html
+    assert '.mode-banner.status-strip' in css
+    assert 'min-height: 32px' in css
+    assert '.utility-row.steel-masthead' in css
+    assert '.primary-row.tab-strip' in css
+    assert '.tactical-tabs a[aria-current="page"]' in css
+    assert 'clip-path: polygon' in css
+    assert '"Bahnschrift"' in css
 
 
 def test_dashboard_is_an_operational_workspace_with_honest_unavailable_state() -> None:
@@ -96,6 +114,11 @@ def test_command_center_keeps_mobile_targets_forced_colors_and_reduced_motion() 
     assert "@media (max-width: 479px)" in css
     assert "min-height: 44px" in css
     assert "@media (forced-colors: active)" in css
+    assert '.clipped-control:focus-visible' in css
+    assert '.tactical-tabs a[aria-current="page"]:focus-visible' in css
+    forced_colors = css.split("@media (forced-colors: active)", maxsplit=1)[1]
+    assert ".clipped-control" in forced_colors
+    assert '.tactical-tabs a[aria-current="page"]' in forced_colors
     assert "prefers-reduced-motion: reduce" in css
 
 

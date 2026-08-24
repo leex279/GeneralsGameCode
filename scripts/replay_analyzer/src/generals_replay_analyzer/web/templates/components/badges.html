@@ -1,15 +1,15 @@
 {% macro evidence_badge(tier, evidence_public_id) -%}
-<span class="badge evidence-tier" data-evidence-public-id="{{ evidence_public_id }}">Evidence tier: {{ tier }}</span>
+<span class="badge evidence-tier clipped-badge" data-evidence-public-id="{{ evidence_public_id }}">Evidence tier: {{ tier }}</span>
 {%- endmacro %}
 
 {% macro availability_badge(availability) -%}
-<span class="badge availability-{{ availability.state }}">Availability: {{ availability.state }}. Reason: {{ availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}</span>
+<span class="badge availability-{{ availability.state }} clipped-badge">Availability: {{ availability.state }}. Reason: {{ availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}</span>
 {%- endmacro %}
 
 {% macro terminal_quality_badge(terminal_quality) -%}
 {% if terminal_quality %}
-<span class="badge terminal-quality">Terminal quality: {{ terminal_quality.lifecycle }}</span>
+<span class="badge terminal-quality clipped-badge">Terminal quality: {{ terminal_quality.lifecycle }}</span>
 {% else %}
-<span class="badge terminal-quality">Terminal quality: unavailable</span>
+<span class="badge terminal-quality clipped-badge">Terminal quality: unavailable</span>
 {% endif %}
 {%- endmacro %}
