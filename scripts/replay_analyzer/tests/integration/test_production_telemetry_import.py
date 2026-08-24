@@ -102,8 +102,13 @@ def _report_values(document: ReportDocument) -> Iterable[ReportValue]:
     return (*document.observed, *document.derived, *document.inferred)
 
 
-def test_production_composition_exposes_the_real_engine_adapter_when_configured(tmp_path: Path) -> None:
+def test_production_composition_exposes_the_real_engine_adapter_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Catch production composition regressing to parser-only telemetry before the opt-in run starts."""
+    for test_control in (_OPT_IN, _EXECUTABLE, _RUNTIME_DIRECTORY, _USER_DATA_DIRECTORY):
+        monkeypatch.delenv(test_control, raising=False)
     executable = tmp_path / "generalszh.exe"
     executable.write_bytes(b"engine")
     settings = AnalyzerSettings.model_validate(
