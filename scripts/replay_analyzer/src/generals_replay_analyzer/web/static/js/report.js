@@ -26,7 +26,23 @@
     document.querySelector("[data-timeline-axis]:checked")?.value === "seconds" ? "seconds" : "frame";
 
   const axisValue = (frame, payload) =>
-    selectedAxis() === "seconds" ? frame / payload.timebase_fps : frame;
+    selectedAxis() === "seconds" && payload.timebase_fps !== null
+      ? frame / payload.timebase_fps
+      : frame;
+
+  const synchronizeAxisControls = (payload) => {
+    axisInputs.forEach((input) => {
+      const authorityUnavailable =
+        input.value === "seconds" && payload.timebase_fps === null;
+      input.disabled = authorityUnavailable;
+      if (authorityUnavailable && input.checked) {
+        const frameInput = axisInputs.find((candidate) => candidate.value === "frame");
+        if (frameInput) {
+          frameInput.checked = true;
+        }
+      }
+    });
+  };
 
   const chartSeries = (payload) =>
     payload.series
@@ -93,12 +109,13 @@
         };
       });
 
-  // TheSuperHackers @feature Leex 23/08/2026 Keep chart filters bound to one fixed report and derive seconds only from authoritative 30 FPS frames. (#TBD)
+  // TheSuperHackers @feature Leex 24/08/2026 Keep chart filters bound to one fixed report and derive seconds only from the replay-specific authoritative clock. (#TBD)
   const render = (payload) => {
-    if (payload.schema_version !== "web-report-timeline-v1" || payload.timebase_fps !== 30) {
+    if (payload.schema_version !== "web-report-timeline-v1" || (payload.timebase_fps !== null && payload.timebase_fps !== 30 && payload.timebase_fps !== 60)) {
       throw new Error("timeline contract mismatch");
     }
     currentPayload = payload;
+    synchronizeAxisControls(payload);
     if (!chart) {
       // TheSuperHackers @fix Leex 23/08/2026 Keep the evidence timeline compact beneath its explicit player and family filters. (#TBD)
       root.style.height = "12rem";
@@ -111,7 +128,7 @@
           .map((item) => item.label),
       ),
     );
-    const seconds = selectedAxis() === "seconds";
+    const seconds = selectedAxis() === "seconds" && payload.timebase_fps !== null;
     chart.setOption(
       {
         animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -129,7 +146,7 @@
         legend: { show: false, textStyle: { color: "#9bb4c4" } },
         xAxis: {
           type: "value",
-          name: seconds ? "Seconds (frames / 30)" : "Replay frame",
+          name: seconds ? `Seconds (frames / ${payload.timebase_fps})` : "Replay frame",
           axisLine: { lineStyle: { color: "#31536a" } },
           splitLine: { lineStyle: { color: "#1a2f41" } },
         },
@@ -199,7 +216,7 @@
   };
 
   if (controls) {
-    [...filterInputs, ...axisInputs].forEach((input) => {
+    filterInputs.forEach((input) => {
       input.disabled = false;
     });
     filterInputs.forEach((input) => {

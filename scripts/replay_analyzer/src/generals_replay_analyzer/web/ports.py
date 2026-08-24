@@ -1066,12 +1066,12 @@ class TimelineSeriesDTO(WebDTO):
         return self
 
 
-# TheSuperHackers @feature Leex 23/08/2026 Preserve authoritative frame time at a fixed 30 FPS chart boundary. (#TBD)
+# TheSuperHackers @feature Leex 24/08/2026 Preserve replay-specific 30 or 60 Hz authority and leave unknown timelines frame-only. (#TBD)
 class TimelineChartDTO(WebDTO):
     schema_version: Literal["web-report-timeline-v1"]
     query: TimelineChartQueryDTO
     availability: AvailabilityDTO
-    timebase_fps: Literal[30]
+    timebase_fps: Literal[30, 60] | None
     available_players: tuple[TimelinePlayerOptionDTO, ...]
     available_families: tuple[TimelineFamilyOptionDTO, ...]
     series: tuple[TimelineSeriesDTO, ...]

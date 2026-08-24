@@ -47,10 +47,11 @@ def replay_report_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> R
         or timeline.query.report_public_id != report.fixed_report.report_public_id
     ):
         raise ValueError("timeline identity does not match the fixed report")
+    # TheSuperHackers @fix Leex 24/08/2026 Format report duration through the same replay-specific chart authority. (#TBD)
     duration_label = (
         "Duration unavailable"
-        if report.duration_frames is None
-        else f"{report.duration_frames // 30 // 60}:{report.duration_frames // 30 % 60:02d}"
+        if report.duration_frames is None or timeline.timebase_fps is None
+        else f"{report.duration_frames // timeline.timebase_fps // 60}:{report.duration_frames // timeline.timebase_fps % 60:02d}"
     )
     jump_sections = tuple(
         section for section in report.sections if section.availability.state != "unavailable" or section.claims

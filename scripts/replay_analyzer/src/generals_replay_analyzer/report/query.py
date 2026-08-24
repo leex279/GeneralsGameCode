@@ -401,6 +401,7 @@ class ReportQueryService:
         if type(query) is not TimelineChartQuery:
             raise TypeError("query must be a TimelineChartQuery")
         graph = self.get_report(FixedReportQuery(query.replay_public_id, query.report_public_id))
+        frames_per_second, seconds_display_policy_version = self._timeline_timebase(query.replay_public_id)
         selected_document = graph.selected.document
         available_players = (
             ()
@@ -512,9 +513,9 @@ class ReportQueryService:
             query.replay_public_id,
             query.report_public_id,
             "replay-report-v1",
-            30,
+            frames_per_second,
             "logic-frame-axis-v1",
-            "frame-div-30-v1",
+            seconds_display_policy_version,
             selected_player_ids,
             selected_families,
             available_players,
@@ -523,6 +524,30 @@ class ReportQueryService:
             availability,
             reason,
         )
+
+    # TheSuperHackers @feature Leex 24/08/2026 Resolve timeline seconds only from persisted engine clock authority. (#TBD)
+    def _timeline_timebase(self, replay_public_id: str) -> tuple[Literal[30, 60] | None, Literal["frame-div-authoritative-logic-fps-v2", "frame-div-30-historical-v1", "frame-only-authority-unavailable-v2"]]:
+        """Resolve timeline seconds only from persisted replay/telemetry clock authority."""
+        with self._session_factory() as session:
+            replay = session.scalar(select(Replay).where(Replay.public_id == replay_public_id))
+            if replay is None:
+                raise ReportGraphNotFoundError("requested replay public ID was not found")
+            header = replay.header_json if isinstance(replay.header_json, Mapping) else {}
+            timebase = header.get("timebase")
+            if isinstance(timebase, Mapping):
+                fps = timebase.get("logic_frames_per_second")
+                if timebase.get("source") == "engine_manifest" and fps in (30, 60):
+                    return cast(Literal[30, 60], fps), "frame-div-authoritative-logic-fps-v2"
+            telemetry_runs = tuple(session.scalars(select(TelemetryRun).where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded").order_by(TelemetryRun.run_id)))
+        for telemetry in telemetry_runs:
+            settings = telemetry.settings_json if isinstance(telemetry.settings_json, Mapping) else {}
+            fps = settings.get("logic_frames_per_second")
+            if settings.get("logic_timebase_source") == "engine_manifest" and fps in (30, 60):
+                return cast(Literal[30, 60], fps), "frame-div-authoritative-logic-fps-v2"
+        # TheSuperHackers @info Leex 24/08/2026 Retain the explicit legacy V1 30 Hz display contract only when no V2 engine-manifest clock exists. (#TBD)
+        if any(item.schema_version < 2 for item in telemetry_runs):
+            return 30, "frame-div-30-historical-v1"
+        return None, "frame-only-authority-unavailable-v2"
 
     @staticmethod
     def _timeline_scalar(value: CanonicalValue | None) -> int | float | str | None:

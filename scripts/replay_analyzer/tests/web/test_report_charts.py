@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -129,19 +131,31 @@ def test_timeline_series_rejects_shapes_that_do_not_match_their_kind(series: Tim
         TimelineSeriesDTO.model_validate(series.model_dump())
 
 
-def test_timeline_timebase_is_frozen_at_thirty_frames_per_second() -> None:
-    """Catch a chart endpoint inventing a replay-specific or browser-specific timebase."""
+def test_timeline_timebase_accepts_the_replay_specific_60_hz_authority() -> None:
+    """Keep the chart contract compatible with an authoritative high-FPS replay."""
     query = TimelineChartQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)
-    with pytest.raises(ValidationError):
-        TimelineChartDTO(
-            schema_version="web-report-timeline-v1",
-            query=query,
-            availability=AvailabilityDTO(state="unavailable", reason_codes=("telemetry_missing",)),
-            timebase_fps=60,
-            available_players=(),
-            available_families=(),
-            series=(),
-        )
+    chart = TimelineChartDTO(
+        schema_version="web-report-timeline-v1",
+        query=query,
+        availability=AvailabilityDTO(state="unavailable", reason_codes=("telemetry_missing",)),
+        timebase_fps=60,
+        available_players=(),
+        available_families=(),
+        series=(),
+    )
+    assert chart.timebase_fps == 60
+
+
+def test_timeline_script_keeps_seconds_disabled_when_clock_authority_is_unavailable() -> None:
+    """Catch progressive enhancement re-enabling a seconds axis that would divide by null."""
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src/generals_replay_analyzer/web/static/js/report.js"
+    ).read_text(encoding="utf-8")
+
+    assert "const synchronizeAxisControls = (payload) =>" in source
+    assert 'input.value === "seconds" && payload.timebase_fps === null' in source
+    assert "[...filterInputs, ...axisInputs].forEach" not in source
 
 
 @pytest.mark.parametrize("family", ["commands", "terrain", "Activity"])

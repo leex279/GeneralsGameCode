@@ -362,9 +362,9 @@ class TimelineChartDTO:
     replay_public_id: str
     report_public_id: str
     report_version: Literal["replay-report-v1"]
-    frames_per_second: Literal[30]
+    frames_per_second: Literal[30, 60] | None
     axis_version: Literal["logic-frame-axis-v1"]
-    seconds_display_policy_version: Literal["frame-div-30-v1"]
+    seconds_display_policy_version: Literal["frame-div-authoritative-logic-fps-v2", "frame-div-30-historical-v1", "frame-only-authority-unavailable-v2"]
     selected_player_public_ids: tuple[str, ...]
     selected_families: tuple[TimelineFamily, ...]
     available_players: tuple[TimelineOptionDTO, ...]
@@ -377,11 +377,17 @@ class TimelineChartDTO:
         if (
             self.schema_version != "replay-report-timeline-v1"
             or self.report_version != "replay-report-v1"
-            or self.frames_per_second != 30
             or self.axis_version != "logic-frame-axis-v1"
-            or self.seconds_display_policy_version != "frame-div-30-v1"
         ):
             raise ValueError("unsupported timeline schema or timebase")
+        if self.frames_per_second not in (None, 30, 60):
+            raise ValueError("timeline logic frames per second must be 30, 60, or unavailable")
+        if self.frames_per_second is None and self.seconds_display_policy_version != "frame-only-authority-unavailable-v2":
+            raise ValueError("an unavailable timeline authority must preserve frame-only labels")
+        if self.frames_per_second == 30 and self.seconds_display_policy_version not in ("frame-div-authoritative-logic-fps-v2", "frame-div-30-historical-v1"):
+            raise ValueError("30 Hz timeline policy must declare its authority")
+        if self.frames_per_second == 60 and self.seconds_display_policy_version != "frame-div-authoritative-logic-fps-v2":
+            raise ValueError("60 Hz timeline policy requires manifest authority")
         _uuid(self.replay_public_id, "timeline replay_public_id")
         _uuid(self.report_public_id, "timeline report_public_id")
         players = tuple(sorted({_uuid(item, "selected timeline player") for item in self.selected_player_public_ids}))

@@ -105,14 +105,14 @@
   {% endif %}
 
   <section id="report-timeline" class="workspace-panel" aria-labelledby="timeline-title">
-    <div class="section-heading"><div><span class="eyebrow">Frame timebase · 30 FPS</span><h2 id="timeline-title">Match timeline</h2></div></div>
+    <div class="section-heading"><div><span class="eyebrow">Frame timebase · {% if report_view.timeline.timebase_fps is not none %}{{ report_view.timeline.timebase_fps }} FPS{% else %}authority unavailable; exact frames only{% endif %}</span><h2 id="timeline-title">Match timeline</h2></div></div>
     <!-- TheSuperHackers @fix Leex 24/08/2026 Explain why parser command markers can outlive a partial engine evidence horizon. (#TBD) -->
     {% if coaching.horizon.status == "partial" %}<p class="analysis-scope-warning"><strong>Timeline boundary:</strong> Recorded command markers can continue beyond this boundary; economy, combat, and strategy conclusions stop at the observed engine horizon.</p>{% endif %}
     {% if report_view.timeline.availability.state == "unavailable" %}
       <p>Timeline unavailable. Reason: {{ report_view.timeline.availability.reason_codes|join(", ") }}</p>
     {% else %}
       <form class="library-filters" data-timeline-controls aria-label="Timeline controls"><div class="filter-grid">
-        <fieldset><legend>Time axis</legend><label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label><label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis disabled> Seconds</label></fieldset>
+        <fieldset><legend>Time axis</legend><label for="timeline-axis-frame"><input id="timeline-axis-frame" type="radio" name="timeline-axis" value="frame" data-timeline-axis checked disabled> Frames</label><label for="timeline-axis-seconds"><input id="timeline-axis-seconds" type="radio" name="timeline-axis" value="seconds" data-timeline-axis{% if report_view.timeline.timebase_fps is none %} disabled{% endif %}> Seconds</label></fieldset>
         <fieldset><legend>Players</legend>{% for player in report_view.timeline.available_players %}<label for="timeline-player-{{ loop.index }}"><input id="timeline-player-{{ loop.index }}" type="checkbox" value="{{ player.public_id }}" data-timeline-player checked disabled> {{ player.label }}</label>{% endfor %}</fieldset>
         <fieldset class="timeline-family-filter"><legend>Event families</legend>{% for family in report_view.timeline.available_families %}<label for="timeline-family-{{ loop.index }}"><input id="timeline-family-{{ loop.index }}" type="checkbox" value="{{ family.value }}" data-timeline-family checked disabled> {{ family.label }}</label>{% endfor %}</fieldset>
       </div></form>

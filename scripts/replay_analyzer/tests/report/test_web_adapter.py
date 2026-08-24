@@ -144,7 +144,7 @@ def test_production_web_adapter_projects_one_fixed_report_and_its_evidence(
     timeline = adapter.timeline_chart(timeline_query)
     assert timeline.query == timeline_query
     assert timeline.query.report_public_id == report.fixed_report.report_public_id
-    assert timeline.timebase_fps == 30
+    assert timeline.timebase_fps is None
 
 
 def test_web_report_excludes_a_fabricated_closed_slot_outside_parser_subjects(

@@ -1389,7 +1389,8 @@ def test_timeline_query_is_frame_canonical_sorted_and_report_scoped(
 
     assert first == second
     assert first.schema_version == "replay-report-timeline-v1"
-    assert first.frames_per_second == 30
+    assert first.frames_per_second is None
+    assert first.seconds_display_policy_version == "frame-only-authority-unavailable-v2"
     assert first.replay_public_id == published_graph.replay_public_id
     assert first.report_public_id == published_graph.player_report_id
     assert first.selected_player_public_ids == (published_graph.player_public_id,)
@@ -1406,6 +1407,26 @@ def test_timeline_query_is_frame_canonical_sorted_and_report_scoped(
                 published_graph.player_report_id,
             )
         )
+
+
+def test_timeline_uses_the_authoritative_60_hz_replay_header_timebase(
+    published_graph: PublishedGraph,
+    report_database: SeededReportDatabase,
+) -> None:
+    with report_database.session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        assert replay is not None
+        replay.header_json = {
+            **replay.header_json,
+            "timebase": {"logic_frames_per_second": 60, "source": "engine_manifest"},
+        }
+
+    chart = published_graph.service.timeline_chart(
+        TimelineChartQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+
+    assert chart.frames_per_second == 60
+    assert chart.seconds_display_policy_version == "frame-div-authoritative-logic-fps-v2"
 
 
 def test_latest_and_timeline_queries_reject_wrong_types_ambiguity_and_unknown_filters(
