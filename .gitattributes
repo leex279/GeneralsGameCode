@@ -1,0 +1,4 @@
+# TheSuperHackers @fix Leex 24/08/2026 Preserve byte-pinned Web dependencies and license fixtures across Windows checkouts. (#TBD)
+/scripts/replay_analyzer/src/generals_replay_analyzer/web/static/vendor/htmx.min.js text eol=lf
+/scripts/replay_analyzer/src/generals_replay_analyzer/web/static/vendor/echarts.min.js text eol=lf
+/scripts/replay_analyzer/tests/web/fixtures/vendor/* text eol=lf
