@@ -35,6 +35,7 @@ from ..db.models import (
 )
 from ..identity.service import IdentityError
 from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundle
+from ..telemetry.model import TelemetryRecord
 from .evidence_identity import telemetry_event_evidence_identities, validate_observed_evidence_identity
 from .identity_import import (
     IdentityResolutionContractError,
@@ -147,6 +148,17 @@ class _NormalizedTelemetry:
     map_projection: NormalizedMap | None
     records: tuple[dict[str, Any], ...]
     payloads: tuple[dict[str, Any], ...]
+
+
+def _normalized_record_json(record: TelemetryRecord) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = record.payload.model_dump(mode="json")
+    if record.schema_version == 2 and record.event_type == "match_outcome":
+        # TheSuperHackers @fix Leex 25/08/2026 Keep deprecated v1 outcome defaults out of strict v2 persistence. (#TBD)
+        payload.pop("outcome", None)
+        payload.pop("winner_player_index", None)
+    raw_record = record.model_dump(mode="json")
+    raw_record["payload"] = payload
+    return raw_record, payload
 
 
 def _utc(value: datetime) -> datetime:
@@ -824,9 +836,13 @@ class TelemetryObservationImporter:
                 raise ValueError("telemetry engine build differs from the selected runner metadata")
             self._validate_bundle_topology(root, bundle, verified)
             map_projection = normalize_map_asset(bundle.map_asset) if bundle.map_asset is not None else None
-            records = tuple(record.model_dump(mode="json") for record in bundle.records)
-            payloads = tuple(record.payload.model_dump(mode="json") for record in bundle.records)
-            return _NormalizedTelemetry(bundle, map_projection, records, payloads)
+            records: list[dict[str, Any]] = []
+            payloads: list[dict[str, Any]] = []
+            for record in bundle.records:
+                raw_record, payload = _normalized_record_json(record)
+                records.append(raw_record)
+                payloads.append(payload)
+            return _NormalizedTelemetry(bundle, map_projection, tuple(records), tuple(payloads))
 
     @staticmethod
     def _validate_bundle_topology(

@@ -65,6 +65,7 @@ from generals_replay_analyzer.importing.telemetry_import import (
     TelemetryAttempt,
     TelemetryImportResult,
     TelemetryObservationImporter,
+    _normalized_record_json,
 )
 from generals_replay_analyzer.parser import ParsedReplay, parse_replay
 from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
@@ -667,6 +668,20 @@ def _run_diagnostics(session_factory: sessionmaker[Session], run_id: str) -> obj
     with session_factory() as session:
         run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
         return None if run is None else run.diagnostics_json
+
+
+def test_v2_outcome_normalization_does_not_reintroduce_legacy_fields(tmp_path: Path) -> None:
+    """Catch validated v2 outcomes gaining deprecated null fields before persistence."""
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v2_bundle(tmp_path / run_id, run_id)
+    record = next(
+        item for item in load_validated_telemetry_bundle(trace).records if item.event_type == "match_outcome"
+    )
+    raw_record, payload = _normalized_record_json(record)
+    assert "outcome" not in payload
+    assert "winner_player_index" not in payload
+    assert "outcome" not in raw_record["payload"]
+    assert "winner_player_index" not in raw_record["payload"]
 
 
 def test_v2_import_uses_validated_map_and_stable_raw_event_evidence(
