@@ -194,6 +194,7 @@ class _ProcessRunner:
         cancellation: _Cancellation | None = None,
         capture_result: dict[str, object] | None = None,
         inspect_engine_capture: Callable[[VideoProcessSpec], None] | None = None,
+        engine_exit_code: int = 0,
     ) -> None:
         self.stages = stages
         self.specs: list[VideoProcessSpec] = []
@@ -202,6 +203,7 @@ class _ProcessRunner:
         self.cancellation = cancellation
         self.capture_result = capture_result
         self.inspect_engine_capture = inspect_engine_capture
+        self.engine_exit_code = engine_exit_code
         self.mutation_denied = False
 
     def run(self, spec: VideoProcessSpec) -> VideoProcessResult:
@@ -211,23 +213,27 @@ class _ProcessRunner:
             self.inspect_engine_capture(spec)
         if spec.stage == self.fail_stage:
             raise VideoProcessError(f"{spec.stage} launch failed")
-        output = Path(spec.argv[spec.argv.index("-recordVideo") + 1]) if spec.stage == "engine_capture" else Path(spec.argv[-1])
+        output = (
+            Path(spec.argv[spec.argv.index("-recordVideo") + 1])
+            if spec.stage == "engine_capture"
+            else Path(spec.argv[-1])
+        )
         output.write_bytes(b"gameplay" if spec.stage == "engine_capture" else b"muxed-final")
         if spec.stage == "engine_capture":
             payload: dict[str, object] = {
-                        "schema_version": 1,
-                        "status": "success",
-                        "failure_code": "ok",
-                        "failure_detail": 0,
-                        "requested_width": 640,
-                        "requested_height": 360,
-                        "actual_width": 640,
-                        "actual_height": 360,
-                        "fps": 30,
-                        "logic_frames": 60,
-                        "presentation_frames": 60,
-                        "process_exit_code": 0,
-                    }
+                "schema_version": 1,
+                "status": "success",
+                "failure_code": "ok",
+                "failure_detail": 0,
+                "requested_width": 640,
+                "requested_height": 360,
+                "actual_width": 640,
+                "actual_height": 360,
+                "fps": 30,
+                "logic_frames": 60,
+                "presentation_frames": 60,
+                "process_exit_code": 0,
+            }
             if self.capture_result is not None:
                 payload.update(self.capture_result)
             (output.parent / f"{output.name}.capture-result.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -240,9 +246,9 @@ class _ProcessRunner:
                 self.mutation_denied = True
         if self.cancellation is not None and spec.stage == "engine_capture":
             self.cancellation.cancelled = True
-        return VideoProcessResult(
+        result = VideoProcessResult(
             stage=spec.stage,
-            exit_code=0,
+            exit_code=self.engine_exit_code if spec.stage == "engine_capture" else 0,
             timed_out=False,
             duration_seconds=0.1,
             process_tree_terminated=False,
@@ -250,6 +256,9 @@ class _ProcessRunner:
             stdout_path=spec.stdout_path,
             stderr_path=spec.stderr_path,
         )
+        if result.exit_code != 0:
+            raise VideoProcessError(f"{spec.stage} failed with exit code {result.exit_code}", result)
+        return result
 
 
 class _Verifier:
@@ -277,7 +286,13 @@ class _Verifier:
         return VerifiedMediaV1(
             final_video_sha256=_sha256(final_video),
             narration_sha256="f" * 64 if self.wrong_auxiliary_hash else _sha256(narration_wav),
-            subtitle_sha256=("e" * 64 if self.wrong_auxiliary_hash and subtitles is not None else _sha256(subtitles) if subtitles is not None else None),
+            subtitle_sha256=(
+                "e" * 64
+                if self.wrong_auxiliary_hash and subtitles is not None
+                else _sha256(subtitles)
+                if subtitles is not None
+                else None
+            ),
             expected_duration_seconds=(final_frame + 1) / logic_frames_per_second,
             observed=ObservedVideoV1(
                 codec_name="h264",
@@ -343,7 +358,12 @@ def _settings(tmp_path: Path) -> tuple[AnalyzerSettings, Path, Path, Path]:
     return settings, engine.resolve(), ffmpeg.resolve(), ffprobe.resolve()
 
 
-def _request(tmp_path: Path, *, cancellation: _Cancellation | None = None) -> tuple[VideoRenderRequest, CameraPlanV1, CommentaryPlanV1]:
+def _request(
+    tmp_path: Path,
+    *,
+    cancellation: _Cancellation | None = None,
+    diagnostic_preview: bool = False,
+) -> tuple[VideoRenderRequest, CameraPlanV1, CommentaryPlanV1]:
     replay = (tmp_path / "Replay & whoami; $(touch nope).rep").resolve()
     replay.write_bytes(b"retail replay")
     authority = _authority(_sha256(replay))
@@ -353,6 +373,7 @@ def _request(tmp_path: Path, *, cancellation: _Cancellation | None = None) -> tu
             report=cast(PublishedReportGraphDTO, object()),
             scene=cast(MapSceneReadModel, object()),
             replay_path=replay,
+            diagnostic_preview=diagnostic_preview,
             cancellation=cancellation,
         ),
         _camera(authority),
@@ -435,7 +456,42 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
         "native_capture_result",
         "final_video",
     }
-    assert all(artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts)
+    assert all(
+        artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts
+    )
+
+
+def test_explicit_diagnostic_preview_accepts_replay_validator_exit_one_only_with_success_sidecar(
+    tmp_path: Path,
+) -> None:
+    request, camera, commentary = _request(tmp_path, diagnostic_preview=True)
+    stages: list[str] = []
+    process = _ProcessRunner(stages, engine_exit_code=1)
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+
+    result = service.render(request)
+
+    assert result.final_video_path.is_file()
+    assert [spec.stage for spec in process.specs] == ["engine_capture", "mux"]
+    assert publisher.manifests
+
+
+@pytest.mark.parametrize(("diagnostic_preview", "exit_code"), ((False, 1), (True, 2)))
+def test_capture_validator_failure_is_not_accepted_outside_the_explicit_partial_contract(
+    tmp_path: Path,
+    diagnostic_preview: bool,
+    exit_code: int,
+) -> None:
+    request, camera, commentary = _request(tmp_path, diagnostic_preview=diagnostic_preview)
+    stages: list[str] = []
+    process = _ProcessRunner(stages, engine_exit_code=exit_code)
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+
+    with pytest.raises(VideoProcessError, match=f"exit code {exit_code}"):
+        service.render(request)
+
+    assert [spec.stage for spec in process.specs] == ["engine_capture"]
+    assert publisher.manifests == []
 
 
 def test_render_stages_engine_capture_beside_runtime_and_removes_it_after_the_process_settles(tmp_path: Path) -> None:
@@ -547,7 +603,7 @@ def test_render_rejects_verifier_auxiliary_hashes_that_do_not_match_frozen_input
         {"status": "failed", "failure_code": "pipe_write_failed"},
         {"logic_frames": 59},
         {"presentation_frames": 61},
-        {"actual_width": 320},
+        {"requested_width": 320},
         {"process_exit_code": 1},
     ],
 )
@@ -563,6 +619,21 @@ def test_render_rejects_unsuccessful_or_mismatched_native_capture_result(
         service.render(request)
 
     assert publisher.manifests == []
+
+
+def test_render_accepts_scaled_native_backbuffer_when_requested_output_and_verification_match(
+    tmp_path: Path,
+) -> None:
+    request, camera, commentary = _request(tmp_path)
+    stages: list[str] = []
+    process = _ProcessRunner(stages, capture_result={"actual_width": 1686, "actual_height": 916})
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+
+    result = service.render(request)
+
+    assert result.final_video_path.is_file()
+    assert publisher.manifests[0].verified_media.observed.width == 640
+    assert publisher.manifests[0].verified_media.observed.height == 360
 
 
 @pytest.mark.parametrize("failure_stage", ["engine_capture", "mux"])

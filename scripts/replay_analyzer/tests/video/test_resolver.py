@@ -105,6 +105,7 @@ def test_video_request_authority_uses_the_last_presentable_frame_not_the_header_
     )
 
     assert request.authority.evidence_horizon.frame_end == 107
+    assert request.diagnostic_preview is True
     resolved_scene = thaw_canonical(request.scene.payload)
     assert isinstance(resolved_scene, dict)
     assert resolved_scene["query"] == {"frame_start": 0, "frame_end": 107}
@@ -122,13 +123,17 @@ def test_managed_replay_path_rejects_root_escape(tmp_path: Path) -> None:
 def test_authority_payload_rejects_noncanonical_uuid_and_uppercase_sha() -> None:
     with pytest.raises(VideoResolutionError, match="authority identities are invalid"):
         _authority_from_payload(
-            "123e4567-e89b-42d3-a456-426614174000", "123e4567-e89b-42d3-a456-426614174001", "A" * 64,
+            "123e4567-e89b-42d3-a456-426614174000",
+            "123e4567-e89b-42d3-a456-426614174001",
+            "A" * 64,
             {
                 "telemetry_run_public_id": "123e4567-e89b-42d3-a456-426614174002",
                 "telemetry_trace_sha256": "b" * 64,
                 "map_public_id": "123e4567-e89b-42d3-a456-426614174003",
                 "map_content_sha256": "c" * 64,
-            }, 10, 30,
+            },
+            10,
+            30,
         )
 
 
@@ -151,8 +156,11 @@ def test_logic_timebase_resolution_fails_closed_for_unknown_v2_and_preserves_exp
     with pytest.raises(VideoResolutionError, match="engine logic timebase is unavailable"):
         _resolve_authoritative_logic_fps({}, ((2, {}),), requested=30)
 
-    assert _resolve_authoritative_logic_fps(
-        {},
-        ((1, {"logic_frames_per_second": 30, "logic_timebase_source": "historical_v1_contract"}),),
-        requested=30,
-    ) == 30
+    assert (
+        _resolve_authoritative_logic_fps(
+            {},
+            ((1, {"logic_frames_per_second": 30, "logic_timebase_source": "historical_v1_contract"}),),
+            requested=30,
+        )
+        == 30
+    )

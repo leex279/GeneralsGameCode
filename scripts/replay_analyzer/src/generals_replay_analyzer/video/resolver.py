@@ -57,9 +57,7 @@ def _resolve_authoritative_logic_fps(
         source = settings.get("logic_timebase_source")
         if source == "engine_manifest" and fps in (30, 60):
             candidates.add(fps)
-        historical_v1 = historical_v1 or (
-            schema_version == 1 and source == "historical_v1_contract" and fps == 30
-        )
+        historical_v1 = historical_v1 or (schema_version == 1 and source == "historical_v1_contract" and fps == 30)
     if len(candidates) > 1:
         raise VideoResolutionError("conflicting engine logic timebase authorities")
     if candidates:
@@ -83,13 +81,20 @@ def _authority_from_payload(
     logic_frames_per_second: Literal[30, 60],
 ) -> CameraPlanAuthorityV1:
     try:
-        identities = {name: payload[name] for name in ("telemetry_run_public_id", "telemetry_trace_sha256", "map_public_id", "map_content_sha256")}
+        identities = {
+            name: payload[name]
+            for name in ("telemetry_run_public_id", "telemetry_trace_sha256", "map_public_id", "map_content_sha256")
+        }
         if any(type(value) is not str for value in identities.values()):
             raise TypeError("stage identities must be strings")
         return CameraPlanAuthorityV1(
-            replay_public_id=replay_id, replay_sha256=replay_sha256, report_public_id=report_id,
-            telemetry_run_public_id=cast(str, identities["telemetry_run_public_id"]), telemetry_trace_sha256=cast(str, identities["telemetry_trace_sha256"]),
-            map_public_id=cast(str, identities["map_public_id"]), map_content_sha256=cast(str, identities["map_content_sha256"]),
+            replay_public_id=replay_id,
+            replay_sha256=replay_sha256,
+            report_public_id=report_id,
+            telemetry_run_public_id=cast(str, identities["telemetry_run_public_id"]),
+            telemetry_trace_sha256=cast(str, identities["telemetry_trace_sha256"]),
+            map_public_id=cast(str, identities["map_public_id"]),
+            map_content_sha256=cast(str, identities["map_content_sha256"]),
             evidence_horizon=EvidenceHorizonV1(frame_end=accepted_end),
             logic_frames_per_second=logic_frames_per_second,
         )
@@ -178,7 +183,11 @@ class VideoRequestResolver:
         if not isinstance(payload, Mapping):
             raise VideoResolutionError("map scene is invalid")
         available = payload.get("available_frame_window")
-        if not isinstance(available, Mapping) or available.get("frame_start") != 0 or type(available.get("frame_end")) is not int:
+        if (
+            not isinstance(available, Mapping)
+            or available.get("frame_start") != 0
+            or type(available.get("frame_end")) is not int
+        ):
             raise VideoResolutionError("map scene horizon is invalid")
         accepted_end = available["frame_end"]
         if horizon == "complete" and accepted_end != frame_end:
@@ -191,4 +200,10 @@ class VideoRequestResolver:
         )
         # TheSuperHackers @bugfix Leex 24/08/2026 Bind camera input to the exact presentable window after validating the canonical telemetry horizon. (#TBD)
         scene = self._scenes.get_scene(MapSceneReadQuery(replay_id, report_id, 0, renderable_end))
-        return VideoRenderRequest(authority=authority, report=graph, scene=scene, replay_path=replay_path)
+        return VideoRenderRequest(
+            authority=authority,
+            report=graph,
+            scene=scene,
+            replay_path=replay_path,
+            diagnostic_preview=preview,
+        )

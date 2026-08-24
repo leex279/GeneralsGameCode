@@ -35,6 +35,7 @@ from generals_replay_analyzer.video.contracts import (
 from generals_replay_analyzer.video.manifest import ArtifactHashV1, VideoManifestPublisher, VideoManifestV1
 from generals_replay_analyzer.video.process import (
     VideoProcessCancelled,
+    VideoProcessError,
     VideoProcessResult,
     VideoProcessRunner,
     VideoProcessSpec,
@@ -121,6 +122,7 @@ class VideoRenderRequest:
     report: PublishedReportGraphDTO
     scene: MapSceneReadModel
     replay_path: Path
+    diagnostic_preview: bool = False
     enrichment: ValidatedCommentaryEnrichmentV1 | None = None
     cancellation: CancellationSignal | None = None
     timeout_seconds: int = 14_400
@@ -130,6 +132,8 @@ class VideoRenderRequest:
             raise TypeError("video render authority must use camera-plan authority v1")
         if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 86_400:
             raise ValueError("video render timeout must be between 1 and 86400 seconds")
+        if type(self.diagnostic_preview) is not bool:
+            raise TypeError("diagnostic preview must be a boolean")
         object.__setattr__(self, "replay_path", self.replay_path.resolve())
 
 
@@ -159,8 +163,8 @@ class NativeCaptureResultV1(VideoContract):
     failure_detail: int
     requested_width: int = Field(ge=1)
     requested_height: int = Field(ge=1)
-    actual_width: int = Field(ge=1)
-    actual_height: int = Field(ge=1)
+    actual_width: int = Field(ge=1, le=16_384)
+    actual_height: int = Field(ge=1, le=16_384)
     fps: Literal[30, 60]
     logic_frames: int = Field(ge=1)
     presentation_frames: int = Field(ge=1)
@@ -277,7 +281,9 @@ def _ffmpeg_filter_path(path: Path) -> str:
     return value
 
 
-def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int, logic_frames_per_second: int) -> NativeCaptureResultV1:
+def _load_capture_result(
+    path: Path, settings: VideoSettingsV1, final_frame: int, logic_frames_per_second: int
+) -> NativeCaptureResultV1:
     sidecar = _require_ordinary_file(path, "native capture result")
     try:
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -291,9 +297,9 @@ def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int
     if presentation_numerator % logic_frames_per_second:
         raise VideoRenderError("output FPS must divide exactly into the authoritative logic duration")
     expected_presentation_frames = presentation_numerator // logic_frames_per_second
+    # TheSuperHackers @bugfix Leex 24/08/2026 Treat actual dimensions as the bounded source backbuffer; requested dimensions plus ffprobe verify the scaled output. (#TBD)
     if (
         (result.requested_width, result.requested_height) != (settings.width, settings.height)
-        or (result.actual_width, result.actual_height) != (settings.width, settings.height)
         or result.fps != settings.fps
         or result.logic_frames != expected_logic_frames
         or result.presentation_frames != expected_presentation_frames
@@ -335,9 +341,7 @@ class VideoRenderService:
         self._voice_provider = voice_provider
         self._process_runner = process_runner if process_runner is not None else VideoProcessRunner()
         self._media_verifier = media_verifier
-        self._manifest_publisher = (
-            manifest_publisher if manifest_publisher is not None else VideoManifestPublisher()
-        )
+        self._manifest_publisher = manifest_publisher if manifest_publisher is not None else VideoManifestPublisher()
         self._narration_scheduler = narration_scheduler if narration_scheduler is not None else NarrationScheduler()
         self._uuid_factory = uuid_factory
 
@@ -359,7 +363,9 @@ class VideoRenderService:
         camera = self._camera_planner.create(request.authority, request.report, request.scene)
         if type(camera) is not CameraPlanV1 or camera.authority != request.authority:
             raise VideoRenderError("camera plan authority differs from the fixed render request")
-        camera_plan_path = _write_exclusive(run_directory / "camera-plan-v1.json", camera.canonical_json().encode("utf-8"))
+        camera_plan_path = _write_exclusive(
+            run_directory / "camera-plan-v1.json", camera.canonical_json().encode("utf-8")
+        )
         camera_script_path = _write_exclusive(run_directory / "camera-plan-v1.txt", _camera_script(camera))
         self._check_cancelled(request)
         immutable.update(self._snapshot((camera_plan_path, camera_script_path)))
@@ -400,36 +406,41 @@ class VideoRenderService:
         # TheSuperHackers @feature Leex 24/08/2026 Launch the analyzer beside retail runtime modules without altering the configured build. (#TBD)
         try:
             with bind_runtime_executable(engine, engine_runtime) as engine_binding:
-                engine_result = self._run_process(
-                VideoProcessSpec(
-                stage="engine_capture",
-                run_id=run_id,
-                argv=(
-                    str(engine_binding.launch_executable),
-                    "-replay",
-                    str(frozen_replay),
-                    "-autocamera",
-                    str(camera_script_path),
-                    "-recordVideo",
-                    str(gameplay_path),
-                    # TheSuperHackers @fix Leex 24/08/2026 Keep the native backbuffer and encoded replay cast at one fixed resolution. (#TBD)
-                    "-videoRes",
-                    f"{settings.width}x{settings.height}",
-                    "-xres",
-                    str(settings.width),
-                    "-yres",
-                    str(settings.height),
-                    "-videoFps",
-                    str(settings.fps),
-                ),
-                cwd=engine_runtime,
-                stdout_path=run_directory / "engine-capture.stdout.log",
-                stderr_path=run_directory / "engine-capture.stderr.log",
-                timeout_seconds=request.timeout_seconds,
-                    cancellation=request.cancellation,
-                ),
-                immutable,
-                )
+                try:
+                    engine_result = self._run_process(
+                        VideoProcessSpec(
+                            stage="engine_capture",
+                            run_id=run_id,
+                            argv=(
+                                str(engine_binding.launch_executable),
+                                "-replay",
+                                str(frozen_replay),
+                                "-autocamera",
+                                str(camera_script_path),
+                                "-recordVideo",
+                                str(gameplay_path),
+                                # TheSuperHackers @fix Leex 24/08/2026 Keep the native backbuffer and encoded replay cast at one fixed resolution. (#TBD)
+                                "-videoRes",
+                                f"{settings.width}x{settings.height}",
+                                "-xres",
+                                str(settings.width),
+                                "-yres",
+                                str(settings.height),
+                                "-videoFps",
+                                str(settings.fps),
+                            ),
+                            cwd=engine_runtime,
+                            stdout_path=run_directory / "engine-capture.stdout.log",
+                            stderr_path=run_directory / "engine-capture.stderr.log",
+                            timeout_seconds=request.timeout_seconds,
+                            cancellation=request.cancellation,
+                        ),
+                        immutable,
+                    )
+                except VideoProcessError as error:
+                    # TheSuperHackers @bugfix Leex 24/08/2026 Preserve the validator failure while allowing only an explicit, sidecar-verified partial cast to continue. (#TBD)
+                    engine_result = self._diagnostic_capture_result(request, error)
+                    self._assert_immutable(immutable)
         except EngineRunConfigurationError as error:
             raise VideoRenderError(f"engine runtime binding failed: {error}") from error
         del engine_result
@@ -550,6 +561,24 @@ class VideoRenderService:
             manifest_path=manifest_path,
             manifest_sha256=manifest_sha256,
         )
+
+    @staticmethod
+    def _diagnostic_capture_result(
+        request: VideoRenderRequest,
+        error: VideoProcessError,
+    ) -> VideoProcessResult:
+        result = error.result
+        if (
+            not request.diagnostic_preview
+            or result is None
+            or result.stage != "engine_capture"
+            or result.exit_code != 1
+            or result.timed_out
+            or result.cancelled
+            or result.process_tree_terminated
+        ):
+            raise error
+        return result
 
     def _fixed_settings(self) -> tuple[VideoSettingsV1, Path, Path, Path, Path]:
         if self.settings.engine_executable is None:
@@ -751,9 +780,7 @@ class VideoRenderService:
         # TheSuperHackers @bugfix Leex 24/08/2026 Keep burned subtitles embedded in final video without publishing a standalone artifact. (#TBD)
         if settings.subtitle_mode == "track":
             paths["subtitles"] = subtitles
-        paths.update(
-            {f"voice_clip_{index:04d}": clip.source_path for index, clip in enumerate(voice_clips)}
-        )
+        paths.update({f"voice_clip_{index:04d}": clip.source_path for index, clip in enumerate(voice_clips)})
         return tuple(
             ArtifactHashV1(name=name, path=path, sha256=immutable[path.resolve()])
             for name, path in sorted(paths.items())
