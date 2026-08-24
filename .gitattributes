@@ -2,3 +2,4 @@
 /scripts/replay_analyzer/src/generals_replay_analyzer/web/static/vendor/htmx.min.js text eol=lf
 /scripts/replay_analyzer/src/generals_replay_analyzer/web/static/vendor/echarts.min.js text eol=lf
 /scripts/replay_analyzer/tests/web/fixtures/vendor/* text eol=lf
+/scripts/replay_analyzer/src/generals_replay_analyzer/data/* text eol=lf
