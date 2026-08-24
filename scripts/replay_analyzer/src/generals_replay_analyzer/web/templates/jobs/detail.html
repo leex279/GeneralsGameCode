@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>Analysis job</h1>
+  <h1>{% if job.summary.stage == 'render_video' %}Replay cast production{% else %}Analysis job{% endif %}</h1>
+  {% if job.summary.stage == 'render_video' %}<p><a class="button" href="/video/{{ job.summary.job_public_id }}">Open cast production page</a></p>{% endif %}
   {% if mutation %}<p role="status">Job action: {{ mutation.result_code }}.</p>{% endif %}
   <section aria-labelledby="job-state-heading"><h2 id="job-state-heading">Job state</h2>
     <p>Stage: {{ job.summary.stage }}</p><p>State: {{ job.summary.state }}{% if job.summary.cancel_requested %}. Cancel requested; the owned execution is settling before cancellation becomes final.{% endif %}</p>
