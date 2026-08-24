@@ -12,6 +12,7 @@ from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.telemetry.model import (
     CashChangedPayload,
     CashChangedRecord,
+    CashPerMinuteSnapshotRecord,
     CompleteRecord,
     PlayersInitializedRecord,
     SupplyCollectedRecord,
@@ -44,7 +45,12 @@ def _environment(repository_root: Path) -> dict[str, str]:
     return environment
 
 
-def _run(executable: Path, replay: Path, trace: Path, repository_root: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    executable: Path,
+    replay: Path,
+    trace: Path,
+    repository_root: Path,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             [
@@ -98,6 +104,39 @@ def _assert_cash_fold(records: tuple[TelemetryRecord, ...]) -> None:
         assert chain[-1].after == balances[player_index].balance
 
 
+def _assert_income_rate_evidence(records: tuple[TelemetryRecord, ...]) -> None:
+    players = next(record for record in records if isinstance(record, PlayersInitializedRecord))
+    complete = records[-1]
+    assert isinstance(complete, CompleteRecord)
+    resolved_players = sorted(
+        slot.player_index
+        for slot in players.payload.slots or []
+        if slot.occupied and slot.player_index is not None
+    )
+    samples = [record for record in records if isinstance(record, CashPerMinuteSnapshotRecord)]
+    expected_frames = sorted({*range(30, complete.payload.final_frame + 1, 30), complete.payload.final_frame})
+
+    assert [record.frame for record in samples] == expected_frames
+    assert all(
+        [entry.player_index for entry in record.payload.players] == resolved_players
+        for record in samples
+    )
+    assert all(record.payload.source == "Money::getCashPerMinute" for record in samples)
+    tracked_cash = [
+        record
+        for record in records
+        if isinstance(record, CashChangedRecord) and record.payload.track_income
+    ]
+    assert tracked_cash
+    assert all(record.payload.tracked_income_amount is not None for record in tracked_cash)
+    assert all(record.payload.income_bucket_index is not None for record in tracked_cash)
+    assert all(
+        record.payload.tracked_income_amount
+        == (record.payload.after - record.payload.before) % (2**32)
+        for record in tracked_cash
+    )
+
+
 def test_natural_crc_stopping_replay_exposes_engine_cash_chain_and_final_balances(
     tmp_path: Path,
     repository_root: Path,
@@ -136,6 +175,7 @@ def test_natural_crc_stopping_replay_exposes_engine_cash_chain_and_final_balance
     }
     assert all(record.payload.before + record.payload.delta == record.payload.after for record in cash)
     _assert_cash_fold(records)
+    _assert_income_rate_evidence(records)
 
 
 def test_crc_stripped_derivative_reaches_economy_and_queue_mechanics_without_strategy_claims(
@@ -213,6 +253,62 @@ def test_crc_stripped_derivative_reaches_economy_and_queue_mechanics_without_str
         assert cash.payload.delta == record.payload.amount
         assert cash.payload.reason == "supply_income"
     _assert_cash_fold(records)
+    _assert_income_rate_evidence(records)
+
+
+def test_income_provenance_and_aggregate_sampler_follow_the_engine_rotation_seams(repository_root: Path) -> None:
+    money = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/RTS/Money.cpp"
+    ).read_text(encoding="utf-8")
+    economy = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEconomy.cpp"
+    ).read_text(encoding="utf-8")
+    telemetry = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp"
+    ).read_text(encoding="utf-8")
+
+    deposit = money.split("void Money::deposit", maxsplit=1)[1].split(
+        "void Money::setStartingCash", maxsplit=1
+    )[0]
+    rotation = money.split("void Money::updateIncomeBucket", maxsplit=1)[1].split(
+        "UnsignedInt Money::getCashPerMinute", maxsplit=1
+    )[0]
+    finish = telemetry.split("void ReplayTelemetry::finish(", maxsplit=1)[1]
+    normalized_deposit = " ".join(deposit.split())
+
+    provenance_call = (
+        "ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money, "
+        "trackIncome, amountToDeposit, m_currentBucket)"
+    )
+    assert provenance_call in normalized_deposit
+    assert normalized_deposit.index("m_incomeBuckets[m_currentBucket] += amountToDeposit") < normalized_deposit.index(
+        provenance_call
+    )
+    assert rotation.index("m_incomeBuckets[m_currentBucket] = 0u") < rotation.index(
+        "ReplayEconomy::observeIncomeBucketUpdated"
+    )
+    assert 'ReplayTelemetry::emit(frame, "cash_per_minute_snapshot"' in economy
+    assert finish.index("ReplayEconomy::emitTerminalCashPerMinuteSnapshot(finalFrame)") < finish.index(
+        "ReplayCombat::emitMatchOutcome(finalFrame, reason)"
+    )
+
+
+def test_income_rate_sampler_is_bounded_to_cadence_and_resolved_occupied_slots(repository_root: Path) -> None:
+    source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayEconomy.cpp"
+    ).read_text(encoding="utf-8")
+    initialize = source.split("void ReplayEconomy::initialize", maxsplit=1)[1].split(
+        "void ReplayEconomy::observeMoneyAttached", maxsplit=1
+    )[0]
+    observer = source.split("void ReplayEconomy::observeIncomeBucketUpdated", maxsplit=1)[1].split(
+        "void ReplayEconomy::emitTerminalCashPerMinuteSnapshot", maxsplit=1
+    )[0]
+
+    assert "slot->isOccupied()" in initialize
+    assert "ThePlayerList->getPlayerFromSlotIndex" in initialize
+    assert "std::sort" in initialize
+    assert "frame == 0 || frame % LOGICFRAMES_PER_SECOND != 0" in observer
+    assert "updatedIncomePlayers" in observer
 
 
 def test_authoritative_supply_source_is_captured_at_pickup_and_consumed_at_dropoff(repository_root: Path) -> None:

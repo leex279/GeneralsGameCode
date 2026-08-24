@@ -7,15 +7,18 @@
 #include "Common/Money.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#include "Common/Recorder.h"
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/ReplayTelemetry.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Object.h"
+#include "GameNetwork/GameInfo.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +39,8 @@ namespace
 		long long delta;
 		UnsignedInt after;
 		Bool trackIncome;
+		UnsignedInt trackedIncomeAmount;
+		UnsignedInt incomeBucketIndex;
 		ReplayCashReason reason;
 	};
 
@@ -73,9 +78,14 @@ namespace
 		std::map<unsigned long long, UpgradeState> upgrades;
 		std::map<std::pair<Int, std::string>, unsigned long long> activeUpgrades;
 		std::map<Int, std::vector<Int>> supplySources;
+		std::vector<Int> resolvedOccupiedPlayerIndices;
+		std::set<Int> updatedIncomePlayers;
 		unsigned long long nextProductionId = 1;
 		unsigned long long nextUpgradeId = 1;
+		UnsignedInt incomeUpdateFrame = 0;
+		UnsignedInt lastCashPerMinuteFrame = 0;
 		Int sciencePurchaseSuppressionDepth = 0;
+		Bool hasCashPerMinuteSnapshot = FALSE;
 		Bool initialized = FALSE;
 	};
 
@@ -157,8 +167,29 @@ namespace
 			+ ",\"delta\":" + std::to_string(event.delta)
 			+ ",\"after\":" + std::to_string(event.after)
 			+ ",\"track_income\":" + (event.trackIncome ? "true" : "false")
-			+ ",\"reason\":" + jsonString(cashReasonName(event.reason)) + "}";
+			+ ",\"reason\":" + jsonString(cashReasonName(event.reason))
+			+ (event.trackIncome
+				? ",\"tracked_income_amount\":" + std::to_string(event.trackedIncomeAmount)
+					+ ",\"income_bucket_index\":" + std::to_string(event.incomeBucketIndex)
+				: std::string()) + "}";
 		ReplayTelemetry::emit(event.frame, "cash_changed", AsciiString(payload.c_str()));
+	}
+
+	Player *playerByIndex(Int playerIndex)
+	{
+		if (ThePlayerList == nullptr)
+		{
+			return nullptr;
+		}
+		for (Int index = 0; index < ThePlayerList->getPlayerCount(); ++index)
+		{
+			Player *player = ThePlayerList->getNthPlayer(index);
+			if (player != nullptr && player->getPlayerIndex() == playerIndex)
+			{
+				return player;
+			}
+		}
+		return nullptr;
 	}
 
 	std::string productionPayload(const ProductionState &state, const char *terminal)
@@ -288,6 +319,27 @@ void ReplayEconomy::initialize()
 		return;
 	}
 	s_state.initialized = TRUE;
+	if (TheRecorder != nullptr && TheRecorder->getGameInfo() != nullptr && ThePlayerList != nullptr)
+	{
+		const GameInfo *gameInfo = TheRecorder->getGameInfo();
+		for (Int slotIndex = 0; slotIndex < MAX_SLOTS; ++slotIndex)
+		{
+			const GameSlot *slot = gameInfo->getConstSlot(slotIndex);
+			if (slot == nullptr || !slot->isOccupied())
+			{
+				continue;
+			}
+			Player *player = ThePlayerList->getPlayerFromSlotIndex(slotIndex);
+			if (player != nullptr)
+			{
+				s_state.resolvedOccupiedPlayerIndices.push_back(player->getPlayerIndex());
+			}
+		}
+		std::sort(s_state.resolvedOccupiedPlayerIndices.begin(), s_state.resolvedOccupiedPlayerIndices.end());
+		s_state.resolvedOccupiedPlayerIndices.erase(
+			std::unique(s_state.resolvedOccupiedPlayerIndices.begin(), s_state.resolvedOccupiedPlayerIndices.end()),
+			s_state.resolvedOccupiedPlayerIndices.end());
+	}
 	for (const CashEvent &event : s_state.pendingCash)
 	{
 		emitCash(event);
@@ -302,7 +354,7 @@ void ReplayEconomy::observeMoneyAttached(Int playerIndex, UnsignedInt balance)
 		return;
 	}
 	const CashEvent event = { currentFrame(), playerIndex, 0, static_cast<long long>(balance),
-		balance, FALSE, REPLAY_CASH_STARTING };
+		balance, FALSE, 0, 0, REPLAY_CASH_STARTING };
 	if (s_state.initialized)
 	{
 		emitCash(event);
@@ -313,14 +365,16 @@ void ReplayEconomy::observeMoneyAttached(Int playerIndex, UnsignedInt balance)
 	}
 }
 
-void ReplayEconomy::observeCashChanged(Int playerIndex, UnsignedInt before, UnsignedInt after, Bool trackIncome)
+void ReplayEconomy::observeCashChanged(Int playerIndex, UnsignedInt before, UnsignedInt after, Bool trackIncome,
+	UnsignedInt trackedIncomeAmount, UnsignedInt incomeBucketIndex)
 {
 	if (!ReplayTelemetry::isEnabled() || before == after)
 	{
 		return;
 	}
 	const CashEvent event = { currentFrame(), playerIndex, before,
-		static_cast<long long>(after) - static_cast<long long>(before), after, trackIncome, consumeCashReason() };
+		static_cast<long long>(after) - static_cast<long long>(before), after, trackIncome,
+		trackedIncomeAmount, incomeBucketIndex, consumeCashReason() };
 	if (s_state.initialized)
 	{
 		emitCash(event);
@@ -329,6 +383,70 @@ void ReplayEconomy::observeCashChanged(Int playerIndex, UnsignedInt before, Unsi
 	{
 		s_state.pendingCash.push_back(event);
 	}
+}
+
+void ReplayEconomy::observeIncomeBucketUpdated(Int playerIndex, UnsignedInt frame)
+{
+	if (!ReplayTelemetry::isInitialized() || frame == 0 || frame % LOGICFRAMES_PER_SECOND != 0)
+	{
+		return;
+	}
+	if (s_state.incomeUpdateFrame != frame)
+	{
+		s_state.incomeUpdateFrame = frame;
+		s_state.updatedIncomePlayers.clear();
+	}
+	if (!std::binary_search(s_state.resolvedOccupiedPlayerIndices.begin(),
+		s_state.resolvedOccupiedPlayerIndices.end(), playerIndex))
+	{
+		return;
+	}
+	s_state.updatedIncomePlayers.insert(playerIndex);
+	if (s_state.updatedIncomePlayers.size() == s_state.resolvedOccupiedPlayerIndices.size())
+	{
+		// TheSuperHackers @feature Leex 23/08/2026 Export the aggregate only after every resolved replay player rotated its engine income bucket. (#0)
+		emitCashPerMinuteSnapshot(frame);
+	}
+}
+
+void ReplayEconomy::emitTerminalCashPerMinuteSnapshot(UnsignedInt frame)
+{
+	if (ReplayTelemetry::isInitialized())
+	{
+		// TheSuperHackers @feature Leex 23/08/2026 Force one terminal income-rate observation without mutating Money state. (#0)
+		emitCashPerMinuteSnapshot(frame);
+	}
+}
+
+void ReplayEconomy::emitCashPerMinuteSnapshot(UnsignedInt frame)
+{
+	if (s_state.resolvedOccupiedPlayerIndices.empty()
+		|| (s_state.hasCashPerMinuteSnapshot && s_state.lastCashPerMinuteFrame == frame))
+	{
+		return;
+	}
+	std::string players = "[";
+	for (size_t index = 0; index < s_state.resolvedOccupiedPlayerIndices.size(); ++index)
+	{
+		if (index != 0)
+		{
+			players.push_back(',');
+		}
+		const Int playerIndex = s_state.resolvedOccupiedPlayerIndices[index];
+		Player *player = playerByIndex(playerIndex);
+		Money *money = player != nullptr ? player->getMoney() : nullptr;
+		players += "{\"player_index\":" + std::to_string(playerIndex)
+			+ ",\"has_money\":" + (money != nullptr ? "true" : "false")
+			+ ",\"cash_per_minute\":"
+			+ (money != nullptr ? std::to_string(money->getCashPerMinute()) : "null") + "}";
+	}
+	players.push_back(']');
+	const std::string payload = "{\"source\":\"Money::getCashPerMinute\""
+		",\"sample_interval_frames\":30,\"income_window_buckets\":60,\"bucket_width_frames\":30"
+		",\"players\":" + players + "}";
+	ReplayTelemetry::emit(frame, "cash_per_minute_snapshot", AsciiString(payload.c_str()));
+	s_state.hasCashPerMinuteSnapshot = TRUE;
+	s_state.lastCashPerMinuteFrame = frame;
 }
 
 void ReplayEconomy::observeProductionQueued(const Object *producer, Int engineProductionId,

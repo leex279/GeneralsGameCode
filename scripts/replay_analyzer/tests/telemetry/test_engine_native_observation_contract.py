@@ -449,6 +449,69 @@ def test_cash_per_minute_accepts_deposits_before_and_after_the_boundary_rotation
         _validate_native([*records[:2], records[0], records[2]], final_frame=30)
 
 
+def test_cash_per_minute_expires_the_wrapped_bucket_after_frame_1800_rotation() -> None:
+    records = [
+        _validated(
+            "cash_changed",
+            {
+                "player_index": 0,
+                "before": 0,
+                "delta": 100,
+                "after": 100,
+                "track_income": True,
+                "reason": "supply_income",
+                "tracked_income_amount": 100,
+                "income_bucket_index": 0,
+            },
+            frame=0,
+            sequence=1,
+        )
+    ]
+    sequence = 2
+    for frame in range(30, 1800, 30):
+        sample = _cash_per_minute()
+        sample["players"] = [
+            {"player_index": 0, "has_money": True, "cash_per_minute": 100}
+        ]
+        records.append(
+            _validated("cash_per_minute_snapshot", sample, frame=frame, sequence=sequence)
+        )
+        sequence += 1
+
+    deposits = (
+        (1799, 100, 150, 50, 59),
+        (1800, 150, 175, 25, 59),
+        (1800, 175, 182, 7, 0),
+    )
+    for frame, before, after, amount, bucket in deposits:
+        records.append(
+            _validated(
+                "cash_changed",
+                {
+                    "player_index": 0,
+                    "before": before,
+                    "delta": after - before,
+                    "after": after,
+                    "track_income": True,
+                    "reason": "supply_income",
+                    "tracked_income_amount": amount,
+                    "income_bucket_index": bucket,
+                },
+                frame=frame,
+                sequence=sequence,
+            )
+        )
+        sequence += 1
+
+    terminal = _cash_per_minute()
+    terminal["players"] = [{"player_index": 0, "has_money": True, "cash_per_minute": 82}]
+    records.append(
+        _validated("cash_per_minute_snapshot", terminal, frame=1800, sequence=sequence)
+    )
+
+    _validate_native(records, final_frame=1800)
+
+
 def test_engine_native_player_scope_uses_resolved_slots_not_the_full_engine_domain() -> None:
     payload = _scorekeeper()
     second = deepcopy(payload["players"][0])
