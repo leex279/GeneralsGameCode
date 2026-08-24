@@ -572,7 +572,8 @@ public:
 
 
 	// the trailing '\' is included!
-  const AsciiString &getPath_UserData() const { return m_userDataDir; }
+	// TheSuperHackers @bugfix Leex 24/08/2026 Keep this layout-dependent accessor in the owning translation unit. (#TBD)
+	const AsciiString &getPath_UserData() const;
 
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	// TheSuperHackers @feature Leex 21/08/2026 Isolate analyzer replay map discovery from the player's registry-derived data directory. (#TBD)
