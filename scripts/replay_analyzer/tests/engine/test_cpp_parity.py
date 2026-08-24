@@ -33,23 +33,19 @@ def test_object_crc_logging_exposes_exact_transform_bits(repository_root: Path) 
     ) in object_source
 
 
-def test_zero_hour_orientation_constructs_signed_basis_directly(repository_root: Path) -> None:
-    """Keep zero-angle orientation bytes independent of compiler cross-product optimization."""
+def test_zero_hour_orientation_preserves_historical_cross_product_signed_zero(repository_root: Path) -> None:
+    """Keep the historical cross products that reproduce the recorder's signed-zero matrix bits."""
     thing_source = (
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Thing/Thing.cpp"
     ).read_text(encoding="utf-8")
 
     assert (
-        "// TheSuperHackers @bugfix Leex 24/08/2026 Build the planar basis directly so modern compilers preserve the retail signed-zero layout. (#TBD)\n"
-        "\t\tx.x = u.x;\n"
-        "\t\tx.y = u.y;\n"
-        "\t\tx.z = 0.0f;\n"
-        "\t\ty.x = -u.y;\n"
-        "\t\ty.y = u.x;\n"
-        "\t\ty.z = 0.0f;"
+        "// TheSuperHackers @bugfix Leex 24/08/2026 Restore the historical cross products so replay transforms retain their signed-zero bits. (#TBD)\n"
+        "\t\tCoord3D::crossProduct(z, u, y);\n"
+        "\t\tCoord3D::crossProduct(y, z, x);"
     ) in thing_source
-    assert "y.crossProduct( z, u, y );" not in thing_source
-    assert "x.crossProduct( y, z, x );" not in thing_source
+    assert "x.x = u.x;" not in thing_source
+    assert "y.z = 0.0f;" not in thing_source
 
 
 @pytest.mark.parametrize(
