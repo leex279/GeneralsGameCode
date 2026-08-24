@@ -22,12 +22,20 @@
         <div><span class="eyebrow">Replay evidence</span><h2 id="workspace-title">Analysis workspace</h2></div>
         {{ badges.availability_badge(shell.availability) }}
       </div>
+      {% if shell.availability.state != "unavailable" %}
+        {# TheSuperHackers @feature Leex 24/08/2026 Lead with real workspace totals instead of technical shortcuts. (#TBD) #}
+        <div class="dashboard-kpi-grid" aria-label="Workspace totals">
+          {% for label, value in (("Replay count", dashboard.replay_count), ("Analyzed", dashboard.analyzed_count), ("Failed jobs", dashboard.failed_jobs_count), ("Maps seen", dashboard.maps_seen)) %}
+            <article class="dashboard-kpi"><span>{{ label }}</span><strong>{% if value is not none %}{{ value }}{% else %}Unavailable{% endif %}</strong></article>
+          {% endfor %}
+        </div>
+      {% endif %}
       {% if shell.availability.state != "unavailable" and dashboard.recent_replays %}
         <section class="dashboard-section" aria-labelledby="recent-matches-title">
           <div class="section-heading compact-heading"><div><span class="eyebrow">Latest evidence</span><h3 id="recent-matches-title">Recent matches</h3></div></div>
           <!-- TheSuperHackers @feature Leex 23/08/2026 Open recent fixed reports directly and lead with player-readable match context. (#TBD) -->
           <p id="recent-match-table-scroll-instruction" class="scroll-instruction">Scroll horizontally to inspect recent replay evidence.</p>
-          <div class="table-scroll" tabindex="0" aria-describedby="recent-match-table-scroll-instruction"><table class="dashboard-table recent-match-table"><caption>Recent replay evidence</caption><thead><tr><th scope="col">Match evidence</th><th scope="col">Review</th></tr></thead><tbody>
+          <div class="table-scroll" tabindex="0" aria-describedby="recent-match-table-scroll-instruction"><table class="dashboard-table recent-match-table"><caption>Recent replay evidence</caption><thead><tr><th scope="col">Replay identity and evidence</th><th scope="col">Inspect</th></tr></thead><tbody>
             {% for replay in dashboard.recent_replays %}
               <tr><td class="recent-match-analysis">
                   <span>{{ replay.analysis_state }} analysis &middot; {{ replay.evidence_tier or "evidence pending" }}</span>

@@ -436,6 +436,27 @@ def test_library_and_dashboard_dtos_never_expose_private_source_locators(
         (REPLAY_BETA, "Beta Match"),
     ]
 
+    dashboard = adapter.dashboard()
+    assert dashboard.replay_count == 2
+    assert dashboard.analyzed_count == 1
+    assert dashboard.failed_jobs_count == 0
+    assert dashboard.maps_seen == 1
+
+
+def test_dashboard_counts_reported_replays_as_analyzed_even_when_engine_is_partial(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    """Catch a truthful partial report being excluded from the analyzed workspace total."""
+    _, factory = library_database
+    with factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == REPLAY_ALPHA))
+        assert replay is not None
+        replay.lifecycle_state = "desynced"
+
+    dashboard = _adapter(library_database).dashboard()
+
+    assert dashboard.analyzed_count == 1
+
 
 def test_dashboard_projects_available_players_map_and_detected_opening_without_claiming_unknown_horizon(
     library_database: tuple[AnalyzerSettings, sessionmaker[Session]],

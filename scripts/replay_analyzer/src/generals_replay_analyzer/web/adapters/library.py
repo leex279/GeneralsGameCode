@@ -256,11 +256,27 @@ class AnalyticsLibraryAdapter:
             for value in page.items
             if value.players
         )[:8]
+        with self._session_factory() as session:
+            # TheSuperHackers @feature Leex 24/08/2026 Back dashboard totals with persisted workspace evidence. (#TBD)
+            replay_count = session.scalar(select(func.count()).select_from(Replay)) or 0
+            analyzed_count = session.scalar(
+                select(func.count(func.distinct(Report.replay_id))).select_from(Report)
+            ) or 0
+            failed_jobs_count = session.scalar(
+                select(func.count()).select_from(Job).where(Job.status == "failed")
+            ) or 0
+            maps_seen = session.scalar(
+                select(func.count(func.distinct(Replay.map_id))).where(Replay.map_id.is_not(None))
+            ) or 0
         return DashboardDTO(
             generated_at=_utc(self._clock()),
             availability=AvailabilityDTO(state="available"),
             pipeline_states=tuple(value.pipeline for value in page.items if value.pipeline is not None),
             recent_replays=recent,
+            replay_count=replay_count,
+            analyzed_count=analyzed_count,
+            failed_jobs_count=failed_jobs_count,
+            maps_seen=maps_seen,
         )
 
     def list_replays(self, query: ReplayLibraryQueryDTO) -> ReplayLibraryPageDTO:

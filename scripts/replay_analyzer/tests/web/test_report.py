@@ -317,7 +317,8 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
     assert response.status_code == 200
     for first, second in (
         ('id="what-happened"', 'id="strategy"'),
-        ('id="strategy"', 'id="worth-reviewing"'),
+        ('id="strategy"', 'id="opening-intelligence"'),
+        ('id="opening-intelligence"', 'id="worth-reviewing"'),
         ('id="worth-reviewing"', 'id="report-timeline"'),
         ('id="report-timeline"', 'id="build-order"'),
         ('id="build-order"', 'id="technical-evidence"'),
@@ -327,6 +328,12 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
     assert "Supply income" in response.text
     assert "1,350 supplies/min" in response.text
     assert "Power Plant" in response.text
+    assert "Opening intelligence" in response.text
+    assert "Power Plant completed" in response.text
+    assert 'aria-label="Review derived evidence for Power Plant completed"' in response.text
+    assert "No verified scouting clear inside the verified horizon." in response.text
+    assert "Build order" in response.text
+    assert "Army and attacks" in response.text
     assert '<details id="technical-evidence" class="workspace-panel technical-evidence">' in response.text
     assert f'/replays/{REPLAY_ID}/reports/{OPPONENT_REPORT_ID}' in response.text
     assert f'/replays/{REPLAY_ID}/reports/{REPORT_ID}/map' in response.text

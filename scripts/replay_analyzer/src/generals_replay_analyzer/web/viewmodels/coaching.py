@@ -123,6 +123,22 @@ class KeyMomentView(_FrozenView):
     evidence: tuple[ReportEvidenceReferenceDTO, ...]
 
 
+# TheSuperHackers @feature Leex 24/08/2026 Align observed opening events into evidence-bounded strategy lanes. (#TBD)
+class OpeningLaneEventView(_FrozenView):
+    frame: int
+    time_label: str
+    title: str
+    evidence: tuple[ReportEvidenceReferenceDTO, ...]
+
+
+class OpeningLaneView(_FrozenView):
+    lane_id: Literal["build", "scouting", "combat", "powers"]
+    title: str
+    description: str
+    empty_message: str
+    events: tuple[OpeningLaneEventView, ...]
+
+
 class CoachingViewModel(_FrozenView):
     schema_version: Literal["coaching-view-v1"] = "coaching-view-v1"
     horizon: EvidenceHorizonView
@@ -132,6 +148,7 @@ class CoachingViewModel(_FrozenView):
     highlights: tuple[CoachingHighlightView, ...]
     prompts: tuple[ReviewPromptView, ...]
     key_moments: tuple[KeyMomentView, ...]
+    opening_lanes: tuple[OpeningLaneView, ...]
     limitations: tuple[str, ...]
     local_model_summary: str | None
 
@@ -254,7 +271,12 @@ def _strategies(report: ReplayReportDTO) -> tuple[PlayerStrategyView, ...]:
     )
 
 
-def _build_order(report: ReplayReportDTO) -> tuple[BuildOrderStepView, ...]:
+def _build_order(
+    report: ReplayReportDTO,
+    horizon: EvidenceHorizonView,
+) -> tuple[BuildOrderStepView, ...]:
+    if horizon.frame_end is None:
+        return ()
     player = _selected_player(report)
     player_label = "Replay" if player is None else player.display_name
     output: list[BuildOrderStepView] = []
@@ -274,7 +296,7 @@ def _build_order(report: ReplayReportDTO) -> tuple[BuildOrderStepView, ...]:
             ):
                 continue
             frame = cast(int, step["frame"])
-            if frame < 0:
+            if frame < 0 or frame > horizon.frame_end:
                 continue
             output.append(
                 BuildOrderStepView(
@@ -467,6 +489,61 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
     )
 
 
+def _opening_lanes(
+    build_order: tuple[BuildOrderStepView, ...],
+    key_moments: tuple[KeyMomentView, ...],
+) -> tuple[OpeningLaneView, ...]:
+    events: dict[str, list[OpeningLaneEventView]] = {
+        "build": [],
+        "scouting": [],
+        "combat": [],
+        "powers": [],
+    }
+    events["build"].extend(
+        OpeningLaneEventView(
+            frame=step.frame,
+            time_label=format_frame(step.frame),
+            title=f"{step.structure_label} completed",
+            evidence=step.evidence,
+        )
+        for step in build_order
+    )
+    lane_by_category = {
+        "Scouting": "scouting",
+        "Combat": "combat",
+        "Engagement": "combat",
+        "Power use": "powers",
+    }
+    for moment in key_moments:
+        lane_id = lane_by_category.get(moment.category_label)
+        if lane_id is None:
+            continue
+        events[lane_id].append(
+            OpeningLaneEventView(
+                frame=moment.frame,
+                time_label=format_frame(moment.frame),
+                title=moment.title,
+                evidence=moment.evidence,
+            )
+        )
+    lane_config = (
+        ("build", "Build order", "Verified structure completions", "No verified build completion inside the verified horizon."),
+        ("scouting", "Scouting", "First clear sightings of opponent assets", "No verified scouting clear inside the verified horizon."),
+        ("combat", "Army and attacks", "Observed kills and engagement swing candidates", "No verified combat event inside the verified horizon."),
+        ("powers", "Powers", "Observed special-power activations", "No verified power use inside the verified horizon."),
+    )
+    return tuple(
+        OpeningLaneView(
+            lane_id=cast(Literal["build", "scouting", "combat", "powers"], lane_id),
+            title=title,
+            description=description,
+            empty_message=empty_message,
+            events=tuple(sorted(events[lane_id], key=lambda item: (item.frame, item.title))[:12]),
+        )
+        for lane_id, title, description, empty_message in lane_config
+    )
+
+
 def _summary(
     report: ReplayReportDTO,
     horizon: EvidenceHorizonView,
@@ -525,8 +602,9 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
         raise ValueError("timeline identity does not match the fixed report")
     horizon = _horizon(report, timeline)
     strategies = _strategies(report)
-    build_order = _build_order(report)
+    build_order = _build_order(report, horizon)
     highlights = _highlights(report)
+    key_moments = _key_moments(report, horizon)
     return CoachingViewModel(
         horizon=horizon,
         summary=_summary(report, horizon, strategies, build_order, highlights),
@@ -534,7 +612,8 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
         build_order=build_order,
         highlights=highlights,
         prompts=_prompts(strategies),
-        key_moments=_key_moments(report, horizon),
+        key_moments=key_moments,
+        opening_lanes=_opening_lanes(build_order, key_moments),
         limitations=_limitations(report, horizon),
         local_model_summary=_local_model_summary(report),
     )

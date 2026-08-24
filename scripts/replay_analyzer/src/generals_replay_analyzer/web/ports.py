@@ -374,6 +374,11 @@ class DashboardDTO(TimestampedWebDTO):
     recent_replays: tuple[DashboardReplayDTO, ...] = Field(default=(), max_length=8)
     trends: tuple[DashboardTrendDTO, ...] = Field(default=(), max_length=2)
     notable_evidence: tuple[DashboardNoticeDTO, ...] = Field(default=(), max_length=8)
+    # TheSuperHackers @feature Leex 24/08/2026 Carry datastore-backed workspace totals into the dashboard. (#TBD)
+    replay_count: int | None = Field(default=None, ge=0)
+    analyzed_count: int | None = Field(default=None, ge=0)
+    failed_jobs_count: int | None = Field(default=None, ge=0)
+    maps_seen: int | None = Field(default=None, ge=0)
 
 
 class IdentityLandingDTO(TimestampedWebDTO):

@@ -302,6 +302,10 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     assert "Activity &amp; quality trends" in response.text and "10 verified, 2 partial" in response.text
     assert "Notable evidence" in response.text and "One replay needs evidence review" in response.text
     assert 'class="dashboard-table recent-match-table"' in response.text
+    assert 'class="dashboard-kpi-grid"' in response.text
+    assert 'Replay count' in response.text
+    assert 'Maps seen' in response.text
+    assert 'Replay identity and evidence' in response.text and '>Inspect<' in response.text
     assert (
         'href="/replays/123e4567-e89b-42d3-a456-426614174000/reports/'
         '123e4567-e89b-42d3-a456-426614174010">View analysis</a>'

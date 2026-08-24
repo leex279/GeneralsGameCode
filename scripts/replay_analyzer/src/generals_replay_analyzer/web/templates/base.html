@@ -7,7 +7,8 @@
     {# TheSuperHackers @fix Leex 23/08/2026 Keep local HTMX enhancement compatible with the closed script and style policy. (#TBD) #}
     <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
     <title>{{ shell.page_title }}</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    {# TheSuperHackers @fix Leex 24/08/2026 Rev the local stylesheet URL when product UI changes must bypass stale browser caches. (#TBD) #}
+    <link rel="stylesheet" href="/static/css/app.css?v=15">
     <script src="/static/js/app.js" defer></script>
   </head>
   <body>

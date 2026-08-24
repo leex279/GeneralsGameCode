@@ -99,6 +99,11 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .command-strip small { color: var(--cc-muted); font-size: 0.75rem; margin-top: 0.1rem; }
 .command-index { color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.75rem; }
 .dashboard-layout { display: grid; gap: var(--cc-space-4); grid-template-columns: minmax(0, 2fr) minmax(18rem, 0.8fr); }
+/* TheSuperHackers @feature Leex 24/08/2026 Match the reference dashboard with datastore-backed workspace totals. (#TBD) */
+.dashboard-kpi-grid { display: grid; gap: var(--cc-space-3); grid-template-columns: repeat(4, minmax(0, 1fr)); margin: var(--cc-space-4) 0; }
+.dashboard-kpi { background: var(--cc-surface-2); border: 1px solid var(--cc-rule); padding: var(--cc-space-3); }
+.dashboard-kpi span { color: var(--cc-muted); display: block; font-family: var(--cc-mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; }
+.dashboard-kpi strong { color: var(--cc-pale); display: block; font-family: var(--cc-mono); font-size: 1.65rem; margin-top: .35rem; }
 .workspace-panel, .operations-rail, .library-panel, .results-panel { background: linear-gradient(135deg, var(--cc-surface-2), var(--cc-surface-1) 38%); border: 1px solid var(--cc-rule); clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); }
 .workspace-panel + .workspace-panel, main > .technical-evidence { margin-top: var(--cc-space-4); }
 /* TheSuperHackers @bugfix Leex 23/08/2026 Keep immutable canonical report values inside the viewport. (#TBD) */
@@ -154,6 +159,24 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .key-moment-content h3 { color: var(--cc-pale); margin: 0 0 var(--cc-space-1); }
 .key-moment-content p { color: var(--cc-muted); margin: 0; }
 .key-moment-list .evidence-links { justify-self: end; margin-top: 0; }
+/* TheSuperHackers @feature Leex 24/08/2026 Render evidence-bounded strategy lanes as a readable broadcast timeline. (#TBD) */
+.opening-intelligence > p { color: var(--cc-muted); padding: 0 var(--cc-space-4); }
+.opening-lanes { border-top: 1px solid var(--cc-rule); display: grid; }
+.opening-lane { display: grid; grid-template-columns: minmax(12rem, 0.32fr) minmax(0, 1fr); min-height: 6.5rem; }
+.opening-lane + .opening-lane { border-top: 1px solid var(--cc-rule); }
+.opening-lane > header { align-items: start; background: var(--cc-surface-2); border-right: 1px solid var(--cc-rule); display: grid; gap: var(--cc-space-3); grid-template-columns: 2rem 1fr; padding: var(--cc-space-4); }
+.opening-lane > header > span { color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.7rem; }
+.opening-lane h3 { color: var(--cc-pale); font-size: 1.15rem; margin: 0; text-transform: uppercase; }
+.opening-lane header p { color: var(--cc-muted); font-size: 0.78rem; margin: var(--cc-space-1) 0 0; }
+.opening-lane ol { align-items: stretch; display: flex; gap: var(--cc-space-2); list-style: none; margin: 0; overflow-x: auto; padding: var(--cc-space-3); }
+.opening-lane li { background: var(--cc-surface-3); border: 1px solid var(--cc-rule); display: grid; flex: 0 0 min(18rem, 75vw); gap: var(--cc-space-1); padding: var(--cc-space-3); }
+.opening-lane .lane-event-time { color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+.opening-lane li strong { color: var(--cc-pale); font-family: var(--cc-condensed); font-size: 1rem; text-transform: uppercase; }
+.opening-lane .evidence-links { margin-top: auto; }
+.opening-lane-empty { align-self: center; color: var(--cc-muted); font-family: var(--cc-mono); font-size: 0.76rem; margin: 0; padding: var(--cc-space-4); }
+.opening-lane[data-lane="scouting"] > header { border-left: 3px solid var(--cc-success); }
+.opening-lane[data-lane="combat"] > header { border-left: 3px solid var(--cc-danger); }
+.opening-lane[data-lane="powers"] > header { border-left: 3px solid var(--cc-amber); }
 .build-order-list { counter-reset: build-step; list-style: none; margin: 0; padding: 0 var(--cc-space-4) var(--cc-space-4); }
 .build-order-list li { align-items: center; border-top: 1px solid var(--cc-rule); counter-increment: build-step; display: grid; gap: var(--cc-space-3); grid-template-columns: 5rem minmax(10rem, 1fr) minmax(8rem, 0.6fr) auto; min-height: 64px; padding: var(--cc-space-3); }
 .build-order-list li::before { color: var(--cc-muted); content: counter(build-step, decimal-leading-zero); font-family: var(--cc-mono); grid-column: 1; grid-row: 1; opacity: 0.55; }
@@ -352,6 +375,7 @@ dialog::backdrop { background: rgb(4 9 13 / 88%); }
 
 @media (max-width: 1023px) {
   .dashboard-layout { grid-template-columns: 1fr; }
+  .dashboard-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-strip { grid-template-columns: 1fr; }
   .command-strip a + a { border-left: 0; border-top: 1px solid var(--cc-rule); }
@@ -380,6 +404,8 @@ dialog::backdrop { background: rgb(4 9 13 / 88%); }
   .key-moment-time { padding-left: var(--cc-space-4); }
   .key-moment-content { padding-left: var(--cc-space-4); }
   .key-moment-list .evidence-links { justify-self: start; padding-left: var(--cc-space-4); }
+  .opening-lane { grid-template-columns: 1fr; }
+  .opening-lane > header { border-bottom: 1px solid var(--cc-rule); border-right: 0; }
   .build-order-list li { grid-template-columns: 4.5rem minmax(0, 1fr); }
   .build-order-list strong { grid-column: 2; }
   .build-order-list span { grid-column: 2; }

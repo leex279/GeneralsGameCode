@@ -90,6 +90,7 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
         raw_value=[
             {"frame": 45, "template_name": "AmericaPowerPlant"},
             {"frame": 90, "template_name": "AmericaBarracks"},
+            *([{"frame": 120, "template_name": "AmericaWarFactory"}] if partial else []),
         ],
         display_value="2 completed structures",
         evidence_id=BUILD_EVIDENCE,
@@ -315,6 +316,39 @@ def test_key_moments_turn_event_evidence_into_a_chronological_review_queue() -> 
         "Review the positioning, trade, and follow-up around this evidence-backed swing candidate."
     )
     assert coaching.key_moments[-1].evidence[0].public_id == TURNING_EVIDENCE
+
+
+def test_opening_lanes_align_build_scouting_combat_and_power_evidence() -> None:
+    """Catch useful opening intelligence collapsing back into an unordered metric list."""
+    coaching = coaching_view(_report(), _timeline())
+
+    assert [lane.lane_id for lane in coaching.opening_lanes] == [
+        "build",
+        "scouting",
+        "combat",
+        "powers",
+    ]
+    assert [event.title for event in coaching.opening_lanes[0].events] == [
+        "Power Plant completed",
+        "Barracks completed",
+    ]
+    assert coaching.opening_lanes[1].events[0].title == "War Factory first observed"
+    assert coaching.opening_lanes[2].events[0].title == "Humvee over War Factory"
+    assert coaching.opening_lanes[3].events[0].title == (
+        "Superweapon Spy Satellite (unrecognized) used"
+    )
+    assert coaching.opening_lanes[1].events[0].time_label == "0:05.0 (frame 150)"
+    assert coaching.opening_lanes[1].events[0].evidence[0].public_id == SCOUTING_EVIDENCE
+
+
+def test_opening_lanes_preserve_empty_categories_and_respect_partial_horizon() -> None:
+    """Catch absent telemetry being hidden or events leaking past a desync boundary."""
+    coaching = coaching_view(_report(partial=True), _timeline(late_parser_frame=56_003))
+
+    assert [event.frame for event in coaching.opening_lanes[0].events] == [45, 90]
+    assert all(event.frame <= 105 for lane in coaching.opening_lanes for event in lane.events)
+    assert all(not lane.events for lane in coaching.opening_lanes[1:])
+    assert all(lane.empty_message.endswith("inside the verified horizon.") for lane in coaching.opening_lanes[1:])
 
 
 def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
