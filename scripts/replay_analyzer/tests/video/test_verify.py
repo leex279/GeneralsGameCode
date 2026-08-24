@@ -25,7 +25,14 @@ def _wav(path: Path, *, silent: bool = False) -> Path:
     return path
 
 
-def _probe(*, codec: str = "h264", pix_fmt: str = "yuv420p", fps: str = "30/1", duration: str = "2.0") -> str:
+def _probe(
+    *,
+    codec: str = "h264",
+    pix_fmt: str = "yuv420p",
+    fps: str = "30/1",
+    duration: str = "2.0",
+    sample_rate: str = "30000",
+) -> str:
     return json.dumps(
         {
             "format": {"duration": duration},
@@ -41,7 +48,13 @@ def _probe(*, codec: str = "h264", pix_fmt: str = "yuv420p", fps: str = "30/1", 
                     "nb_frames": "60",
                     "duration": duration,
                 },
-                {"codec_type": "audio", "codec_name": "aac", "sample_rate": "30000", "channels": 1, "duration": duration},
+                {
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "sample_rate": sample_rate,
+                    "channels": 1,
+                    "duration": duration,
+                },
                 {"codec_type": "subtitle", "codec_name": "webvtt", "duration": duration},
             ],
         }
@@ -90,6 +103,7 @@ def test_verifier_accepts_probed_authoritative_media_and_records_landmarks(tmp_p
         ({"pix_fmt": "yuv444p"}, "yuv420p"),
         ({"fps": "60/1"}, "FPS"),
         ({"duration": "1.0"}, "duration"),
+        ({"sample_rate": "48000"}, "sample rate"),
     ],
 )
 def test_verifier_rejects_wrong_media_properties(tmp_path: Path, kwargs: dict[str, str], message: str) -> None:

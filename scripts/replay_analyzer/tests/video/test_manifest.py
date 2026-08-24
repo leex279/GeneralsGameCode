@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,11 @@ def test_publisher_atomically_publishes_only_verified_complete_hash_graph(tmp_pa
     published = VideoManifestPublisher().publish(manifest, destination)
 
     assert published == destination.resolve()
-    assert VideoManifestV1.model_validate_json(published.read_text(encoding="utf-8")) == manifest
+    document = json.loads(published.read_text(encoding="utf-8"))
+    assert all("path" not in artifact for artifact in document["artifacts"])
+    assert [(artifact["name"], artifact["sha256"]) for artifact in document["artifacts"]] == [
+        (artifact.name, artifact.sha256) for artifact in manifest.artifacts
+    ]
 
 
 def test_publisher_rejects_unverified_tampered_or_existing_publication(tmp_path: Path) -> None:
