@@ -26,7 +26,7 @@ def test_complete_evidence_creates_worker_owned_render_job() -> None:
     )
 
     assert job.stage == "render_video"
-    assert job.component_version == "5"
+    assert job.component_version == "6"
     assert job.input_json["evidence_horizon"] == "complete"
     assert job.input_json["diagnostic_preview"] is False
     assert job.input_json["replay_sha256"] == "a" * 64
@@ -134,3 +134,32 @@ def test_stage_handler_returns_only_public_verified_media_identity() -> None:
 
     assert output["schema_version"] == "video-stage-output-v1"
     assert set(output) == {"schema_version", "run_public_id", "final_video_sha256", "manifest_public_id", "manifest_sha256"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("run_public_id", "123E4567-E89B-42D3-A456-426614174000"),
+        ("manifest_public_id", "not-a-public-id"),
+        ("final_video_sha256", "A" * 64),
+        ("final_video_sha256", "../" + "a" * 61),
+        ("manifest_sha256", "g" * 64),
+    ),
+)
+def test_stage_handler_rejects_noncanonical_persisted_media_identity(field: str, value: str) -> None:
+    values = {
+        "run_public_id": _id(),
+        "final_video_sha256": "a" * 64,
+        "manifest_public_id": _id(),
+        "manifest_sha256": "b" * 64,
+    }
+    values[field] = value
+
+    class Renderer:
+        def render(self, _request: object) -> object:
+            return type("Result", (), values)()
+
+    handler = VideoRenderStageHandler(request_factory=lambda _input: object(), renderer=Renderer())
+
+    with pytest.raises(RuntimeError, match="verified public media identities"):
+        handler(type("Context", (), {"input": {"replay_public_id": _id()}})())

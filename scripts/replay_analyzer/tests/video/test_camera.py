@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -20,10 +21,12 @@ from generals_replay_analyzer.report.read_model import (
 )
 from generals_replay_analyzer.spatial.query import MapSceneReadModel
 from generals_replay_analyzer.video.camera import CameraPlanContractError, CameraPlanService
+from generals_replay_analyzer.video.commentary import CommentaryPlanService
 from generals_replay_analyzer.video.contracts import CameraPlanAuthorityV1, EvidenceHorizonV1
 
 REPLAY_ID = "10000000-0000-4000-8000-000000000001"
 REPORT_ID = "20000000-0000-4000-8000-000000000001"
+PLAYER_REPORT_ID = "20000000-0000-4000-8000-000000000002"
 RUN_ID = "30000000-0000-4000-8000-000000000001"
 MAP_ID = "40000000-0000-4000-8000-000000000001"
 PLAYER_ID = "70000000-0000-4000-8000-000000000001"
@@ -120,6 +123,35 @@ def _report() -> PublishedReportGraphDTO:
         ),
         published,
         (),
+    )
+
+
+def _player_selected_report() -> PublishedReportGraphDTO:
+    graph = _report()
+    player_document = replace(
+        graph.replay_wide.document,
+        report_public_id=PLAYER_REPORT_ID,
+        replay_player_public_id=PLAYER_ID,
+        observed=tuple(
+            value for value in graph.replay_wide.document.observed if value.claim_id != "map.start"
+        ),
+    )
+    player_report = PublishedReportDTO(
+        player_document,
+        graph.replay_wide.structured_asset,
+        graph.replay_wide.presentation_asset,
+        graph.replay_wide.html,
+        graph.replay_wide.text,
+        graph.replay_wide.created_at_utc,
+    )
+    return PublishedReportGraphDTO(
+        graph.schema_version,
+        graph.output_schema_version,
+        graph.replay_public_id,
+        PLAYER_REPORT_ID,
+        graph.identity,
+        graph.replay_wide,
+        (player_report,),
     )
 
 
@@ -249,6 +281,29 @@ def test_camera_plan_uses_cited_positions_and_is_byte_deterministic() -> None:
     assert [item.focus_kind for item in first.segments] == ["base_context", "engagement"]
     assert first.segments[1].target_x == 700.0
     assert first.segments[1].evidence[0].evidence_public_id == EVIDENCE_FIGHT
+
+
+def test_player_selected_camera_uses_only_shared_frame_zero_context_before_commentary() -> None:
+    report = _player_selected_report()
+    scene = _scene()
+    payload = dict(scene.payload)
+    query = dict(payload["query"])
+    payload["report_public_id"] = PLAYER_REPORT_ID
+    query["report_public_id"] = PLAYER_REPORT_ID
+    payload["query"] = query
+
+    camera = CameraPlanService().create(
+        _authority(report_public_id=PLAYER_REPORT_ID),
+        report,
+        MapSceneReadModel(payload),
+    )
+    commentary = CommentaryPlanService().create(report, camera)
+
+    assert camera.authority.report_public_id == PLAYER_REPORT_ID
+    assert [item.focus_kind for item in camera.segments] == ["base_context", "engagement"]
+    assert camera.segments[0].evidence[0].evidence_public_id == EVIDENCE_START
+    assert camera.segments[1].evidence[0].evidence_public_id == EVIDENCE_FIGHT
+    assert commentary.report_public_id == PLAYER_REPORT_ID
 
 
 @pytest.mark.parametrize(

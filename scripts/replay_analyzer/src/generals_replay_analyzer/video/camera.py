@@ -79,12 +79,11 @@ def _number(value: object, label: str) -> float:
 def _report_evidence(
     report: PublishedReportGraphDTO,
 ) -> dict[str, tuple[str, tuple[tuple[int, int], ...]]]:
-    # TheSuperHackers @bugfix Leex 24/08/2026 Bind camera citations to the exact selected report used by the map scene. (#TBD)
-    document = report.selected.document
     collected: dict[str, tuple[str, set[tuple[int, int]]]] = {}
-    for value in (*document.evidence_availability, *document.observed, *document.derived):
+
+    def collect(value: object) -> None:
         if type(value) is not ReportValue:
-            continue
+            return
         frame_start, frame_end = (0, 0) if value.frame_window is None else value.frame_window
         for evidence in value.evidence:
             if evidence.tier not in ("observed", "derived"):
@@ -96,6 +95,16 @@ def _report_evidence(
                 raise CameraPlanContractError("fixed report assigns conflicting evidence tiers")
             else:
                 prior[1].add((frame_start, frame_end))
+
+    # TheSuperHackers @bugfix Leex 24/08/2026 Bind camera events to the selected report while sharing only replay-wide frame-zero context. (#TBD)
+    document = report.selected.document
+    for value in (*document.evidence_availability, *document.observed, *document.derived):
+        collect(value)
+    if document.report_public_id != report.replay_wide.document.report_public_id:
+        replay_wide = report.replay_wide.document
+        for value in (*replay_wide.evidence_availability, *replay_wide.observed, *replay_wide.derived):
+            if type(value) is ReportValue and value.frame_window in (None, (0, 0)):
+                collect(value)
     return {
         public_id: (tier, tuple(sorted(windows)))
         for public_id, (tier, windows) in sorted(collected.items())

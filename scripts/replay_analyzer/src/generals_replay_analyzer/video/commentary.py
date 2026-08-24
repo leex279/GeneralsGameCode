@@ -150,7 +150,7 @@ class CommentaryPlanService:
             raise CommentaryPlanContractError("commentary has no frame window for its match introduction")
         # TheSuperHackers @bugfix Leex 24/08/2026 Cite shared camera context when a player report omits replay-wide map-start claims. (#TBD)
         events.insert(0, self._intro_event(report, camera, intro_latest_end, horizon, partial))
-        return self._allocate_speech_windows(events, horizon)
+        return self._allocate_speech_windows(events, camera, horizon)
 
     @staticmethod
     def _intro_event(
@@ -196,10 +196,18 @@ class CommentaryPlanService:
         )
 
     @staticmethod
-    def _allocate_speech_windows(events: list[CommentaryEventV1], horizon: int) -> list[CommentaryEventV1]:
+    def _allocate_speech_windows(
+        events: list[CommentaryEventV1], camera: CameraPlanV1, horizon: int
+    ) -> list[CommentaryEventV1]:
+        segments = {segment.segment_id: segment for segment in camera.segments}
         scheduled: list[CommentaryEventV1] = []
         for index, event in enumerate(events):
             latest_end = events[index + 1].start_frame - 1 if index + 1 < len(events) else horizon
+            segment = segments.get(event.camera_segment_id)
+            if segment is None:
+                raise CommentaryPlanContractError("commentary references an unknown camera segment")
+            # TheSuperHackers @bugfix Leex 24/08/2026 Keep each spoken event inside its cited camera shot. (#TBD)
+            latest_end = min(latest_end, segment.end_frame)
             if latest_end < event.start_frame:
                 raise CommentaryPlanContractError("commentary evidence anchors leave no non-overlapping speech window")
             payload = event.model_dump(mode="python")

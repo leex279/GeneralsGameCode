@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from generals_replay_analyzer.config import load_runtime_configuration
 from generals_replay_analyzer.db import create_database_engine, create_session_factory
 from generals_replay_analyzer.db.models import Job, TelemetryRun
-from generals_replay_analyzer.video.resolver import VideoRequestResolver
+from generals_replay_analyzer.video.resolver import VideoRequestResolver, VideoResolutionError
 
 from .populated_fixture import (
     ComparisonBinding,
@@ -211,22 +211,24 @@ def test_builder_composes_pinned_replay_through_production_services_and_queries(
                 )
             },
         ).settings
-        resolved_video = VideoRequestResolver(factory, settings).resolve(
-            {
-                "diagnostic_preview": True,
-                "evidence_horizon": "partial",
-                "logic_frames_per_second": 30,
-                "replay_public_id": manifest.replay_public_id,
-                "replay_sha256": manifest.input_replay_sha256,
-                "report_public_id": manifest.replay_report.report_public_id,
-            }
-        )
+        video_values = {
+            "diagnostic_preview": True,
+            "evidence_horizon": "partial",
+            "logic_frames_per_second": 30,
+            "replay_public_id": manifest.replay_public_id,
+            "replay_sha256": manifest.input_replay_sha256,
+            "report_public_id": manifest.replay_report.report_public_id,
+        }
+        resolver = VideoRequestResolver(factory, settings)
+        resolved_video = resolver.resolve(video_values)
         assert resolved_video.replay_path == (
             settings.data_root
             / "replays"
             / manifest.input_replay_sha256[:2]
             / manifest.input_replay_sha256
         )
+        with pytest.raises(VideoResolutionError, match="replay SHA-256 differs"):
+            resolver.resolve({**video_values, "replay_sha256": "0" * 64})
         with factory() as session:
             pending = session.scalar(
                 select(Job).where(Job.public_id == manifest.pending_job.job_public_id)

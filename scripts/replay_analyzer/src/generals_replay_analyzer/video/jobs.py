@@ -34,6 +34,23 @@ class VideoRenderer(Protocol):
     def render(self, request: Any) -> Any: ...
 
 
+def _is_canonical_public_id(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        return str(UUID(value)) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 class VideoRenderStageHandler:
     """Bridge a frozen durable job to the private renderer only inside a worker."""
 
@@ -50,10 +67,12 @@ class VideoRenderStageHandler:
         result = self._renderer.render(request)
         fields = ("run_public_id", "final_video_sha256", "manifest_public_id", "manifest_sha256")
         values = {field: getattr(result, field, None) for field in fields}
-        if (
-            not all(type(value) is str and value for value in values.values())
-            or len(str(values["final_video_sha256"])) != 64
-            or len(str(values["manifest_sha256"])) != 64
+        # TheSuperHackers @bugfix Leex 24/08/2026 Reject malformed renderer identities before workers persist media references. (#TBD)
+        if not (
+            _is_canonical_public_id(values["run_public_id"])
+            and _is_canonical_public_id(values["manifest_public_id"])
+            and _is_sha256(values["final_video_sha256"])
+            and _is_sha256(values["manifest_sha256"])
         ):
             raise RuntimeError("renderer did not return verified public media identities")
         return {"schema_version": "video-stage-output-v1", **values}

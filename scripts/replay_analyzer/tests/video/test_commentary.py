@@ -204,6 +204,68 @@ def test_complete_plan_introduces_match_and_covers_strategy_milestone_engagement
     assert all(later.start_frame > earlier.latest_end_frame for earlier, later in zip(plan.events, plan.events[1:]))
 
 
+def test_commentary_speech_window_never_crosses_its_camera_segment_cut() -> None:
+    graph = _report()
+    document = replace(
+        graph.replay_wide.document,
+        observed=tuple(
+            value
+            for value in graph.replay_wide.document.observed
+            if value.claim_id in ("map.start", "strategy:usa_humvee_pressure:one")
+        ),
+    )
+    report = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    citation = EvidenceCitationV1(
+        evidence_public_id=MAP_EVIDENCE,
+        tier="observed",
+        frame_start=0,
+        frame_end=0,
+    )
+    camera = CameraPlanV1(
+        authority=_authority(300),
+        segments=(
+            CameraSegmentV1(
+                segment_id="60000000-0000-4000-8000-000000000011",
+                start_frame=0,
+                end_frame=44,
+                target_x=0.0,
+                target_y=0.0,
+                target_z=0.0,
+                zoom=1.0,
+                pitch=-45.0,
+                yaw=0.0,
+                transition="cut",
+                transition_frames=0,
+                focus_kind="base_context",
+                label="Opening base",
+                evidence=(citation,),
+            ),
+            CameraSegmentV1(
+                segment_id="60000000-0000-4000-8000-000000000012",
+                start_frame=45,
+                end_frame=300,
+                target_x=100.0,
+                target_y=100.0,
+                target_z=0.0,
+                zoom=1.0,
+                pitch=-45.0,
+                yaw=0.0,
+                transition="cut",
+                transition_frames=0,
+                focus_kind="milestone",
+                label="Next camera shot",
+                evidence=(citation,),
+            ),
+        ),
+    )
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    strategy = next(event for event in plan.events if event.role == "analysis")
+    assert strategy.camera_segment_id == "60000000-0000-4000-8000-000000000011"
+    assert strategy.latest_end_frame == 44
+
+
 def test_partial_plan_announces_boundary_without_later_phases_or_winner_and_is_offline_deterministic() -> None:
     service = CommentaryPlanService()
     first = service.create(_report(partial=True), _camera(105))

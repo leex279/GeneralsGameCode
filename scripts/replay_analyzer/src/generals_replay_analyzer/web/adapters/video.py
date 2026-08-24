@@ -16,7 +16,12 @@ from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db.models import Job, JobStageResult, Replay, Report, TelemetryRun
 from generals_replay_analyzer.importing.jobs import JobCoordinator
 from generals_replay_analyzer.importing.stages import RENDER_REPORT
-from generals_replay_analyzer.video.jobs import VideoJobPlanner, VideoJobRequestError
+from generals_replay_analyzer.video.jobs import (
+    VideoJobPlanner,
+    VideoJobRequestError,
+    _is_canonical_public_id,
+    _is_sha256,
+)
 from generals_replay_analyzer.video.resolver import VideoResolutionError, _resolve_authoritative_logic_fps
 from generals_replay_analyzer.web.errors import PublicProblem
 from generals_replay_analyzer.web.ports import (
@@ -110,15 +115,27 @@ class AnalyticsVideoAdapter:
             output = None if result is None else result.output_json
         if not isinstance(output, dict):
             raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
-        run_id, final_hash, manifest_hash = output.get("run_public_id"), output.get("final_video_sha256"), output.get("manifest_sha256")
-        if not all(isinstance(value, str) for value in (run_id, final_hash, manifest_hash)):
+        run_id = output.get("run_public_id")
+        final_hash = output.get("final_video_sha256")
+        manifest_id = output.get("manifest_public_id")
+        manifest_hash = output.get("manifest_sha256")
+        # TheSuperHackers @bugfix Leex 24/08/2026 Revalidate persisted media identities and contain every download below its render run. (#TBD)
+        if not (
+            output.get("schema_version") == "video-stage-output-v1"
+            and _is_canonical_public_id(run_id)
+            and _is_canonical_public_id(manifest_id)
+            and _is_sha256(final_hash)
+            and _is_sha256(manifest_hash)
+        ):
             raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
         assert isinstance(run_id, str) and isinstance(final_hash, str) and isinstance(manifest_hash, str)
-        directory = (self._settings.video_run_directory / run_id).resolve()
         root = self._settings.video_run_directory.resolve()
+        directory = (root / run_id).resolve()
         if directory.parent != root:
             raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
-        path = directory / ("video-manifest-v1.json" if manifest else f"final-{final_hash}.mp4")
+        path = (directory / ("video-manifest-v1.json" if manifest else f"final-{final_hash}.mp4")).resolve()
+        if path.parent != directory:
+            raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
         try:
             digest = hashlib.sha256()
             with path.open("rb") as source:

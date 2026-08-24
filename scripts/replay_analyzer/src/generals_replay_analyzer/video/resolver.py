@@ -112,6 +112,7 @@ class VideoRequestResolver:
     def resolve(self, values: Mapping[str, object]) -> VideoRenderRequest:
         try:
             replay_id = values["replay_public_id"]
+            replay_sha256 = values["replay_sha256"]
             report_id = values["report_public_id"]
             horizon = values["evidence_horizon"]
             preview = values["diagnostic_preview"]
@@ -120,6 +121,9 @@ class VideoRequestResolver:
             raise VideoResolutionError("video job authority is incomplete") from error
         if (
             not isinstance(replay_id, str)
+            or not isinstance(replay_sha256, str)
+            or len(replay_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in replay_sha256)
             or not isinstance(report_id, str)
             or horizon not in {"complete", "partial"}
             or type(preview) is not bool
@@ -131,12 +135,15 @@ class VideoRequestResolver:
             replay = session.scalar(select(Replay).where(Replay.public_id == replay_id))
             if replay is None or replay.managed_asset_id is None:
                 raise VideoResolutionError("managed replay is unavailable")
+            # TheSuperHackers @bugfix Leex 24/08/2026 Reject durable jobs whose frozen replay digest differs from current storage authority. (#TBD)
+            if replay.sha256 != replay_sha256:
+                raise VideoResolutionError("video job replay SHA-256 differs from managed replay authority")
             asset = session.get(ManagedAsset, replay.managed_asset_id)
-            if asset is None or asset.sha256 != replay.sha256:
+            if asset is None or asset.sha256 != replay_sha256:
                 raise VideoResolutionError("managed replay identity is invalid")
             # TheSuperHackers @bugfix Leex 24/08/2026 Resolve managed-asset paths from their canonical product-root scope. (#TBD)
             replay_path = _managed_replay_path(self._settings.data_root, asset.relative_path)
-            if not replay_path.is_file() or hashlib.sha256(replay_path.read_bytes()).hexdigest() != replay.sha256:
+            if not replay_path.is_file() or hashlib.sha256(replay_path.read_bytes()).hexdigest() != replay_sha256:
                 raise VideoResolutionError("managed replay bytes are invalid")
             telemetry_timebases = tuple(
                 (
@@ -170,6 +177,6 @@ class VideoRequestResolver:
         if horizon == "partial" and not preview:
             raise VideoResolutionError("partial cast requires diagnostic preview")
         authority = _authority_from_payload(
-            replay_id, report_id, replay.sha256, payload, accepted_end, logic_frames_per_second
+            replay_id, report_id, replay_sha256, payload, accepted_end, logic_frames_per_second
         )
         return VideoRenderRequest(authority=authority, report=graph, scene=scene, replay_path=replay_path)
