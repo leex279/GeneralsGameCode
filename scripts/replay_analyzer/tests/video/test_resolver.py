@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from generals_replay_analyzer.spatial.query import MapSceneReadModel
+from generals_replay_analyzer.features.evidence import thaw_canonical
+from generals_replay_analyzer.spatial.query import MapSceneReadModel, MapSceneReadQuery
 from generals_replay_analyzer.video import resolver as video_resolver
 from generals_replay_analyzer.video.resolver import (
     VideoRequestResolver,
@@ -62,20 +63,35 @@ def test_video_request_authority_uses_the_last_presentable_frame_not_the_header_
         def scalars(self, _: object) -> tuple[object, ...]:
             return ()
 
-    scene = MapSceneReadModel(
-        {
-            "available_frame_window": {"frame_start": 0, "frame_end": 108},
-            "telemetry_run_public_id": "123e4567-e89b-42d3-a456-426614174002",
-            "telemetry_trace_sha256": "a" * 64,
-            "map_public_id": "123e4567-e89b-42d3-a456-426614174003",
-            "map_content_sha256": "b" * 64,
-        }
-    )
+    scene_payload = {
+        "available_frame_window": {"frame_start": 0, "frame_end": 108},
+        "query": {"frame_start": 0, "frame_end": 108},
+        "telemetry_run_public_id": "123e4567-e89b-42d3-a456-426614174002",
+        "telemetry_trace_sha256": "a" * 64,
+        "map_public_id": "123e4567-e89b-42d3-a456-426614174003",
+        "map_content_sha256": "b" * 64,
+    }
+
+    class Scenes:
+        def get_canonical_scene(self, _: object) -> MapSceneReadModel:
+            return MapSceneReadModel(scene_payload)
+
+        def get_scene(self, query: MapSceneReadQuery) -> MapSceneReadModel:
+            return MapSceneReadModel(
+                {
+                    **scene_payload,
+                    "query": {
+                        "frame_start": query.frame_start,
+                        "frame_end": query.frame_end,
+                    },
+                }
+            )
+
     resolver = VideoRequestResolver.__new__(VideoRequestResolver)
     resolver._sessions = Session
     resolver._settings = SimpleNamespace(data_root=tmp_path)
     resolver._reports = SimpleNamespace(get_report=lambda _: SimpleNamespace())
-    resolver._scenes = SimpleNamespace(get_canonical_scene=lambda _: scene)
+    resolver._scenes = Scenes()
 
     request = resolver.resolve(
         {
@@ -89,6 +105,9 @@ def test_video_request_authority_uses_the_last_presentable_frame_not_the_header_
     )
 
     assert request.authority.evidence_horizon.frame_end == 107
+    resolved_scene = thaw_canonical(request.scene.payload)
+    assert isinstance(resolved_scene, dict)
+    assert resolved_scene["query"] == {"frame_start": 0, "frame_end": 107}
 
 
 def test_managed_replay_path_rejects_root_escape(tmp_path: Path) -> None:

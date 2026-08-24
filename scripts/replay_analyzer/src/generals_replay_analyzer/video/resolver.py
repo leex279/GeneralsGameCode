@@ -172,9 +172,9 @@ class VideoRequestResolver:
             )
             frame_end = replay.frame_count
         # TheSuperHackers @bugfix Leex 24/08/2026 Direct diagnostic casts only across the report's verified telemetry horizon. (#TBD)
-        scene = self._scenes.get_canonical_scene(MapSceneReadQuery(replay_id, report_id, 0, 0))
+        canonical_scene = self._scenes.get_canonical_scene(MapSceneReadQuery(replay_id, report_id, 0, 0))
         # TheSuperHackers @bugfix Leex 24/08/2026 Validate the immutable scene's thawed mapping instead of its storage wrapper. (#TBD)
-        payload = thaw_canonical(scene.payload)
+        payload = thaw_canonical(canonical_scene.payload)
         if not isinstance(payload, Mapping):
             raise VideoResolutionError("map scene is invalid")
         available = payload.get("available_frame_window")
@@ -189,4 +189,6 @@ class VideoRequestResolver:
         authority = _authority_from_payload(
             replay_id, report_id, replay_sha256, payload, renderable_end, logic_frames_per_second
         )
+        # TheSuperHackers @bugfix Leex 24/08/2026 Bind camera input to the exact presentable window after validating the canonical telemetry horizon. (#TBD)
+        scene = self._scenes.get_scene(MapSceneReadQuery(replay_id, report_id, 0, renderable_end))
         return VideoRenderRequest(authority=authority, report=graph, scene=scene, replay_path=replay_path)
