@@ -92,6 +92,7 @@ class EngineTelemetryAcquirer:
             raise ValueError("engine telemetry acquisition requires a configured engine executable")
         config = EngineRunConfig(
             executable=executable,
+            runtime_directory=self.settings.engine_runtime_directory,
             data_root=self.settings.data_root,
             movement_sample_frames=self.settings.movement_sample_frames,
         )

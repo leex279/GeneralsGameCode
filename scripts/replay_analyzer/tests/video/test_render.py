@@ -303,6 +303,8 @@ class _Cancellation:
 def _settings(tmp_path: Path) -> tuple[AnalyzerSettings, Path, Path, Path]:
     tools = tmp_path / "tools with spaces & metacharacters"
     tools.mkdir()
+    engine_runtime = tmp_path / "installed Zero Hour"
+    engine_runtime.mkdir()
     engine = tools / "generalszh & safe.exe"
     ffmpeg = tools / "ffmpeg;safe.exe"
     ffprobe = tools / "ffprobe $(safe).exe"
@@ -311,6 +313,7 @@ def _settings(tmp_path: Path) -> tuple[AnalyzerSettings, Path, Path, Path]:
     settings = AnalyzerSettings._for_testing_with_repository_outputs(
         data_root=tmp_path / "product data & safe",
         engine_executable=engine,
+        engine_runtime_directory=engine_runtime,
         ffmpeg_executable=ffmpeg,
         ffprobe_executable=ffprobe,
         video_width=640,
@@ -385,6 +388,7 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert result.manifest_sha256 == _sha256(result.manifest_path)
     assert verifier.calls[0][3] == 59
     engine_spec, mux_spec = process.specs
+    assert engine_spec.cwd == (tmp_path / "installed Zero Hour").resolve()
     frozen_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
     assert frozen_replay.parent == result.run_directory
     assert frozen_replay.name == "replay.rep"

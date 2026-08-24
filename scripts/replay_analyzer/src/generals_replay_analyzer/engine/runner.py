@@ -211,6 +211,7 @@ def _ansi_path_bytes(path: Path) -> bytes:
 def _preflight_ansi_paths(
     run_dir: Path,
     executable: Path,
+    working_directory: Path,
     replay: Path,
     replay_user_data_root: Path | None,
 ) -> None:
@@ -219,7 +220,7 @@ def _preflight_ansi_paths(
     transaction_suffix = ".tmp.4294967295.100"
     candidates = [
         ("engine executable", executable),
-        ("engine working directory", executable.parent),
+        ("engine working directory", working_directory),
         ("replay input", replay),
         ("telemetry transaction", run_dir / "trace.ndjson.tmp.4294967295.100"),
         (
@@ -532,7 +533,13 @@ def export_telemetry(
     replay = require_regular_input(replay, "replay input")
     run_id = _canonical_run_id(run_id_factory())
     run_dir = config.data_root / "runs" / run_id
-    _preflight_ansi_paths(run_dir, config.executable, replay, config.replay_user_data_root)
+    _preflight_ansi_paths(
+        run_dir,
+        config.executable,
+        config.working_directory,
+        replay,
+        config.replay_user_data_root,
+    )
     _ensure_plain_directory(config.data_root)
     runs_root = config.data_root / "runs"
     _ensure_plain_directory(runs_root)
@@ -587,12 +594,13 @@ def export_telemetry(
             "timeout_seconds": config.timeout_seconds,
             "movement_sample_frames": config.movement_sample_frames,
             "data_root": str(config.data_root),
+            "runtime_directory": str(config.runtime_directory) if config.runtime_directory is not None else None,
             "replay_user_data_root": (
                 str(config.replay_user_data_root) if config.replay_user_data_root is not None else None
             ),
         },
         "argv": list(argv),
-        "cwd": str(config.executable.parent),
+        "cwd": str(config.working_directory),
         "shell": False,
     }
     try:
@@ -611,7 +619,7 @@ def export_telemetry(
                     run_id=run_id,
                     run_dir=run_dir,
                     argv=argv,
-                    cwd=config.executable.parent,
+                    cwd=config.working_directory,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
                     stdout_handle=stdout_handle,

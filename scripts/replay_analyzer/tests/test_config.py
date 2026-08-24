@@ -32,6 +32,7 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
     """Expose one immutable settings object rather than scattered path and provider knobs."""
     data_root = tmp_path / "data"
     engine = tmp_path / "runtime" / "generalszh.exe"
+    engine_runtime = tmp_path / "installed-game"
     watch = tmp_path / "incoming"
     settings = AnalyzerSettings(
         _env_file=None,
@@ -42,6 +43,7 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
         cache_directory=tmp_path / "model-cache",
         log_directory=tmp_path / "application-logs",
         engine_executable=engine,
+        engine_runtime_directory=engine_runtime,
         ollama_url="http://127.0.0.1:22434",
         ollama_model="test-model:latest",
         watched_folders=(watch,),
@@ -66,6 +68,7 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
     assert settings.cache_directory == (tmp_path / "model-cache").resolve()
     assert settings.log_directory == (tmp_path / "application-logs").resolve()
     assert settings.engine_executable == engine.resolve()
+    assert settings.engine_runtime_directory == engine_runtime.resolve()
     assert settings.ollama_url == "http://127.0.0.1:22434"
     assert settings.ollama_model == "test-model:latest"
     assert settings.watched_folders == (watch.resolve(),)

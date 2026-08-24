@@ -121,6 +121,7 @@ class EngineRunConfig:
     """Validated product settings that cannot be changed during an engine run."""
 
     executable: Path
+    runtime_directory: Path | None = None
     timeout_seconds: int = 900
     movement_sample_frames: int = 15
     data_root: Path = field(default_factory=default_data_root)
@@ -147,5 +148,16 @@ class EngineRunConfig:
             else require_plain_directory_input(self.replay_user_data_root, "replay user-data root")
         )
         object.__setattr__(self, "executable", executable)
+        runtime_directory = (
+            None
+            if self.runtime_directory is None
+            else require_plain_directory_input(self.runtime_directory, "engine runtime directory")
+        )
+        object.__setattr__(self, "runtime_directory", runtime_directory)
         object.__setattr__(self, "data_root", data_root)
         object.__setattr__(self, "replay_user_data_root", replay_user_data_root)
+
+    @property
+    def working_directory(self) -> Path:
+        """Use explicit installed runtime data while preserving colocated executable compatibility."""
+        return self.executable.parent if self.runtime_directory is None else self.runtime_directory

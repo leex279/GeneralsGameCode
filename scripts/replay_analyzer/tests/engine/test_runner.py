@@ -289,6 +289,35 @@ def test_success_uses_explicit_argv_runtime_cwd_and_validated_public_paths(tmp_p
     assert (result.run_dir / "result.json").is_file()
 
 
+def test_explicit_runtime_directory_keeps_build_executable_separate_from_installed_game(tmp_path: Path) -> None:
+    """Launch a development build beside the legally installed runtime data it needs."""
+    executable, replay, data_root = _inputs(tmp_path)
+    runtime_directory = (tmp_path / "installed-zero-hour").resolve()
+    runtime_directory.mkdir()
+    launcher = FakeLauncher(_publish_valid_evidence)
+
+    result = export_telemetry(
+        replay,
+        _config(executable, data_root, runtime_directory=runtime_directory),
+        launcher=launcher,
+        run_id_factory=lambda: "173e4567-e89b-42d3-a456-426614174000",
+    )
+
+    assert result.status is EngineRunStatus.SUCCESS
+    assert launcher.requests[0].cwd == runtime_directory
+    request_document = json.loads((result.run_dir / "request.json").read_text(encoding="utf-8"))
+    assert request_document["cwd"] == str(runtime_directory)
+    assert request_document["config"]["runtime_directory"] == str(runtime_directory)
+
+
+def test_explicit_runtime_directory_must_be_an_existing_plain_directory(tmp_path: Path) -> None:
+    executable, _replay, data_root = _inputs(tmp_path)
+    missing = (tmp_path / "missing-runtime").resolve()
+
+    with pytest.raises(EngineRunConfigurationError, match="existing ordinary non-reparse directory"):
+        _config(executable, data_root, runtime_directory=missing)
+
+
 def test_isolated_replay_user_data_root_is_validated_and_bound_to_request(tmp_path: Path) -> None:
     """Catch the runner omitting or ambiguously recording the engine's isolated user-map root."""
     executable, replay, data_root = _inputs(tmp_path)

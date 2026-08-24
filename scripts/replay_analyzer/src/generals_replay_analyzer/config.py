@@ -70,6 +70,8 @@ class AnalyzerSettings(BaseSettings):
     cache_directory: Path
     log_directory: Path
     engine_executable: Path | None = None
+    # TheSuperHackers @feature Leex 24/08/2026 Launch development builds beside the installed Zero Hour runtime data. (#TBD)
+    engine_runtime_directory: Path | None = None
     ollama_url: str = Field(default="http://127.0.0.1:11434", min_length=1)
     ollama_model: str = Field(default="qwen3.6:27b", min_length=1)
     watched_folders: tuple[Path, ...] = ()
@@ -149,6 +151,8 @@ class AnalyzerSettings(BaseSettings):
 
         if self.engine_executable is not None:
             object.__setattr__(self, "engine_executable", _absolute_path(self.engine_executable))
+        if self.engine_runtime_directory is not None:
+            object.__setattr__(self, "engine_runtime_directory", _absolute_path(self.engine_runtime_directory))
         for field_name in ("ffmpeg_executable", "ffprobe_executable"):
             executable = getattr(self, field_name)
             if executable is not None:

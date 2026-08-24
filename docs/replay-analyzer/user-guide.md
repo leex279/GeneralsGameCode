@@ -22,12 +22,15 @@ cmake --build build/win32 --target z_generals --config Release
 uv sync --project scripts/replay_analyzer
 ```
 
-The default engine build path is `build/win32/GeneralsMD/Release/generalszh.exe`. When the runtime game directory is elsewhere, set both product-owned paths explicitly before starting a process:
+Keep the instrumented development executable in the build output and point its working directory at a legal Zero Hour installation. The game loads its DLLs and runtime data from that separate directory; the analyzer never replaces the retail executable:
 
 ```powershell
 $env:GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE = (Resolve-Path 'build/win32/GeneralsMD/Release/generalszh.exe').Path
+$env:GENERALS_REPLAY_ANALYZER_ENGINE_RUNTIME_DIRECTORY = (Resolve-Path 'C:\Program Files (x86)\Steam\steamapps\common\Command & Conquer Generals - Zero Hour').Path
 $env:GENERALS_REPLAY_ANALYZER_DATA_ROOT = "$env:LOCALAPPDATA\GeneralsReplayAnalyzer"
 ```
+
+If the executable was deliberately deployed into the installed game directory, `ENGINE_RUNTIME_DIRECTORY` may be omitted and the executable's parent is used. A bare build folder is not a complete Zero Hour runtime.
 
 Do not put the data root inside a Git checkout. By default it contains the SQLite database, managed replay copies, immutable artifacts, map assets, logs, engine runs, and migration backups.
 

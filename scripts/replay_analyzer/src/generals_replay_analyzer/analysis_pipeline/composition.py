@@ -138,7 +138,7 @@ def create_production_import_service(
                     renderer=VideoRenderService(
                         settings=settings,
                         voice_provider=WindowsSapiVoiceProvider(Path("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"), settings.video_voice_name),
-                        media_verifier=MediaVerifier(settings.ffprobe_executable),
+                        media_verifier=MediaVerifier(settings.ffprobe_executable, settings.ffmpeg_executable),
                     ),
                 ),
             ),

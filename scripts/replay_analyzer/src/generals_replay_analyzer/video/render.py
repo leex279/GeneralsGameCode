@@ -337,7 +337,7 @@ class VideoRenderService:
         if type(request) is not VideoRenderRequest:
             raise TypeError("render requires a fixed VideoRenderRequest")
         self._check_cancelled(request)
-        settings, engine, ffmpeg, ffprobe = self._fixed_settings()
+        settings, engine, engine_runtime, ffmpeg, ffprobe = self._fixed_settings()
         replay = _require_ordinary_file(request.replay_path, "replay")
         if _sha256(replay) != request.authority.replay_sha256:
             raise VideoRenderError("replay hash differs from accepted camera authority")
@@ -405,7 +405,7 @@ class VideoRenderService:
                     "-videoFps",
                     str(settings.fps),
                 ),
-                cwd=engine.parent,
+                cwd=engine_runtime,
                 stdout_path=run_directory / "engine-capture.stdout.log",
                 stderr_path=run_directory / "engine-capture.stderr.log",
                 timeout_seconds=request.timeout_seconds,
@@ -522,7 +522,7 @@ class VideoRenderService:
             manifest_sha256=manifest_sha256,
         )
 
-    def _fixed_settings(self) -> tuple[VideoSettingsV1, Path, Path, Path]:
+    def _fixed_settings(self) -> tuple[VideoSettingsV1, Path, Path, Path, Path]:
         if self.settings.engine_executable is None:
             raise VideoRenderError("engine executable is not configured")
         if self.settings.ffmpeg_executable is None or self.settings.ffprobe_executable is None:
@@ -536,6 +536,10 @@ class VideoRenderService:
         return (
             settings,
             _require_ordinary_file(self.settings.engine_executable, "engine executable"),
+            _require_ordinary_directory(
+                self.settings.engine_runtime_directory or self.settings.engine_executable.parent,
+                "engine runtime directory",
+            ),
             _require_ordinary_file(self.settings.ffmpeg_executable, "FFmpeg executable"),
             _require_ordinary_file(self.settings.ffprobe_executable, "ffprobe executable"),
         )
