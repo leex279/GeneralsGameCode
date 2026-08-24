@@ -56,7 +56,9 @@ def _claim_evidence(value: ReportValue, horizon: int) -> tuple[EvidenceCitationV
 
 def _claims(report: PublishedReportGraphDTO, horizon: int) -> tuple[_Claim, ...]:
     output: list[_Claim] = []
-    for value in (*report.replay_wide.document.observed, *report.replay_wide.document.derived):
+    # TheSuperHackers @bugfix Leex 24/08/2026 Narrate only claims accepted by the selected report authority. (#TBD)
+    document = report.selected.document
+    for value in (*document.observed, *document.derived):
         if type(value) is not ReportValue or value.availability != "available" or value.frame_window is None:
             continue
         start, end = value.frame_window
@@ -69,6 +71,15 @@ def _claims(report: PublishedReportGraphDTO, horizon: int) -> tuple[_Claim, ...]
 def _mapping(value: CanonicalValue) -> dict[str, object]:
     thawed = thaw_report_value(value)
     return thawed if isinstance(thawed, dict) else {}
+
+
+def _spoken_map_name(value: str) -> str:
+    leaf = value.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    while leaf.startswith("[") and "]" in leaf:
+        leaf = leaf.split("]", 1)[1].strip()
+    if not leaf:
+        return value
+    return leaf.title() if leaf.islower() else leaf
 
 
 def _camera_segment_id(camera: CameraPlanV1, start: int, end: int) -> str:
@@ -100,7 +111,7 @@ class CommentaryPlanService:
         plan = CommentaryPlanV1(
             logic_hz=camera.authority.logic_frames_per_second,
             replay_public_id=report.replay_public_id,
-            report_public_id=report.replay_wide.document.report_public_id,
+            report_public_id=report.selected.document.report_public_id,
             evidence_horizon=camera.authority.evidence_horizon,
             events=tuple(events),
         )
@@ -109,7 +120,8 @@ class CommentaryPlanService:
     @staticmethod
     def _validate_identity(report: PublishedReportGraphDTO, camera: CameraPlanV1) -> None:
         authority = camera.authority
-        document = report.replay_wide.document
+        # TheSuperHackers @bugfix Leex 24/08/2026 Synchronize commentary with the same selected report as camera direction. (#TBD)
+        document = report.selected.document
         if report.replay_public_id != authority.replay_public_id or document.replay_public_id != authority.replay_public_id:
             raise CommentaryPlanContractError("report and camera replay identities differ")
         if document.report_public_id != authority.report_public_id or report.selected_report_public_id != authority.report_public_id:
@@ -120,39 +132,80 @@ class CommentaryPlanService:
     def _deterministic_events(
         self, report: PublishedReportGraphDTO, camera: CameraPlanV1, claims: tuple[_Claim, ...], horizon: int
     ) -> list[CommentaryEventV1]:
-        map_claim = next((item for item in claims if item.value.claim_id == "map.start"), None)
-        if map_claim is None or map_claim.start_frame != 0:
-            raise CommentaryPlanContractError("commentary requires observed map-start evidence at frame zero")
         players = report.identity.players
         player_names = {player.public_id: player.display_name for player in players}
-        player_text = " and ".join(player.display_name for player in players)
-        map_name = report.identity.map_name or report.identity.label
-        events = [
-            self._event(
-                camera, map_claim, "intro", f"Welcome to {map_name}. {player_text} are on the field.",
-                tuple(player.public_id for player in players), None,
-            )
-        ]
+        events: list[CommentaryEventV1] = []
         partial = report.identity.duration_frames is not None and horizon < report.identity.duration_frames
         for claim in claims:
-            if claim is map_claim or claim.start_frame == 0:
+            if claim.start_frame == 0:
                 continue
             rendered = self._render_claim(claim, player_names)
             if rendered is None:
                 continue
             role, text, player_ids, strategy = rendered
             events.append(self._event(camera, claim, role, text, player_ids, strategy))
-        if partial:
-            boundary = next((item for item in claims if item.end_frame == horizon and item.value.section == "quality"), None)
-            if boundary is None:
-                raise CommentaryPlanContractError("partial commentary requires observed evidence at its accepted boundary")
-            events.append(
-                self._event(
-                    camera, boundary, "transition", f"Evidence ends at frame {horizon}; this is a diagnostic boundary.", (), None,
-                )
-            )
         events.sort(key=lambda item: (item.start_frame, item.event_id))
-        return self._deduplicate_nonoverlapping(events)
+        intro_latest_end = events[0].start_frame - 1 if events else horizon
+        if intro_latest_end < 0:
+            raise CommentaryPlanContractError("commentary has no frame window for its match introduction")
+        # TheSuperHackers @bugfix Leex 24/08/2026 Cite shared camera context when a player report omits replay-wide map-start claims. (#TBD)
+        events.insert(0, self._intro_event(report, camera, intro_latest_end, horizon, partial))
+        return self._allocate_speech_windows(events, horizon)
+
+    @staticmethod
+    def _intro_event(
+        report: PublishedReportGraphDTO,
+        camera: CameraPlanV1,
+        latest_end_frame: int,
+        horizon: int,
+        partial: bool,
+    ) -> CommentaryEventV1:
+        segment = next((item for item in camera.segments if item.start_frame == 0), None)
+        if segment is None or not segment.evidence:
+            raise CommentaryPlanContractError("commentary introduction requires cited camera context at frame zero")
+        players = report.identity.players
+        player_text = " versus ".join(player.display_name for player in players)
+        map_name = _spoken_map_name(report.identity.map_name or report.identity.label)
+        if partial and horizon <= camera.authority.logic_frames_per_second * 4:
+            # TheSuperHackers @feature Leex 24/08/2026 Keep very short diagnostic previews audible without truncating narration. (#TBD)
+            text = f"{map_name}. Preview."
+        elif partial:
+            text = f"{map_name}: {player_text}. Diagnostic opening through frame {horizon}."
+        else:
+            text = f"Welcome to {map_name}. {' and '.join(player.display_name for player in players)} are on the field."
+        evidence_ids = ",".join(item.evidence_public_id for item in segment.evidence)
+        event_id = str(
+            uuid5(
+                _NAMESPACE,
+                f"{camera.authority.replay_public_id}:{camera.authority.report_public_id}:intro:0:{latest_end_frame}:{evidence_ids}",
+            )
+        )
+        return CommentaryEventV1(
+            event_id=event_id,
+            start_frame=0,
+            latest_end_frame=latest_end_frame,
+            text=text,
+            subtitle_text=text,
+            role="intro",
+            player_public_ids=tuple(player.public_id for player in players),
+            strategy_identity=None,
+            evidence=segment.evidence,
+            confidence_tier=_tier(segment.evidence),
+            camera_segment_id=segment.segment_id,
+            template_version=_TEMPLATE_VERSION,
+        )
+
+    @staticmethod
+    def _allocate_speech_windows(events: list[CommentaryEventV1], horizon: int) -> list[CommentaryEventV1]:
+        scheduled: list[CommentaryEventV1] = []
+        for index, event in enumerate(events):
+            latest_end = events[index + 1].start_frame - 1 if index + 1 < len(events) else horizon
+            if latest_end < event.start_frame:
+                raise CommentaryPlanContractError("commentary evidence anchors leave no non-overlapping speech window")
+            payload = event.model_dump(mode="python")
+            payload["latest_end_frame"] = latest_end
+            scheduled.append(CommentaryEventV1.model_validate(payload))
+        return CommentaryPlanService._deduplicate_nonoverlapping(scheduled)
 
     @staticmethod
     def _render_claim(
@@ -193,7 +246,7 @@ class CommentaryPlanService:
         event_id = str(uuid5(_NAMESPACE, f"{camera.authority.replay_public_id}:{claim.value.claim_id}:{role}:{claim.start_frame}:{claim.end_frame}:{evidence_ids}"))
         return CommentaryEventV1(
             event_id=event_id,
-            start_frame=claim.start_frame,
+            start_frame=claim.end_frame,
             latest_end_frame=claim.end_frame,
             text=text,
             subtitle_text=text,

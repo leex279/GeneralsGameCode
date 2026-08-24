@@ -11,8 +11,10 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
+from generals_replay_analyzer.config import load_runtime_configuration
 from generals_replay_analyzer.db import create_database_engine, create_session_factory
 from generals_replay_analyzer.db.models import Job, TelemetryRun
+from generals_replay_analyzer.video.resolver import VideoRequestResolver
 
 from .populated_fixture import (
     ComparisonBinding,
@@ -199,6 +201,32 @@ def test_builder_composes_pinned_replay_through_production_services_and_queries(
     engine = create_database_engine(runtime_root / "product-data" / "replay-analyzer.sqlite3")
     try:
         factory = create_session_factory(engine)
+        result_environment = dict(result.environment)
+        settings = load_runtime_configuration(
+            environment=result_environment,
+            values={
+                "watched_folders": tuple(
+                    Path(value)
+                    for value in json.loads(result_environment["GENERALS_REPLAY_ANALYZER_WATCHED_FOLDERS"])
+                )
+            },
+        ).settings
+        resolved_video = VideoRequestResolver(factory, settings).resolve(
+            {
+                "diagnostic_preview": True,
+                "evidence_horizon": "partial",
+                "logic_frames_per_second": 30,
+                "replay_public_id": manifest.replay_public_id,
+                "replay_sha256": manifest.input_replay_sha256,
+                "report_public_id": manifest.replay_report.report_public_id,
+            }
+        )
+        assert resolved_video.replay_path == (
+            settings.data_root
+            / "replays"
+            / manifest.input_replay_sha256[:2]
+            / manifest.input_replay_sha256
+        )
         with factory() as session:
             pending = session.scalar(
                 select(Job).where(Job.public_id == manifest.pending_job.job_public_id)

@@ -65,11 +65,13 @@ class VideoJobPlanner:
 
     clock: Callable[[], datetime]
 
-    # TheSuperHackers @feature Leex 24/08/2026 Keep commented cast requests durable and evidence-bound. (#TBD)
+    # TheSuperHackers @bugfix Leex 24/08/2026 Bind every render stage to the replay content identity required by workers. (#TBD)
     def plan(
         self,
         *,
         replay_public_id: str,
+        replay_sha256: str,
+        logic_frames_per_second: Literal[30, 60],
         report_public_id: str,
         report_job_public_id: str,
         evidence_horizon: EvidenceHorizon,
@@ -77,6 +79,14 @@ class VideoJobPlanner:
     ) -> JobSpec:
         if any(str(UUID(value)) != value for value in (replay_public_id, report_public_id, report_job_public_id)):
             raise VideoJobRequestError("replay, report, and report job identities must be canonical public IDs")
+        if (
+            type(replay_sha256) is not str
+            or len(replay_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in replay_sha256)
+        ):
+            raise VideoJobRequestError("replay SHA-256 must be canonical lowercase hexadecimal")
+        if type(logic_frames_per_second) is not int or logic_frames_per_second not in (30, 60):
+            raise VideoJobRequestError("logic timebase must be an engine-authoritative 30 or 60 frames per second")
         if evidence_horizon not in {"complete", "partial"}:
             raise VideoJobRequestError("evidence horizon is invalid")
         if type(diagnostic_preview) is not bool:
@@ -85,6 +95,8 @@ class VideoJobPlanner:
             raise VideoJobRequestError("partial evidence requires an explicit diagnostic preview")
         identity = {
             "replay_public_id": replay_public_id,
+            "replay_sha256": replay_sha256,
+            "logic_frames_per_second": logic_frames_per_second,
             "report_public_id": report_public_id,
             "report_job_public_id": report_job_public_id,
             "evidence_horizon": evidence_horizon,
@@ -94,7 +106,7 @@ class VideoJobPlanner:
         return JobSpec(
             stage=RENDER_VIDEO,
             component_version=RENDER_VIDEO_VERSION,
-            idempotency_key=content_key(RENDER_VIDEO, RENDER_VIDEO_VERSION, "0" * 64, identity),
+            idempotency_key=content_key(RENDER_VIDEO, RENDER_VIDEO_VERSION, replay_sha256, identity),
             input_json=identity,
             priority=100,
             max_attempts=3,
@@ -106,6 +118,8 @@ class VideoJobPlanner:
         coordinator: VideoJobCoordinator,
         *,
         replay_public_id: str,
+        replay_sha256: str,
+        logic_frames_per_second: Literal[30, 60],
         report_public_id: str,
         report_job_public_id: str,
         evidence_horizon: EvidenceHorizon,
@@ -114,6 +128,8 @@ class VideoJobPlanner:
         """Persist a render job and its report prerequisite; rendering remains worker-owned."""
         spec = self.plan(
             replay_public_id=replay_public_id,
+            replay_sha256=replay_sha256,
+            logic_frames_per_second=logic_frames_per_second,
             report_public_id=report_public_id,
             report_job_public_id=report_job_public_id,
             evidence_horizon=evidence_horizon,

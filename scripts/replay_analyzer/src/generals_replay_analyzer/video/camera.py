@@ -79,7 +79,8 @@ def _number(value: object, label: str) -> float:
 def _report_evidence(
     report: PublishedReportGraphDTO,
 ) -> dict[str, tuple[str, tuple[tuple[int, int], ...]]]:
-    document = report.replay_wide.document
+    # TheSuperHackers @bugfix Leex 24/08/2026 Bind camera citations to the exact selected report used by the map scene. (#TBD)
+    document = report.selected.document
     collected: dict[str, tuple[str, set[tuple[int, int]]]] = {}
     for value in (*document.evidence_availability, *document.observed, *document.derived):
         if type(value) is not ReportValue:
@@ -254,7 +255,8 @@ class CameraPlanService:
     ) -> None:
         if report.replay_public_id != authority.replay_public_id:
             raise CameraPlanContractError("report replay does not match camera authority")
-        document = report.replay_wide.document
+        # TheSuperHackers @bugfix Leex 24/08/2026 Validate player-scoped casts against their selected immutable report. (#TBD)
+        document = report.selected.document
         if document.report_public_id != authority.report_public_id or document.replay_sha256 != authority.replay_sha256:
             raise CameraPlanContractError("fixed report does not match camera authority")
         for key, expected in (

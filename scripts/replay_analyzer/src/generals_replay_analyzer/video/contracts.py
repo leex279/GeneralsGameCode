@@ -180,11 +180,15 @@ class CommentaryEventV1(VideoContract):
     def _validate_evidence_window(self) -> Self:
         if self.latest_end_frame < self.start_frame:
             raise ValueError("commentary event frame window must be ordered")
+        # TheSuperHackers @bugfix Leex 24/08/2026 Allow narration after cited evidence is known while rejecting future-dependent claims. (#TBD)
         if any(
-            citation.frame_start > self.start_frame or citation.frame_end < self.latest_end_frame
+            not (
+                citation.frame_end <= self.start_frame
+                or (citation.frame_start <= self.start_frame and citation.frame_end >= self.latest_end_frame)
+            )
             for citation in self.evidence
         ):
-            raise ValueError("commentary event must fit inside every cited evidence window")
+            raise ValueError("commentary evidence must be available before speech or cover its complete frame window")
         ordered_players = tuple(sorted(set(self.player_public_ids)))
         ordered_evidence = tuple(
             sorted(set(self.evidence), key=lambda item: (item.frame_start, item.frame_end, item.evidence_public_id, item.tier))

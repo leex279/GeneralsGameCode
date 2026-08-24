@@ -736,6 +736,14 @@ class MapSceneQueryService:
         graph = self._report_graph(query)
         return self._get_scene(query, graph)
 
+    # TheSuperHackers @feature Leex 24/08/2026 Expose the report-authoritative map horizon to offline broadcast consumers. (#TBD)
+    def get_canonical_scene(self, query: MapSceneReadQuery) -> MapSceneReadModel:
+        """Return the fixed report scene across exactly its available telemetry window."""
+        if type(query) is not MapSceneReadQuery:
+            raise TypeError("query must be a MapSceneReadQuery")
+        graph = self._report_graph(query)
+        return self._get_scene(query, graph, canonical_index_window=True)
+
     def _get_scene(
         self,
         query: MapSceneReadQuery,

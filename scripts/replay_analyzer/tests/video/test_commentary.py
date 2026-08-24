@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -23,6 +24,7 @@ from generals_replay_analyzer.video.contracts import (
     CameraPlanAuthorityV1,
     CameraPlanV1,
     CameraSegmentV1,
+    CommentaryEventV1,
     EvidenceCitationV1,
     EvidenceHorizonV1,
     ValidatedCommentaryEnrichmentV1,
@@ -30,6 +32,7 @@ from generals_replay_analyzer.video.contracts import (
 
 REPLAY_ID = "10000000-0000-4000-8000-000000000001"
 REPORT_ID = "20000000-0000-4000-8000-000000000001"
+PLAYER_REPORT_ID = "20000000-0000-4000-8000-000000000002"
 RUN_ID = "30000000-0000-4000-8000-000000000001"
 MAP_ID = "40000000-0000-4000-8000-000000000001"
 PLAYER_ONE_ID = "70000000-0000-4000-8000-000000000001"
@@ -42,11 +45,13 @@ OUTCOME_EVIDENCE = "50000000-0000-4000-8000-000000000005"
 BOUNDARY_EVIDENCE = "50000000-0000-4000-8000-000000000006"
 
 
-def _authority(frame_end: int, *, replay_public_id: str = REPLAY_ID) -> CameraPlanAuthorityV1:
+def _authority(
+    frame_end: int, *, replay_public_id: str = REPLAY_ID, report_public_id: str = REPORT_ID
+) -> CameraPlanAuthorityV1:
     return CameraPlanAuthorityV1(
         replay_public_id=replay_public_id,
         replay_sha256="a" * 64,
-        report_public_id=REPORT_ID,
+        report_public_id=report_public_id,
         telemetry_run_public_id=RUN_ID,
         telemetry_trace_sha256="b" * 64,
         map_public_id=MAP_ID,
@@ -127,6 +132,33 @@ def _report(*, partial: bool = False) -> PublishedReportGraphDTO:
     )
 
 
+def _player_selected_report() -> PublishedReportGraphDTO:
+    graph = _report()
+    player_document = replace(
+        graph.replay_wide.document,
+        report_public_id=PLAYER_REPORT_ID,
+        replay_player_public_id=PLAYER_ONE_ID,
+        observed=tuple(value for value in graph.replay_wide.document.observed if value.claim_id != "map.start"),
+    )
+    player_report = PublishedReportDTO(
+        player_document,
+        graph.replay_wide.structured_asset,
+        graph.replay_wide.presentation_asset,
+        graph.replay_wide.html,
+        graph.replay_wide.text,
+        graph.replay_wide.created_at_utc,
+    )
+    return PublishedReportGraphDTO(
+        graph.schema_version,
+        graph.output_schema_version,
+        graph.replay_public_id,
+        PLAYER_REPORT_ID,
+        graph.identity,
+        graph.replay_wide,
+        (player_report,),
+    )
+
+
 def _camera(frame_end: int, *, replay_public_id: str = REPLAY_ID) -> CameraPlanV1:
     return CameraPlanV1(
         authority=_authority(frame_end, replay_public_id=replay_public_id),
@@ -148,7 +180,7 @@ def _camera(frame_end: int, *, replay_public_id: str = REPLAY_ID) -> CameraPlanV
                 evidence_public_id=MAP_EVIDENCE,
                 tier="observed",
                 frame_start=0,
-                frame_end=frame_end,
+                frame_end=0,
             ),),
         ),),
     )
@@ -178,7 +210,8 @@ def test_partial_plan_announces_boundary_without_later_phases_or_winner_and_is_o
     second = service.create(_report(partial=True), _camera(105))
 
     assert first.canonical_json() == second.canonical_json()
-    assert any(event.role == "transition" and "Evidence ends at frame 105" in event.text for event in first.events)
+    assert first.events[0].role == "intro"
+    assert first.events[0].text == "Tournament Desert. Preview."
     assert all(event.latest_end_frame <= 105 for event in first.events)
     assert all("wins" not in event.text for event in first.events)
     assert all(event.evidence[0].tier == "observed" for event in first.events)
@@ -229,3 +262,32 @@ def test_enrichment_requires_exact_event_evidence_and_frame_window() -> None:
 def test_rejects_report_and_camera_from_different_replays() -> None:
     with pytest.raises(CommentaryPlanContractError, match="replay"):
         CommentaryPlanService().create(_report(), _camera(300, replay_public_id="10000000-0000-4000-8000-000000000099"))
+
+
+def test_player_selected_plan_preserves_the_camera_report_authority() -> None:
+    camera = _camera(300).model_copy(update={"authority": _authority(300, report_public_id=PLAYER_REPORT_ID)})
+
+    plan = CommentaryPlanService().create(_player_selected_report(), camera)
+
+    assert plan.report_public_id == PLAYER_REPORT_ID
+
+
+def test_commentary_may_speak_after_point_evidence_becomes_available() -> None:
+    event = CommentaryEventV1(
+        event_id="60000000-0000-4000-8000-000000000099",
+        start_frame=15,
+        latest_end_frame=60,
+        text="The opening order is now confirmed.",
+        subtitle_text="The opening order is now confirmed.",
+        role="analysis",
+        evidence=(EvidenceCitationV1(
+            evidence_public_id=STRATEGY_EVIDENCE,
+            tier="observed",
+            frame_start=15,
+            frame_end=15,
+        ),),
+        confidence_tier="observed",
+        camera_segment_id="60000000-0000-4000-8000-000000000001",
+    )
+
+    assert event.latest_end_frame == 60

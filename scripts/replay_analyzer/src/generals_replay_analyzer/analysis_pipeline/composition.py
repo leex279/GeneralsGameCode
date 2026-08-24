@@ -30,7 +30,12 @@ from ..importing.service import (
     TelemetryAcquirer,
     TerminalDependencyPolicy,
 )
-from ..importing.stages import RECONCILE_IDENTITIES, RECONCILE_IDENTITIES_VERSION, RENDER_REPORT_VERSION
+from ..importing.stages import (
+    RECONCILE_IDENTITIES,
+    RECONCILE_IDENTITIES_VERSION,
+    RENDER_REPORT_VERSION,
+    RENDER_VIDEO_VERSION,
+)
 from ..importing.telemetry_import import ObservationImportHandler, TelemetryObservationImporter
 from ..llm.provider import OllamaClientConfig
 from ..llm.service import HttpxOllamaTransport, OllamaAnalysisService
@@ -132,7 +137,7 @@ def create_production_import_service(
     if settings.engine_executable is not None and settings.ffmpeg_executable is not None and settings.ffprobe_executable is not None:
         video_registration = (
             StageHandlerRegistration(
-                "render_video", "1",
+                "render_video", RENDER_VIDEO_VERSION,
                 VideoRenderStageHandler(
                     request_factory=VideoRequestResolver(session_factory, settings).resolve,
                     renderer=VideoRenderService(

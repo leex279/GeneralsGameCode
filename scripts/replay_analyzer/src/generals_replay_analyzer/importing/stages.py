@@ -49,7 +49,8 @@ ASSESS_STRATEGIES_VERSION = "1"
 ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
-RENDER_VIDEO_VERSION = "1"
+# TheSuperHackers @fix Leex 24/08/2026 Version the replay-hash, engine-timebase, and selected-report render authority. (#TBD)
+RENDER_VIDEO_VERSION = "5"
 
 
 def canonical_json(value: Any) -> str:

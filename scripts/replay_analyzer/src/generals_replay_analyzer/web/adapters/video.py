@@ -13,10 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.config import AnalyzerSettings
-from generals_replay_analyzer.db.models import Job, JobStageResult, Replay, Report
+from generals_replay_analyzer.db.models import Job, JobStageResult, Replay, Report, TelemetryRun
 from generals_replay_analyzer.importing.jobs import JobCoordinator
 from generals_replay_analyzer.importing.stages import RENDER_REPORT
 from generals_replay_analyzer.video.jobs import VideoJobPlanner, VideoJobRequestError
+from generals_replay_analyzer.video.resolver import VideoResolutionError, _resolve_authoritative_logic_fps
 from generals_replay_analyzer.web.errors import PublicProblem
 from generals_replay_analyzer.web.ports import (
     AvailabilityDTO,
@@ -47,7 +48,7 @@ class AnalyticsVideoAdapter:
         self._settings = settings
         self._clock = clock
 
-    # TheSuperHackers @feature Leex 24/08/2026 Enqueue evidence-scoped replay casts without exposing execution capabilities. (#TBD)
+    # TheSuperHackers @bugfix Leex 24/08/2026 Enqueue evidence-scoped casts with their immutable replay content identity. (#TBD)
     def submit_video_cast(self, command: VideoCastRequestDTO) -> VideoCastSubmissionDTO:
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.public_id == command.replay_public_id))
@@ -63,16 +64,34 @@ class AnalyticsVideoAdapter:
                 raise PublicProblem(status=409, code="video_report_unavailable", detail="A completed replay report is required")
             report_json = report.report_json if isinstance(report.report_json, dict) else {}
             horizon = _evidence_horizon(report_json)
+            # TheSuperHackers @bugfix Leex 24/08/2026 Freeze the engine manifest clock instead of guessing from replay wall time. (#TBD)
+            telemetry_timebases = tuple(
+                (
+                    run.schema_version,
+                    run.settings_json if isinstance(run.settings_json, dict) else {},
+                )
+                for run in session.scalars(
+                    select(TelemetryRun)
+                    .where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
+                    .order_by(TelemetryRun.run_id)
+                )
+            )
             planner = VideoJobPlanner(clock=self._clock)
             try:
+                logic_frames_per_second = _resolve_authoritative_logic_fps(
+                    replay.header_json,
+                    telemetry_timebases,
+                )
                 spec = planner.plan(
                     replay_public_id=replay.public_id,
+                    replay_sha256=replay.sha256,
+                    logic_frames_per_second=logic_frames_per_second,
                     report_public_id=report.public_id,
                     report_job_public_id=report_job.public_id,
                     evidence_horizon=horizon,
                     diagnostic_preview=command.diagnostic_preview,
                 )
-            except VideoJobRequestError as error:
+            except (VideoJobRequestError, VideoResolutionError) as error:
                 raise PublicProblem(status=409, code="video_evidence_incomplete", detail=str(error)) from error
             coordinator = JobCoordinator(self._session_factory, clock=self._clock)
             snapshot = coordinator.create_job(replace(spec, replay_id=replay.id))

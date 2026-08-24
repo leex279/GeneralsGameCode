@@ -41,6 +41,7 @@ def test_logic_timebase_resolution_prefers_engine_manifest_and_rejects_request_m
         }
     }
 
+    assert _resolve_authoritative_logic_fps(header, ()) == 60
     assert _resolve_authoritative_logic_fps(header, (), requested=60) == 60
     with pytest.raises(VideoResolutionError, match="differs from engine authority"):
         _resolve_authoritative_logic_fps(header, (), requested=30)

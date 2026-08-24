@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db.models import ManagedAsset, Replay, TelemetryRun
+from generals_replay_analyzer.features.evidence import thaw_canonical
 from generals_replay_analyzer.report.query import FixedReportQuery, ReportQueryService
 from generals_replay_analyzer.spatial.query import MapSceneQueryService, MapSceneReadQuery
 from generals_replay_analyzer.video.contracts import CameraPlanAuthorityV1, EvidenceHorizonV1
@@ -28,9 +29,9 @@ def _resolve_authoritative_logic_fps(
     replay_header: object,
     telemetry_timebases: tuple[tuple[int, Mapping[str, object]], ...],
     *,
-    requested: object,
+    requested: object | None = None,
 ) -> Literal[30, 60]:
-    if requested not in (30, 60):
+    if requested is not None and requested not in (30, 60):
         raise VideoResolutionError("video job logic timebase is invalid")
     candidates: set[int] = set()
     header = replay_header if isinstance(replay_header, Mapping) else {}
@@ -58,7 +59,7 @@ def _resolve_authoritative_logic_fps(
         authoritative = 30
     else:
         raise VideoResolutionError("engine logic timebase is unavailable")
-    if requested != authoritative:
+    if requested is not None and requested != authoritative:
         raise VideoResolutionError("video job logic timebase differs from engine authority")
     return cast(Literal[30, 60], authoritative)
 
@@ -133,7 +134,8 @@ class VideoRequestResolver:
             asset = session.get(ManagedAsset, replay.managed_asset_id)
             if asset is None or asset.sha256 != replay.sha256:
                 raise VideoResolutionError("managed replay identity is invalid")
-            replay_path = _managed_replay_path(self._settings.managed_replay_directory, asset.relative_path)
+            # TheSuperHackers @bugfix Leex 24/08/2026 Resolve managed-asset paths from their canonical product-root scope. (#TBD)
+            replay_path = _managed_replay_path(self._settings.data_root, asset.relative_path)
             if not replay_path.is_file() or hashlib.sha256(replay_path.read_bytes()).hexdigest() != replay.sha256:
                 raise VideoResolutionError("managed replay bytes are invalid")
             telemetry_timebases = tuple(
@@ -153,8 +155,10 @@ class VideoRequestResolver:
                 requested=logic_frames_per_second,
             )
             frame_end = replay.frame_count
-        scene = self._scenes.get_scene(MapSceneReadQuery(replay_id, report_id, 0, frame_end))
-        payload = scene.payload
+        # TheSuperHackers @bugfix Leex 24/08/2026 Direct diagnostic casts only across the report's verified telemetry horizon. (#TBD)
+        scene = self._scenes.get_canonical_scene(MapSceneReadQuery(replay_id, report_id, 0, 0))
+        # TheSuperHackers @bugfix Leex 24/08/2026 Validate the immutable scene's thawed mapping instead of its storage wrapper. (#TBD)
+        payload = thaw_canonical(scene.payload)
         if not isinstance(payload, Mapping):
             raise VideoResolutionError("map scene is invalid")
         available = payload.get("available_frame_window")

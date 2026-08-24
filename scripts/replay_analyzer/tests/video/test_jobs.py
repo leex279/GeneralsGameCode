@@ -17,6 +17,8 @@ def test_complete_evidence_creates_worker_owned_render_job() -> None:
 
     job = planner.plan(
         replay_public_id=_id(),
+        replay_sha256="a" * 64,
+        logic_frames_per_second=30,
         report_public_id=_id(),
         report_job_public_id=_id(),
         evidence_horizon="complete",
@@ -24,9 +26,11 @@ def test_complete_evidence_creates_worker_owned_render_job() -> None:
     )
 
     assert job.stage == "render_video"
-    assert job.component_version == "1"
+    assert job.component_version == "5"
     assert job.input_json["evidence_horizon"] == "complete"
     assert job.input_json["diagnostic_preview"] is False
+    assert job.input_json["replay_sha256"] == "a" * 64
+    assert job.input_json["logic_frames_per_second"] == 30
     assert "path" not in job.input_json
 
 
@@ -36,6 +40,8 @@ def test_partial_evidence_requires_explicit_diagnostic_preview() -> None:
     with pytest.raises(VideoJobRequestError, match="diagnostic preview"):
         planner.plan(
             replay_public_id=_id(),
+            replay_sha256="a" * 64,
+            logic_frames_per_second=30,
             report_public_id=_id(),
             report_job_public_id=_id(),
             evidence_horizon="partial",
@@ -48,6 +54,8 @@ def test_partial_preview_is_explicitly_marked_in_durable_input() -> None:
 
     job = planner.plan(
         replay_public_id=_id(),
+        replay_sha256="a" * 64,
+        logic_frames_per_second=30,
         report_public_id=_id(),
         report_job_public_id=_id(),
         evidence_horizon="partial",
@@ -72,12 +80,45 @@ def test_enqueue_adds_report_dependency_without_running_a_renderer() -> None:
     report_job_id = _id()
 
     public_id = planner.enqueue(
-        coordinator, replay_public_id=_id(), report_public_id=_id(), report_job_public_id=report_job_id,
+        coordinator, replay_public_id=_id(), replay_sha256="a" * 64, logic_frames_per_second=30,
+        report_public_id=_id(), report_job_public_id=report_job_id,
         evidence_horizon="complete", diagnostic_preview=False,
     )
 
     assert public_id == "created"
     assert coordinator.edge == ("created", report_job_id)
+
+
+@pytest.mark.parametrize("value", ("A" * 64, "a" * 63, "g" * 64))
+def test_video_job_rejects_a_noncanonical_replay_content_hash(value: str) -> None:
+    planner = VideoJobPlanner(clock=lambda: datetime(2026, 8, 24, tzinfo=UTC))
+
+    with pytest.raises(VideoJobRequestError, match="replay SHA-256"):
+        planner.plan(
+            replay_public_id=_id(),
+            replay_sha256=value,
+            logic_frames_per_second=30,
+            report_public_id=_id(),
+            report_job_public_id=_id(),
+            evidence_horizon="complete",
+            diagnostic_preview=False,
+        )
+
+
+@pytest.mark.parametrize("value", (0, 29, 59, True))
+def test_video_job_rejects_an_invalid_logic_timebase(value: object) -> None:
+    planner = VideoJobPlanner(clock=lambda: datetime(2026, 8, 24, tzinfo=UTC))
+
+    with pytest.raises(VideoJobRequestError, match="logic timebase"):
+        planner.plan(
+            replay_public_id=_id(),
+            replay_sha256="a" * 64,
+            logic_frames_per_second=value,  # type: ignore[arg-type]
+            report_public_id=_id(),
+            report_job_public_id=_id(),
+            evidence_horizon="complete",
+            diagnostic_preview=False,
+        )
 
 
 def test_stage_handler_returns_only_public_verified_media_identity() -> None:
