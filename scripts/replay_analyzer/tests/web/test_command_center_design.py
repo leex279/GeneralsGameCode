@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 from fastapi.testclient import TestClient
@@ -300,7 +301,7 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     assert "command-center.rep" not in response.text
     assert "Activity &amp; quality trends" in response.text and "10 verified, 2 partial" in response.text
     assert "Notable evidence" in response.text and "One replay needs evidence review" in response.text
-    assert 'class="recent-match-grid"' in response.text
+    assert 'class="dashboard-table recent-match-table"' in response.text
     assert (
         'href="/replays/123e4567-e89b-42d3-a456-426614174000/reports/'
         '123e4567-e89b-42d3-a456-426614174010">View analysis</a>'
@@ -310,13 +311,27 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
 
 
 def test_dashboard_recent_match_card_leads_with_fixed_report_analysis_facts() -> None:
-    template = package_resource("web/templates/dashboard.html").read_text(encoding="utf-8")
+    template = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/templates/dashboard.html").read_text(encoding="utf-8")
 
-    assert 'class="recent-match-analysis"' in template
+    assert 'class="dashboard-table recent-match-table"' in template
+    assert 'class="recent-match-grid"' not in template
+    assert 'class="recent-match-card"' not in template
     assert "replay.player_factions" in template
     assert "replay.observed_horizon" in template
     assert "replay.strategy_labels" in template
     assert 'class="recent-match-operations"' in template
+
+
+def test_library_uses_a_desktop_filter_rail_and_preserves_mobile_labelled_rows() -> None:
+    source_root = Path(__file__).parents[2] / "src/generals_replay_analyzer/web"
+    template = (source_root / "templates/replays/index.html").read_text(encoding="utf-8")
+    css = (source_root / "static/css/app.css").read_text(encoding="utf-8")
+
+    assert 'class="library-filter-rail"' in template
+    assert ".library-workspace, .jobs-workspace {" in css
+    assert "grid-template-columns: 16rem minmax(0, 1fr)" in css
+    assert "@media (max-width: 767px)" in css
+    assert ".replay-table td::before" in css
 
 
 def test_library_prefers_a_direct_analysis_journey_over_searching_the_same_row() -> None:

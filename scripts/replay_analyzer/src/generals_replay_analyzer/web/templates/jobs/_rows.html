@@ -1,15 +1,15 @@
-<section aria-label="Job results"{% if jobs.page.poll_after_seconds %} hx-get="{{ jobs.canonical_url }}" hx-trigger="every {{ jobs.page.poll_after_seconds }}s" hx-swap="outerHTML"{% endif %}>
-  <p>Availability: {{ jobs.page.availability.state }}. Reason: {{ jobs.page.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p>
-  <table>
+<section class="job-results-panel" aria-labelledby="job-results-heading"{% if jobs.page.poll_after_seconds %} hx-get="{{ jobs.canonical_url }}" hx-trigger="every {{ jobs.page.poll_after_seconds }}s" hx-swap="outerHTML"{% endif %}>
+  <div class="section-heading compact-heading"><div><span class="eyebrow">Results</span><h2 id="job-results-heading">Analysis job queue</h2></div><p>Availability: {{ jobs.page.availability.state }}. Reason: {{ jobs.page.availability.reason_codes|join(', ') or 'availability_reason_not_supplied' }}</p></div>
+  <p id="job-table-scroll-instruction" class="scroll-instruction">Scroll horizontally to inspect the complete job state.</p><div class="table-scroll" tabindex="0" aria-describedby="job-table-scroll-instruction"><table class="job-table">
     <caption>Analysis job results</caption>
-    <thead><tr><th scope="col">Job</th><th scope="col">Stage</th><th scope="col">State</th><th scope="col">Progress</th><th scope="col">Attempts</th></tr></thead>
+    <thead><tr><th scope="col">Job</th><th scope="col">Replay</th><th scope="col">Stage</th><th scope="col">State</th><th scope="col">Progress</th><th scope="col">Attempts</th><th scope="col">Logs</th></tr></thead>
     <tbody>{% for job in jobs.page.items %}<tr>
-      <td><a href="/jobs/{{ job.job_public_id }}">{{ job.job_public_id }}</a></td>
-      <td>{{ job.stage }}</td>
-      <td>{{ job.state }}{% if job.cancel_requested %} (cancel requested){% endif %}</td>
-      <td>{% if job.progress %}{{ job.progress.completed }} / {{ job.progress.total }} {{ job.progress.unit }}{% else %}progress_unavailable{% endif %}</td>
-      <td>{{ job.attempt_count }} / {{ job.max_attempts }}</td>
-    </tr>{% else %}<tr><td colspan="5">No analysis jobs match the current filters.</td></tr>{% endfor %}</tbody>
-  </table>
+      <td data-label="Job"><a href="/jobs/{{ job.job_public_id }}">{{ job.job_public_id }}</a><small>{{ job.component_version }}</small></td>
+      <td data-label="Replay">{{ job.replay_public_id or 'unavailable' }}</td><td data-label="Stage">{{ job.stage }}</td>
+      <td data-label="State"><span class="job-state" data-state="{{ job.state }}">{{ job.state }}</span>{% if job.cancel_requested %}<small>cancel requested</small>{% endif %}{% if job.error %}<small>{{ job.error.code }}</small>{% endif %}</td>
+      <td data-label="Progress">{% if job.progress %}<progress value="{{ job.progress.completed }}" max="{{ job.progress.total }}">{{ job.progress.completed }} / {{ job.progress.total }}</progress> {{ job.progress.completed }} / {{ job.progress.total }} {{ job.progress.unit }}{% else %}progress_unavailable{% endif %}</td>
+      <td data-label="Attempts">{{ job.attempt_count }} / {{ job.max_attempts }}</td><td data-label="Logs"><a href="/jobs/{{ job.job_public_id }}">Open job &amp; logs</a></td>
+    </tr>{% else %}<tr class="empty-result-row"><td colspan="7">No analysis jobs match the current filters.</td></tr>{% endfor %}</tbody>
+  </table></div>
   {% if jobs.next_url %}<a href="{{ jobs.next_url }}">Next jobs</a>{% endif %}
 </section>

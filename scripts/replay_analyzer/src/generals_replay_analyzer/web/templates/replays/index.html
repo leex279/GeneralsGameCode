@@ -22,7 +22,7 @@
   </header>
 
   <div class="library-workspace">
-    <section class="library-panel" aria-labelledby="library-filter-heading">
+    <aside class="library-filter-rail" aria-labelledby="library-filter-heading">
       <div class="library-toolbar-shell">
         <div class="library-toolbar">
           <div><span class="eyebrow">Query</span><h2 id="library-filter-heading">Find replay evidence</h2></div>
@@ -76,8 +76,8 @@
           </nav>
         </div>
       </div>
-    </section>
-    {% include "replays/_table.html" %}
+    </aside>
+    <div class="library-results">{% include "replays/_table.html" %}</div>
   </div>
   <div id="import-modal-host" aria-live="polite"></div>
   {# TheSuperHackers @fix Leex 23/08/2026 Load the vendored enhancement runtime only where replay-library dialogs use it. (#TBD) #}

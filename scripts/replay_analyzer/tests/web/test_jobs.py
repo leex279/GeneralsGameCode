@@ -193,6 +193,28 @@ def test_jobs_list_maps_accepted_cursor_filters_and_active_polling() -> None:
     assert "running" in response.text
 
 
+def test_jobs_listing_is_a_filter_rail_with_dense_truthful_job_rows() -> None:
+    port = _JobPort(
+        _summary(
+            progress={"completed": 4, "total": 8, "unit": "replays"},
+            cancel_requested=True,
+        )
+    )
+    with _client(port) as client:
+        response = client.get("/jobs?state=running&stage=parse", headers={"host": "localhost"})
+
+    assert response.status_code == 200
+    assert 'class="job-filter-rail"' in response.text
+    assert 'class="job-results-panel"' in response.text
+    assert 'class="job-table"' in response.text
+    assert 'data-label="Progress"' in response.text
+    assert "4 / 8 replays" in response.text
+    assert "cancel requested" in response.text
+    assert "1 / 3" in response.text
+    assert f'href="/jobs/{JOB_ID}">Open job &amp; logs</a>' in response.text
+    assert '<form action="/jobs" method="get"' in response.text
+
+
 def test_jobs_list_canonicalizes_equivalent_state_filter_permutations_and_duplicates() -> None:
     port = _JobPort()
     with _client(port) as client:
