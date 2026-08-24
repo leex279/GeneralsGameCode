@@ -61,6 +61,49 @@ def test_full_match_observation_sampling_is_bounded_and_spans_the_timeline() -> 
     assert selected == tuple(sorted(set(selected)))
 
 
+def test_report_omits_bulk_partition_diagnostics_from_public_observed_values(
+    report_database: SeededReportDatabase,
+) -> None:
+    now = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
+    with report_database.session_factory() as session:  # type: ignore[operator]
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_insert"))
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_insert"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.status == "succeeded"))
+        assert replay is not None and telemetry is not None
+        evidence = EvidenceItem(
+            public_id=stable_uuid("bulk-partition-grid-evidence"),
+            replay_id=replay.id,
+            telemetry_run_id=telemetry.id,
+            tier="observed",
+            source_kind="telemetry_event",
+            source_key="telemetry:partition-grid:bulk",
+            schema_version=2,
+            created_at=now,
+        )
+        session.add(evidence)
+        session.flush()
+        session.add(
+            TelemetryEvent(
+                telemetry_run_id=telemetry.id,
+                sequence=99_999,
+                frame=300,
+                logic_time_seconds=10.0,
+                schema_version=2,
+                event_type="partition_engine_grid_sample",
+                payload_json={"objects": [{"object_id": index, "x": float(index)} for index in range(1_000)]},
+                raw_record_json={"event_type": "partition_engine_grid_sample"},
+                evidence_item_id=evidence.id,
+            )
+        )
+        session.commit()
+
+    receipt = _service(report_database).create(ReportRequest(report_database.replay_public_id, publish=False))
+
+    assert receipt.document.observed
+    assert all(value.label != "partition_engine_grid_sample" for value in receipt.document.observed)
+
+
 def test_report_feature_assembly_query_count_is_bounded_by_batches(
     report_database: SeededReportDatabase,
 ) -> None:

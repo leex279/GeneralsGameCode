@@ -112,6 +112,8 @@ class _CatalogIdentities:
     thing_templates: frozenset[str]
     thing_template_kind_of_flags: Mapping[str, frozenset[str]]
     thing_template_behavior_modules: Mapping[str, frozenset[str]]
+    thing_template_has_locomotor_sets: Mapping[str, bool]
+    thing_template_production_capable: Mapping[str, bool]
     thing_template_locomotors_by_sample_set: Mapping[tuple[str, int, str], frozenset[str]]
     thing_template_air_locomotors_by_sample_set: Mapping[tuple[str, int, str], frozenset[str]]
     upgrades: frozenset[str]
@@ -452,6 +454,14 @@ def _validate_catalog_asset(
         },
         thing_template_behavior_modules={
             cast(str, entry["name"]): frozenset(cast(list[str], entry["behavior_modules"]))
+            for entry in thing_templates
+        },
+        thing_template_has_locomotor_sets={
+            cast(str, entry["name"]): bool(cast(list[object], entry["locomotor_sets"]))
+            for entry in thing_templates
+        },
+        thing_template_production_capable={
+            cast(str, entry["name"]): cast(bool, entry["production_capable"])
             for entry in thing_templates
         },
         thing_template_locomotors_by_sample_set=template_locomotors,
@@ -2178,6 +2188,16 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
             sample_kind_of_flags = catalog_identities.thing_template_kind_of_flags.get(
                 validated.payload.template_name or "", frozenset()
             )
+            sample_template_name = validated.payload.template_name or ""
+            sample_behavior_modules = catalog_identities.thing_template_behavior_modules.get(
+                sample_template_name, frozenset()
+            )
+            sample_has_locomotor_sets = catalog_identities.thing_template_has_locomotor_sets.get(
+                sample_template_name, False
+            )
+            sample_production_capable = catalog_identities.thing_template_production_capable.get(
+                sample_template_name, False
+            )
             lifecycle = entity_lifecycles.get(validated.payload.object_id)
             if lifecycle is not None:
                 sample_kind_of_flags &= lifecycle.kind_of_flags
@@ -2216,6 +2236,9 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
                     sample_kind_of_flags,
                     catalog_air_locomotors,
                     lifecycle.creation_source if lifecycle is not None else None,
+                    catalog_behavior_modules=sample_behavior_modules,
+                    catalog_has_locomotor_sets=sample_has_locomotor_sets,
+                    catalog_production_capable=sample_production_capable,
                 )
             except MapAssetValidationError as error:
                 raise _error(

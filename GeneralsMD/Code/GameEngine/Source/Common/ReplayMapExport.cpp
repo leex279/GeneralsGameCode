@@ -811,11 +811,12 @@ namespace
 			+ positionJson({ minimumX, minimumY, minimumZ }) + ",\"minimum_inclusive\":true},"
 			"\"entity_sample_policy\":{\"bounded_layer_statuses\":[\"stable\",\"dynamic_bridge_layer\",\"unknown_engine_value\"],"
 			"\"bounded_position_policies\":[\"pathfinder_xy_closed\"],"
+			// TheSuperHackers @bugfix Leex 24/08/2026 Declare the bounded trusted visual-debris policy with the map asset that authorizes it. (#TBD)
 			"\"exempt_position_policies\":[\"exempt_kindof_aircraft\",\"exempt_kindof_bridge\","
 			"\"exempt_kindof_projectile\",\"exempt_kindof_parachutable\",\"exempt_locomotor_air_surface\","
-			"\"exempt_map_loaded_unclassified_immobile\"],"
+			"\"exempt_map_loaded_unclassified_immobile\",\"exempt_trusted_visual_debris\"],"
 			"\"policy\":\"pathfinder_xy_closed_except_explicit_engine_category\","
-			"\"policy_source\":\"ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface\"},"
+			"\"policy_source\":\"ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface\"},"
 			"\"float_encoding\":\"IEEE-754-binary32\",\"units\":\"engine_world_unit\"},"
 			"\"engine_data_identity\":" + jsonString(ReplayTelemetry::getEngineDataIdentity())
 			+ ",\"features\":{\"bridges\":" + bridges + ",\"start_positions\":" + starts
@@ -853,6 +854,40 @@ Bool ReplayMapExport::isClassifiedStaticObject(const Object *object)
 	std::vector<std::pair<std::string, std::string>> categories;
 	buildStaticCategories(object, categories);
 	return !categories.empty();
+}
+
+// TheSuperHackers @bugfix Leex 24/08/2026 Keep ordinary in-bounds debris on the closed policy and constrain the exception to the trusted edge margin. (#TBD)
+Bool ReplayMapExport::needsTrustedVisualDebrisPositionExemption(const Coord3D *position)
+{
+	if (position == nullptr || TheAI == nullptr || TheAI->pathfinder() == nullptr) return FALSE;
+	IRegion2D extent;
+	if (!TheAI->pathfinder()->replayAnalyzerGetExtent(&extent)) return FALSE;
+	const Real minimumX = static_cast<Real>(extent.lo.x) * PATHFIND_CELL_SIZE_F;
+	const Real minimumY = static_cast<Real>(extent.lo.y) * PATHFIND_CELL_SIZE_F;
+	const Real maximumX = static_cast<Real>(extent.hi.x + 1) * PATHFIND_CELL_SIZE_F;
+	const Real maximumY = static_cast<Real>(extent.hi.y + 1) * PATHFIND_CELL_SIZE_F;
+	if (insideXY(*position, minimumX, minimumY, maximumX, maximumY)) return FALSE;
+	const Real margin = PATHFIND_CELL_SIZE_F * 2.0f;
+	return insideXY(*position, minimumX - margin, minimumY - margin, maximumX + margin, maximumY + margin);
+}
+
+// TheSuperHackers @bugfix Leex 24/08/2026 Omit only finite debris positions beyond the same two-cell envelope enforced by the strict reader. (#TBD)
+Bool ReplayMapExport::isBeyondTrustedVisualDebrisPositionMargin(const Coord3D *position)
+{
+	if (position == nullptr || !std::isfinite(static_cast<double>(position->x))
+		|| !std::isfinite(static_cast<double>(position->y)) || TheAI == nullptr
+		|| TheAI->pathfinder() == nullptr)
+	{
+		return FALSE;
+	}
+	IRegion2D extent;
+	if (!TheAI->pathfinder()->replayAnalyzerGetExtent(&extent)) return FALSE;
+	const Real margin = PATHFIND_CELL_SIZE_F * 2.0f;
+	const Real minimumX = static_cast<Real>(extent.lo.x) * PATHFIND_CELL_SIZE_F - margin;
+	const Real minimumY = static_cast<Real>(extent.lo.y) * PATHFIND_CELL_SIZE_F - margin;
+	const Real maximumX = static_cast<Real>(extent.hi.x + 1) * PATHFIND_CELL_SIZE_F + margin;
+	const Real maximumY = static_cast<Real>(extent.hi.y + 1) * PATHFIND_CELL_SIZE_F + margin;
+	return !insideXY(*position, minimumX, minimumY, maximumX, maximumY);
 }
 
 void ReplayMapExport::reset()

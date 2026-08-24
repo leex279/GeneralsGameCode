@@ -17,6 +17,7 @@
 
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#include "Common/ReplayEntityLifecycle.h"
 #include "Common/ReplayTelemetry.h"
 #include "Common/ThingTemplate.h"
 #include "GameLogic/Damage.h"
@@ -381,6 +382,14 @@ void ReplayCombat::observeDamage(const Object *victim, const DamageInfo *damageI
 	{
 		return;
 	}
+	const Object *sourceObject = damageInfo->in.m_sourceID != INVALID_ID && TheGameLogic != nullptr
+		? TheGameLogic->findObjectByID(damageInfo->in.m_sourceID) : nullptr;
+	// TheSuperHackers @bugfix Leex 24/08/2026 Flush buffered lifecycle creation before combat evidence references either object. (#TBD)
+	ReplayEntityLifecycle::ensureObjectCreated(victim);
+	if (sourceObject != nullptr)
+	{
+		ReplayEntityLifecycle::ensureObjectCreated(sourceObject);
+	}
 	const ThingTemplate *attackerTemplate = damageInfo->in.m_sourceTemplate;
 	const std::string payload = "{\"victim_object_id\":" + std::to_string(static_cast<UnsignedInt>(victim->getID()))
 		+ ",\"victim_player_index\":" + nullableInt(hasVictimPlayer, victimPlayer)
@@ -434,6 +443,12 @@ void ReplayCombat::observeHealing(const Object *target, const DamageInfo *damage
 		? TheGameLogic->findObjectByID(damageInfo->in.m_sourceID) : nullptr;
 	Int sourcePlayer = 0;
 	const Bool hasSourcePlayer = objectPlayerIndex(source, sourcePlayer);
+	// TheSuperHackers @bugfix Leex 24/08/2026 Flush buffered lifecycle creation before healing evidence references either object. (#TBD)
+	ReplayEntityLifecycle::ensureObjectCreated(target);
+	if (source != nullptr)
+	{
+		ReplayEntityLifecycle::ensureObjectCreated(source);
+	}
 	const std::string payload = "{\"target_object_id\":" + std::to_string(static_cast<UnsignedInt>(target->getID()))
 		+ ",\"target_player_index\":" + nullableInt(hasTargetPlayer, targetPlayer)
 		+ ",\"source_object_id\":" + nullableObjectId(damageInfo->in.m_sourceID)
@@ -454,6 +469,8 @@ void ReplayCombat::observeVeterancy(const Object *object, VeterancyLevel previou
 	{
 		return;
 	}
+	// TheSuperHackers @bugfix Leex 24/08/2026 Flush buffered lifecycle creation before veterancy evidence references the object. (#TBD)
+	ReplayEntityLifecycle::ensureObjectCreated(object);
 	Int owner = 0;
 	const Bool hasOwner = objectPlayerIndex(object, owner);
 	const std::string payload = "{\"object_id\":" + std::to_string(static_cast<UnsignedInt>(object->getID()))

@@ -285,3 +285,29 @@ def test_damage_writer_uses_raw_source_player_mask_not_attacker_current_owner(re
     assert "source_player_mask" in damage
     assert "source_player_indices" in damage
     assert "objectPlayerIndex(attacker" not in damage
+
+
+def test_combat_writer_flushes_creation_before_emitting_object_references(repository_root: Path) -> None:
+    combat = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
+    ).read_text(encoding="utf-8")
+    damage = combat.split("void ReplayCombat::observeDamage", maxsplit=1)[1].split(
+        "void ReplayCombat::observeHealing", maxsplit=1
+    )[0]
+    healing = combat.split("void ReplayCombat::observeHealing", maxsplit=1)[1].split(
+        "void ReplayCombat::observeVeterancy", maxsplit=1
+    )[0]
+    veterancy = combat.split("void ReplayCombat::observeVeterancy", maxsplit=1)[1].split(
+        "void ReplayCombat::observePlayerTerminalTransition", maxsplit=1
+    )[0]
+
+    assert '#include "Common/ReplayEntityLifecycle.h"' in combat
+    assert damage.index("ReplayEntityLifecycle::ensureObjectCreated(victim)") < damage.index(
+        'ReplayTelemetry::emit(currentFrame(), "damage_applied"'
+    )
+    assert healing.index("ReplayEntityLifecycle::ensureObjectCreated(target)") < healing.index(
+        'ReplayTelemetry::emit(currentFrame(), "healing_applied"'
+    )
+    assert veterancy.index("ReplayEntityLifecycle::ensureObjectCreated(object)") < veterancy.index(
+        'ReplayTelemetry::emit(currentFrame(), "veterancy_changed"'
+    )

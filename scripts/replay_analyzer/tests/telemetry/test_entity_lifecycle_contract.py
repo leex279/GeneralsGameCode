@@ -110,7 +110,7 @@ def _outcome(sequence: int, engine_player_indices: list[int]) -> dict[str, objec
     )
 
 
-def _write_catalog(directory: Path) -> dict[str, object]:
+def _write_catalog(directory: Path, *, debris_catalog_tamper: str | None = None) -> dict[str, object]:
     catalog = {
         "schema_version": 1,
         "type": "game_data_catalog",
@@ -147,6 +147,7 @@ def _write_catalog(directory: Path) -> dict[str, object]:
                     ("TreePalm1", ["IGNORED_IN_GUI", "IMMOBILE", "SHRUBBERY"], []),
                     ("RocksG14", ["IMMOBILE"], []),
                     ("StaticRock", ["IMMOBILE", "OBSTACLE"], []),
+                    ("GenericDebris", ["UNATTACKABLE"], ["InactiveBody", "PhysicsBehavior", "SlowDeathBehavior"]),
                 ]
             )
         ],
@@ -155,6 +156,13 @@ def _write_catalog(directory: Path) -> dict[str, object]:
         "weapons": [],
         "locomotors": [],
     }
+    templates = catalog["thing_templates"]
+    assert isinstance(templates, list)
+    debris = next(entry for entry in templates if isinstance(entry, dict) and entry.get("name") == "GenericDebris")
+    if debris_catalog_tamper == "missing_physics_behavior":
+        debris["behavior_modules"] = ["InactiveBody", "SlowDeathBehavior"]
+    elif debris_catalog_tamper == "production_capable":
+        debris["production_capable"] = True
     content = json.dumps(catalog, separators=(",", ":")).encode() + b"\n"
     digest = hashlib.sha256(content).hexdigest()
     name = f"game-data-catalog-v1-{digest}.json"
@@ -358,14 +366,17 @@ def _trace(
     *,
     bridges: list[dict[str, object]] | None = None,
     static_objects: list[dict[str, object]] | None = None,
+    map_asset_options: dict[str, object] | None = None,
+    debris_catalog_tamper: str | None = None,
 ) -> Path:
-    reference = _write_catalog(tmp_path)
+    reference = _write_catalog(tmp_path, debris_catalog_tamper=debris_catalog_tamper)
     map_reference = write_test_map_asset(
         tmp_path,
         ENGINE_IDENTITY,
         "maps/test.map",
         bridges=bridges,
         static_objects=static_objects,
+        **({} if map_asset_options is None else map_asset_options),
     )
     records = [
         _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
@@ -999,6 +1010,209 @@ def test_v2_accepts_oob_map_loaded_unclassified_immobile_decoration(
     records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
 
     assert records[-1].event_type == "complete"
+
+
+def test_v2_accepts_trusted_physics_visual_debris_within_two_terrain_cells(tmp_path: Path) -> None:
+    creation = _creation(273, "GenericDebris")
+    creation.update(
+        {
+            "owner_player_index": None,
+            "team_id": None,
+            "kind_of_flags": ["UNATTACKABLE"],
+            "creation_source": "unknown",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 273,
+            "template_name": "GenericDebris",
+            "owner_player_index": None,
+            "position": {"x": 514.271057, "y": 2617.82104, "z": 0.0},
+            "is_mobile": False,
+            "position_bounds_policy": "exempt_trusted_visual_debris",
+        }
+    )
+
+    records = tuple(
+        iter_validated_trace(
+            _trace(
+                tmp_path,
+                [("object_created", creation), ("entity_sample", sample)],
+                map_asset_options={
+                    "grid_width": 260,
+                    "grid_height": 260,
+                    "grid_origin_x": 0,
+                    "grid_origin_y": 0,
+                    "grid_cell_size": 10.0,
+                },
+            )
+        )
+    )
+
+    assert records[-1].event_type == "complete"
+
+
+def test_v2_accepts_trusted_visual_debris_at_exact_two_terrain_cell_margin(tmp_path: Path) -> None:
+    creation = _creation(273, "GenericDebris")
+    creation.update(
+        {
+            "owner_player_index": None,
+            "team_id": None,
+            "kind_of_flags": ["UNATTACKABLE"],
+            "creation_source": "unknown",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 273,
+            "template_name": "GenericDebris",
+            "owner_player_index": None,
+            "position": {"x": 514.271057, "y": 2620.0, "z": 0.0},
+            "is_mobile": False,
+            "position_bounds_policy": "exempt_trusted_visual_debris",
+        }
+    )
+
+    records = tuple(
+        iter_validated_trace(
+            _trace(
+                tmp_path,
+                [("object_created", creation), ("entity_sample", sample)],
+                map_asset_options={
+                    "grid_width": 260,
+                    "grid_height": 260,
+                    "grid_origin_x": 0,
+                    "grid_origin_y": 0,
+                    "grid_cell_size": 10.0,
+                },
+            )
+        )
+    )
+
+    assert records[-1].event_type == "complete"
+
+
+@pytest.mark.parametrize("tamper", ["missing_physics_behavior", "production_capable"])
+def test_v2_rejects_visual_debris_without_exact_catalog_provenance(tmp_path: Path, tamper: str) -> None:
+    creation = _creation(273, "GenericDebris")
+    creation.update(
+        {
+            "owner_player_index": None,
+            "team_id": None,
+            "kind_of_flags": ["UNATTACKABLE"],
+            "creation_source": "unknown",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 273,
+            "template_name": "GenericDebris",
+            "owner_player_index": None,
+            "position": {"x": 514.271057, "y": 2617.82104, "z": 0.0},
+            "is_mobile": False,
+            "position_bounds_policy": "exempt_trusted_visual_debris",
+        }
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="trusted visual debris"):
+        tuple(
+            iter_validated_trace(
+                _trace(
+                    tmp_path,
+                    [("object_created", creation), ("entity_sample", sample)],
+                    map_asset_options={
+                        "grid_width": 260,
+                        "grid_height": 260,
+                        "grid_origin_x": 0,
+                        "grid_origin_y": 0,
+                        "grid_cell_size": 10.0,
+                    },
+                    debris_catalog_tamper=tamper,
+                )
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["no_physics", "structure", "path_goal", "beyond_terrain_margin"],
+)
+def test_v2_rejects_forged_trusted_visual_debris_policy(tmp_path: Path, tamper: str) -> None:
+    creation = _creation(273, "GenericDebris")
+    creation.update(
+        {
+            "owner_player_index": None,
+            "team_id": None,
+            "kind_of_flags": ["UNATTACKABLE"],
+            "creation_source": "unknown",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 273,
+            "template_name": "GenericDebris",
+            "owner_player_index": None,
+            "position": {"x": 514.271057, "y": 2617.82104, "z": 0.0},
+            "is_mobile": False,
+            "is_structure": False,
+            "position_bounds_policy": "exempt_trusted_visual_debris",
+        }
+    )
+    if tamper == "no_physics":
+        sample["speed_status"] = "unavailable_no_physics"
+        sample["speed"] = None
+    elif tamper == "structure":
+        sample["is_structure"] = True
+    elif tamper == "path_goal":
+        sample.update(
+            {
+                "path_goal_status": "path_tail",
+                "path_goal": {"x": 0.0, "y": 0.0, "z": 0.0},
+            }
+        )
+    else:
+        sample["position"] = {"x": 514.271057, "y": 2620.00001, "z": 0.0}
+
+    with pytest.raises(TelemetryTraceValidationError, match="trusted visual debris"):
+        tuple(
+            iter_validated_trace(
+                _trace(
+                    tmp_path,
+                    [("object_created", creation), ("entity_sample", sample)],
+                    map_asset_options={
+                        "grid_width": 260,
+                        "grid_height": 260,
+                        "grid_origin_x": 0,
+                        "grid_origin_y": 0,
+                        "grid_cell_size": 10.0,
+                    },
+                )
+            )
+        )
 
 
 @pytest.mark.parametrize("tamper", ["not_map_loaded", "missing_immobile", "catalog_mismatch"])

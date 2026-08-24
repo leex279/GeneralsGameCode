@@ -299,6 +299,24 @@ def test_every_lifecycle_instrumentation_seam_has_the_required_feature_comment(r
                 assert required_comment in "\n".join(lines[max(0, index - 2) : index])
 
 
+def test_destroyed_event_is_emitted_only_at_actual_object_deletion(repository_root: Path) -> None:
+    game_logic = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp"
+    ).read_text(encoding="utf-8")
+    process_destroy_list = game_logic.split("void GameLogic::processDestroyList()", maxsplit=1)[1].split(
+        "void GameLogic::update", maxsplit=1
+    )[0]
+    queue_destruction = game_logic.split("void GameLogic::destroyObject( Object *obj )", maxsplit=1)[1].split(
+        "Bool inCRCGen", maxsplit=1
+    )[0]
+
+    assert "ReplayEntityLifecycle::observeDestroyed" not in queue_destruction
+    assert "ReplayEntityLifecycle::observeDestroyed(currentObject)" in process_destroy_list
+    assert process_destroy_list.index("ReplayEntityLifecycle::observeDestroyed(currentObject)") < (
+        process_destroy_list.index("currentObject->removeFromList")
+    )
+
+
 def test_first_explicit_position_set_freezes_creation_pose_before_later_transform_updates(
     repository_root: Path,
 ) -> None:

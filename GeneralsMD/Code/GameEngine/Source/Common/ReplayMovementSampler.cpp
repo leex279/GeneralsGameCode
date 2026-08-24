@@ -536,13 +536,35 @@ namespace
 		}
 	}
 
+	// TheSuperHackers @bugfix Leex 24/08/2026 Identify exact physics-only visual debris without relying on transient Object::isMobile state. (#TBD)
+	Bool isTrustedVisualDebris(const Object *object, const EngineSampleSnapshot &sample)
+	{
+		return object->getTemplate()->getName().compare("GenericDebris") == 0
+			&& object->isKindOf(KINDOF_UNATTACKABLE)
+			&& ReplayEntityLifecycle::getCreationSource(object) == REPLAY_ENTITY_CREATION_UNKNOWN
+			&& sample.hasSpeed && !sample.structure && !sample.hasPathGoal;
+	}
+
+	// TheSuperHackers @bugfix Leex 24/08/2026 Omit only trusted physics debris after it leaves the strict map-edge telemetry envelope. (#TBD)
+	Bool shouldEmitSample(const Object *object, const EngineSampleSnapshot &sample)
+	{
+		return !isTrustedVisualDebris(object, sample)
+			|| !ReplayMapExport::isBeyondTrustedVisualDebrisPositionMargin(&sample.position);
+	}
+
 	// TheSuperHackers @feature Leex 21/08/2026 Bind coordinate exemptions only to independently catalog-verifiable engine evidence. (#TBD)
-	const char *positionBoundsPolicy(const Object *object)
+	const char *positionBoundsPolicy(const Object *object, const EngineSampleSnapshot &sample)
 	{
 		if (object->isKindOf(KINDOF_AIRCRAFT)) return "exempt_kindof_aircraft";
 		if (object->isKindOf(KINDOF_BRIDGE)) return "exempt_kindof_bridge";
 		if (object->isKindOf(KINDOF_PROJECTILE)) return "exempt_kindof_projectile";
 		if (object->isKindOf(KINDOF_PARACHUTABLE)) return "exempt_kindof_parachutable";
+		// TheSuperHackers @bugfix Leex 24/08/2026 Exempt only provenance-valid physics debris that actually crosses the trusted map-edge margin. (#TBD)
+		if (isTrustedVisualDebris(object, sample)
+			&& ReplayMapExport::needsTrustedVisualDebrisPositionExemption(&sample.position))
+		{
+			return "exempt_trusted_visual_debris";
+		}
 		if (ReplayEntityLifecycle::getCreationSource(object) == REPLAY_ENTITY_CREATION_MAP_LOADED
 			&& object->isKindOf(KINDOF_IMMOBILE) && !ReplayMapExport::isClassifiedStaticObject(object))
 		{
@@ -588,7 +610,7 @@ namespace
 			+ ",\"layer_id\":" + std::to_string(sample.layerId)
 			+ ",\"layer_name\":" + (stableLayerName != nullptr ? jsonString(stableLayerName) : "null")
 			+ ",\"layer_name_status\":" + jsonString(layerStatus)
-			+ ",\"position_bounds_policy\":" + jsonString(positionBoundsPolicy(object))
+			+ ",\"position_bounds_policy\":" + jsonString(positionBoundsPolicy(object, sample))
 			+ ",\"speed_status\":" + jsonString(sample.hasSpeed ? "measured_physics_velocity" : "unavailable_no_physics")
 			+ ",\"speed\":" + (sample.hasSpeed ? speed : "null")
 			+ ",\"current_state\":" + jsonString(sample.state.classification.c_str())
@@ -832,6 +854,20 @@ void ReplayMovementSampler::sampleEndOfFrame()
 		SampleState &retained = s_sampleStates[objectId];
 		const EngineSampleSnapshot current = engineSample(object);
 		const Bool stateChanged = retained.hasState && !sameState(retained.state, current.state);
+		const ForcedSampleMap::const_iterator preexistingForcedSample = s_forcedSamples.find(objectId);
+		const UnsignedInt preexistingForced = preexistingForcedSample != s_forcedSamples.end()
+			? preexistingForcedSample->second : 0;
+		if (retained.hasSample && (preexistingForced & FORCE_ORDER) == 0 && !shouldEmitSample(object, current))
+		{
+			// TheSuperHackers @bugfix Leex 24/08/2026 Omit far visual-debris state and position evidence as one integrity-preserving pair. (#TBD)
+			retained.state = current.state;
+			retained.hasState = TRUE;
+			retained.sample = current;
+			retained.hasSample = TRUE;
+			retained.lastSampleFrame = frame;
+			s_forcedSamples.erase(objectId);
+			continue;
+		}
 		if (stateChanged)
 		{
 			emitStateTransition(frame, object, retained.state, current.state);

@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 from map_asset_support import write_test_map_asset
 
-from generals_replay_analyzer.telemetry.model import FLOAT32_MAX, DamageAppliedRecord, MatchOutcomeRecord
+from generals_replay_analyzer.telemetry.model import (
+    FLOAT32_MAX,
+    DamageAppliedRecord,
+    HealingAppliedRecord,
+    MatchOutcomeRecord,
+)
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
@@ -456,6 +461,51 @@ def test_v2_combat_model_rejects_nonfinite_engine_reals(value: float) -> None:
 
     with pytest.raises(ValueError, match="finite float32"):
         DamageAppliedRecord.model_validate(damage)
+
+
+def test_v2_healing_accepts_engine_real_subtraction_rounding_within_one_health_ulp() -> None:
+    healing = _record(
+        4,
+        "healing_applied",
+        {
+            "target_object_id": 20,
+            "target_player_index": 1,
+            "source_object_id": None,
+            "source_player_index": None,
+            "attempted_amount": 0.666666687,
+            "calculated_amount": 0.666666687,
+            "applied_amount": 0.666687012,
+            "prior_health": 830.0,
+            "new_health": 830.666687,
+            "location": None,
+        },
+        frame=10,
+    )
+
+    assert HealingAppliedRecord.model_validate(healing).payload.applied_amount == 0.666687012
+
+
+def test_v2_healing_rejects_applied_amount_beyond_one_health_float32_ulp() -> None:
+    healing = _record(
+        4,
+        "healing_applied",
+        {
+            "target_object_id": 20,
+            "target_player_index": 1,
+            "source_object_id": None,
+            "source_player_index": None,
+            "attempted_amount": 0.666666687,
+            "calculated_amount": 0.666666687,
+            "applied_amount": 0.666809082,
+            "prior_health": 830.0,
+            "new_health": 830.666809082,
+            "location": None,
+        },
+        frame=10,
+    )
+
+    with pytest.raises(ValueError, match="authoritative calculated healing"):
+        HealingAppliedRecord.model_validate(healing)
 
 
 def test_task6_pydantic_payloads_are_closed_for_v2_without_tightening_v1() -> None:

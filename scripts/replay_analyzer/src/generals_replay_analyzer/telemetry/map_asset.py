@@ -42,6 +42,7 @@ POSITION_POLICIES = frozenset(
         "exempt_kindof_parachutable",
         "exempt_locomotor_air_surface",
         "exempt_map_loaded_unclassified_immobile",
+        "exempt_trusted_visual_debris",
     }
 )
 CELL_TYPES = (
@@ -356,7 +357,8 @@ class EntitySamplePolicy(StrictModel):
     policy: Literal["pathfinder_xy_closed_except_explicit_engine_category"]
     policy_source: Literal[
         "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
-        "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
+        "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
+        "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
     ]
 
     @model_validator(mode="after")
@@ -373,9 +375,17 @@ class EntitySamplePolicy(StrictModel):
             "exempt_locomotor_air_surface",
         ]
         v2_exemptions = [*v1_exemptions, "exempt_map_loaded_unclassified_immobile"]
+        v2_visual_debris_exemptions = [*v2_exemptions, "exempt_trusted_visual_debris"]
         expected = v1_exemptions if self.policy_source == (
             "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
-        ) else v2_exemptions
+        ) else (
+            v2_visual_debris_exemptions
+            if self.policy_source == (
+                "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, "
+                "or catalog-bound current locomotor AIR surface"
+            )
+            else v2_exemptions
+        )
         if self.exempt_position_policies != expected:
             raise ValueError("exempt position policies must equal the closed source-grounded policy")
         return self
@@ -656,6 +666,15 @@ class _EntityPositionPayload(Protocol):
     @property
     def current_locomotor_template_name(self) -> object: ...
 
+    @property
+    def speed_status(self) -> object: ...
+
+    @property
+    def is_mobile(self) -> object: ...
+
+    @property
+    def is_structure(self) -> object: ...
+
 
 class MapAsset(StrictModel):
     """Fully validated immutable map values; constructed only after every member succeeds."""
@@ -688,12 +707,26 @@ class MapAsset(StrictModel):
                 f"[{self.bounds.minimum.y}, {self.bounds.maximum.y}]"
             )
 
+    def _require_visual_debris_xy(self, position: _XYPosition) -> None:
+        """Limit trusted physics debris to the two-cell terrain border around the map."""
+        margin_x = self.terrain.cell_size.x * 2.0
+        margin_y = self.terrain.cell_size.y * 2.0
+        if not (
+            self.bounds.minimum.x - margin_x <= position.x <= self.bounds.maximum.x + margin_x
+            and self.bounds.minimum.y - margin_y <= position.y <= self.bounds.maximum.y + margin_y
+        ):
+            raise MapAssetValidationError("trusted visual debris is outside the two-cell terrain edge margin")
+
     def require_entity_position(
         self,
         payload: _EntityPositionPayload,
         kind_of_flags: frozenset[str],
         catalog_air_locomotors: frozenset[str],
         creation_source: str | None = None,
+        *,
+        catalog_behavior_modules: frozenset[str] = frozenset(),
+        catalog_has_locomotor_sets: bool = False,
+        catalog_production_capable: bool = False,
     ) -> None:
         """Apply the manifest's explicit layer policy to a telemetry sample and path goal."""
         policy = payload.position_bounds_policy
@@ -735,6 +768,24 @@ class MapAsset(StrictModel):
                 raise MapAssetValidationError(
                     "entity sample map-loaded unclassified immobile exemption lacks lifecycle/catalog/map evidence"
                 )
+            return
+        if policy == "exempt_trusted_visual_debris":
+            if (
+                getattr(payload, "template_name", None) != "GenericDebris"
+                or "UNATTACKABLE" not in kind_of_flags
+                or creation_source != "unknown"
+                or not {"PhysicsBehavior", "SlowDeathBehavior"}.issubset(catalog_behavior_modules)
+                or catalog_has_locomotor_sets
+                or catalog_production_capable
+                or payload.speed_status != "measured_physics_velocity"
+                or payload.current_locomotor_template_name is not None
+                or payload.is_structure is not False
+                or payload.path_goal is not None
+            ):
+                raise MapAssetValidationError(
+                    "trusted visual debris exemption lacks catalog, lifecycle, and physics provenance"
+                )
+            self._require_visual_debris_xy(payload.position)
             return
         if policy != "pathfinder_xy_closed":
             raise MapAssetValidationError("entity sample has unknown position bounds policy")

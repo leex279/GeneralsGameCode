@@ -2672,6 +2672,12 @@ void GameLogic::processDestroyList()
 		}
 
 
+		#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 20/08/2026 Observe destruction at the unique irreversible GameLogic lifecycle seam. (#TBD)
+		// TheSuperHackers @bugfix Leex 24/08/2026 Emit terminal lifecycle evidence only when the queued object is actually removed. (#TBD)
+		ReplayEntityLifecycle::observeDestroyed(currentObject);
+		#endif
+
 		currentObject->removeFromList(&m_objList);//remove from object list
 
 		// remove object from lookup table
@@ -4206,10 +4212,6 @@ void GameLogic::destroyObject( Object *obj )
 
 	// mark object as destroyed
 	obj->setStatus( MAKE_OBJECT_STATUS_MASK( OBJECT_STATUS_DESTROYED ) );
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	// TheSuperHackers @feature Leex 20/08/2026 Observe destruction at the unique irreversible GameLogic lifecycle seam. (#TBD)
-	ReplayEntityLifecycle::observeDestroyed(obj);
-#endif
 
 	// We desperately need to stop here, or else the destructor of the statemachine will try to do
 	// stopping logic, which uses virtual functions and deleted modules, which will crash us.

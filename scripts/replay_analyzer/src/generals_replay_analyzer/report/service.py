@@ -93,6 +93,8 @@ _CRITICAL_TELEMETRY_EVENT_TYPES = frozenset(
     }
 )
 _NOISY_TELEMETRY_EVENT_TYPES = frozenset({"entity_sample", "entity_state_changed"})
+# TheSuperHackers @bugfix Leex 24/08/2026 Keep bulk engine grid snapshots in telemetry storage rather than bounded public report values. (#TBD)
+_REPORT_EXCLUDED_TELEMETRY_EVENT_TYPES = frozenset({"partition_engine_grid_sample"})
 _T = TypeVar("_T")
 
 
@@ -529,17 +531,22 @@ class ReportService:
                     if player_authority is not None and row[1].id in player_authority
                 )
             telemetry_total = len(all_event_rows)
+            reportable_event_rows = tuple(
+                row
+                for row in all_event_rows
+                if row[0].event_type not in _REPORT_EXCLUDED_TELEMETRY_EVENT_TYPES
+            )
             critical = tuple(
-                row for row in all_event_rows if row[0].event_type in _CRITICAL_TELEMETRY_EVENT_TYPES
+                row for row in reportable_event_rows if row[0].event_type in _CRITICAL_TELEMETRY_EVENT_TYPES
             )
             routine = tuple(
                 row
-                for row in all_event_rows
+                for row in reportable_event_rows
                 if row[0].event_type not in _CRITICAL_TELEMETRY_EVENT_TYPES
                 and row[0].event_type not in _NOISY_TELEMETRY_EVENT_TYPES
             )
             noisy = tuple(
-                row for row in all_event_rows if row[0].event_type in _NOISY_TELEMETRY_EVENT_TYPES
+                row for row in reportable_event_rows if row[0].event_type in _NOISY_TELEMETRY_EVENT_TYPES
             )
             semantic_limit = _MAX_TELEMETRY_OBSERVATIONS - _MAX_NOISY_TELEMETRY_OBSERVATIONS
             selected_critical = _evenly_sample(critical, semantic_limit)

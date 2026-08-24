@@ -132,10 +132,11 @@ def _write_asset(root: Path, *, schema_version: int = 2) -> tuple[Path, dict[str
                     "exempt_kindof_projectile", "exempt_kindof_parachutable",
                     "exempt_locomotor_air_surface",
                     *(["exempt_map_loaded_unclassified_immobile"] if schema_version == 2 else []),
+                    *(["exempt_trusted_visual_debris"] if schema_version == 2 else []),
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
                 "policy_source": (
-                    "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
+                    "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
                     if schema_version == 2
                     else "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
                 ),
@@ -858,16 +859,84 @@ def test_map_export_sources_remain_modern_zero_hour_read_only(repository_root: P
     assert "exempt_physics_without_ai_pathing" not in sampler
     assert "exempt_module_wander_ai" not in sampler
     assert "current_locomotor_template_name" in sampler
-    assert "positionBoundsPolicy(object)" in sampler
+    assert "positionBoundsPolicy(object, sample)" in sampler
     assert "!ReplayMapExport::isClassifiedStaticObject(object)" in sampler
     assert "ReplayMapExport::isClassifiedStaticObject" in source
-    assert "getTemplate()->getName()" not in sampler.split("const char *positionBoundsPolicy", 1)[1].split(
-        "Bool emitSample", 1
-    )[0]
+    trusted_policy = sampler.split("Bool isTrustedVisualDebris", 1)[1].split("Bool shouldEmitSample", 1)[0]
+    bounds_policy = sampler.split("const char *positionBoundsPolicy", 1)[1].split("Bool emitSample", 1)[0]
+    assert 'getTemplate()->getName().compare("GenericDebris")' in trusted_policy
+    assert "KINDOF_UNATTACKABLE" in trusted_policy
+    assert "exempt_trusted_visual_debris" in bounds_policy
     telemetry = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp").read_text(
         encoding="utf-8"
     )
     assert telemetry.count("ReplayMapExport::reset();") >= 4
+
+
+def test_visual_debris_bounds_exemption_requires_an_outside_physics_sample(
+    repository_root: Path,
+) -> None:
+    """Catch in-bounds or provenance-incomplete debris being mislabeled as bounds-exempt."""
+    sampler = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayMovementSampler.cpp").read_text(
+        encoding="utf-8"
+    )
+    trusted_policy = sampler.split("Bool isTrustedVisualDebris", 1)[1].split("Bool shouldEmitSample", 1)[0]
+    bounds_policy = sampler.split("const char *positionBoundsPolicy", 1)[1].split("Bool emitSample", 1)[0]
+
+    assert "const EngineSampleSnapshot &sample" in bounds_policy
+    assert "isTrustedVisualDebris(object, sample)" in bounds_policy
+    assert "sample.mobile" not in trusted_policy
+    assert "sample.hasSpeed" in trusted_policy
+    assert "!sample.structure" in trusted_policy
+    assert "!sample.hasPathGoal" in trusted_policy
+    assert "REPLAY_ENTITY_CREATION_UNKNOWN" in trusted_policy
+    assert "ReplayMapExport::needsTrustedVisualDebrisPositionExemption(&sample.position)" in bounds_policy
+    assert "positionBoundsPolicy(object, sample)" in sampler
+
+
+def test_visual_debris_beyond_the_trusted_margin_is_omitted_before_payload_construction(
+    repository_root: Path,
+) -> None:
+    """Catch far-off-map physics debris producing a knowingly invalid bounded entity sample."""
+    sampler = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayMovementSampler.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert "Bool shouldEmitSample" in sampler
+    trusted_policy = sampler.split("Bool isTrustedVisualDebris", 1)[1].split("Bool shouldEmitSample", 1)[0]
+    emission_policy = sampler.split("Bool shouldEmitSample", 1)[1].split("const char *positionBoundsPolicy", 1)[0]
+    sample_loop = sampler.split("void ReplayMovementSampler::sampleEndOfFrame", 1)[1]
+
+    assert 'getTemplate()->getName().compare("GenericDebris")' in trusted_policy
+    assert "KINDOF_UNATTACKABLE" in trusted_policy
+    assert "REPLAY_ENTITY_CREATION_UNKNOWN" in trusted_policy
+    assert "sample.mobile" not in trusted_policy
+    assert "sample.hasSpeed" in trusted_policy
+    assert "!sample.structure" in trusted_policy
+    assert "!sample.hasPathGoal" in trusted_policy
+    assert "isTrustedVisualDebris(object, sample)" in emission_policy
+    assert "ReplayMapExport::isBeyondTrustedVisualDebrisPositionMargin(&sample.position)" in emission_policy
+    guard = sample_loop.index("!shouldEmitSample(object, current)")
+    assert guard < sample_loop.index("emitStateTransition(frame, object")
+    omission_start = sample_loop.rfind("if (", 0, guard)
+    omission = sample_loop[omission_start : sample_loop.index("emitStateTransition(frame, object")]
+    assert "retained.hasSample" in omission
+    assert "(preexistingForced & FORCE_ORDER) == 0" in omission
+    assert "retained.sample = current" in omission
+    assert "s_forcedSamples.erase(objectId)" in omission
+    assert "continue;" in omission
+
+
+def test_state_forced_sample_reason_reads_force_after_state_transition(repository_root: Path) -> None:
+    """Catch the debris omission precheck making ordinary state-forced samples use a stale force value."""
+    sampler = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayMovementSampler.cpp").read_text(
+        encoding="utf-8"
+    )
+    sample_loop = sampler.split("void ReplayMovementSampler::sampleEndOfFrame", 1)[1]
+    transition = sample_loop.index("s_forcedSamples[objectId] |= FORCE_STATE")
+    reason_force = sample_loop.index("const UnsignedInt forced =", transition)
+
+    assert "preexistingForced" in sample_loop[:transition]
+    assert transition < reason_force < sample_loop.index("const char *reason")
 
 
 @pytest.mark.engine

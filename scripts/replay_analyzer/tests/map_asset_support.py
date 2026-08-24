@@ -15,14 +15,23 @@ def write_test_map_asset(
     bridges: list[dict[str, object]] | None = None,
     start_positions: list[dict[str, object]] | None = None,
     static_objects: list[dict[str, object]] | None = None,
+    grid_width: int = 2,
+    grid_height: int = 2,
+    grid_origin_x: int = -1,
+    grid_origin_y: int = -1,
+    grid_cell_size: float = 1_000_000.0,
 ) -> dict[str, object]:
-    """Write deterministic 2x2 authoritative-format bytes and return their strict reference."""
+    """Write deterministic authoritative-format map bytes and return their strict reference."""
+    element_count = grid_width * grid_height
     raw_members = {
-        "height.f32.zlib": ("float32", struct.pack("<4f", 0.0, 0.0, 0.0, 0.0)),
-        "pathing-amphibious.u8.zlib": ("uint8", bytes((1, 1, 0, 0))),
-        "pathing-ground.u8.zlib": ("uint8", bytes((1, 0, 0, 0))),
-        "terrain.u8.zlib": ("uint8", bytes((0, 1, 2, 4))),
-        "zones.i32.zlib": ("int32", struct.pack("<4i", 1, 2, 3, 4)),
+        "height.f32.zlib": ("float32", struct.pack(f"<{element_count}f", *([0.0] * element_count))),
+        "pathing-amphibious.u8.zlib": ("uint8", bytes((1,)) * element_count),
+        "pathing-ground.u8.zlib": ("uint8", bytes((1,)) * element_count),
+        "terrain.u8.zlib": ("uint8", bytes((0,)) * element_count),
+        "zones.i32.zlib": (
+            "int32",
+            struct.pack(f"<{element_count}i", *(index % 16_384 for index in range(element_count))),
+        ),
     }
     compressed: dict[str, bytes] = {}
     members: dict[str, object] = {}
@@ -35,7 +44,7 @@ def write_test_map_asset(
             "compression": "zlib",
             "compression_level": 9,
             "dtype": dtype,
-            "element_count": 4,
+            "element_count": element_count,
             "endianness": "little",
             "grid": "pathing",
             "uncompressed_sha256": hashlib.sha256(raw).hexdigest(),
@@ -43,16 +52,16 @@ def write_test_map_asset(
         }
     grid = {
         "bounds": {
-            "maximum_exclusive": {"x": 1_000_000.0, "y": 1_000_000.0},
-            "minimum_inclusive": {"x": -1_000_000.0, "y": -1_000_000.0},
+            "maximum_exclusive": {"x": (grid_origin_x + grid_width) * grid_cell_size, "y": (grid_origin_y + grid_height) * grid_cell_size},
+            "minimum_inclusive": {"x": grid_origin_x * grid_cell_size, "y": grid_origin_y * grid_cell_size},
         },
-        "cell_size": {"x": 1_000_000.0, "y": 1_000_000.0},
+        "cell_size": {"x": grid_cell_size, "y": grid_cell_size},
         "dimension_source": "synthetic contract fixture",
-        "height": 2,
-        "index_origin": {"x": -1, "y": -1},
+        "height": grid_height,
+        "index_origin": {"x": grid_origin_x, "y": grid_origin_y},
         "sample_point": "cell_center",
         "storage_order": "row_major_y_then_x_x_fastest",
-        "width": 2,
+        "width": grid_width,
     }
     manifest: dict[str, object] = {
         "classification": {
@@ -75,9 +84,9 @@ def write_test_map_asset(
         "coordinate_system": {
             "axes": ["engine_world_x", "engine_world_y", "engine_world_z"],
             "bounds": {
-                "maximum": {"x": 1_000_000.0, "y": 1_000_000.0, "z": 10_000.0},
+                "maximum": {"x": (grid_origin_x + grid_width) * grid_cell_size, "y": (grid_origin_y + grid_height) * grid_cell_size, "z": 10_000.0},
                 "maximum_inclusive": True,
-                "minimum": {"x": -1_000_000.0, "y": -1_000_000.0, "z": -10_000.0},
+                "minimum": {"x": grid_origin_x * grid_cell_size, "y": grid_origin_y * grid_cell_size, "z": -10_000.0},
                 "minimum_inclusive": True,
             },
             "entity_sample_policy": {
@@ -88,9 +97,10 @@ def write_test_map_asset(
                     "exempt_kindof_projectile", "exempt_kindof_parachutable",
                     "exempt_locomotor_air_surface",
                     "exempt_map_loaded_unclassified_immobile",
+                    "exempt_trusted_visual_debris",
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
-                "policy_source": "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
+                "policy_source": "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
             },
             "float_encoding": "IEEE-754-binary32",
             "units": "engine_world_unit",

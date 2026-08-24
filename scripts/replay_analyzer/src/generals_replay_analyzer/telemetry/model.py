@@ -58,6 +58,18 @@ def _require_v2_engine_real(field: str, value: float) -> None:
         raise ValueError(f"v2 {field} must be a finite float32 engine Real")
 
 
+# TheSuperHackers @bugfix Leex 24/08/2026 Validate health deltas within one engine Real ULP at the authoritative health scale. (#TBD)
+def _engine_real_transition_close(observed: float, expected: float, prior: float, new: float) -> bool:
+    def float32_ulp(value: float) -> float:
+        if value == 0:
+            return math.ldexp(1.0, -149)
+        _fraction, exponent = math.frexp(abs(value))
+        return math.ldexp(1.0, max(exponent - 24, -149))
+
+    absolute_tolerance = max(1e-5, float32_ulp(prior), float32_ulp(new))
+    return math.isclose(observed, expected, rel_tol=1e-6, abs_tol=absolute_tolerance)
+
+
 def _require_v2_engine_enum_name(
     numeric_id: int | None,
     stable_name: str | None,
@@ -803,6 +815,7 @@ class EntitySamplePayload(OpenPayload):
         "exempt_kindof_parachutable",
         "exempt_locomotor_air_surface",
         "exempt_map_loaded_unclassified_immobile",
+        "exempt_trusted_visual_debris",
     ] | None = None
     speed_status: Literal["measured_physics_velocity", "unavailable_no_physics"] | None = None
     speed: NonNegativeFloat | None
@@ -1230,12 +1243,20 @@ class DamageAppliedRecord(TelemetryEnvelope):
         calculated = self.payload.calculated_amount
         if calculated is None or calculated <= 0 or self.payload.applied_amount <= 0 or self.payload.prior_health <= 0:
             raise ValueError("v2 damage requires a positive calculated, applied, and prior-health transition")
-        if self.payload.applied_amount > calculated and not math.isclose(
-            self.payload.applied_amount, calculated, rel_tol=1e-6, abs_tol=1e-5
+        if self.payload.applied_amount > calculated and not _engine_real_transition_close(
+            self.payload.applied_amount,
+            calculated,
+            self.payload.prior_health,
+            self.payload.new_health,
         ):
             raise ValueError("applied damage cannot exceed authoritative calculated damage")
         expected_applied = self.payload.prior_health - self.payload.new_health
-        if not math.isclose(self.payload.applied_amount, expected_applied, rel_tol=1e-6, abs_tol=1e-5):
+        if not _engine_real_transition_close(
+            self.payload.applied_amount,
+            expected_applied,
+            self.payload.prior_health,
+            self.payload.new_health,
+        ):
             raise ValueError("damage health arithmetic does not match applied_amount")
         if self.payload.killing_blow != (self.payload.new_health == 0):
             raise ValueError("killing_blow must exactly describe the positive-to-zero health transition")
@@ -1285,12 +1306,20 @@ class HealingAppliedRecord(TelemetryEnvelope):
         calculated = self.payload.calculated_amount
         if attempted is None or calculated is None or calculated <= 0 or self.payload.applied_amount <= 0:
             raise ValueError("v2 healing requires attempted, positive calculated, and applied transition values")
-        if self.payload.applied_amount > calculated and not math.isclose(
-            self.payload.applied_amount, calculated, rel_tol=1e-6, abs_tol=1e-5
+        if self.payload.applied_amount > calculated and not _engine_real_transition_close(
+            self.payload.applied_amount,
+            calculated,
+            self.payload.prior_health,
+            self.payload.new_health,
         ):
             raise ValueError("applied healing cannot exceed authoritative calculated healing")
         expected_applied = self.payload.new_health - self.payload.prior_health
-        if not math.isclose(self.payload.applied_amount, expected_applied, rel_tol=1e-6, abs_tol=1e-5):
+        if not _engine_real_transition_close(
+            self.payload.applied_amount,
+            expected_applied,
+            self.payload.prior_health,
+            self.payload.new_health,
+        ):
             raise ValueError("healing health arithmetic does not match applied_amount")
         for field, value in (
             ("attempted_amount", attempted),
