@@ -87,6 +87,12 @@ add_subdirectory(Core)
 # Add main build targets
 if(RTS_BUILD_ZEROHOUR)
     add_subdirectory(GeneralsMD)
+    if(NOT IS_VS6_BUILD)
+        # TheSuperHackers @build Leex 23/08/2026 Compile replay direction only into the modern Zero Hour analyzer target. (#TBD)
+        target_sources(z_gameengine PRIVATE
+            Core/GameEngine/Source/GameClient/AutoCameraDirector.cpp
+        )
+    endif()
 endif()
 
 if(RTS_BUILD_GENERALS)

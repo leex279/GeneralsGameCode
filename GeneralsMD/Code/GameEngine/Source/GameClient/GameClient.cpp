@@ -44,6 +44,9 @@
 #include "Common/ThingTemplate.h"
 #include "Common/Xfer.h"
 #include "GameClient/Anim2D.h"
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+#include "GameClient/AutoCameraDirector.h"
+#endif
 #include "GameClient/CampaignManager.h"
 #include "GameClient/ChallengeGenerals.h"
 #include "GameClient/CommandXlat.h"
@@ -212,6 +215,12 @@ GameClient::~GameClient()
 
 	delete TheVideoPlayer;
 	TheVideoPlayer = nullptr;
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Release presentation-only replay direction with the Zero Hour GameClient. (#TBD)
+	delete TheAutoCameraDirector;
+	TheAutoCameraDirector = nullptr;
+#endif
 
 	// destroy all translators
 	for( UnsignedInt i = 0; i < m_numTranslators; i++ )
@@ -441,6 +450,13 @@ void GameClient::init()
 
 	m_intro = NEW Intro;
 
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Initialize validated replay direction after the native tactical view exists. (#TBD)
+	TheAutoCameraDirector = new AutoCameraDirector;
+	TheAutoCameraDirector->init();
+	TheAutoCameraDirector->setName("TheAutoCameraDirector");
+#endif
+
 #ifdef PERF_TIMERS
 	TheGraphDraw = new GraphDraw;
 #endif
@@ -476,6 +492,10 @@ void GameClient::reset()
 	TheEva->reset();
 	if (TheSnowManager)
 		TheSnowManager->reset();
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (TheAutoCameraDirector)
+		TheAutoCameraDirector->reset();
+#endif
 
 	// clear any drawable TOC we might have
 	m_drawableTOC.clear();
@@ -704,6 +724,14 @@ void GameClient::update()
 	{
 		TheTerrainVisual->UPDATE();
 	}
+
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Apply seek-safe replay camera state immediately before the native display update. (#TBD)
+	if (TheAutoCameraDirector)
+	{
+		TheAutoCameraDirector->UPDATE();
+	}
+#endif
 
 	// update display
 	{
