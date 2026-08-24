@@ -21,6 +21,17 @@ class VideoResolutionError(ValueError):
     """The durable request does not resolve to one complete compatible authority."""
 
 
+# TheSuperHackers @fix Leex 24/08/2026 Keep managed replay resolution inside the configured root after symlink resolution. (#TBD)
+def _managed_replay_path(root: Path, relative_path: str) -> Path:
+    candidate = (root / Path(*relative_path.split("/"))).resolve()
+    managed_root = root.resolve()
+    try:
+        candidate.relative_to(managed_root)
+    except ValueError as error:
+        raise VideoResolutionError("managed replay path escapes configured root") from error
+    return candidate
+
+
 class VideoRequestResolver:
     """Resolve only worker-side storage and read models; Web never receives these capabilities."""
 
@@ -49,7 +60,7 @@ class VideoRequestResolver:
             asset = session.get(ManagedAsset, replay.managed_asset_id)
             if asset is None or asset.sha256 != replay.sha256:
                 raise VideoResolutionError("managed replay identity is invalid")
-            replay_path = (self._settings.managed_replay_directory / Path(*asset.relative_path.split("/"))).resolve()
+            replay_path = _managed_replay_path(self._settings.managed_replay_directory, asset.relative_path)
             if not replay_path.is_file() or hashlib.sha256(replay_path.read_bytes()).hexdigest() != replay.sha256:
                 raise VideoResolutionError("managed replay bytes are invalid")
             frame_end = replay.frame_count
