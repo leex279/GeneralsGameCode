@@ -64,6 +64,17 @@
         {% endfor %}
       </div>
     {% else %}<p>No supported headline metrics are available inside this report's evidence horizon.</p>{% endif %}
+    {% if coaching.signal_reads %}
+      <!-- TheSuperHackers @feature Leex 24/08/2026 Add a plainly bounded interpretation beside measured report signals. (#TBD) -->
+      <div class="signal-read-list" aria-label="Evidence-bounded signal interpretation">
+        {% for read in coaching.signal_reads %}
+          <article class="signal-read">
+            <span class="eyebrow">{{ read.title }}</span><p>{{ read.statement }}</p>
+            <div class="evidence-links">{% for evidence in read.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
+          </article>
+        {% endfor %}
+      </div>
+    {% endif %}
   </section>
 
   <section id="strategy" class="workspace-panel" aria-labelledby="strategy-title">

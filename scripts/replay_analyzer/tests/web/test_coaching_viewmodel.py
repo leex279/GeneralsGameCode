@@ -289,6 +289,10 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
     assert 1 <= len(coaching.prompts) <= 5
     assert coaching.prompts[0].strategy_id == "usa_humvee_pressure"
     assert coaching.prompts[0].evidence[0].public_id == STRATEGY_EVIDENCE
+    assert coaching.highlights[0].signal_id == "economy.supply_collection_rate"
+    assert coaching.signal_reads[0].title == "Economy signal"
+    assert "does not establish spend" in coaching.signal_reads[0].statement
+    assert coaching.signal_reads[0].evidence[0].public_id == METRIC_EVIDENCE
 
 
 def test_key_moments_turn_event_evidence_into_a_chronological_review_queue() -> None:
@@ -368,6 +372,28 @@ def test_partial_desync_report_never_invents_result_or_future_phases() -> None:
     assert coaching.limitations == ("CRC mismatch at frame 105",)
     assert coaching.local_model_summary is None
     assert coaching.key_moments == ()
+
+
+def test_partial_report_suppresses_metrics_extending_past_the_terminal_horizon() -> None:
+    report = _report(partial=True)
+    sections = tuple(
+        section.model_copy(
+            update={
+                "claims": tuple(
+                    claim.model_copy(update={"frame_window": (0, 120)})
+                    if claim.label == "economy.supply_collection_rate"
+                    else claim
+                    for claim in section.claims
+                )
+            }
+        )
+        for section in report.sections
+    )
+
+    coaching = coaching_view(report.model_copy(update={"sections": sections}), _timeline(late_parser_frame=56_003))
+
+    assert all(item.signal_id != "economy.supply_collection_rate" for item in coaching.highlights)
+    assert coaching.signal_reads == ()
 
 
 def test_ollama_state_cannot_change_deterministic_coaching() -> None:

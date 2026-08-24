@@ -102,6 +102,7 @@ class BuildOrderStepView(_FrozenView):
 
 
 class CoachingHighlightView(_FrozenView):
+    signal_id: str
     title: str
     value: str
     explanation: str
@@ -111,6 +112,14 @@ class CoachingHighlightView(_FrozenView):
 class ReviewPromptView(_FrozenView):
     strategy_id: str
     text: str
+    evidence: tuple[ReportEvidenceReferenceDTO, ...]
+
+
+class SignalReadView(_FrozenView):
+    """A bounded interpretation of one measured signal, never a causal claim."""
+
+    title: str
+    statement: str
     evidence: tuple[ReportEvidenceReferenceDTO, ...]
 
 
@@ -146,6 +155,7 @@ class CoachingViewModel(_FrozenView):
     strategies: tuple[PlayerStrategyView, ...]
     build_order: tuple[BuildOrderStepView, ...]
     highlights: tuple[CoachingHighlightView, ...]
+    signal_reads: tuple[SignalReadView, ...]
     prompts: tuple[ReviewPromptView, ...]
     key_moments: tuple[KeyMomentView, ...]
     opening_lanes: tuple[OpeningLaneView, ...]
@@ -231,12 +241,34 @@ def _horizon(report: ReplayReportDTO, timeline: TimelineChartDTO) -> EvidenceHor
     )
 
 
-def _strategies(report: ReplayReportDTO) -> tuple[PlayerStrategyView, ...]:
+def _claim_inside_horizon(claim: ReportClaimDTO, horizon: EvidenceHorizonView) -> bool:
+    """Reject aggregate or event claims that can include facts beyond the accepted boundary."""
+
+    if horizon.frame_end is None:
+        return False
+    if claim.frame_window is None:
+        if horizon.status != "complete":
+            return False
+    elif claim.frame_window[1] > horizon.frame_end:
+        return False
+    raw = _thaw(claim.raw_value)
+    return not (
+        isinstance(raw, list)
+        and any(
+            isinstance(item, dict) and type(item.get("frame")) is int and cast(int, item["frame"]) > horizon.frame_end
+            for item in raw
+        )
+    )
+
+
+def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[PlayerStrategyView, ...]:
     player = _selected_player(report)
     player_label = "Replay" if player is None else player.display_name
     faction = None if player is None or player.faction is None else game_label(player.faction)
     output: list[PlayerStrategyView] = []
     for claim in _available_claims(report, "strategy_phases"):
+        if not _claim_inside_horizon(claim, horizon):
+            continue
         raw = _thaw(claim.raw_value)
         if (
             not claim.claim_id.startswith(f"strategy:{claim.label}:")
@@ -360,7 +392,7 @@ def _metric_value(claim: ReportClaimDTO) -> str:
     return claim.display_value or "Unavailable"
 
 
-def _highlights(report: ReplayReportDTO) -> tuple[CoachingHighlightView, ...]:
+def _highlights(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[CoachingHighlightView, ...]:
     claims = {
         claim.label: claim
         for section in report.sections
@@ -368,9 +400,11 @@ def _highlights(report: ReplayReportDTO) -> tuple[CoachingHighlightView, ...]:
         if claim.availability in ("available", "partial")
         and claim.claim_id.startswith(f"feature:{claim.label}:")
         and claim.evidence
+        and _claim_inside_horizon(claim, horizon)
     }
     return tuple(
         CoachingHighlightView(
+            signal_id=name,
             title=feature_label(name),
             value=_metric_value(claims[name]),
             explanation=_HIGHLIGHT_EXPLANATIONS[name],
@@ -387,6 +421,23 @@ def _prompts(strategies: tuple[PlayerStrategyView, ...]) -> tuple[ReviewPromptVi
         for item in strategies
         if item.strategy_id in _ADVICE and item.evidence
     )[:5]
+
+
+# TheSuperHackers @feature Leex 24/08/2026 Explain measured economy signals without inferring spend, army value, or causality. (#TBD)
+def _signal_reads(highlights: tuple[CoachingHighlightView, ...]) -> tuple[SignalReadView, ...]:
+    supply = next((item for item in highlights if item.signal_id == "economy.supply_collection_rate"), None)
+    if supply is None:
+        return ()
+    return (
+        SignalReadView(
+            title="Economy signal",
+            statement=(
+                f"Observed collection reached {supply.value} inside the verified horizon. "
+                "This measures income recorded by the engine; it does not establish spend, army value, or strategic cause."
+            ),
+            evidence=supply.evidence,
+        ),
+    )
 
 
 def _event_rows(report: ReplayReportDTO, label: str) -> tuple[tuple[dict[str, object], ReportClaimDTO], ...]:
@@ -601,9 +652,9 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
     ):
         raise ValueError("timeline identity does not match the fixed report")
     horizon = _horizon(report, timeline)
-    strategies = _strategies(report)
+    strategies = _strategies(report, horizon)
     build_order = _build_order(report, horizon)
-    highlights = _highlights(report)
+    highlights = _highlights(report, horizon)
     key_moments = _key_moments(report, horizon)
     return CoachingViewModel(
         horizon=horizon,
@@ -611,6 +662,7 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
         strategies=strategies,
         build_order=build_order,
         highlights=highlights,
+        signal_reads=_signal_reads(highlights),
         prompts=_prompts(strategies),
         key_moments=key_moments,
         opening_lanes=_opening_lanes(build_order, key_moments),
