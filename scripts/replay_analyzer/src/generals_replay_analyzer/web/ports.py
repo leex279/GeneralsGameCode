@@ -1936,6 +1936,8 @@ class MapSceneDTO(WebDTO):
     replay_public_id: PublicId
     report_public_id: PublicId
     report_version: str = Field(min_length=1, max_length=128)
+    telemetry_run_public_id: PublicId
+    telemetry_trace_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     map_public_id: PublicId
     map_display_name: str = Field(min_length=1, max_length=256)
     map_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

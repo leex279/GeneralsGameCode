@@ -266,6 +266,8 @@ def _scene(query: MapSceneQueryDTO) -> MapSceneDTO:
         replay_public_id=query.replay_public_id,
         report_public_id=query.report_public_id,
         report_version="report-v1",
+        telemetry_run_public_id="30000000-0000-4000-8000-000000000001",
+        telemetry_trace_sha256="b" * 64,
         map_public_id=MAP_ID,
         map_display_name="Tournament Desert",
         map_content_sha256="a" * 64,

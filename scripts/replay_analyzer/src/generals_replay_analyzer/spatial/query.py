@@ -447,6 +447,7 @@ class MapSceneQueryService:
         if (
             telemetry is None
             or telemetry.status != "succeeded"
+            or telemetry.trace_sha256 is None
             or telemetry.replay_id != replay.id
             or telemetry.map_id != map_row.id
             or telemetry.engine_build != map_row.engine_data_identity
@@ -1111,6 +1112,8 @@ class MapSceneQueryService:
                 "replay_public_id": replay.public_id,
                 "report_public_id": document.report_public_id,
                 "report_version": document.report_version,
+                "telemetry_run_public_id": telemetry.run_id,
+                "telemetry_trace_sha256": telemetry.trace_sha256,
                 "map_public_id": map_row.public_id,
                 "map_display_name": map_row.display_name or replay.map_name,
                 "map_content_sha256": map_row.content_sha256,
