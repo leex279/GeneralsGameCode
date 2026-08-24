@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.db.models import (
+    AnalysisRun,
     EvidenceItem,
     Job,
     ManagedAsset,
@@ -433,6 +435,126 @@ def test_library_and_dashboard_dtos_never_expose_private_source_locators(
         (REPLAY_ALPHA, "Alpha Final"),
         (REPLAY_BETA, "Beta Match"),
     ]
+
+
+def test_dashboard_projects_available_players_map_and_detected_opening_without_claiming_unknown_horizon(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    recent = _adapter(library_database).dashboard().recent_replays[0]
+
+    assert recent.player_factions == ("leex279 (USA)", "FOX27 (GLA)")
+    assert recent.map_name == "Tournament Desert"
+    assert recent.strategy_labels == ()
+    assert recent.observed_horizon is None
+
+
+def test_dashboard_uses_the_fixed_report_observed_evidence_horizon(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        report = session.scalar(select(Report).where(Report.public_id == PLAYER_REPORT))
+        assert report is not None
+        report.report_json = {
+            "observed": [
+                {
+                    "availability": "partial",
+                    "evidence": [{"public_id": EVIDENCE_OBSERVED, "tier": "observed"}],
+                    "frame_window": [0, 105],
+                }
+            ]
+        }
+
+    recent = _adapter(library_database).dashboard().recent_replays[0]
+
+    assert recent.observed_horizon == "Observed evidence through 0:03.5 (frame 105)"
+
+
+def test_dashboard_omits_a_horizon_when_fixed_report_windows_are_gapped(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        report = session.scalar(select(Report).where(Report.public_id == PLAYER_REPORT))
+        assert report is not None
+        report.report_json = {
+            "observed": [
+                {
+                    "availability": "available",
+                    "evidence": [{"public_id": EVIDENCE_OBSERVED, "tier": "observed"}],
+                    "frame_window": [0, 30],
+                },
+                {
+                    "availability": "available",
+                    "evidence": [{"public_id": EVIDENCE_OBSERVED, "tier": "observed"}],
+                    "frame_window": [60, 105],
+                },
+            ]
+        }
+
+    assert _adapter(library_database).dashboard().recent_replays[0].observed_horizon is None
+
+
+def test_dashboard_uses_only_detected_strategies_from_the_linked_fixed_report_analysis_run(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == REPLAY_ALPHA))
+        current_report = session.scalar(select(Report).where(Report.public_id == PLAYER_REPORT))
+        stale_report = session.scalar(select(Report).where(Report.public_id == REPORT_FIXED))
+        assert replay is not None and current_report is not None and stale_report is not None
+        current_run = _analysis_run(replay.id, "current")
+        stale_run = _analysis_run(replay.id, "stale")
+        session.add_all((current_run, stale_run))
+        session.flush()
+        current_report.analysis_run_id = current_run.id
+        current_report.report_json = _strategy_report_json("usa_humvee_pressure", "usa_fast_strategy_center")
+        stale_report.analysis_run_id = stale_run.id
+        stale_report.report_json = _strategy_report_json("gla_terror_tech")
+
+    recent = _adapter(library_database).dashboard().recent_replays[0]
+
+    assert recent.report_public_id == PLAYER_REPORT
+    assert recent.strategy_labels == ("Humvee pressure", "Strategy Center technology")
+
+
+def _analysis_run(replay_id: int, label: str) -> AnalysisRun:
+    return AnalysisRun(
+        run_id=str(uuid5(NAMESPACE_URL, f"dashboard-analysis:{label}")),
+        replay_id=replay_id,
+        replay_player_id=None,
+        provider="ollama",
+        model_name="fixture",
+        model_digest="a" * 64,
+        prompt_version="fixture",
+        prompt_digest="b" * 64,
+        response_schema_version="fixture",
+        response_schema_digest="c" * 64,
+        settings_digest="d" * 64,
+        input_digest="e" * 64,
+        cache_key=("f" if label == "current" else "0") * 64,
+        status="failed",
+        validated_response_json=None,
+        diagnostics_json=[],
+        error_json={"code": "fixture"},
+    )
+
+
+def _strategy_report_json(*labels: str) -> dict[str, object]:
+    return {
+        "derived": [
+            {
+                "claim_id": f"strategy:{label}:{index}",
+                "section": "strategy",
+                "label": label,
+                "availability": "available",
+                "raw_value": {"strategy_label": label},
+                "evidence": [{"public_id": EVIDENCE_DERIVED, "tier": "derived"}],
+            }
+            for index, label in enumerate(labels)
+        ]
+    }
 
 
 def test_library_projection_is_read_only(

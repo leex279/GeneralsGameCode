@@ -71,7 +71,7 @@ def test_dashboard_is_an_operational_workspace_with_honest_unavailable_state() -
     assert "<h1>Replay dashboard</h1>" in html
     assert 'class="command-strip"' in html
     assert 'class="dashboard-layout"' in html
-    assert 'class="operations-rail"' in html
+    assert 'class="operations-rail"' not in html
     assert "No replay evidence in this library yet" in html
     assert "analytics_adapter_pending" in html
     assert "kpi-card" not in html
@@ -222,8 +222,11 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
                         report_public_id="123e4567-e89b-42d3-a456-426614174010",
                         label="command-center.rep",
                         players=("leex279", "FOX27"),
+                        player_factions=("leex279 (USA)", "FOX27 (GLA)"),
                         result="win",
                         map_name="Tournament Desert",
+                        observed_horizon="Observed evidence through 0:03.5 (frame 105)",
+                        strategy_labels=("Humvee pressure",),
                         analysis_state="verified",
                         evidence_tier="observed",
                         observed_at=datetime(2026, 8, 22, 11, 0, tzinfo=UTC),
@@ -267,7 +270,11 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
 
     assert response.status_code == 200
     assert action_response.status_code == 200
-    assert "Recent matches" in response.text and "command-center.rep" in response.text
+    assert "Recent matches" in response.text and "leex279 (USA)" in response.text
+    assert "Tournament Desert" in response.text
+    assert "Observed evidence through 0:03.5 (frame 105)" in response.text
+    assert "Humvee pressure" in response.text
+    assert "command-center.rep" not in response.text
     assert "Activity &amp; quality trends" in response.text and "10 verified, 2 partial" in response.text
     assert "Notable evidence" in response.text and "One replay needs evidence review" in response.text
     assert 'class="recent-match-grid"' in response.text
@@ -277,6 +284,16 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     ) in response.text
     assert 'href="/replays?analysis_status=partial">Inspect matching replays</a>' in response.text
     assert 'href="/replays?search=123e4567-e89b-42d3-a456-426614174000">Inspect replay evidence</a>' in response.text
+
+
+def test_dashboard_recent_match_card_leads_with_fixed_report_analysis_facts() -> None:
+    template = package_resource("web/templates/dashboard.html").read_text(encoding="utf-8")
+
+    assert 'class="recent-match-analysis"' in template
+    assert "replay.player_factions" in template
+    assert "replay.observed_horizon" in template
+    assert "replay.strategy_labels" in template
+    assert 'class="recent-match-operations"' in template
 
 
 def test_library_prefers_a_direct_analysis_journey_over_searching_the_same_row() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -25,6 +25,7 @@ from generals_replay_analyzer.db.models import (
     Source,
     StrategyAssessment,
 )
+from generals_replay_analyzer.presentation import format_frame, strategy_label
 from generals_replay_analyzer.watching import (
     RootRegistryError,
     WatchDiscoveryError,
@@ -92,6 +93,7 @@ class _ReplayProjection:
     sources: tuple[_SourceProjection, ...]
     evidence: tuple[_EvidenceProjection, ...]
     report_public_id: str | None
+    report_json: object | None
     pipeline: PipelineStateDTO | None
 
     @property
@@ -111,6 +113,76 @@ def _matchup(value: str) -> tuple[str, ...] | None:
     normalized = re.sub(r"\s+(?:vs?\.?|versus)\s+", "-v-", value.strip(), flags=re.IGNORECASE)
     parts = tuple(part.strip().casefold() for part in normalized.split("-v-"))
     return tuple(sorted(parts)) if len(parts) >= 2 and all(parts) else None
+
+
+def _observed_horizon(report_json: object | None) -> str | None:
+    """Return a conservative horizon only when the fixed report records observed evidence."""
+
+    if not isinstance(report_json, Mapping):
+        return None
+    observed = report_json.get("observed")
+    if not isinstance(observed, list):
+        return None
+    windows = sorted(
+        (
+            (window[0], window[1])
+            for claim in observed
+            if isinstance(claim, Mapping)
+            and claim.get("availability") in {"available", "partial"}
+            and isinstance(claim.get("evidence"), list)
+            and claim["evidence"]
+            and isinstance((window := claim.get("frame_window")), list)
+            and len(window) == 2
+            and type(window[0]) is int
+            and type(window[1]) is int
+            and window[0] >= 0
+            and window[1] >= window[0]
+        ),
+        key=lambda window: (window[0], window[1]),
+    )
+    if not windows or windows[0][0] != 0:
+        return None
+    frame_end = windows[0][1]
+    for frame_start, candidate_end in windows[1:]:
+        if frame_start > frame_end + 1:
+            return None
+        frame_end = max(frame_end, candidate_end)
+    return f"Observed evidence through {format_frame(frame_end)}"
+
+
+def _strategy_labels(report_json: object | None) -> tuple[str, ...]:
+    """Expose only deterministic strategy claims embedded in the linked fixed report."""
+
+    if not isinstance(report_json, Mapping):
+        return ()
+    derived = report_json.get("derived")
+    if not isinstance(derived, list):
+        return ()
+    labels: list[str] = []
+    for claim in derived:
+        if not (
+            isinstance(claim, Mapping)
+            and claim.get("section") == "strategy"
+            and claim.get("availability") in {"available", "partial"}
+            and isinstance(claim.get("claim_id"), str)
+            and claim["claim_id"].startswith("strategy:")
+            and isinstance(claim.get("label"), str)
+            and isinstance(claim.get("raw_value"), Mapping)
+            and claim["raw_value"].get("strategy_label") == claim["label"]
+            and isinstance(claim.get("evidence"), list)
+            and any(
+                isinstance(reference, Mapping) and reference.get("tier") == "derived"
+                for reference in claim["evidence"]
+            )
+        ):
+            continue
+        label = strategy_label(claim["label"])
+        if label not in labels:
+            labels.append(label)
+        if len(labels) == 2:
+            break
+    return tuple(labels)
+
 
 def _pipeline(job: Job | None, replay_public_id: str) -> PipelineStateDTO | None:
     if job is None:
@@ -168,8 +240,15 @@ class AnalyticsLibraryAdapter:
                 report_public_id=value.report_public_id,
                 label=labels[value.replay_public_id],
                 players=tuple(player.display_name for player in value.players),
+                # TheSuperHackers @feature Leex 24/08/2026 Keep recent cards player-first using only parser factions and persisted rule assessments. (#0)
+                player_factions=tuple(
+                    f"{player.display_name} ({player.faction})" if player.faction is not None else player.display_name
+                    for player in value.players
+                ),
                 result=value.result,
                 map_name=value.map_display_name,
+                observed_horizon=value.observed_horizon,
+                strategy_labels=value.strategy_labels,
                 analysis_state=value.lifecycle_state,
                 evidence_tier=value.provenance.evidence_tier,
                 observed_at=value.observed_at_utc,
@@ -445,6 +524,7 @@ class AnalyticsLibraryAdapter:
         }
         parser_ids = tuple(parser_by_replay.values())
         players_by_replay: dict[int, list[ReplayPlayerDisplayDTO]] = defaultdict(list)
+        reports_by_public_id: dict[str, Report] = {}
         if parser_ids:
             player_rows = tuple(session.execute(
                 select(ReplayPlayer, Player.display_name)
@@ -479,6 +559,7 @@ class AnalyticsLibraryAdapter:
                     )
                 )
             }
+            reports_by_public_id.update({report.public_id: report for report in reports_by_player.values()})
             for replay_player, canonical_name in player_rows:
                 label = canonical_name or replay_player.original_name or f"Player slot {replay_player.slot_index + 1}"
                 player_report = reports_by_player.get(replay_player.id)
@@ -549,6 +630,18 @@ class AnalyticsLibraryAdapter:
             (Report.created_at.desc(), Report.public_id.desc()),
             Report.replay_player_id.is_(None),
         )
+        reports_by_public_id.update({report.public_id: report for report in reports_by_replay.values()})
+        selected_reports_by_replay = {
+            replay.id: next(
+                (
+                    reports_by_public_id[player.report_public_id]
+                    for player in players_by_replay[replay.id]
+                    if player.report_public_id is not None and player.report_public_id in reports_by_public_id
+                ),
+                reports_by_replay.get(replay.id),
+            )
+            for replay in replays
+        }
         jobs_by_replay = self._latest_entities(
             session,
             Job,
@@ -562,7 +655,7 @@ class AnalyticsLibraryAdapter:
                 tuple(players_by_replay[replay.id]),
                 sources_by_replay.get(replay.id),
                 evidence_by_replay.get(replay.id),
-                reports_by_replay.get(replay.id),
+                selected_reports_by_replay[replay.id],
                 jobs_by_replay.get(replay.id),
             )
             for replay in replays
@@ -617,6 +710,7 @@ class AnalyticsLibraryAdapter:
                 (player.report_public_id for player in players if player.report_public_id is not None),
                 report.public_id if report is not None else None,
             ),
+            report_json=report.report_json if report is not None else None,
             pipeline=_pipeline(job, replay.public_id),
         )
 
@@ -637,6 +731,8 @@ class AnalyticsLibraryAdapter:
             players=value.players,
             map_public_id=value.map_public_id,
             map_display_name=value.map_display_name,
+            observed_horizon=_observed_horizon(value.report_json),
+            strategy_labels=_strategy_labels(value.report_json),
             patch=value.patch,
             result=value.result,
             lifecycle_state=value.lifecycle_state,

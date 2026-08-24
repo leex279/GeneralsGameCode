@@ -316,8 +316,11 @@ class DashboardReplayDTO(WebDTO):
     report_public_id: PublicId | None = None
     label: str = Field(min_length=1, max_length=256)
     players: tuple[str, ...] = Field(min_length=1, max_length=16)
+    player_factions: tuple[str, ...] = Field(default=(), max_length=16)
     result: str | None = Field(default=None, min_length=1, max_length=64)
     map_name: str | None = Field(default=None, min_length=1, max_length=256)
+    observed_horizon: str | None = Field(default=None, min_length=1, max_length=128)
+    strategy_labels: tuple[str, ...] = Field(default=(), max_length=2)
     analysis_state: str = Field(min_length=1, max_length=64)
     evidence_tier: Literal["observed", "derived", "inferred"] | None = None
     observed_at: AwareDatetime | None = None
@@ -327,6 +330,13 @@ class DashboardReplayDTO(WebDTO):
     def _validate_player_labels(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if any(not value.strip() or len(value) > 256 for value in values):
             raise ValueError("dashboard player labels must be nonempty and bounded")
+        return values
+
+    @field_validator("player_factions", "strategy_labels")
+    @classmethod
+    def _validate_analysis_labels(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not value.strip() or len(value) > 256 for value in values):
+            raise ValueError("dashboard analysis labels must be nonempty and bounded")
         return values
 
     @field_validator("observed_at")
@@ -462,6 +472,8 @@ class ReplayLibraryItemDTO(WebDTO):
     players: tuple[ReplayPlayerDisplayDTO, ...]
     map_public_id: PublicId | None = None
     map_display_name: str | None = Field(default=None, min_length=1, max_length=256)
+    observed_horizon: str | None = Field(default=None, min_length=1, max_length=128)
+    strategy_labels: tuple[str, ...] = Field(default=(), max_length=2)
     patch: str | None = Field(default=None, min_length=1, max_length=64)
     result: str | None = Field(default=None, min_length=1, max_length=64)
     lifecycle_state: str = Field(min_length=1, max_length=64)

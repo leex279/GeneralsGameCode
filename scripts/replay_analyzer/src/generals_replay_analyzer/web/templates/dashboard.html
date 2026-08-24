@@ -1,6 +1,5 @@
 {% extends "base.html" %}
 {% import "components/badges.html" as badges %}
-{% import "components/pipeline.html" as pipeline_components %}
 {% block content %}
   <header class="page-heading">
     <div>
@@ -30,11 +29,18 @@
           <div class="recent-match-grid">
             {% for replay in dashboard.recent_replays %}
               <article class="recent-match-card">
-                <span>{{ replay.analysis_state }} analysis &middot; {{ replay.evidence_tier or "evidence pending" }}</span>
-                <h4>{{ replay.players|join(" vs ") }}</h4>
-                <p>{{ replay.map_name or "Map unavailable" }}{% if replay.result %} &middot; {{ replay.result }}{% endif %}</p>
-                <small>{{ replay.label }}{% if replay.observed_at %} &middot; {{ replay.observed_at }}{% endif %}</small>
-                {% if replay.report_public_id %}<a href="/replays/{{ replay.replay_public_id }}/reports/{{ replay.report_public_id }}">View analysis</a>{% else %}<a href="/replays/{{ replay.replay_public_id }}">View analysis</a>{% endif %}
+                <div class="recent-match-analysis">
+                  <span>{{ replay.analysis_state }} analysis &middot; {{ replay.evidence_tier or "evidence pending" }}</span>
+                  <h4>{{ replay.players|join(" vs ") }}</h4>
+                  <dl>
+                    <div><dt>Players</dt><dd>{{ replay.player_factions|join(" vs ") if replay.player_factions else replay.players|join(" vs ") }}</dd></div>
+                    <div><dt>Map</dt><dd>{{ replay.map_name or "Map unavailable" }}</dd></div>
+                    {% if replay.observed_horizon %}<div><dt>Evidence horizon</dt><dd>{{ replay.observed_horizon }}</dd></div>{% endif %}
+                    {% if replay.strategy_labels %}<div><dt>Detected opening</dt><dd>{{ replay.strategy_labels|join(" · ") }}</dd></div>{% endif %}
+                  </dl>
+                </div>
+                {% if replay.report_public_id %}<a class="button button-primary" href="/replays/{{ replay.replay_public_id }}/reports/{{ replay.report_public_id }}">View analysis</a>{% else %}<a class="button button-primary" href="/replays/{{ replay.replay_public_id }}">View analysis</a>{% endif %}
+                <a class="recent-match-operations" href="/jobs">Operations &amp; job details</a>
               </article>
             {% endfor %}
           </div>
@@ -71,17 +77,5 @@
       {% endif %}
     </section>
 
-    <aside class="operations-rail" aria-labelledby="operations-title">
-      <div class="section-heading"><div><span class="eyebrow">System</span><h2 id="operations-title">Operations</h2></div></div>
-      <dl class="status-ledger">
-        <div><dt>Availability</dt><dd>{{ shell.availability.state }}</dd></div>
-        <div><dt>Terminal quality</dt><dd>{% if shell.terminal_quality %}{{ shell.terminal_quality.lifecycle }}{% else %}unavailable{% endif %}</dd></div>
-        <div><dt>Execution mode</dt><dd>local only</dd></div>
-      </dl>
-      <div class="operations-detail">
-        {{ badges.terminal_quality_badge(shell.terminal_quality) }}
-        {{ pipeline_components.pipeline_summary(shell.pipeline) }}
-      </div>
-    </aside>
   </div>
 {% endblock %}
