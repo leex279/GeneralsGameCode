@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -63,6 +64,9 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_DISPOSITION_INFO_CLASS = 4
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_ACCESS_DENIED = 5
+_DELETE_RETRY_COUNT = 50
+_DELETE_RETRY_SECONDS = 0.1
 
 _KERNEL32: Any = None
 if os.name == "nt":
@@ -206,7 +210,15 @@ def _win_cleanup_staged_link(
     try:
         if handle is None:
             handle = _win_open_staged_lock(destination, expected)
-        _win_mark_delete(handle)
+        # TheSuperHackers @bugfix Leex 24/08/2026 Let a settled child release its executable image mapping before exact-handle deletion. (#TBD)
+        for attempt in range(_DELETE_RETRY_COUNT):
+            try:
+                _win_mark_delete(handle)
+                break
+            except OSError as error:
+                if error.errno != _ACCESS_DENIED or attempt + 1 == _DELETE_RETRY_COUNT:
+                    raise
+                time.sleep(_DELETE_RETRY_SECONDS)
     finally:
         if handle is not None:
             _win_close(handle)
@@ -347,6 +359,11 @@ def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBind
                 if cleanup_error is None:
                     cleanup_error = error
 
+        # TheSuperHackers @bugfix Leex 24/08/2026 Release the source share lock before marking the still handle-verified staged link for deletion. (#TBD)
+        if source_handle is not None:
+            cleanup(lambda: _win_close(source_handle))
+            source_handle = None
+
         try:
             if owns_staged_link and staged_handle is not None:
                 assert destination is not None
@@ -359,8 +376,6 @@ def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBind
                 owned_identity = source_identity
                 cleanup(lambda: _win_cleanup_staged_link(owned_destination, owned_identity, None))
         finally:
-            if source_handle is not None:
-                cleanup(lambda: _win_close(source_handle))
             if runtime_handle is not None:
                 cleanup(lambda: _win_close(runtime_handle))
 

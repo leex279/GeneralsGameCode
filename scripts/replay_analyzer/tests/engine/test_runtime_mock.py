@@ -91,3 +91,54 @@ def test_cleanup_error_surfaces_without_primary_error(tmp_path: Path, monkeypatc
 
     with pytest.raises(OSError, match="cleanup"), runtime_module._bind_windows(source, runtime):
         pass
+
+
+def test_source_lock_closes_before_owned_link_is_marked_for_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remaining staged handle keeps identity authority while the source share lock is released."""
+    _install_binding_mocks(monkeypatch)
+    events: list[str] = []
+    monkeypatch.setattr(runtime_module, "_win_open_staged_lock", lambda _path, _expected: 12)
+    monkeypatch.setattr(runtime_module, "_win_mark_delete", lambda handle: events.append(f"delete:{handle}"))
+    monkeypatch.setattr(runtime_module, "_win_close", lambda handle: events.append(f"close:{handle}"))
+    monkeypatch.setattr(
+        runtime_module,
+        "_win_open_verified_source",
+        lambda _path, staged: (11 if staged else 13, runtime_module._WindowsFileIdentity(1, 2, 0, 10)),
+    )
+    source = tmp_path / "build" / "generalszh.exe"
+    runtime = tmp_path / "runtime"
+    source.parent.mkdir()
+    runtime.mkdir()
+
+    with runtime_module._bind_windows(source, runtime):
+        pass
+
+    assert events.index("close:13") < events.index("delete:12")
+
+
+def test_staged_cleanup_retries_transient_image_mapping_access_denial(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+    closed: list[int] = []
+
+    def mark_delete(_handle: int) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise OSError(5, "image mapping is still settling")
+
+    monkeypatch.setattr(runtime_module, "_win_mark_delete", mark_delete)
+    monkeypatch.setattr(runtime_module, "_win_close", closed.append)
+    monkeypatch.setattr(runtime_module.time, "sleep", delays.append)
+
+    runtime_module._win_cleanup_staged_link(
+        Path("staged.exe"),
+        runtime_module._WindowsFileIdentity(1, 2, 0, 10),
+        12,
+    )
+
+    assert attempts == 3
+    assert delays == [0.1, 0.1]
+    assert closed == [12]
