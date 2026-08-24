@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.config import AnalyzerSettings
-from generals_replay_analyzer.db.models import ManagedAsset, Replay
+from generals_replay_analyzer.db.models import ManagedAsset, Replay, TelemetryRun
 from generals_replay_analyzer.report.query import FixedReportQuery, ReportQueryService
 from generals_replay_analyzer.spatial.query import MapSceneQueryService, MapSceneReadQuery
 from generals_replay_analyzer.video.contracts import CameraPlanAuthorityV1, EvidenceHorizonV1
@@ -21,6 +21,46 @@ from generals_replay_analyzer.video.render import VideoRenderRequest
 
 class VideoResolutionError(ValueError):
     """The durable request does not resolve to one complete compatible authority."""
+
+
+# TheSuperHackers @fix Leex 24/08/2026 Refuse video timing that disagrees with imported engine clock authority. (#TBD)
+def _resolve_authoritative_logic_fps(
+    replay_header: object,
+    telemetry_timebases: tuple[tuple[int, Mapping[str, object]], ...],
+    *,
+    requested: object,
+) -> Literal[30, 60]:
+    if requested not in (30, 60):
+        raise VideoResolutionError("video job logic timebase is invalid")
+    candidates: set[int] = set()
+    header = replay_header if isinstance(replay_header, Mapping) else {}
+    timebase = header.get("timebase")
+    if isinstance(timebase, Mapping):
+        fps = timebase.get("logic_frames_per_second")
+        if timebase.get("source") == "engine_manifest" and fps in (30, 60):
+            candidates.add(cast(int, fps))
+    has_v2 = False
+    historical_v1 = False
+    for schema_version, settings in telemetry_timebases:
+        has_v2 = has_v2 or schema_version >= 2
+        fps = settings.get("logic_frames_per_second")
+        source = settings.get("logic_timebase_source")
+        if source == "engine_manifest" and fps in (30, 60):
+            candidates.add(cast(int, fps))
+        historical_v1 = historical_v1 or (
+            schema_version == 1 and source == "historical_v1_contract" and fps == 30
+        )
+    if len(candidates) > 1:
+        raise VideoResolutionError("conflicting engine logic timebase authorities")
+    if candidates:
+        authoritative = candidates.pop()
+    elif historical_v1 and not has_v2:
+        authoritative = 30
+    else:
+        raise VideoResolutionError("engine logic timebase is unavailable")
+    if requested != authoritative:
+        raise VideoResolutionError("video job logic timebase differs from engine authority")
+    return cast(Literal[30, 60], authoritative)
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Validate every worker stage identity through the closed UUID and lowercase SHA contract. (#TBD)
@@ -96,6 +136,22 @@ class VideoRequestResolver:
             replay_path = _managed_replay_path(self._settings.managed_replay_directory, asset.relative_path)
             if not replay_path.is_file() or hashlib.sha256(replay_path.read_bytes()).hexdigest() != replay.sha256:
                 raise VideoResolutionError("managed replay bytes are invalid")
+            telemetry_timebases = tuple(
+                (
+                    run.schema_version,
+                    run.settings_json if isinstance(run.settings_json, Mapping) else {},
+                )
+                for run in session.scalars(
+                    select(TelemetryRun)
+                    .where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
+                    .order_by(TelemetryRun.run_id)
+                )
+            )
+            logic_frames_per_second = _resolve_authoritative_logic_fps(
+                replay.header_json,
+                telemetry_timebases,
+                requested=logic_frames_per_second,
+            )
             frame_end = replay.frame_count
         scene = self._scenes.get_scene(MapSceneReadQuery(replay_id, report_id, 0, frame_end))
         payload = scene.payload
