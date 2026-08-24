@@ -9,6 +9,7 @@
 #include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayMapExport.h"
 #include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayPartitionSampler.h"
 #include "Common/ReplayVisibilitySampler.h"
 #include "Common/ReplayOutcome.h"
 #include "Common/ReplayEconomy.h"
@@ -523,6 +524,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	ReplayMovementSampler::reset();
 	// TheSuperHackers @feature Leex 23/08/2026 Reset trace-local scouting state whenever telemetry is reconfigured. (#0)
 	ReplayVisibilitySampler::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Reset trace-local partition cadence whenever telemetry is reconfigured. (#0)
+	ReplayPartitionSampler::reset();
 }
 
 Bool ReplayTelemetry::isEnabled()
@@ -760,6 +763,8 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationR
 		return;
 	}
 
+	// TheSuperHackers @feature Leex 23/08/2026 Force the bounded partition lattice before terminal economy and outcome publication. (#0)
+	ReplayPartitionSampler::emitTerminalSample(finalFrame);
 	// TheSuperHackers @feature Leex 23/08/2026 Preserve a final engine income-rate sample before terminal outcome publication. (#0)
 	ReplayEconomy::emitTerminalCashPerMinuteSnapshot(finalFrame);
 	// TheSuperHackers @feature Leex 23/08/2026 Emit raw terminal score totals immediately before the authoritative outcome. (#0)

@@ -55,6 +55,7 @@
 #include "Common/ReplayEntityLifecycle.h"
 #include "Common/ReplayEconomy.h"
 #include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayPartitionSampler.h"
 #include "Common/ReplayVisibilitySampler.h"
 #endif
 #include "Common/StatsCollector.h"
@@ -432,6 +433,8 @@ void GameLogic::reset()
 	ReplayMovementSampler::reset();
 	// TheSuperHackers @feature Leex 23/08/2026 Clear copied scouting observations before object identities are reused. (#0)
 	ReplayVisibilitySampler::reset();
+	// TheSuperHackers @feature Leex 23/08/2026 Clear the last sampled partition frame before the replay logic clock restarts. (#0)
+	ReplayPartitionSampler::reset();
 #endif
 	m_thingTemplateBuildableOverrides.clear();
 	m_controlBarOverrides.clear();
@@ -3990,6 +3993,8 @@ void GameLogic::update()
 	ReplayMovementSampler::sampleEndOfFrame();
 	// TheSuperHackers @feature Leex 23/08/2026 Observe shroud after partition and destruction updates without changing simulation state. (#0)
 	ReplayVisibilitySampler::sampleEndOfFrame();
+	// TheSuperHackers @feature Leex 23/08/2026 Sample bounded partition heuristics at the same post-update observational seam. (#0)
+	ReplayPartitionSampler::sampleEndOfFrame();
 #endif
 
 

@@ -1157,6 +1157,8 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayEconomy.h
         Include/Common/ReplayEntityLifecycle.h
         Include/Common/ReplayMovementSampler.h
+        # TheSuperHackers @feature Leex 23/08/2026 Compile the bounded partition heuristic provider only in modern analyzer builds. (#0)
+        Include/Common/ReplayPartitionSampler.h
         Include/Common/ReplayVisibilitySampler.h
         Include/Common/ReplayOutcome.h
         Include/Common/ReplayParseDump.h
@@ -1168,6 +1170,7 @@ if(NOT IS_VS6_BUILD)
         Source/Common/ReplayEconomy.cpp
         Source/Common/ReplayEntityLifecycle.cpp
         Source/Common/ReplayMovementSampler.cpp
+        Source/Common/ReplayPartitionSampler.cpp
         Source/Common/ReplayVisibilitySampler.cpp
         Source/Common/ReplayOutcome.cpp
         Source/Common/ReplayParseDump.cpp
