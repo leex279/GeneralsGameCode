@@ -23,7 +23,8 @@ def _hash(path: Path) -> str:
 
 class ArtifactHashV1(VideoContract):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    path: Path
+    # TheSuperHackers @fix Leex 24/08/2026 Keep private render paths available for rehashing but out of public manifests. (#TBD)
+    path: Path | None = Field(default=None, exclude=True)
     sha256: Sha256
 
 
@@ -48,7 +49,7 @@ class VideoManifestPublisher:
         if not manifest.verification_passed:
             raise ValueError("only verified media manifests may be published")
         for artifact in manifest.artifacts:
-            if not artifact.path.is_file() or _hash(artifact.path) != artifact.sha256:
+            if artifact.path is None or not artifact.path.is_file() or _hash(artifact.path) != artifact.sha256:
                 raise ValueError(f"artifact hash no longer matches immutable manifest: {artifact.name}")
         target = destination.resolve()
         target.parent.mkdir(parents=True, exist_ok=True)

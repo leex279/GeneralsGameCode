@@ -119,16 +119,18 @@ def _default_probe(argv: tuple[str, ...]) -> str:
     return completed.stdout
 
 
-def _require_pcm_signal(path: Path) -> None:
+def _require_pcm_signal(path: Path) -> int:
     try:
         with wave.open(str(path), "rb") as source:
             if source.getcomptype() != "NONE" or source.getnchannels() != 1 or source.getnframes() <= 0:
                 raise MediaVerificationError("narration must be a non-empty mono PCM WAV")
+            sample_rate = source.getframerate()
             frames = source.readframes(source.getnframes())
     except (OSError, EOFError, wave.Error) as error:
         raise MediaVerificationError(f"narration WAV cannot be read: {error}") from error
     if not any(value != 0 for value in frames):
         raise MediaVerificationError("narration source is silent")
+    return sample_rate
 
 
 # TheSuperHackers @feature Leex 24/08/2026 Verify final replay media against closed ffprobe facts before immutable publication. (#TBD)
@@ -161,11 +163,11 @@ class MediaVerifier:
             raise MediaVerificationError("subtitle track source must exist")
         if any(item.frame > final_frame for item in landmarks):
             raise MediaVerificationError("verification landmark exceeds authoritative evidence horizon")
-        _require_pcm_signal(narration)
+        narration_sample_rate = _require_pcm_signal(narration)
         document = self._probe(final)
         observed = self._observed(document)
         expected_duration = (final_frame + 1) / 30.0
-        self._validate(observed, settings, expected_duration, final_frame)
+        self._validate(observed, settings, expected_duration, final_frame, narration_sample_rate)
         return VerifiedMediaV1(
             final_video_sha256=_sha256(final),
             narration_sha256=_sha256(narration),
@@ -219,7 +221,13 @@ class MediaVerifier:
         )
 
     @staticmethod
-    def _validate(observed: ObservedVideoV1, settings: VideoSettingsV1, expected_duration: float, final_frame: int) -> None:
+    def _validate(
+        observed: ObservedVideoV1,
+        settings: VideoSettingsV1,
+        expected_duration: float,
+        final_frame: int,
+        narration_sample_rate: int,
+    ) -> None:
         if observed.codec_name != "h264":
             raise MediaVerificationError("final video must use H.264")
         if observed.pixel_format != "yuv420p":
@@ -236,5 +244,7 @@ class MediaVerifier:
             raise MediaVerificationError("final video duration differs from authoritative duration")
         if observed.audio_codec_name != "aac" or observed.audio_channels != 1:
             raise MediaVerificationError("final video must contain mono AAC narration")
+        if observed.audio_sample_rate != narration_sample_rate:
+            raise MediaVerificationError("final video audio sample rate differs from narration source")
         if settings.subtitle_mode == "track" and observed.subtitle_codec_name is None:
             raise MediaVerificationError("final video is missing its subtitle track")
