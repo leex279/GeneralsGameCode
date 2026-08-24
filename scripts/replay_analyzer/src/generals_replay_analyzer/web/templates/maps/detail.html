@@ -12,7 +12,7 @@
 
   <!-- TheSuperHackers @feature Leex 23/08/2026 Summarize only observed spatial collections before exposing map internals. (#TBD) -->
   <section class="workspace-panel spatial-briefing" aria-labelledby="spatial-briefing-title">
-    <div class="section-heading"><div><span class="eyebrow">Observed spatial facts</span><h2 id="spatial-briefing-title">Map evidence at a glance</h2></div><span>{{ map_view.scene.query.frame_start }}â€“{{ map_view.scene.query.frame_end }} frames</span></div>
+    <div class="section-heading"><div><span class="eyebrow">Observed spatial facts</span><h2 id="spatial-briefing-title">Map evidence at a glance</h2></div><span>{{ map_view.scene.query.frame_start }}&ndash;{{ map_view.scene.query.frame_end }} frames</span></div>
     <div class="spatial-briefing-grid">
       {% if map_view.scene.starts %}<article><strong>{{ map_view.scene.starts|length }}</strong><span>verified start{% if map_view.scene.starts|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.starts[0].evidence) }}</article>{% endif %}
       {% if map_view.scene.resources %}<article><strong>{{ map_view.scene.resources|length }}</strong><span>resource location{% if map_view.scene.resources|length != 1 %}s{% endif %}</span>{{ evidence_links(map_view.scene.resources[0].evidence) }}</article>{% endif %}

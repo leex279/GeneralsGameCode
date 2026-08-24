@@ -30,10 +30,10 @@
           <div class="recent-match-grid">
             {% for replay in dashboard.recent_replays %}
               <article class="recent-match-card">
-                <span>{{ replay.analysis_state }} analysis Â· {{ replay.evidence_tier or "evidence pending" }}</span>
+                <span>{{ replay.analysis_state }} analysis &middot; {{ replay.evidence_tier or "evidence pending" }}</span>
                 <h4>{{ replay.players|join(" vs ") }}</h4>
-                <p>{{ replay.map_name or "Map unavailable" }}{% if replay.result %} Â· {{ replay.result }}{% endif %}</p>
-                <small>{{ replay.label }}{% if replay.observed_at %} Â· {{ replay.observed_at }}{% endif %}</small>
+                <p>{{ replay.map_name or "Map unavailable" }}{% if replay.result %} &middot; {{ replay.result }}{% endif %}</p>
+                <small>{{ replay.label }}{% if replay.observed_at %} &middot; {{ replay.observed_at }}{% endif %}</small>
                 {% if replay.report_public_id %}<a href="/replays/{{ replay.replay_public_id }}/reports/{{ replay.report_public_id }}">View analysis</a>{% else %}<a href="/replays/{{ replay.replay_public_id }}">View analysis</a>{% endif %}
               </article>
             {% endfor %}
@@ -54,7 +54,7 @@
       {% endif %}
       {% if shell.availability.state == "unavailable" %}
         <div class="empty-workspace">
-          <span class="empty-glyph" aria-hidden="true">∅</span>
+          <span class="empty-glyph" aria-hidden="true">&empty;</span>
           <div>
             <h3>No replay evidence in this library yet</h3>
             <p>Import a replay to begin. Until the production analytics adapter is connected, this screen stays deliberately empty.</p>

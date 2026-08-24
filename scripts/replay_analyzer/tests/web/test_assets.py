@@ -87,6 +87,25 @@ def test_every_first_party_template_and_asset_is_local_and_has_no_inline_or_dyna
         assert "createElement('script')" not in content and 'createElement("script")' not in content
 
 
+# TheSuperHackers @bugfix Leex 24/08/2026 Keep packaged user-facing resources free of UTF-8 mojibake. (#TBD)
+def test_packaged_user_facing_resources_have_no_encoding_corruption_markers() -> None:
+    root = package_resource("web")
+    first_party = _walk_resources(root.joinpath("templates")) + _walk_resources(root.joinpath("static", "css")) + _walk_resources(
+        root.joinpath("static", "js")
+    )
+    markers = ("\u00c2", "\u00e2", "\ufffd")
+
+    corrupted = {
+        str(resource.relative_to(root)): marker
+        for resource in first_party
+        for content in (resource.read_text(encoding="utf-8"),)
+        for marker in markers
+        if marker in content
+    }
+
+    assert corrupted == {}
+
+
 def _walk_resources(directory: object) -> tuple[object, ...]:
     children = tuple(directory.iterdir())  # type: ignore[union-attr]
     return tuple(
