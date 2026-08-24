@@ -1,6 +1,13 @@
+{# TheSuperHackers @fix Leex 24/08/2026 Present unresolved replay setup codes as pending faction evidence. (#TBD) #}
+{% macro faction_label(value) -%}
+  {%- if not value -%}Unavailable
+  {%- elif value.isdigit() -%}Faction awaiting engine resolution
+  {%- else -%}{{ value }}
+  {%- endif -%}
+{%- endmacro %}
 <section class="workspace-panel" aria-labelledby="history-title">
   <div class="section-heading"><div><span class="eyebrow">Fixed report membership</span><h2 id="history-title">Match history</h2></div><span>{{ profile.history_total_items }} matches</span></div>
   {% if profile.replay_history %}<div class="wide-table-scroll" role="region" aria-label="Player match history" tabindex="0"><table><caption>Exact replay-player observations for this identity revision</caption><thead><tr><th scope="col">Player</th><th scope="col">Match</th><th scope="col">Faction</th><th scope="col">Opposition</th><th scope="col">Result</th><th scope="col">Evidence horizon</th><th scope="col">Analysis</th></tr></thead><tbody>
-  {% for item in profile.replay_history %}<tr><th scope="row">{{ item.observed_name }}</th><td>{{ item.map_display_name or 'Map unavailable' }}<small>{{ item.started_at_utc or 'Start time unavailable' }}</small></td><td>{{ item.faction or 'Unavailable' }}</td><td>{{ item.opponent_factions|join(', ') or 'Unavailable' }}</td><td>{{ item.result or 'Unavailable' }}</td><td>{{ item.terminal_quality.lifecycle }} / {{ item.availability.state }}</td><td>{% if item.fixed_report %}<a href="/replays/{{ item.fixed_report.replay_public_id }}/reports/{{ item.fixed_report.report_public_id }}">View analysis</a>{% else %}Unavailable: {{ item.availability.reason_codes|join(', ') }}{% endif %}</td></tr>{% endfor %}
+  {% for item in profile.replay_history %}<tr><th scope="row">{{ item.observed_name }}</th><td><span class="history-match-name">{{ item.map_display_name or 'Map unavailable' }}</span><small class="history-match-time">{{ item.started_at_utc or 'Start time unavailable' }}</small></td><td>{{ faction_label(item.faction) }}</td><td>{% if item.opponent_factions %}{% for faction in item.opponent_factions %}{{ faction_label(faction) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}Unavailable{% endif %}</td><td>{{ item.result or 'Unavailable' }}</td><td>{{ item.terminal_quality.lifecycle }} / {{ item.availability.state }}</td><td>{% if item.fixed_report %}<a href="/replays/{{ item.fixed_report.replay_public_id }}/reports/{{ item.fixed_report.report_public_id }}">View analysis</a>{% else %}Unavailable: {{ item.availability.reason_codes|join(', ') }}{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p>Replay history unavailable. Reason: {{ profile.availability.reason_codes|join(', ') or 'history_empty' }}</p>{% endif %}
 </section>

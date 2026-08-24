@@ -289,6 +289,29 @@ def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidenc
     assert '<details class="workspace-panel technical-evidence profile-identity">' in fixed.text
 
 
+def test_profile_history_hides_unresolved_parser_slot_numbers_and_separates_match_time() -> None:
+    """Keep parser setup codes and adjacent timestamps out of the player-facing match summary."""
+    profile = _full_profile()
+    history = profile.replay_history[0].model_copy(
+        update={
+            "faction": "7",
+            "opponent_factions": ("4",),
+            "map_display_name": None,
+        }
+    )
+    port = _PlayerPort(profile.model_copy(update={"replay_history": (history,)}))
+
+    with _client(port) as client:
+        resolution = client.get(f"/players/{PLAYER_ID}", headers={"accept": "text/html"}, follow_redirects=False)
+        fixed = client.get(resolution.headers["location"], headers={"accept": "text/html"})
+
+    assert fixed.status_code == 200
+    assert fixed.text.count("Faction awaiting engine resolution") == 2
+    assert ">7<" not in fixed.text and ">4<" not in fixed.text
+    assert '<span class="history-match-name">Map unavailable</span>' in fixed.text
+    assert '<small class="history-match-time">Start time unavailable</small>' in fixed.text
+
+
 def test_one_match_profile_explains_the_sample_requirement_once_without_empty_rows() -> None:
     profile = _full_profile().model_copy(
         update={

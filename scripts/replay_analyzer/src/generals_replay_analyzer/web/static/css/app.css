@@ -188,6 +188,8 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .recent-match-card h4 { font-family: var(--cc-condensed); font-size: clamp(1.3rem, 2.5vw, 1.8rem); margin: 0; text-transform: uppercase; }
 .recent-match-card p { color: var(--cc-pale); margin: 0; }
 .recent-match-card small { color: var(--cc-muted); overflow-wrap: anywhere; }
+.history-match-name, .history-match-time { display: block; }
+.history-match-time { color: var(--cc-muted); margin-top: 0.15rem; }
 .recent-match-card > a { color: var(--cc-cyan); font-weight: 800; justify-self: start; margin-top: var(--cc-space-2); }
 .trend-ledger { margin: 0; }
 .trend-ledger > div { border-top: 1px solid var(--cc-rule); display: grid; gap: var(--cc-space-3); grid-template-columns: minmax(10rem, 0.5fr) 1fr; padding: var(--cc-space-3); }
