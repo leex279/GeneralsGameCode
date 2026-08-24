@@ -17,9 +17,9 @@ from generals_replay_analyzer.video.resolver import (
 
 @pytest.mark.parametrize(
     ("frame_count", "accepted_evidence_end", "expected_frame_end"),
-    ((108, 108, 107), (108, 99, 99), (1, 1, 0)),
+    ((56_003, 108, 107), (108, 99, 98), (108, 200, 107), (1, 1, 0)),
 )
-def test_renderable_horizon_caps_evidence_at_the_last_presentable_replay_frame(
+def test_renderable_horizon_converts_post_update_boundaries_to_the_last_presentable_frame(
     frame_count: int,
     accepted_evidence_end: int,
     expected_frame_end: int,
@@ -36,7 +36,7 @@ def test_video_request_authority_uses_the_last_presentable_frame_not_the_header_
         public_id="123e4567-e89b-42d3-a456-426614174000",
         managed_asset_id=2,
         sha256=replay_sha256,
-        frame_count=108,
+        frame_count=56_003,
         header_json={
             "timebase": {
                 "source": "engine_manifest",

@@ -49,8 +49,8 @@ ASSESS_STRATEGIES_VERSION = "1"
 ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
-# TheSuperHackers @bugfix Leex 24/08/2026 Invalidate casts that treated the replay frame count as an inclusive video endpoint. (#TBD)
-RENDER_VIDEO_VERSION = "10"
+# TheSuperHackers @bugfix Leex 24/08/2026 Invalidate casts that treated a telemetry terminal boundary as a rendered frame. (#TBD)
+RENDER_VIDEO_VERSION = "11"
 
 
 def canonical_json(value: Any) -> str:

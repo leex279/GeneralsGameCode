@@ -24,13 +24,13 @@ class VideoResolutionError(ValueError):
     """The durable request does not resolve to one complete compatible authority."""
 
 
-# TheSuperHackers @bugfix Leex 24/08/2026 Convert the replay header frame count into its inclusive final presentable frame. (#TBD)
+# TheSuperHackers @bugfix Leex 24/08/2026 Convert replay and telemetry post-update boundaries into the last presentable frame. (#TBD)
 def _renderable_frame_end(frame_count: int, accepted_evidence_end: int) -> int:
     if type(frame_count) is not int or frame_count < 1:
         raise VideoResolutionError("replay has no presentable video frames")
-    if type(accepted_evidence_end) is not int or accepted_evidence_end < 0:
-        raise VideoResolutionError("accepted evidence horizon is invalid")
-    return min(frame_count - 1, accepted_evidence_end)
+    if type(accepted_evidence_end) is not int or accepted_evidence_end < 1:
+        raise VideoResolutionError("accepted evidence horizon has no presentable video frames")
+    return min(frame_count, accepted_evidence_end) - 1
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Refuse video timing that disagrees with imported engine clock authority. (#TBD)
