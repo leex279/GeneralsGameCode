@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
+import ctypes
 import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from generals_replay_analyzer.engine.config import (
@@ -19,12 +21,85 @@ from generals_replay_analyzer.engine.config import (
 )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class _FileDispositionInfo(ctypes.Structure):
+    _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+
+@dataclass(frozen=True)
+class _WindowsFileIdentity:
+    volume_serial: int
+    file_index: int
+    attributes: int
+    size: int
+
+
+_FILE_READ_DATA = 0x0001
+_FILE_LIST_DIRECTORY = 0x0001
+_FILE_READ_ATTRIBUTES = 0x0080
+_DELETE_ACCESS = 0x00010000
+_SYNCHRONIZE = 0x00100000
+_FILE_SHARE_READ = 0x1
+_FILE_SHARE_WRITE = 0x2
+_FILE_SHARE_DELETE = 0x4
+_OPEN_EXISTING = 3
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_DISPOSITION_INFO_CLASS = 4
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+_KERNEL32: Any = None
+if os.name == "nt":
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    _KERNEL32.CreateFileW.restype = wintypes.HANDLE
+    _KERNEL32.CreateHardLinkW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPVOID]
+    _KERNEL32.CreateHardLinkW.restype = wintypes.BOOL
+    _KERNEL32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    ]
+    _KERNEL32.GetFileInformationByHandle.restype = wintypes.BOOL
+    _KERNEL32.GetFinalPathNameByHandleW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    _KERNEL32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 
 def _is_reparse(info: os.stat_result) -> bool:
@@ -51,57 +126,220 @@ class RuntimeExecutableBinding:
     staged: bool
 
 
-def _safe_same_file(left: Path, right: Path, expected_sha256: str) -> bool:
-    try:
-        left = _ordinary_file(left, "configured engine executable")
-        right = _ordinary_file(right, "staged engine executable")
-        return os.path.samefile(left, right) and _sha256(left) == expected_sha256 and _sha256(right) == expected_sha256
-    except (EngineRunConfigurationError, OSError):
-        return False
+def _win_error(operation: str) -> OSError:
+    return OSError(ctypes.get_last_error(), f"secure Windows runtime binding {operation} failed")
 
 
-# TheSuperHackers @feature Leex 24/08/2026 Bind each analyzer launch into the installed Zero Hour runtime without replacing retail files. (#TBD)
-@contextmanager
-def bind_runtime_executable(executable: Path, runtime_directory: Path) -> Iterator[RuntimeExecutableBinding]:
-    """Expose a unique hardlink beside runtime data, deleting only the unchanged link we own."""
-    source = _ordinary_file(executable, "configured engine executable")
-    runtime = require_plain_directory_input(runtime_directory, "engine runtime directory")
-    if source.parent == runtime:
-        yield RuntimeExecutableBinding(source, source, False)
-        return
-    source_info = source.stat()
-    runtime_info = runtime.stat()
-    if source_info.st_dev != runtime_info.st_dev:
+def _win_open(path: Path, *, access: int, share: int, directory: bool) -> int:
+    flags = _FILE_FLAG_OPEN_REPARSE_POINT | (_FILE_FLAG_BACKUP_SEMANTICS if directory else 0)
+    handle = _KERNEL32.CreateFileW(str(path), access, share, None, _OPEN_EXISTING, flags, None)
+    if handle in (None, _INVALID_HANDLE_VALUE):
+        raise _win_error(f"open of {path.name}")
+    return int(handle)
+
+
+def _win_close(handle: int) -> None:
+    if not _KERNEL32.CloseHandle(handle):  # pragma: no cover - native API failure
+        raise _win_error("handle close")
+
+
+def _win_identity(handle: int) -> _WindowsFileIdentity:
+    information = _ByHandleFileInformation()
+    if not _KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise _win_error("identity query")
+    return _WindowsFileIdentity(
+        volume_serial=int(information.dwVolumeSerialNumber),
+        file_index=int((information.nFileIndexHigh << 32) | information.nFileIndexLow),
+        attributes=int(information.dwFileAttributes),
+        size=int((information.nFileSizeHigh << 32) | information.nFileSizeLow),
+    )
+
+
+def _win_final_path(handle: int) -> str:
+    path = ctypes.create_unicode_buffer(32768)
+    length = int(_KERNEL32.GetFinalPathNameByHandleW(handle, path, len(path), 0))
+    if length == 0 or length >= len(path):
+        raise _win_error("final-path query")
+    return path.value
+
+
+def _win_expected_path(path: Path) -> str:
+    raw = str(path)
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw[2:]
+    return "\\\\?\\" + raw
+
+
+def _win_require_exact_path(handle: int, path: Path, label: str) -> None:
+    if os.path.normcase(_win_final_path(handle)) != os.path.normcase(_win_expected_path(path)):
+        raise EngineRunConfigurationError(f"{label} handle resolved to an unexpected path")
+
+
+def _win_require_file(identity: _WindowsFileIdentity, label: str) -> None:
+    if identity.attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+        raise EngineRunConfigurationError(f"{label} handle is not an ordinary non-reparse file")
+
+
+def _win_require_directory(identity: _WindowsFileIdentity, label: str) -> None:
+    if not identity.attributes & _FILE_ATTRIBUTE_DIRECTORY or identity.attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise EngineRunConfigurationError(f"{label} handle is not an ordinary non-reparse directory")
+
+
+def _win_mark_delete(handle: int) -> None:
+    disposition = _FileDispositionInfo(True)
+    if not _KERNEL32.SetFileInformationByHandle(
+        handle,
+        _FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
+    ):
+        raise _win_error("owned-link deletion")
+
+
+def _win_same_object(left: _WindowsFileIdentity, right: _WindowsFileIdentity) -> bool:
+    return left.volume_serial == right.volume_serial and left.file_index == right.file_index
+
+
+def _win_require_same_volume(source: _WindowsFileIdentity, runtime: _WindowsFileIdentity) -> None:
+    if source.volume_serial != runtime.volume_serial:
         raise EngineRunConfigurationError(
             "engine executable and engine runtime directory are on different volumes; safe hardlink staging is unavailable"
         )
-    expected_sha256 = _sha256(source)
-    destination = runtime / f"generalszh_replay_analyzer_{uuid4()}.exe"
-    require_no_reparse_components(destination.parent, "engine runtime directory")
+
+
+def _win_open_verified_source(path: Path, *, staged: bool) -> tuple[int, _WindowsFileIdentity]:
+    share = _FILE_SHARE_READ | (_FILE_SHARE_DELETE if staged else 0)
+    access = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES
+    handle = _win_open(path, access=access, share=share, directory=False)
     try:
-        os.link(source, destination)
-    except FileExistsError as error:
-        raise EngineRunConfigurationError("unique runtime executable binding unexpectedly already exists") from error
-    except OSError as error:
-        raise EngineRunConfigurationError(f"could not create exclusive runtime executable binding: {error}") from error
-    bound = False
-    body_failed = False
-    try:
-        if not _safe_same_file(source, destination, expected_sha256):
-            raise EngineRunConfigurationError("runtime executable binding did not retain configured executable identity")
-        bound = True
-        yield RuntimeExecutableBinding(source, destination, True)
+        identity = _win_identity(handle)
+        _win_require_file(identity, "configured engine executable")
+        _win_require_exact_path(handle, path, "configured engine executable")
+        return handle, identity
     except BaseException:
-        body_failed = True
+        _win_close(handle)
         raise
+
+
+def _win_open_verified_runtime(path: Path) -> tuple[int, _WindowsFileIdentity]:
+    handle = _win_open(
+        path,
+        access=_FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        directory=True,
+    )
+    try:
+        identity = _win_identity(handle)
+        _win_require_directory(identity, "engine runtime directory")
+        _win_require_exact_path(handle, path, "engine runtime directory")
+        return handle, identity
+    except BaseException:
+        _win_close(handle)
+        raise
+
+
+def _win_open_staged_lock(path: Path, expected: _WindowsFileIdentity) -> int:
+    handle = _win_open(
+        path,
+        access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE_ACCESS,
+        share=_FILE_SHARE_READ,
+        directory=False,
+    )
+    try:
+        identity = _win_identity(handle)
+        _win_require_file(identity, "staged engine executable")
+        _win_require_exact_path(handle, path, "staged engine executable")
+        if not _win_same_object(identity, expected):
+            raise EngineRunConfigurationError("runtime executable binding did not retain configured executable identity")
+        return handle
+    except BaseException:
+        _win_close(handle)
+        raise
+
+
+def _win_revalidate_source(path: Path, expected: _WindowsFileIdentity) -> None:
+    handle = _win_open(
+        path,
+        access=_FILE_READ_ATTRIBUTES,
+        share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        directory=False,
+    )
+    try:
+        identity = _win_identity(handle)
+        _win_require_file(identity, "configured engine executable")
+        _win_require_exact_path(handle, path, "configured engine executable")
+        if not _win_same_object(identity, expected):
+            raise EngineRunConfigurationError("configured engine executable changed while creating runtime binding")
     finally:
-        # A name alone is never authority to delete: retain a replaced/tampered path for investigation.
-        if bound:
-            if not _safe_same_file(source, destination, expected_sha256):
-                if not body_failed:
-                    raise EngineRunConfigurationError("runtime executable binding changed; refusing to delete an unowned path")
-            else:
+        _win_close(handle)
+
+
+def _win_create_hardlink(source: Path, destination: Path) -> None:
+    if _KERNEL32.CreateHardLinkW(str(destination), str(source), None):
+        return
+    error = ctypes.get_last_error()
+    if error in {80, 183}:
+        raise EngineRunConfigurationError("unique runtime executable binding unexpectedly already exists")
+    raise EngineRunConfigurationError(
+        f"could not create exclusive runtime executable binding: {OSError(error, os.strerror(error))}"
+    )
+
+
+@contextmanager
+def _bind_windows(source: Path, runtime: Path) -> Iterator[RuntimeExecutableBinding]:
+    staged = source.parent != runtime
+    source_handle: int | None = None
+    runtime_handle: int | None = None
+    staged_handle: int | None = None
+    owns_staged_link = False
+    try:
+        runtime_handle, runtime_identity = _win_open_verified_runtime(runtime)
+        source_handle, source_identity = _win_open_verified_source(source, staged=staged)
+        _win_require_same_volume(source_identity, runtime_identity)
+        if not staged:
+            yield RuntimeExecutableBinding(source, source, False)
+            return
+
+        destination = runtime / f"generalszh_replay_analyzer_{uuid4()}.exe"
+        _win_create_hardlink(source, destination)
+        staged_handle = _win_open_staged_lock(destination, source_identity)
+        owns_staged_link = True
+        _win_revalidate_source(source, source_identity)
+        protected_source_handle, protected_source_identity = _win_open_verified_source(source, staged=False)
+        if not _win_same_object(protected_source_identity, source_identity):
+            _win_close(protected_source_handle)
+            raise EngineRunConfigurationError("configured engine executable changed while locking runtime binding")
+        _win_close(source_handle)
+        source_handle = protected_source_handle
+        yield RuntimeExecutableBinding(source, destination, True)
+    finally:
+        try:
+            if owns_staged_link and staged_handle is not None:
                 try:
-                    destination.unlink()
-                except OSError as error:
-                    raise EngineRunConfigurationError(f"could not remove owned runtime executable binding: {error}") from error
+                    _win_mark_delete(staged_handle)
+                finally:
+                    _win_close(staged_handle)
+                    staged_handle = None
+            elif staged_handle is not None:
+                _win_close(staged_handle)
+                staged_handle = None
+        finally:
+            try:
+                if source_handle is not None:
+                    _win_close(source_handle)
+            finally:
+                if runtime_handle is not None:
+                    _win_close(runtime_handle)
+
+
+# TheSuperHackers @fix Leex 24/08/2026 Hold the exact runtime executable object against mutation and delete its owned link by handle. (#TBD)
+@contextmanager
+def bind_runtime_executable(executable: Path, runtime_directory: Path) -> Iterator[RuntimeExecutableBinding]:
+    """Hold one immutable launch object through child settlement and clean up only by identity."""
+    if os.name != "nt":  # pragma: no cover - production runtime binding targets Windows
+        raise EngineRunConfigurationError("secure runtime executable binding is unavailable on this platform")
+    source = _ordinary_file(executable, "configured engine executable")
+    runtime = require_plain_directory_input(runtime_directory, "engine runtime directory")
+    require_no_reparse_components(runtime, "engine runtime directory")
+    with _bind_windows(source, runtime) as binding:
+        yield binding

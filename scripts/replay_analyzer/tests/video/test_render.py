@@ -194,6 +194,7 @@ class _ProcessRunner:
         self.cancellation = cancellation
         self.capture_result = capture_result
         self.inspect_engine_capture = inspect_engine_capture
+        self.mutation_denied = False
 
     def run(self, spec: VideoProcessSpec) -> VideoProcessResult:
         self.specs.append(spec)
@@ -225,7 +226,10 @@ class _ProcessRunner:
         spec.stdout_path.write_bytes(b"")
         spec.stderr_path.write_bytes(b"")
         if self.mutate_after_stage is not None and self.mutate_after_stage[0] == spec.stage:
-            self.mutate_after_stage[1].write_bytes(b"changed executable")
+            try:
+                self.mutate_after_stage[1].write_bytes(b"changed executable")
+            except PermissionError:
+                self.mutation_denied = True
         if self.cancellation is not None and spec.stage == "engine_capture":
             self.cancellation.cancelled = True
         return VideoProcessResult(
@@ -462,7 +466,7 @@ def test_render_removes_staged_engine_after_engine_capture_launch_failure(tmp_pa
     assert len(staged) == 1 and not staged[0].exists()
 
 
-def test_render_detects_replay_or_executable_identity_changes_after_external_stages(tmp_path: Path) -> None:
+def test_render_detects_replay_changes_and_denies_executable_mutation_during_capture(tmp_path: Path) -> None:
     request, camera, commentary = _request(tmp_path)
     service, _, _, _, publisher = _service(
         tmp_path,
@@ -492,9 +496,11 @@ def test_render_detects_replay_or_executable_identity_changes_after_external_sta
         manifest_publisher=publisher,
         uuid_factory=lambda: RUN_ID,
     )
-    with pytest.raises(VideoRenderError, match="immutable input changed"):
-        service.render(request)
-    assert publisher.manifests == []
+    result = service.render(request)
+    assert result.final_video_path.is_file()
+    assert process.mutation_denied is True
+    assert engine.read_bytes() == b"engine"
+    assert len(publisher.manifests) == 1
 
 
 def test_render_rejects_an_injected_camera_plan_for_a_different_authority(tmp_path: Path) -> None:
@@ -595,7 +601,12 @@ def test_cancellation_after_engine_capture_leaves_only_unpublished_stage_artifac
     request, camera, commentary = _request(tmp_path, cancellation=cancellation)
     settings, _, _, _ = _settings(tmp_path)
     stages: list[str] = []
-    process = _ProcessRunner(stages, cancellation=cancellation)
+    staged: list[Path] = []
+
+    def inspect(spec: VideoProcessSpec) -> None:
+        staged.append(Path(spec.argv[0]))
+
+    process = _ProcessRunner(stages, cancellation=cancellation, inspect_engine_capture=inspect)
     publisher = _ManifestPublisher()
     service = VideoRenderService(
         settings=settings,
@@ -612,6 +623,7 @@ def test_cancellation_after_engine_capture_leaves_only_unpublished_stage_artifac
         service.render(request)
 
     assert stages[-1] == "engine_capture"
+    assert len(staged) == 1 and not staged[0].exists()
     assert publisher.manifests == []
     assert not list(settings.video_run_directory.glob("*/final-*.mp4"))
 
