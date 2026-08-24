@@ -523,6 +523,20 @@ def test_replay_user_data_root_is_modern_guarded_and_applied_before_map_discover
     )
 
 
+def test_user_data_path_accessor_has_one_layout_owning_definition(repository_root: Path) -> None:
+    """Catch an inline accessor being linked from a target with a different conditional GlobalData layout."""
+    header = (
+        repository_root / "GeneralsMD/Code/GameEngine/Include/Common/GlobalData.h"
+    ).read_text(encoding="utf-8")
+    source = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "const AsciiString &getPath_UserData() const;" in header
+    assert "getPath_UserData() const {" not in header
+    assert "const AsciiString &GlobalData::getPath_UserData() const" in source
+
+
 def test_replay_user_data_root_rejects_a_maps_subtree_junction_before_playback(
     tmp_path: Path,
     repository_root: Path,
