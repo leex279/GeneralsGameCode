@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 
-from generals_replay_analyzer.presentation import faction_label
+from generals_replay_analyzer.presentation import faction_label, map_label
 from generals_replay_analyzer.report.model import ReportAvailability, ReportQualityIssue, ReportValue, thaw_report_value
 from generals_replay_analyzer.report.query import (
     EvidenceQuery,
@@ -325,7 +325,7 @@ class AnalyticsReportAdapter:
             replay_sha256=document.replay_sha256,
             players=players,
             result=None if selected_player is None else selected_player.result,
-            map_name=graph.identity.map_name,
+            map_name=map_label(graph.identity.map_name),
             patch=graph.identity.patch,
             duration_frames=graph.identity.duration_frames,
             source_mode="deterministic_with_ollama" if ollama.requested else "deterministic_only",

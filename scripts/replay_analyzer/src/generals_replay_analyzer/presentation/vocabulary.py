@@ -146,6 +146,24 @@ def faction_label(identity: str | None) -> str | None:
     return game_label(normalized) if normalized.startswith("Faction") else normalized
 
 
+# TheSuperHackers @fix Leex 24/08/2026 Present map names without leaking engine storage paths or rank tags. (#TBD)
+def map_label(identity: str | None) -> str | None:
+    """Return the evidence-derived map leaf as a readable label without changing its stored identity."""
+
+    if identity is None:
+        return None
+    normalized = identity.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    leaf = normalized.rsplit("/", maxsplit=1)[-1]
+    leaf = re.sub(r"(?i)\.map\Z", "", leaf)
+    leaf = re.sub(r"^\[[^\]]{1,32}\]\s*", "", leaf)
+    readable = re.sub(r"[_-]+", " ", leaf).strip()
+    if not readable:
+        return None
+    return readable.title() if readable == readable.casefold() else readable
+
+
 def feature_label(feature_name: str) -> str:
     """Return a player-facing metric name while retaining honest unknown handling."""
 

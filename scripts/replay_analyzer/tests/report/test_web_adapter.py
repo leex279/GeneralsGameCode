@@ -213,6 +213,32 @@ def test_web_report_does_not_present_an_unresolved_numeric_faction_code(
     assert report.players[0].faction is None
 
 
+def test_web_report_presents_a_readable_map_name_without_rewriting_report_identity(
+    report_database: SeededReportDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published = _publish_graph(report_database)
+    graph = published.service.get_report(
+        FixedReportQuery(published.replay_public_id, published.player_report_id)
+    )
+    raw_name = "userdata/maps/[rank] sand scorpion"
+    monkeypatch.setattr(
+        published.service,
+        "get_report",
+        lambda _query: replace(graph, identity=replace(graph.identity, map_name=raw_name)),
+    )
+
+    report = AnalyticsReportAdapter(published.service).get_report(
+        FixedReportQueryDTO(
+            replay_public_id=published.replay_public_id,
+            report_public_id=published.player_report_id,
+        )
+    )
+
+    assert report.map_name == "Sand Scorpion"
+    assert graph.identity.map_name != report.map_name
+
+
 def test_production_web_adapter_reports_honest_not_generated_state(
     report_database: SeededReportDatabase,
 ) -> None:

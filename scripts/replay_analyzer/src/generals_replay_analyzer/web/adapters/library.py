@@ -25,7 +25,7 @@ from generals_replay_analyzer.db.models import (
     Source,
     StrategyAssessment,
 )
-from generals_replay_analyzer.presentation import faction_label, format_frame, strategy_label
+from generals_replay_analyzer.presentation import faction_label, format_frame, map_label, strategy_label
 from generals_replay_analyzer.watching import (
     RootRegistryError,
     WatchDiscoveryError,
@@ -718,7 +718,9 @@ class AnalyticsLibraryAdapter:
             patch=replay.version_string or None,
             lifecycle_state=replay.lifecycle_state,
             map_public_id=map_row.public_id if map_row is not None else None,
-            map_display_name=(map_row.display_name or replay.map_name) if map_row is not None else replay.map_name,
+            map_display_name=map_label(
+                (map_row.display_name or replay.map_name) if map_row is not None else replay.map_name
+            ),
             players=players,
             sources=(source,) if source is not None else (),
             evidence=(evidence,) if evidence is not None else (),

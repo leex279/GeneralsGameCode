@@ -5,6 +5,7 @@ from generals_replay_analyzer.presentation.vocabulary import (
     feature_label,
     format_frame,
     game_label,
+    map_label,
     reason_label,
 )
 
@@ -32,6 +33,12 @@ def test_faction_label_hides_unresolved_slot_codes_and_names_verified_factions()
     assert faction_label("FactionChinaTankGeneral") == "China Tank General"
     assert faction_label("FactionGLAToxinGeneral") == "GLA Toxin General"
     assert faction_label("GLA") == "GLA"
+
+
+def test_map_label_removes_storage_paths_and_rank_tags_without_changing_named_maps() -> None:
+    assert map_label("userdata/maps/[rank] sand scorpion") == "Sand Scorpion"
+    assert map_label(r"UserData\Maps\Custom_Map.map") == "Custom Map"
+    assert map_label("Tournament Desert") == "Tournament Desert"
 
 
 def test_frame_format_preserves_exact_evidence_location() -> None:

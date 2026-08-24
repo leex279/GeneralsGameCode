@@ -489,6 +489,27 @@ def test_library_and_dashboard_do_not_present_unresolved_numeric_faction_codes(
     assert recent.player_factions == ("leex279", "FOX27 (GLA)")
 
 
+def test_library_and_dashboard_present_a_readable_map_name_without_changing_storage(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    raw_name = "userdata/maps/[rank] sand scorpion"
+    with factory.begin() as session:
+        map_row = session.scalar(select(Map).where(Map.public_id == MAP_ID))
+        assert map_row is not None
+        map_row.display_name = raw_name
+
+    adapter = _adapter(library_database)
+    item = adapter.list_replays(ReplayLibraryQueryDTO(page_size=1)).items[0]
+    recent = adapter.dashboard().recent_replays[0]
+
+    assert item.map_display_name == "Sand Scorpion"
+    assert recent.map_name == "Sand Scorpion"
+    with factory() as session:
+        stored = session.scalar(select(Map.display_name).where(Map.public_id == MAP_ID))
+    assert stored == raw_name
+
+
 def test_dashboard_uses_the_fixed_report_observed_evidence_horizon(
     library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
 ) -> None:

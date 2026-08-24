@@ -40,6 +40,7 @@ from generals_replay_analyzer.identity.workflow import (
     RevisionPrecondition,
     SplitIdentityDraft,
 )
+from generals_replay_analyzer.presentation import map_label
 from generals_replay_analyzer.web.errors import PublicProblem
 from generals_replay_analyzer.web.ports import (
     AvailabilityDTO,
@@ -304,7 +305,7 @@ class AnalyticsPlayersAdapter:
                     opponent_factions=item.opponent_factions,
                     opponent_player_public_ids=item.opponent_player_public_ids,
                     map_public_id=item.map_public_id,
-                    map_display_name=item.map_display_name,
+                    map_display_name=map_label(item.map_display_name),
                     patch=item.patch,
                     start_position=item.start_position,
                     result=item.result,
