@@ -86,6 +86,7 @@ def _verify(tmp_path: Path, payload: str, *, silent: bool = False, final_silent:
         subtitles,
         settings=VideoSettingsV1(width=640, height=360, fps=30, subtitle_mode="track"),
         final_frame=59,
+        logic_frames_per_second=30,
         landmarks=(VerificationLandmarkV1(frame=30, evidence_public_ids=("10000000-0000-4000-8000-000000000001",)),),
     )
     assert captured[0][0] == str(ffprobe)
@@ -158,5 +159,6 @@ def test_verifier_rejects_out_of_horizon_landmark(tmp_path: Path) -> None:
             None,
             settings=VideoSettingsV1(width=640, height=360, fps=30, subtitle_mode="burned"),
             final_frame=59,
+            logic_frames_per_second=30,
             landmarks=(VerificationLandmarkV1(frame=60, evidence_public_ids=("10000000-0000-4000-8000-000000000001",)),),
         )

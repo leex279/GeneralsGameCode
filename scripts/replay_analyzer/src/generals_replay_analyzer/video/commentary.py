@@ -98,6 +98,7 @@ class CommentaryPlanService:
         claims = _claims(report, horizon)
         events = self._deterministic_events(report, camera, claims, horizon)
         plan = CommentaryPlanV1(
+            logic_hz=camera.logic_hz,
             replay_public_id=report.replay_public_id,
             report_public_id=report.replay_wide.document.report_public_id,
             evidence_horizon=camera.authority.evidence_horizon,

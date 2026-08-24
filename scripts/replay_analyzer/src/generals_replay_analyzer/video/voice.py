@@ -54,8 +54,6 @@ def _measure_pcm(path: Path) -> tuple[int, int, int, int]:
         raise NarrationScheduleError(f"voice clip is not a readable PCM WAV: {error}") from error
     if channels != 1 or width not in {1, 2, 3, 4} or rate <= 0 or samples <= 0:
         raise NarrationScheduleError("voice clip must be non-empty mono PCM with a supported sample width")
-    if rate % 30:
-        raise NarrationScheduleError("voice clip sample rate must divide exactly into the 30 Hz logic timeline")
     return channels, width, rate, samples
 
 
@@ -77,8 +75,6 @@ class VoiceClipV1(VideoContract):
 
     @model_validator(mode="after")
     def _require_logic_compatible_pcm(self) -> Self:
-        if self.sample_rate % 30:
-            raise ValueError("voice clip sample rate must divide exactly into the 30 Hz logic timeline")
         return self
 
     @classmethod
@@ -124,7 +120,7 @@ class ScheduledNarrationEventV1(VideoContract):
 
 class NarrationScheduleV1(VideoContract):
     schema_version: Literal[1] = 1
-    logic_hz: Literal[30] = 30
+    logic_hz: Literal[30, 60]
     final_frame: int = Field(ge=0)
     channels: int = Field(ge=1, le=1)
     sample_width_bytes: int = Field(ge=1, le=4)
@@ -205,7 +201,10 @@ class NarrationScheduler:
             )
             prior_end = end_frame
         assert pcm_format is not None
+        if pcm_format[2] % plan.logic_hz:
+            raise NarrationScheduleError("voice clip sample rate must divide exactly into the logic timeline")
         return NarrationScheduleV1(
+            logic_hz=plan.logic_hz,
             final_frame=final_frame,
             channels=pcm_format[0],
             sample_width_bytes=pcm_format[1],
@@ -226,6 +225,8 @@ def render_narration_wav(schedule: NarrationScheduleV1, destination: Path) -> Pa
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = _temporary_path(destination)
+    if schedule.sample_rate % schedule.logic_hz:
+        raise NarrationScheduleError("voice sample rate must divide exactly into the logic timeline")
     samples_per_logic_frame = schedule.sample_rate // schedule.logic_hz
     total_samples = (schedule.final_frame + 1) * samples_per_logic_frame
     cursor = 0

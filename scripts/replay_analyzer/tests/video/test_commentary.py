@@ -52,6 +52,7 @@ def _authority(frame_end: int, *, replay_public_id: str = REPLAY_ID) -> CameraPl
         map_public_id=MAP_ID,
         map_content_sha256="c" * 64,
         evidence_horizon=EvidenceHorizonV1(frame_end=frame_end),
+        logic_frames_per_second=30,
     )
 
 

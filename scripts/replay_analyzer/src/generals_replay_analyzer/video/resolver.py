@@ -24,7 +24,14 @@ class VideoResolutionError(ValueError):
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Validate every worker stage identity through the closed UUID and lowercase SHA contract. (#TBD)
-def _authority_from_payload(replay_id: str, report_id: str, replay_sha256: str, payload: Mapping[str, object], accepted_end: int) -> CameraPlanAuthorityV1:
+def _authority_from_payload(
+    replay_id: str,
+    report_id: str,
+    replay_sha256: str,
+    payload: Mapping[str, object],
+    accepted_end: int,
+    logic_frames_per_second: int,
+) -> CameraPlanAuthorityV1:
     try:
         identities = {name: payload[name] for name in ("telemetry_run_public_id", "telemetry_trace_sha256", "map_public_id", "map_content_sha256")}
         if any(type(value) is not str for value in identities.values()):
@@ -34,6 +41,7 @@ def _authority_from_payload(replay_id: str, report_id: str, replay_sha256: str, 
             telemetry_run_public_id=cast(str, identities["telemetry_run_public_id"]), telemetry_trace_sha256=cast(str, identities["telemetry_trace_sha256"]),
             map_public_id=cast(str, identities["map_public_id"]), map_content_sha256=cast(str, identities["map_content_sha256"]),
             evidence_horizon=EvidenceHorizonV1(frame_end=accepted_end),
+            logic_frames_per_second=logic_frames_per_second,
         )
     except (KeyError, TypeError, ValidationError) as error:
         raise VideoResolutionError("map scene authority identities are invalid") from error
@@ -66,9 +74,16 @@ class VideoRequestResolver:
             report_id = values["report_public_id"]
             horizon = values["evidence_horizon"]
             preview = values["diagnostic_preview"]
+            logic_frames_per_second = values["logic_frames_per_second"]
         except KeyError as error:
             raise VideoResolutionError("video job authority is incomplete") from error
-        if not isinstance(replay_id, str) or not isinstance(report_id, str) or horizon not in {"complete", "partial"} or type(preview) is not bool:
+        if (
+            not isinstance(replay_id, str)
+            or not isinstance(report_id, str)
+            or horizon not in {"complete", "partial"}
+            or type(preview) is not bool
+            or logic_frames_per_second not in {30, 60}
+        ):
             raise VideoResolutionError("video job authority is invalid")
         graph = self._reports.get_report(FixedReportQuery(replay_id, report_id))
         with self._sessions() as session:
@@ -94,5 +109,7 @@ class VideoRequestResolver:
             raise VideoResolutionError("production cast requires complete telemetry horizon")
         if horizon == "partial" and not preview:
             raise VideoResolutionError("partial cast requires diagnostic preview")
-        authority = _authority_from_payload(replay_id, report_id, replay.sha256, payload, accepted_end)
+        authority = _authority_from_payload(
+            replay_id, report_id, replay.sha256, payload, accepted_end, logic_frames_per_second
+        )
         return VideoRenderRequest(authority=authority, report=graph, scene=scene, replay_path=replay_path)

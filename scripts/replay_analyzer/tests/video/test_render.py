@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import wave
@@ -28,6 +29,7 @@ from generals_replay_analyzer.video.contracts import (
 )
 from generals_replay_analyzer.video.process import VideoProcessError, VideoProcessResult, VideoProcessSpec
 from generals_replay_analyzer.video.render import (
+    MediaVerifier,
     RenderManifestInput,
     VideoRenderCancelled,
     VideoRenderError,
@@ -51,6 +53,10 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_media_verifier_protocol_requires_logic_timebase() -> None:
+    assert "logic_frames_per_second" in inspect.signature(MediaVerifier.verify).parameters
+
+
 def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
     return CameraPlanAuthorityV1(
         replay_public_id=REPLAY_ID,
@@ -61,6 +67,7 @@ def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
         map_public_id=MAP_ID,
         map_content_sha256="2" * 64,
         evidence_horizon=EvidenceHorizonV1(frame_end=59),
+        logic_frames_per_second=30,
     )
 
 
@@ -96,6 +103,7 @@ def _camera(authority: CameraPlanAuthorityV1) -> CameraPlanV1:
 
 def _commentary(authority: CameraPlanAuthorityV1) -> CommentaryPlanV1:
     return CommentaryPlanV1(
+        logic_hz=authority.logic_frames_per_second,
         replay_public_id=REPLAY_ID,
         report_public_id=REPORT_ID,
         evidence_horizon=authority.evidence_horizon,
@@ -259,6 +267,7 @@ class _Verifier:
         *,
         settings: VideoSettingsV1,
         final_frame: int,
+        logic_frames_per_second: int,
         landmarks: tuple[VerificationLandmarkV1, ...],
     ) -> VerifiedMediaV1:
         self.stages.append("verify")
@@ -269,7 +278,7 @@ class _Verifier:
             final_video_sha256=_sha256(final_video),
             narration_sha256="f" * 64 if self.wrong_auxiliary_hash else _sha256(narration_wav),
             subtitle_sha256=("e" * 64 if self.wrong_auxiliary_hash and subtitles is not None else _sha256(subtitles) if subtitles is not None else None),
-            expected_duration_seconds=(final_frame + 1) / 30.0,
+            expected_duration_seconds=(final_frame + 1) / logic_frames_per_second,
             observed=ObservedVideoV1(
                 codec_name="h264",
                 pixel_format="yuv420p",
@@ -277,8 +286,8 @@ class _Verifier:
                 height=settings.height,
                 fps_numerator=settings.fps,
                 fps_denominator=1,
-                frame_count=(final_frame + 1) * settings.fps // 30,
-                duration_seconds=(final_frame + 1) / 30.0,
+                frame_count=(final_frame + 1) * settings.fps // logic_frames_per_second,
+                duration_seconds=(final_frame + 1) / logic_frames_per_second,
                 audio_codec_name="aac",
                 audio_sample_rate=30_000,
                 audio_channels=1,

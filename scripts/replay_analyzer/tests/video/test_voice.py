@@ -48,6 +48,7 @@ def _event(event_id: str, start: int, end: int, text: str) -> CommentaryEventV1:
 
 def _plan(*events: CommentaryEventV1, final_frame: int = 299) -> CommentaryPlanV1:
     return CommentaryPlanV1(
+        logic_hz=30,
         replay_public_id=REPLAY_ID,
         report_public_id=REPORT_ID,
         evidence_horizon=EvidenceHorizonV1(frame_end=final_frame),
@@ -82,6 +83,17 @@ def test_scheduler_uses_measured_samples_and_exact_logic_frame_conversion(tmp_pa
     assert schedule.events[0].clip.provider_sha256 == hashlib.sha256(b"fixture").hexdigest()
     assert schedule.events[0].clip.voice_sha256 == hashlib.sha256(b"Fixture Voice").hexdigest()
     assert schedule.events[0].clip.clip_sha256 == hashlib.sha256((tmp_path / "first.wav").read_bytes()).hexdigest()
+
+
+def test_scheduler_uses_sixty_hz_logic_timebase(tmp_path: Path) -> None:
+    event = _event("50000000-0000-4000-8000-000000000003", 0, 60, "Half second")
+    clip = _clip(event, tmp_path / "sixty.wav", 24_000)
+    plan = _plan(event, final_frame=119).model_copy(update={"logic_hz": 60})
+
+    schedule = NarrationScheduler().schedule(plan, (clip,), final_frame=119)
+
+    assert schedule.logic_hz == 60
+    assert (schedule.events[0].start_frame, schedule.events[0].end_frame) == (0, 29)
 
 
 def test_scheduler_rejects_clips_that_cannot_fit_without_crossing_latest_end(tmp_path: Path) -> None:

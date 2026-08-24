@@ -23,5 +23,5 @@ def test_authority_payload_rejects_noncanonical_uuid_and_uppercase_sha() -> None
                 "telemetry_trace_sha256": "b" * 64,
                 "map_public_id": "123e4567-e89b-42d3-a456-426614174003",
                 "map_content_sha256": "c" * 64,
-            }, 10,
+            }, 10, 30,
         )

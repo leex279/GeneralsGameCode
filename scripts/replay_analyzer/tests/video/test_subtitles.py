@@ -33,6 +33,7 @@ def test_webvtt_uses_scheduled_frame_windows_and_subtitle_copy(tmp_path: Path) -
         camera_segment_id="40000000-0000-4000-8000-000000000001",
     )
     plan = CommentaryPlanV1(
+        logic_hz=30,
         replay_public_id="10000000-0000-4000-8000-000000000001",
         report_public_id="20000000-0000-4000-8000-000000000001",
         evidence_horizon=EvidenceHorizonV1(frame_end=120),

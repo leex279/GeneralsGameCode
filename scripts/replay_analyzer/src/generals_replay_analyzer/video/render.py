@@ -97,6 +97,7 @@ class MediaVerifier(Protocol):
         *,
         settings: VideoSettingsV1,
         final_frame: int,
+        logic_frames_per_second: int,
         landmarks: tuple[VerificationLandmarkV1, ...],
     ) -> VerifiedMediaV1: ...
 
@@ -276,7 +277,7 @@ def _ffmpeg_filter_path(path: Path) -> str:
     return value
 
 
-def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int) -> NativeCaptureResultV1:
+def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int, logic_frames_per_second: int) -> NativeCaptureResultV1:
     sidecar = _require_ordinary_file(path, "native capture result")
     try:
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -284,7 +285,12 @@ def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise VideoRenderError("native capture result is not a valid successful closed record") from error
     expected_logic_frames = final_frame + 1
-    expected_presentation_frames = expected_logic_frames * (settings.fps // 30)
+    if type(logic_frames_per_second) is not int or logic_frames_per_second not in (30, 60):
+        raise ValueError("logic_frames_per_second must be 30 or 60")
+    presentation_numerator = expected_logic_frames * settings.fps
+    if presentation_numerator % logic_frames_per_second:
+        raise VideoRenderError("output FPS must divide exactly into the authoritative logic duration")
+    expected_presentation_frames = presentation_numerator // logic_frames_per_second
     if (
         (result.requested_width, result.requested_height) != (settings.width, settings.height)
         or (result.actual_width, result.actual_height) != (settings.width, settings.height)
@@ -368,8 +374,9 @@ class VideoRenderService:
             or commentary.replay_public_id != request.authority.replay_public_id
             or commentary.report_public_id != request.authority.report_public_id
             or commentary.evidence_horizon != request.authority.evidence_horizon
+            or commentary.logic_hz != camera.logic_hz
         ):
-            raise VideoRenderError("commentary plan authority differs from the fixed render request")
+            raise VideoRenderError("commentary plan authority or logic timebase differs from the fixed render request")
         commentary_plan_path = _write_exclusive(
             run_directory / "commentary-plan-v1.json",
             commentary.canonical_json().encode("utf-8"),
@@ -431,7 +438,12 @@ class VideoRenderService:
             gameplay_path.with_name(f"{gameplay_path.name}.capture-result.json"),
             "native capture result",
         )
-        _load_capture_result(capture_result_path, settings, request.authority.evidence_horizon.frame_end)
+        _load_capture_result(
+            capture_result_path,
+            settings,
+            request.authority.evidence_horizon.frame_end,
+            request.authority.logic_frames_per_second,
+        )
         immutable.update(self._snapshot((gameplay_path, capture_result_path)))
         self._check_cancelled(request)
 
@@ -448,6 +460,7 @@ class VideoRenderService:
                     mux_candidate,
                     settings,
                     request.authority.evidence_horizon.frame_end,
+                    request.authority.logic_frames_per_second,
                 ),
                 cwd=ffmpeg.parent,
                 stdout_path=run_directory / "mux.stdout.log",
@@ -469,6 +482,7 @@ class VideoRenderService:
             subtitles_path if settings.subtitle_mode == "track" else None,
             settings=settings,
             final_frame=request.authority.evidence_horizon.frame_end,
+            logic_frames_per_second=request.authority.logic_frames_per_second,
             landmarks=_landmarks(camera),
         )
         self._assert_immutable(immutable)
@@ -612,8 +626,13 @@ class VideoRenderService:
         destination: Path,
         settings: VideoSettingsV1,
         final_frame: int,
+        logic_frames_per_second: int,
     ) -> tuple[str, ...]:
-        duration = f"{(final_frame + 1) / 30.0:.9f}"
+        if logic_frames_per_second not in (30, 60):
+            raise ValueError("logic_frames_per_second must be 30 or 60")
+        numerator = (final_frame + 1) * 1_000_000_000
+        scaled = (numerator + logic_frames_per_second // 2) // logic_frames_per_second
+        duration = f"{scaled // 1_000_000_000}.{scaled % 1_000_000_000:09d}"
         common = (
             str(ffmpeg),
             "-nostdin",

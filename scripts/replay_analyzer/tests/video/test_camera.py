@@ -41,6 +41,7 @@ def _authority(**updates: object) -> CameraPlanAuthorityV1:
         "map_public_id": MAP_ID,
         "map_content_sha256": "c" * 64,
         "evidence_horizon": EvidenceHorizonV1(frame_start=0, frame_end=300),
+        "logic_frames_per_second": 30,
     }
     values.update(updates)
     return CameraPlanAuthorityV1.model_validate(values)

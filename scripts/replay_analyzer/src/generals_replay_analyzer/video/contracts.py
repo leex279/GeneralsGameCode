@@ -73,6 +73,7 @@ class CameraPlanAuthorityV1(VideoContract):
     map_public_id: PublicId
     map_content_sha256: Sha256
     evidence_horizon: EvidenceHorizonV1
+    logic_frames_per_second: Literal[30, 60]
 
 
 CameraFocusKind = Literal[
@@ -122,12 +123,16 @@ class CameraSegmentV1(VideoContract):
 
 class CameraPlanV1(VideoContract):
     schema_version: Literal[1] = 1
-    logic_hz: Literal[30] = 30
+    logic_hz: Literal[30, 60] | None = None
     authority: CameraPlanAuthorityV1
     segments: tuple[CameraSegmentV1, ...] = Field(min_length=1, max_length=20_000)
 
     @model_validator(mode="after")
     def _validate_timeline(self) -> Self:
+        if self.logic_hz is None:
+            object.__setattr__(self, "logic_hz", self.authority.logic_frames_per_second)
+        elif self.logic_hz != self.authority.logic_frames_per_second:
+            raise ValueError("camera plan logic timebase must match its authority")
         ordered = tuple(sorted(self.segments, key=lambda item: (item.start_frame, item.segment_id)))
         if ordered != self.segments:
             raise ValueError("camera segments must already be deterministically ordered")
@@ -191,7 +196,7 @@ class CommentaryEventV1(VideoContract):
 
 class CommentaryPlanV1(VideoContract):
     schema_version: Literal[1] = 1
-    logic_hz: Literal[30] = 30
+    logic_hz: Literal[30, 60]
     replay_public_id: PublicId
     report_public_id: PublicId
     evidence_horizon: EvidenceHorizonV1

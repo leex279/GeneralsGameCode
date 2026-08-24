@@ -35,6 +35,7 @@ def _authority() -> CameraPlanAuthorityV1:
         map_public_id=MAP_ID,
         map_content_sha256="c" * 64,
         evidence_horizon=EvidenceHorizonV1(frame_start=0, frame_end=300),
+        logic_frames_per_second=30,
     )
 
 
@@ -125,3 +126,19 @@ def test_video_settings_accept_only_bounded_product_modes() -> None:
         VideoSettingsV1(width=1920, height=1080, fps=24, subtitle_mode="track")
     with pytest.raises(ValidationError):
         VideoSettingsV1(width=40, height=40, fps=30, subtitle_mode="burned")
+
+
+def test_authority_propagates_sixty_logic_frames_per_second() -> None:
+    authority = _authority().model_copy(update={"logic_frames_per_second": 60})
+    plan = CameraPlanV1(authority=authority, segments=(_segment(SEGMENT_A, 0, 300),))
+
+    assert authority.logic_frames_per_second == 60
+    assert plan.logic_hz == 60
+
+
+def test_authority_requires_an_explicit_logic_timebase() -> None:
+    payload = _authority().model_dump(mode="python")
+    payload.pop("logic_frames_per_second")
+
+    with pytest.raises(ValidationError, match="logic_frames_per_second"):
+        CameraPlanAuthorityV1.model_validate(payload)

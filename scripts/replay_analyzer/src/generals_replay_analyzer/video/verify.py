@@ -199,6 +199,7 @@ class MediaVerifier:
         *,
         settings: VideoSettingsV1,
         final_frame: int,
+        logic_frames_per_second: int,
         landmarks: tuple[VerificationLandmarkV1, ...],
     ) -> VerifiedMediaV1:
         if type(settings) is not VideoSettingsV1 or type(final_frame) is not int or final_frame < 0:
@@ -215,8 +216,10 @@ class MediaVerifier:
         narration_sample_rate, _ = _require_pcm_signal(narration, "narration")
         document = self._probe(final)
         observed = self._observed(document)
-        expected_duration = (final_frame + 1) / 30.0
-        self._validate(observed, settings, expected_duration, final_frame, narration_sample_rate)
+        if logic_frames_per_second not in (30, 60):
+            raise ValueError("logic_frames_per_second must be 30 or 60")
+        expected_duration = (final_frame + 1) / logic_frames_per_second
+        self._validate(observed, settings, expected_duration, final_frame, narration_sample_rate, logic_frames_per_second)
         self._validate_final_audio(final, narration_sample_rate, expected_duration, settings.fps)
         return VerifiedMediaV1(
             final_video_sha256=_sha256(final),
@@ -316,6 +319,7 @@ class MediaVerifier:
         expected_duration: float,
         final_frame: int,
         narration_sample_rate: int,
+        logic_frames_per_second: int,
     ) -> None:
         if observed.codec_name != "h264":
             raise MediaVerificationError("final video must use H.264")
@@ -325,7 +329,10 @@ class MediaVerifier:
             raise MediaVerificationError("final video dimensions differ from fixed settings")
         if observed.fps_numerator != settings.fps * observed.fps_denominator:
             raise MediaVerificationError("final video FPS differs from fixed settings")
-        expected_frames = (final_frame + 1) * settings.fps // 30
+        numerator = (final_frame + 1) * settings.fps
+        if numerator % logic_frames_per_second:
+            raise MediaVerificationError("output FPS must divide exactly into the authoritative logic duration")
+        expected_frames = numerator // logic_frames_per_second
         if observed.frame_count != expected_frames:
             raise MediaVerificationError("final video frame count differs from authoritative duration")
         tolerance = 1.0 / settings.fps
