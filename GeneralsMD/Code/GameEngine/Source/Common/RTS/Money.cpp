@@ -113,8 +113,9 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	if (m_replayAnalyzerHasPlayerIndex)
 	{
-		// TheSuperHackers @feature Leex 20/08/2026 Observe exact engine deposit arithmetic and income tracking at the central mutation. (#TBD)
-		ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money, trackIncome);
+		// TheSuperHackers @feature Leex 23/08/2026 Preserve the original unsigned tracked deposit and its exact engine income bucket. (#0)
+		ReplayEconomy::observeCashChanged(m_playerIndex, replayAnalyzerBefore, m_money,
+			trackIncome, amountToDeposit, m_currentBucket);
 	}
 #endif
 
@@ -170,6 +171,13 @@ void Money::updateIncomeBucket()
 		m_currentBucket = nextBucket;
 		m_incomeBuckets[m_currentBucket] = 0u;
 	}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+	if (m_replayAnalyzerHasPlayerIndex)
+	{
+		// TheSuperHackers @feature Leex 23/08/2026 Observe completion only after this Money instance applies its normal bucket rotation. (#0)
+		ReplayEconomy::observeIncomeBucketUpdated(m_playerIndex, frame);
+	}
+#endif
 }
 
 // ------------------------------------------------------------------------------------------------

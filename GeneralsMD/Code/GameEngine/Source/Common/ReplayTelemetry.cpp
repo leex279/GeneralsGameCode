@@ -750,6 +750,8 @@ void ReplayTelemetry::finish(UnsignedInt finalFrame, ReplayTelemetryTerminationR
 		return;
 	}
 
+	// TheSuperHackers @feature Leex 23/08/2026 Preserve a final engine income-rate sample before terminal outcome publication. (#0)
+	ReplayEconomy::emitTerminalCashPerMinuteSnapshot(finalFrame);
 	// TheSuperHackers @feature Leex 20/08/2026 Emit exactly one authoritative outcome immediately before trace completion. (#TBD)
 	ReplayCombat::emitMatchOutcome(finalFrame, reason);
 	flushOutput();

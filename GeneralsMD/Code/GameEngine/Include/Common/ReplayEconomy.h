@@ -57,7 +57,11 @@ public:
 	static void reset();
 	static void initialize();
 	static void observeMoneyAttached(Int playerIndex, UnsignedInt balance);
-	static void observeCashChanged(Int playerIndex, UnsignedInt before, UnsignedInt after, Bool trackIncome);
+	// TheSuperHackers @feature Leex 23/08/2026 Export exact engine income-bucket provenance and aggregate rates. (#0)
+	static void observeCashChanged(Int playerIndex, UnsignedInt before, UnsignedInt after, Bool trackIncome,
+		UnsignedInt trackedIncomeAmount = 0, UnsignedInt incomeBucketIndex = 0);
+	static void observeIncomeBucketUpdated(Int playerIndex, UnsignedInt frame);
+	static void emitTerminalCashPerMinuteSnapshot(UnsignedInt frame);
 	static void observeProductionQueued(const Object *producer, Int engineProductionId,
 		const AsciiString &templateName, UnsignedInt queuePosition, UnsignedInt cost, Int quantity);
 	static void observeProductionCancelled(const Object *producer, Int engineProductionId);
@@ -82,6 +86,7 @@ private:
 	static void popCashReason();
 	static void pushSciencePurchaseSuppression();
 	static void popSciencePurchaseSuppression();
+	static void emitCashPerMinuteSnapshot(UnsignedInt frame);
 };
 
 #endif // defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
