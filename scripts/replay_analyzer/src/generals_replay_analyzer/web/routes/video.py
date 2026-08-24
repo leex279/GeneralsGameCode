@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import RedirectResponse, Response, StreamingResponse
 
 from generals_replay_analyzer.web.dependencies import application_port
 from generals_replay_analyzer.web.errors import PublicProblem, problem_response
@@ -73,3 +73,20 @@ def video_detail(
         feature_shell(page_title="Replay cast | Generals Replay Analyzer", current_path="/jobs", availability=detail.availability),
         context={"video": video_detail_view(detail)},
     )
+
+
+@router.get("/video/{job_public_id}/download", summary="Download verified replay cast")
+@router.get("/video/{job_public_id}/manifest", summary="Download verified replay cast manifest")
+def download_video_media(
+    request: Request, job_public_id: str,
+    port: Annotated[WebApplicationPort, Depends(application_port, scope="function")],
+) -> Response:
+    try:
+        public_id = _public_id(job_public_id)
+    except ValueError:
+        return problem_response(422, title="Invalid video ID", code="invalid_video_id", detail="Video ID is invalid")
+    reader = getattr(port, "_video", None)
+    if reader is None or not hasattr(reader, "read_verified_media"):
+        return problem_response(503, title="Video unavailable", code="video_adapter_pending", detail="Replay video production is unavailable")
+    content, media_type, filename = reader.read_verified_media(public_id, request.url.path.endswith("/manifest"))
+    return StreamingResponse(iter((content,)), media_type=media_type, headers={"content-disposition": f'attachment; filename="{filename}"', "x-content-type-options": "nosniff"})
