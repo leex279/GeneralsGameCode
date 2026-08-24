@@ -120,6 +120,7 @@ class ActivityExtractor:
             "coverage_manifest": _CANONICAL_MANIFEST,
             "deduplication_window_frames": DEDUPLICATION_WINDOW_FRAMES,
             "denominator_frames": context.final_frame,
+            "logic_frames_per_second": context.logic_frames_per_second,
             "policy_version": POLICY_VERSION,
             "suppressed_count": suppressed,
         }
@@ -150,6 +151,18 @@ class ActivityExtractor:
                     details=details,
                 )
             )
+        elif context.logic_frames_per_second is None:
+            values.append(
+                unavailable_value(
+                    "activity.effective_actions_per_minute",
+                    context.scope,
+                    window,
+                    "missing_logic_timebase",
+                    BASE_REGISTRY,
+                    input_evidence=evidence,
+                    details=details,
+                )
+            )
         elif (
             context.final_frame is None
             or len(terminal) != 1
@@ -168,7 +181,8 @@ class ActivityExtractor:
                 )
             )
         else:
-            rate = 60.0 * len(accepted) / (context.final_frame / 30.0)
+            # TheSuperHackers @fix Leex 24/08/2026 Derive effective APM from the replay's authoritative logic clock. (#TBD)
+            rate = 60.0 * len(accepted) / (context.final_frame / context.logic_frames_per_second)
             values.append(
                 complete_value(
                     "activity.effective_actions_per_minute",

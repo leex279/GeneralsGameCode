@@ -57,6 +57,8 @@ def test_economy_preserves_exact_signed_sums_terminal_balance_rate_and_source_sh
     assert values["economy.tracked_income_total"].raw_value == 125.5  # type: ignore[attr-defined]
     assert values["economy.supply_collected_total"].raw_value == 300.125  # type: ignore[attr-defined]
     assert values["economy.supply_collection_rate"].raw_value == 300.125 * 1800.0 / 60.0  # type: ignore[attr-defined]
+    high_fps = _values(player_context(*context.observed, logic_frames_per_second=60))
+    assert high_fps["economy.supply_collection_rate"].raw_value == 300.125 * 3600.0 / 60.0  # type: ignore[attr-defined]
     assert values["economy.cash_balance_final"].raw_value == 777  # type: ignore[attr-defined]
     assert values["economy.supply_source_resolved_share"].raw_value == 0.5  # type: ignore[attr-defined]
     assert "ideal" not in str(thaw_canonical(values["economy.supply_collection_rate"].details)).lower()  # type: ignore[attr-defined]

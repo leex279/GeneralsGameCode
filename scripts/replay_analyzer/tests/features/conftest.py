@@ -41,6 +41,7 @@ def player_context() -> Callable[..., FeatureContext]:
         *items: ObservedEvidence,
         telemetry_status: str | None = "succeeded",
         final_frame: int | None = 300,
+        logic_frames_per_second: int | None = 30,
         catalog_identity: str | None = "catalog-v1:fixture",
         settings: object = (),
     ) -> FeatureContext:
@@ -55,6 +56,7 @@ def player_context() -> Callable[..., FeatureContext]:
             parser_completion_status="complete",
             telemetry_status=telemetry_status,
             final_frame=final_frame,
+            logic_frames_per_second=logic_frames_per_second,
             catalog_identity=catalog_identity,
             observed=items,
             settings=settings,

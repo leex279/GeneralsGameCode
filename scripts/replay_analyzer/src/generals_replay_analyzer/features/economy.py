@@ -143,6 +143,18 @@ class EconomyExtractor:
             complete_value("economy.cash_per_minute_peak", max(item["cash_per_minute"] for item in series), context.scope, window, refs, BASE_REGISTRY),
             complete_value("economy.cash_per_minute_series", series, context.scope, window, refs, BASE_REGISTRY),
         ]
+        if context.logic_frames_per_second is None:
+            values.append(
+                unavailable_value(
+                    "economy.cash_per_minute_reconciled_share",
+                    context.scope,
+                    window,
+                    "missing_logic_timebase",
+                    BASE_REGISTRY,
+                    input_evidence=tuple(sorted({item.ref for item in (*cash_events, *usable)}, key=lambda ref: (ref.source_key, ref.public_id))),
+                )
+            )
+            return tuple(values)
         bucket_values = [0] * 60
         current_bucket = 0
         complete_provenance = True
@@ -161,7 +173,7 @@ class EconomyExtractor:
                 if item.frame is None or type(amount) is not int or type(bucket) is not int or not 0 <= bucket < 60:
                     complete_provenance = False
                     continue
-                target = (item.frame // 30) % 60
+                target = (item.frame // context.logic_frames_per_second) % 60
                 if bucket == target and current_bucket != target:
                     bucket_values[target] = 0
                     current_bucket = target
@@ -171,7 +183,7 @@ class EconomyExtractor:
                 bucket_values[bucket] = (bucket_values[bucket] + amount) % (2**32)
                 continue
             assert item.frame is not None
-            target = (item.frame // 30) % 60
+            target = (item.frame // context.logic_frames_per_second) % 60
             if current_bucket != target:
                 bucket_values[target] = 0
                 current_bucket = target
@@ -224,8 +236,21 @@ class EconomyExtractor:
                     details={"first_frame": events[0].frame, "last_frame": events[-1].frame, "duration_frames": duration},
                 )
             )
+        elif context.logic_frames_per_second is None:
+            values.append(
+                unavailable_value(
+                    names[1],
+                    context.scope,
+                    window,
+                    "missing_logic_timebase",
+                    BASE_REGISTRY,
+                    input_evidence=refs,
+                    details={"first_frame": events[0].frame, "last_frame": events[-1].frame, "duration_frames": duration},
+                )
+            )
         else:
-            rate = total * 1800.0 / duration
+            # TheSuperHackers @fix Leex 24/08/2026 Measure supply rate against the replay's authoritative logic clock. (#TBD)
+            rate = total * context.logic_frames_per_second * 60.0 / duration
             values.append(
                 complete_value(
                     names[1],

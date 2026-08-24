@@ -42,6 +42,7 @@ class FeatureContext:
     parser_completion_status: str | None
     telemetry_status: str | None
     final_frame: int | None
+    logic_frames_per_second: Literal[30, 60] | None
     catalog_identity: str | None
     observed: tuple[ObservedEvidence, ...]
     settings: CanonicalValue
@@ -55,6 +56,8 @@ class FeatureContext:
             raise ValueError("replay sha256 must be lower-case hexadecimal")
         if self.final_frame is not None and (type(self.final_frame) is not int or self.final_frame < 0):
             raise ValueError("final_frame must be nonnegative")
+        if self.logic_frames_per_second not in (None, 30, 60):
+            raise ValueError("logic_frames_per_second must be 30, 60, or unavailable")
         if self.scope.scope_type == "player" and self.replay_player_public_id != self.scope.scope_key:
             raise ValueError("player context scope mismatch")
         versions = tuple(sorted(self.observation_schema_versions))

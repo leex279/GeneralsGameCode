@@ -1,6 +1,7 @@
 """Closed effective-APM and observed state feature tests."""
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from generals_replay_analyzer.features.activity import ActivityExtractor
 from generals_replay_analyzer.features.context import FeatureContext
@@ -125,6 +126,8 @@ def test_activity_uses_exact_closed_manifest_dedup_policy_and_source_grounded_st
     values = _values(context)
     assert values["activity.supported_order_action_count"].raw_value == 3  # type: ignore[attr-defined]
     assert values["activity.effective_actions_per_minute"].raw_value == 18.0  # type: ignore[attr-defined]
+    high_fps_values = _values(replace(context, logic_frames_per_second=60))
+    assert high_fps_values["activity.effective_actions_per_minute"].raw_value == 36.0  # type: ignore[attr-defined]
     assert thaw_canonical(values["activity.supported_order_coverage"].raw_value) == EXPECTED_ORDER_COVERAGE  # type: ignore[attr-defined]
     details = thaw_canonical(values["activity.effective_actions_per_minute"].details)  # type: ignore[attr-defined]
     assert details["policy_version"] == "effective-apm-policy-v1"

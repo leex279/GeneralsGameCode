@@ -29,6 +29,7 @@ def _context(*, observed: tuple[ObservedEvidence, ...], settings: object = ()) -
         parser_completion_status="complete",
         telemetry_status="succeeded",
         final_frame=300,
+        logic_frames_per_second=30,
         catalog_identity="catalog-v1:abc",
         observed=observed,
         settings=settings,
@@ -53,6 +54,7 @@ def test_cache_identity_changes_for_every_semantic_input_and_version() -> None:
     variants = (
         replace(base, replay_sha256="b" * 64),
         replace(base, final_frame=301),
+        replace(base, logic_frames_per_second=60),
         replace(base, catalog_identity="catalog-v1:def"),
         replace(base, settings=(("policy", "v2"),)),
         replace(base, observed=(replace(item, facts={"amount": 1.2500000000001}),)),
@@ -95,6 +97,8 @@ def test_context_rejects_scope_schema_and_terminal_shape_and_canonicalizes_sets(
         replace(base, cache_schema="wrong")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="final_frame"):
         replace(base, final_frame=-1)
+    with pytest.raises(ValueError, match="logic_frames_per_second"):
+        replace(base, logic_frames_per_second=45)
     with pytest.raises(ValueError, match="schema family"):
         replace(base, observation_schema_versions=(("telemetry", "v2"), ("telemetry", "v2")))
     assert canonical_json({"values": {3, 1, 2}}) == '{"values":[1,2,3]}'

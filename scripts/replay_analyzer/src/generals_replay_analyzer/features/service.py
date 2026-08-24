@@ -128,6 +128,19 @@ def _schema_label(source_kind: str, schema_version: int) -> str:
     return f"{source_kind}-v{schema_version}"
 
 
+def _logic_frames_per_second(telemetry: TelemetryRun | None) -> Literal[30, 60] | None:
+    if telemetry is None:
+        return None
+    settings = _mapping(telemetry.settings_json)
+    fps = settings.get("logic_frames_per_second")
+    source = settings.get("logic_timebase_source")
+    if fps in (30, 60) and source == "engine_manifest":
+        return cast(Literal[30, 60], fps)
+    if telemetry.schema_version == 1 and fps == 30 and source == "historical_v1_contract":
+        return 30
+    return None
+
+
 def _require_strict_canonical_tree(value: object) -> None:
     if value is None or type(value) in (bool, int, str):
         return
@@ -313,6 +326,8 @@ class FeatureExtractionService:
                 parser_completion_status=None if parser is None else parser.completion_status,
                 telemetry_status=None if telemetry is None else telemetry.status,
                 final_frame=None if telemetry is None else telemetry.final_frame,
+                # TheSuperHackers @fix Leex 24/08/2026 Bind time-derived features to persisted engine clock authority. (#TBD)
+                logic_frames_per_second=_logic_frames_per_second(telemetry),
                 catalog_identity=catalog_identity,
                 observed=tuple(observations),
                 settings=request.settings,
