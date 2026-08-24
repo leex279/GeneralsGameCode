@@ -86,3 +86,104 @@ def test_economy_keeps_observed_zero_distinct_from_unavailable_and_rejects_zero_
 
     missing = _values(player_context(telemetry_status=None))
     assert all(value.raw_value is None and value.quality_reason == "missing_successful_telemetry" for value in missing.values())  # type: ignore[attr-defined]
+
+
+def test_economy_folds_projected_cash_per_minute_snapshots_and_income_buckets(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    context = player_context(
+        observed(
+            public_id="00000000-0000-4000-8000-000000000271",
+            source_key="telemetry:cash:bucket-0",
+            frame=29,
+            event_type="cash_changed",
+            facts={
+                "track_income": True,
+                "tracked_income_amount": 100,
+                "income_bucket_index": 0,
+                "replay_player_public_id": player,
+            },
+        ),
+        observed(
+            public_id="00000000-0000-4000-8000-000000000272",
+            source_key="telemetry:cpm:30",
+            frame=30,
+            event_type="cash_per_minute_snapshot",
+            facts={"cash_per_minute": 100, "replay_player_public_id": player},
+        ),
+        observed(
+            public_id="00000000-0000-4000-8000-000000000273",
+            source_key="telemetry:cash:bucket-1",
+            frame=59,
+            event_type="cash_changed",
+            facts={
+                "track_income": True,
+                "tracked_income_amount": 50,
+                "income_bucket_index": 1,
+                "replay_player_public_id": player,
+            },
+        ),
+        observed(
+            public_id="00000000-0000-4000-8000-000000000274",
+            source_key="telemetry:cpm:60",
+            frame=60,
+            event_type="cash_per_minute_snapshot",
+            facts={"cash_per_minute": 150, "replay_player_public_id": player},
+        ),
+    )
+
+    values = _values(context)
+    assert values["economy.cash_per_minute_latest"].raw_value == 150  # type: ignore[attr-defined]
+    assert values["economy.cash_per_minute_peak"].raw_value == 150  # type: ignore[attr-defined]
+    assert thaw_canonical(values["economy.cash_per_minute_series"].raw_value) == [  # type: ignore[attr-defined]
+        {"cash_per_minute": 100, "frame": 30},
+        {"cash_per_minute": 150, "frame": 60},
+    ]
+    assert values["economy.cash_per_minute_reconciled_share"].raw_value == 1.0  # type: ignore[attr-defined]
+    assert all(
+        values[name].input_evidence
+        for name in (
+            "economy.cash_per_minute_latest",
+            "economy.cash_per_minute_peak",
+            "economy.cash_per_minute_series",
+            "economy.cash_per_minute_reconciled_share",
+        )
+    )
+
+
+def test_economy_caves_partial_and_missing_optional_cash_per_minute_families(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    partial = _values(
+        player_context(
+            observed(
+                public_id="00000000-0000-4000-8000-000000000275",
+                source_key="telemetry:cash:legacy",
+                frame=29,
+                event_type="cash_changed",
+                facts={"track_income": True, "replay_player_public_id": player},
+            ),
+            observed(
+                public_id="00000000-0000-4000-8000-000000000276",
+                source_key="telemetry:cpm:30",
+                frame=30,
+                event_type="cash_per_minute_snapshot",
+                facts={"cash_per_minute": 100, "replay_player_public_id": player},
+            ),
+        )
+    )
+    assert partial["economy.cash_per_minute_reconciled_share"].raw_value == 0.0  # type: ignore[attr-defined]
+    assert partial["economy.cash_per_minute_reconciled_share"].quality == "partial"  # type: ignore[attr-defined]
+    assert partial["economy.cash_per_minute_reconciled_share"].quality_reason == "missing_income_bucket_provenance"  # type: ignore[attr-defined]
+
+    missing = _values(player_context())
+    for name in (
+        "economy.cash_per_minute_latest",
+        "economy.cash_per_minute_peak",
+        "economy.cash_per_minute_series",
+        "economy.cash_per_minute_reconciled_share",
+    ):
+        assert missing[name].raw_value is None  # type: ignore[attr-defined]
+        assert missing[name].quality_reason == "missing_cash_per_minute_snapshots"  # type: ignore[attr-defined]

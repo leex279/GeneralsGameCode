@@ -178,7 +178,7 @@ def test_production_pipeline_executes_all_five_stages_with_opt_in_isolation(
         selection for selection in feature_selections if selection.replay_player_public_id is not None
     )
     assert len(replay_wide) == 1 and len(replay_wide[0].feature_set_public_ids) == 1
-    assert player_scoped and all(len(selection.feature_set_public_ids) == 6 for selection in player_scoped)
+    assert player_scoped and all(len(selection.feature_set_public_ids) == 7 for selection in player_scoped)
     assert all(selection.canonical_player_public_id is not None for selection in player_scoped)
     selected_feature_sets = {
         public_id for selection in feature_selections for public_id in selection.feature_set_public_ids

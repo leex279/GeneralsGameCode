@@ -51,6 +51,7 @@ from generals_replay_analyzer.features.evidence import (
 )
 from generals_replay_analyzer.features.production import ProductionExtractor
 from generals_replay_analyzer.features.registry import BASE_REGISTRY, FeatureRegistry
+from generals_replay_analyzer.features.scorekeeper import ScoreKeeperExtractor
 from generals_replay_analyzer.telemetry.map_asset import GridSpec, StartPosition, StaticObjectFeature, WorldBounds
 
 
@@ -165,6 +166,7 @@ class FeatureExtractionService:
                 CombatExtractor(),
                 EconomyExtractor(),
                 ProductionExtractor(),
+                ScoreKeeperExtractor(),
             ),
         )
         self._extractors = {extractor.name: extractor for extractor in configured}
@@ -383,7 +385,13 @@ class FeatureExtractionService:
                 telemetry_run_id=telemetry.id,
             )
         requires_exact_player_mapping = observation_policy == "replay_wide_telemetry" or any(
-            event.event_type in ("players_initialized", "entity_sample") for event, _ in event_rows
+            event.event_type in (
+                "players_initialized",
+                "entity_sample",
+                "scorekeeper_snapshot",
+                "cash_per_minute_snapshot",
+            )
+            for event, _ in event_rows
         )
         if requires_exact_player_mapping:
             players, projected_slots, engine_player_indices = self._selected_telemetry_players(
@@ -802,6 +810,26 @@ class FeatureExtractionService:
                 ):
                     raise FeatureExtractionError("telemetry supply source object identity is invalid")
             facts["replay_player_public_id"] = players.get(player_index) if type(player_index) is int else None
+        elif event_type in ("scorekeeper_snapshot", "cash_per_minute_snapshot"):
+            if replay_player is None:
+                return facts
+            selected_indices = [index for index, public_id in players.items() if public_id == replay_player.public_id]
+            raw_players = facts.get("players")
+            if len(selected_indices) != 1 or type(raw_players) is not list:
+                raise FeatureExtractionError("telemetry aggregate snapshot player mapping is invalid")
+            entries = [
+                entry
+                for entry in cast(list[object], raw_players)
+                if type(entry) is dict and cast(dict[str, object], entry).get("player_index") == selected_indices[0]
+            ]
+            if len(entries) != 1:
+                raise FeatureExtractionError("telemetry aggregate snapshot player mapping is invalid")
+            projected = dict(cast(dict[str, object], entries[0]))
+            projected.pop("player_index", None)
+            projected["replay_player_public_id"] = replay_player.public_id
+            if event_type == "scorekeeper_snapshot":
+                projected["scoring_enabled"] = facts.get("scoring_enabled")
+            facts = projected
         elif event_type == "damage_applied":
             source_mask = facts.get("source_player_mask")
             source_indices = facts.get("source_player_indices")

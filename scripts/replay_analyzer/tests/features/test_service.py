@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from uuid import NAMESPACE_URL, uuid5
 
@@ -2507,3 +2508,58 @@ def test_replay_wide_context_allows_declared_neutral_engine_entity_owner(
     ).extract(_request(replay, target, "context_capture"))
 
     assert len(receipts) == 1 and receipts[0].cache_hit is False
+
+
+def test_event_facts_projects_only_the_requested_player_from_aggregate_engine_snapshots(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    service = FeatureExtractionService(feature_factory)
+    players = {0: "player-a", 1: "player-b"}
+    score = SimpleNamespace(
+        event_type="scorekeeper_snapshot",
+        schema_version=2,
+        payload_json={
+            "scoring_enabled": True,
+            "players": [
+                {"player_index": 0, "money_earned": 100, "money_spent": 50, "units_built": 1, "units_lost": 2,
+                 "units_destroyed": 3, "buildings_built": 4, "buildings_lost": 5, "buildings_destroyed": 6,
+                 "tech_buildings_captured": 7, "faction_buildings_captured": 8},
+                {"player_index": 1, "money_earned": 200, "money_spent": 60, "units_built": 9, "units_lost": 10,
+                 "units_destroyed": 11, "buildings_built": 12, "buildings_lost": 13, "buildings_destroyed": 14,
+                 "tech_buildings_captured": 15, "faction_buildings_captured": 16},
+            ],
+        },
+    )
+    cpm = SimpleNamespace(
+        event_type="cash_per_minute_snapshot",
+        schema_version=2,
+        payload_json={
+            "players": [
+                {"player_index": 0, "has_money": True, "cash_per_minute": 111},
+                {"player_index": 1, "has_money": False, "cash_per_minute": None},
+            ],
+        },
+    )
+
+    score_facts = service._event_facts(score, players, {}, SimpleNamespace(public_id="player-b"))  # type: ignore[arg-type]
+    cpm_facts = service._event_facts(cpm, players, {}, SimpleNamespace(public_id="player-b"))  # type: ignore[arg-type]
+
+    assert score_facts == {
+        "buildings_built": 12,
+        "buildings_destroyed": 14,
+        "buildings_lost": 13,
+        "faction_buildings_captured": 16,
+        "money_earned": 200,
+        "money_spent": 60,
+        "replay_player_public_id": "player-b",
+        "scoring_enabled": True,
+        "tech_buildings_captured": 15,
+        "units_built": 9,
+        "units_destroyed": 11,
+        "units_lost": 10,
+    }
+    assert cpm_facts == {
+        "cash_per_minute": None,
+        "has_money": False,
+        "replay_player_public_id": "player-b",
+    }
