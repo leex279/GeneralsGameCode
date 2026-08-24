@@ -872,7 +872,7 @@ class FeatureExtractionService:
                             type(index) is not int
                             or index < 0
                             or (event.schema_version == 2 and index > 31)
-                            or index not in players
+                            or index not in valid_engine_players
                             for index in raw_source_indices
                         )
                         or raw_source_indices != sorted(set(cast(list[int], raw_source_indices)))
@@ -883,9 +883,14 @@ class FeatureExtractionService:
                     1 << index for index in resolved_source_indices
                 ):
                     raise FeatureExtractionError("telemetry damage source player mask is inconsistent")
-                if victim is not None and (type(victim) is not int or victim < 0 or victim not in players):
+                if victim is not None and (
+                    type(victim) is not int or victim < 0 or victim not in valid_engine_players
+                ):
                     raise FeatureExtractionError("telemetry damage victim player mapping is invalid")
-                facts["source_replay_player_public_ids"] = [players[index] for index in resolved_source_indices]
+                # TheSuperHackers @bugfix Leex 24/08/2026 Preserve declared neutral damage participants without attributing them to replay competitors. (#TBD)
+                facts["source_replay_player_public_ids"] = [
+                    players[index] for index in resolved_source_indices if index in players
+                ]
                 facts["victim_replay_player_public_id"] = players.get(victim) if victim is not None else None
             else:
                 facts["source_replay_player_public_ids"] = [

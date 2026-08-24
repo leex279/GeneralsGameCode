@@ -2338,6 +2338,33 @@ def test_replay_wide_damage_projection_preserves_explicit_unknown_players(
     assert facts["victim_replay_player_public_id"] is None
 
 
+def test_replay_wide_damage_projection_allows_declared_neutral_engine_players(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    target = "00000000-0000-4000-8000-000000000302"
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=2,
+        payload_json={
+            "source_player_mask": 5,
+            "source_player_indices": [0, 2],
+            "victim_player_index": 1,
+        },
+    )
+
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {2: target},
+        {},
+        None,
+        [],
+        frozenset({0, 1, 2, 3}),
+    )
+
+    assert facts["source_replay_player_public_ids"] == [target]
+    assert facts["victim_replay_player_public_id"] is None
+
+
 @pytest.mark.parametrize("source_mask", (True, "1", -1, 2**32))
 def test_replay_wide_damage_v1_projection_rejects_malformed_optional_source_mask(
     feature_factory: sessionmaker[Session], source_mask: object
