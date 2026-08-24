@@ -203,6 +203,13 @@ baseline and the analyzer branch. This is a proven compiler-parity repair, not y
 retail records only the aggregate `0x582083DA` and provides no per-component log. Replay compatibility therefore
 remains unverified and no CRC bypass was applied.
 
+The staged Steam root contains optional UI, localization, and GenTool assets, so runtime identity was checked rather
+than assumed. The replay header records INI CRC `0xFEAAE3F3` and map CRC `0xFFFE2DB4`; a temporary passive runtime
+probe reported the same loaded INI CRC `0xFEAAE3F3`, and the staged map matched `0xFFFE2DB4`. The rebuilt executable
+CRC differs from the replay's retail executable CRC as expected, but the engine-authoritative gameplay INI and map
+identities are exact. The remaining frame-100 state mismatch is therefore not explained by loaded INI or map
+overrides in that runtime root.
+
 ## Acceptance status
 
 Verified: raw-byte normalization mutation sensitivity; pinned three-by-three trace determinism; pinned independent
