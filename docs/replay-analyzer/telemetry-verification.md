@@ -176,6 +176,29 @@ a v1 asset cannot authorize the v2-only `exempt_map_loaded_unclassified_immobile
 - No unsupported telemetry event type was accepted by the strict reader. Any field not present in the validated v2
   records remains unknown; the verification does not synthesize it from replay headers, stdout, or disabled runs.
 
+## CRC divergence diagnostics
+
+Task 2 used the pinned replay (`ea085767bfa11d2cfc167d9007173ce2eb29b5f557702ffd042e2e9a1a8f6bb8`) and
+the same staged `[RANK] Sand Scorpion` files for paired `vc6-releaselog` and modern Debug runs. The VC6 executable was
+compiled by MSVC 6.0 (`12.0.8804`), linked successfully, and had SHA-256
+`8e347c62bdf9b80df2ed2d98f48f7882ff045a021fda4651f22914463c812956`. A temporary hardlink beside the Steam game
+data was required: launching the build executable with only the Steam directory as its working directory failed during
+initialization. The replay, installed executable, and real user-data files were not modified.
+
+The authoritative modern `crc_pair` records computed frame 100 as `0x4D70DE82` and paired it with the replay-recorded
+`0x582083DA`. With identical `-DebugCRCFromFrame 0 -DebugCRCUntilFrame 100 -SaveDebugCRCPerFrame` arguments, the
+deterministic reader found the first VC6-versus-modern diagnostic difference at frame 0 in the object-list line:
+`0xD531BB29` versus `0x875D66F5`. The existing `-LogObjectCRCs` diagnostic narrowed that first line to object 170,
+`GLAInfantryWorker`, and its transform matrix: `0xEA52C503` under VC6 versus `0xEA52C303` under modern Debug. All other
+fields printed on that first object line were identical. `-CRCLogicModuleData` was not enabled because it inserts the
+module-factory snapshot after the already-divergent object and partition checkpoints and therefore cannot refine this
+earlier difference while preserving the authoritative stream.
+
+This is a proven VC6-versus-modern field-level divergence, not yet a proven retail field-level cause. The current VC6
+diagnostic build finishes frame 100 at `0x1A6CF7D6`, which also differs from the replay-recorded `0x582083DA`; retail
+provides no per-component log to establish whether its first difference is the same transform. Replay compatibility
+therefore remains unverified and no simulation change or CRC bypass was applied.
+
 ## Acceptance status
 
 Verified: raw-byte normalization mutation sensitivity; pinned three-by-three trace determinism; pinned independent
@@ -193,12 +216,11 @@ Modern VS 2022 x86 Release and Debug both built and linked `generalszh.exe`. The
 `gitinfo.cpp` with `fatal error C1083: Cannot open include file: 'time.h'`; entering the installed x86 developer
 environment supplied the SDK include paths and both builds then exited zero.
 
-VC6 and MinGW were not available and no compiler-pass claim is made. `cmake --preset vc6` reported unknown C/C++
-compiler identities and `No CMAKE_C_COMPILER could be found` / `No CMAKE_CXX_COMPILER could be found`.
-`cmake --preset mingw-w64-i686` reported that no `Unix Makefiles` build program was available and
-`CMAKE_MAKE_PROGRAM is not set`. Static CMake inspection confirms the analyzer-only source list and
-`RTS_REPLAY_ANALYZER` definition are both inside `if(NOT IS_VS6_BUILD)` in
-`GeneralsMD/Code/GameEngine/CMakeLists.txt`; this is exclusion evidence, not a VC6 compile result.
+The earlier Task 10 environment had no VC6 compiler. Task 2 subsequently built `vc6-releaselog` in the repository's
+VC6 Docker toolchain and ran the diagnostic replay as recorded above. MinGW remains unavailable: the previous
+`cmake --preset mingw-w64-i686` attempt reported that no `Unix Makefiles` build program was available and
+`CMAKE_MAKE_PROGRAM is not set`. The analyzer-only source list and `RTS_REPLAY_ANALYZER` definition remain inside
+`if(NOT IS_VS6_BUILD)` in `GeneralsMD/Code/GameEngine/CMakeLists.txt`.
 
 Final gates after isolated-root integration and corpus closure:
 

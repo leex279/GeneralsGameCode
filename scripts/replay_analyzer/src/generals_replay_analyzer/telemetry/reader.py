@@ -20,6 +20,7 @@ from generals_replay_analyzer.telemetry.model import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     CompleteRecord,
+    CRCPairRecord,
     EntitySampleRecord,
     FinalCashBalance,
     GameDataCatalogReference,
@@ -2013,6 +2014,9 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
     pending_lifecycle_samples: dict[int, int] = {}
     last_entity_samples: dict[int, _LastEntitySample] = {}
     task7_frame_ordering = _Task7FrameOrdering()
+    crc_pair_count = 0
+    prior_crc_computed_frame: int | None = None
+    prior_crc_receive_frame: int | None = None
 
     for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
         try:
@@ -2078,6 +2082,39 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
                 validated.sequence,
                 f"is not greater than previous sequence {prior_sequence}",
             )
+        if isinstance(validated, CRCPairRecord):
+            # TheSuperHackers @feature Leex 24/08/2026 Reject replay CRC diagnostics that do not form one monotonic comparison stream. (#TBD)
+            if crc_pair_count == 0 and validated.payload.pair_index != 0:
+                raise _error(path, line_number, validated.sequence, "first crc_pair pair_index must be zero")
+            if validated.payload.pair_index != crc_pair_count:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    f"crc_pair pair_index {validated.payload.pair_index} is not the expected next index {crc_pair_count}",
+                )
+            if (
+                prior_crc_computed_frame is not None
+                and validated.payload.computed_frame <= prior_crc_computed_frame
+            ):
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    f"crc_pair computed frame {validated.payload.computed_frame} is not greater than "
+                    f"previous computed frame {prior_crc_computed_frame}",
+                )
+            if prior_crc_receive_frame is not None and validated.payload.recorded_receive_frame < prior_crc_receive_frame:
+                raise _error(
+                    path,
+                    line_number,
+                    validated.sequence,
+                    f"crc_pair receive frame {validated.payload.recorded_receive_frame} is less than "
+                    f"previous receive frame {prior_crc_receive_frame}",
+                )
+            crc_pair_count += 1
+            prior_crc_computed_frame = validated.payload.computed_frame
+            prior_crc_receive_frame = validated.payload.recorded_receive_frame
         if validated.event_type in {"order_issued", "entity_state_changed", "entity_sample"}:
             if prior_order_movement_frame is not None and validated.frame < prior_order_movement_frame:
                 raise _error(

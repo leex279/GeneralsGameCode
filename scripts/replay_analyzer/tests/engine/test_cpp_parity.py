@@ -16,6 +16,41 @@ from generals_replay_analyzer.parity import (
 from generals_replay_analyzer.parser import parse_replay
 
 
+def test_analyzer_capture_locals_do_not_break_non_analyzer_vc6(repository_root: Path) -> None:
+    """Keep passive analyzer bookkeeping absent or referenced when VC6 excludes its consumers."""
+    money = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/RTS/Money.cpp"
+    ).read_text(encoding="utf-8")
+    recorder = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+    ).read_text(encoding="utf-8")
+    supply_center = (
+        repository_root
+        / "GeneralsMD/Code/GameEngine/Source/GameLogic/Object/Update/DockUpdate/SupplyCenterDockUpdate.cpp"
+    ).read_text(encoding="utf-8")
+    analyzer_guarded_capture = (
+        "#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)\n"
+        "\tconst UnsignedInt replayAnalyzerBefore = m_money;"
+    )
+
+    assert money.count(analyzer_guarded_capture) == 3
+    assert (
+        "#if !defined(RTS_REPLAY_ANALYZER)\n"
+        "\t// TheSuperHackers @build Leex 24/08/2026 Reference analyzer-only setup read counts when their consumer is excluded. (#TBD)\n"
+        "\t(void)setupStartOffset;"
+    ) in recorder
+    assert (
+        "#if defined(RTS_REPLAY_ANALYZER)\n"
+        "\tconst Int commandStartOffset = m_file->seek(0, File::CURRENT);\n"
+        "#endif"
+    ) in recorder
+    assert (
+        "#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)\n"
+        "\tconst Int deliveredBoxes = supplyTruckAI->getNumberBoxes();\n"
+        "#endif"
+    ) in supply_center
+
+
 @pytest.mark.parametrize(
     ("header_path", "source_path"),
     (

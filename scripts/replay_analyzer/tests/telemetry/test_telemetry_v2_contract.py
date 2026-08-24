@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from map_asset_support import write_test_map_asset
+from pydantic import ValidationError
 
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 from generals_replay_analyzer.telemetry.reader import (
@@ -103,6 +104,39 @@ def _outcome(sequence: int, engine_player_indices: list[int] | None = None) -> d
             "clean_shutdown": True,
         },
     )
+
+
+# TheSuperHackers @feature Leex 24/08/2026 Verify closed and self-consistent replay CRC pairing evidence. (#TBD)
+def _crc_pair(
+    sequence: int,
+    *,
+    pair_index: int = 0,
+    computed_frame: int = 100,
+    computed_crc: int = 0x4D70DE82,
+    recorded_receive_frame: int = 106,
+    recorded_crc: int = 0x582083DA,
+    match: bool = False,
+    queue_depth: int = 0,
+    local_player_index: int = 0,
+) -> dict[str, object]:
+    record = _record(
+        2,
+        sequence,
+        "crc_pair",
+        {
+            "pair_index": pair_index,
+            "computed_frame": computed_frame,
+            "computed_crc": computed_crc,
+            "recorded_receive_frame": recorded_receive_frame,
+            "recorded_crc": recorded_crc,
+            "match": match,
+            "queue_depth": queue_depth,
+            "local_player_index": local_player_index,
+        },
+    )
+    record["frame"] = recorded_receive_frame
+    record["logic_time_seconds"] = recorded_receive_frame / 30.0
+    return record
 
 
 def _catalog() -> dict[str, object]:
@@ -266,6 +300,34 @@ def _write_v2_trace(
     records.extend(_record(2, index, "players_initialized", payload) for index, payload in enumerate(payloads, start=1))
     records.append(_outcome(len(records)))
     records.append(_completion(2, records))
+    return _write_records(directory / name, records)
+
+
+def _write_v2_crc_trace(
+    directory: Path,
+    reference: dict[str, object],
+    crc_pairs: list[dict[str, object]],
+    *,
+    name: str,
+) -> Path:
+    final_frame = max((int(pair["frame"]) for pair in crc_pairs), default=0) + 2
+    map_reference = write_test_map_asset(directory, ENGINE_IDENTITY, "maps/test.map")
+    records = [
+        _record(2, 0, "manifest", _v2_manifest(reference, map_reference)),
+        _record(2, 1, "players_initialized", _v2_players(reference)),
+        *crc_pairs,
+    ]
+    outcome = _outcome(len(records))
+    outcome["frame"] = final_frame
+    outcome["logic_time_seconds"] = final_frame / 30.0
+    records.append(outcome)
+    completion = _completion(2, records)
+    completion["frame"] = final_frame
+    completion["logic_time_seconds"] = final_frame / 30.0
+    completion_payload = completion["payload"]
+    assert isinstance(completion_payload, dict)
+    completion_payload["final_frame"] = final_frame
+    records.append(completion)
     return _write_records(directory / name, records)
 
 
@@ -510,6 +572,99 @@ def test_reader_accepts_v2_only_with_a_catalog_and_one_complete_slot_snapshot(tm
     slot_states = [slot.slot_state for slot in validated[1].payload.slots]
     assert slot_states[:3] == ["human", "easy_ai", "open"]
     assert len(slot_states) == 8
+
+
+def test_reader_accepts_one_closed_crc_pair_bound_to_its_receive_frame(tmp_path: Path) -> None:
+    """Catch omission of the passive computed-versus-recorded replay CRC evidence family."""
+    reference = _write_catalog(tmp_path)
+    trace = _write_v2_crc_trace(
+        tmp_path,
+        reference,
+        [_crc_pair(2)],
+        name="crc-pair.ndjson",
+    )
+
+    records = tuple(iter_validated_trace(trace))
+
+    crc_pair = records[2]
+    assert crc_pair.event_type == "crc_pair"
+    assert crc_pair.frame == 106
+    assert crc_pair.payload.computed_frame == 100
+    assert crc_pair.payload.computed_crc == 0x4D70DE82
+    assert crc_pair.payload.recorded_receive_frame == 106
+    assert crc_pair.payload.recorded_crc == 0x582083DA
+    assert crc_pair.payload.match is False
+    assert crc_pair.payload.queue_depth == 0
+    assert crc_pair.payload.local_player_index == 0
+    with pytest.raises(ValidationError):
+        crc_pair.payload.pair_index = 1
+
+
+@pytest.mark.parametrize(
+    ("mutate", "diagnostic"),
+    [
+        (lambda payload, record: payload.update({"unexpected": True}), "Additional properties"),
+        (lambda payload, record: payload.update({"computed_crc": -1}), "computed_crc"),
+        (lambda payload, record: payload.update({"recorded_crc": 0x1_0000_0000}), "recorded_crc"),
+        (lambda payload, record: payload.update({"local_player_index": 8}), "local_player_index"),
+        (lambda payload, record: payload.update({"match": True}), "match"),
+        (lambda payload, record: record.update({"frame": 107, "logic_time_seconds": 107 / 30.0}), "receive frame"),
+    ],
+)
+def test_reader_rejects_malformed_or_inconsistent_crc_pairs(
+    tmp_path: Path,
+    mutate: Callable[[dict[str, object], dict[str, object]], object],
+    diagnostic: str,
+) -> None:
+    """Catch open, out-of-range, contradictory, or frame-detached CRC diagnostic records."""
+    reference = _write_catalog(tmp_path)
+    pair = _crc_pair(2)
+    payload = pair["payload"]
+    assert isinstance(payload, dict)
+    mutate(payload, pair)
+    trace = _write_v2_crc_trace(tmp_path, reference, [pair], name="bad-crc-pair.ndjson")
+
+    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
+        tuple(iter_validated_trace(trace))
+
+
+@pytest.mark.parametrize(
+    ("pairs", "diagnostic"),
+    [
+        ([_crc_pair(2, pair_index=1)], "first crc_pair pair_index must be zero"),
+        (
+            [_crc_pair(2), _crc_pair(3, pair_index=0, computed_frame=200, recorded_receive_frame=206)],
+            "pair_index 0 is not the expected next index 1",
+        ),
+        (
+            [_crc_pair(2), _crc_pair(3, pair_index=2, computed_frame=200, recorded_receive_frame=206)],
+            "pair_index 2 is not the expected next index 1",
+        ),
+        (
+            [_crc_pair(2), _crc_pair(3, pair_index=1, computed_frame=100, recorded_receive_frame=206)],
+            "computed frame 100 is not greater than previous computed frame 100",
+        ),
+        (
+            [_crc_pair(2), _crc_pair(3, pair_index=1, computed_frame=99, recorded_receive_frame=206)],
+            "computed frame 99 is not greater than previous computed frame 100",
+        ),
+        (
+            [_crc_pair(2), _crc_pair(3, pair_index=1, computed_frame=200, recorded_receive_frame=105)],
+            "receive frame 105 is less than previous receive frame 106",
+        ),
+    ],
+)
+def test_reader_rejects_duplicate_gapped_or_out_of_order_crc_pairs(
+    tmp_path: Path,
+    pairs: list[dict[str, object]],
+    diagnostic: str,
+) -> None:
+    """Catch CRC evidence that cannot represent one deterministic comparison sequence."""
+    reference = _write_catalog(tmp_path)
+    trace = _write_v2_crc_trace(tmp_path, reference, pairs, name="bad-crc-order.ndjson")
+
+    with pytest.raises(TelemetryTraceValidationError, match=diagnostic):
+        tuple(iter_validated_trace(trace))
 
 
 @pytest.mark.parametrize(

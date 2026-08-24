@@ -36,7 +36,7 @@ EVENT_TYPES = (
     "production_completed", "upgrade_queued", "upgrade_cancelled", "upgrade_completed", "science_purchased",
     "special_power_used", "cash_changed", "supply_collected", "damage_applied", "healing_applied",
     "veterancy_changed", "player_defeated", "player_surrendered", "player_disconnected", "match_outcome",
-    "order_issued", "entity_state_changed", "entity_sample", "scorekeeper_snapshot",
+    "order_issued", "entity_state_changed", "entity_sample", "scorekeeper_snapshot", "crc_pair",
     "cash_per_minute_snapshot", "object_visibility_changed", "visibility_sampling_summary",
     "partition_engine_grid_sample", "complete",
 )
@@ -400,6 +400,25 @@ class ClosedObservationPayload(BaseModel):
     """Strict payload base for additive telemetry-v2 engine observations."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class CRCPairPayload(ClosedObservationPayload):
+    """Passive pairing of one computed playback CRC with one recorded CRC command."""
+
+    pair_index: NonNegativeInt
+    computed_frame: NonNegativeInt
+    computed_crc: Annotated[int, Field(ge=0, le=UINT32_MAX)]
+    recorded_receive_frame: NonNegativeInt
+    recorded_crc: Annotated[int, Field(ge=0, le=UINT32_MAX)]
+    match: bool
+    queue_depth: NonNegativeInt
+    local_player_index: Annotated[int, Field(ge=0, le=7)]
+
+    @model_validator(mode="after")
+    def _require_self_consistent_pair(self) -> "CRCPairPayload":
+        if self.match != (self.computed_crc == self.recorded_crc):
+            raise ValueError("match must exactly describe computed_crc equality with recorded_crc")
+        return self
 
 
 class ScoreKeeperPlayerSnapshot(ClosedObservationPayload):
@@ -1704,6 +1723,17 @@ class ScoreKeeperSnapshotRecord(V2OnlyTelemetryEnvelope):
     payload: ScoreKeeperSnapshotPayload
 
 
+class CRCPairRecord(V2OnlyTelemetryEnvelope):
+    event_type: Literal["crc_pair"]
+    payload: CRCPairPayload
+
+    @model_validator(mode="after")
+    def _require_receive_frame_envelope(self) -> "CRCPairRecord":
+        if self.frame != self.payload.recorded_receive_frame:
+            raise ValueError("crc_pair envelope frame must equal its recorded receive frame")
+        return self
+
+
 class CashPerMinuteSnapshotRecord(V2OnlyTelemetryEnvelope):
     event_type: Literal["cash_per_minute_snapshot"]
     payload: CashPerMinuteSnapshotPayload
@@ -1768,7 +1798,7 @@ TelemetryRecord = Annotated[
     | SpecialPowerUsedRecord | CashChangedRecord | SupplyCollectedRecord | DamageAppliedRecord | HealingAppliedRecord
     | VeterancyChangedRecord | PlayerDefeatedRecord | PlayerSurrenderedRecord | PlayerDisconnectedRecord | MatchOutcomeRecord
     | OrderIssuedRecord | EntityStateChangedRecord | EntitySampleRecord | ScoreKeeperSnapshotRecord
-    | CashPerMinuteSnapshotRecord | ObjectVisibilityChangedRecord | VisibilitySamplingSummaryRecord
+    | CRCPairRecord | CashPerMinuteSnapshotRecord | ObjectVisibilityChangedRecord | VisibilitySamplingSummaryRecord
     | PartitionEngineGridSampleRecord | CompleteRecord,
     Field(discriminator="event_type"),
 ]

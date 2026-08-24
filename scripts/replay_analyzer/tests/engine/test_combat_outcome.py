@@ -76,6 +76,16 @@ def test_natural_crc_boundary_has_only_unknown_authoritative_outcome(
     assert counts["damage_applied"] == 0
     assert counts["healing_applied"] == 0
     assert counts["veterancy_changed"] == 0
+    assert counts["crc_pair"] == 1
+    crc_pair = next(record for record in records if record.event_type == "crc_pair")
+    assert crc_pair.payload.pair_index == 0
+    assert crc_pair.payload.computed_frame == 100
+    assert crc_pair.payload.computed_crc == 0x4D70DE82
+    assert crc_pair.payload.recorded_receive_frame == crc_pair.frame
+    assert crc_pair.payload.recorded_crc == 0x582083DA
+    assert crc_pair.payload.match is False
+    assert crc_pair.payload.queue_depth == 0
+    assert crc_pair.payload.local_player_index == 0
     outcome = records[-2]
     complete = records[-1]
     assert outcome.event_type == "match_outcome"

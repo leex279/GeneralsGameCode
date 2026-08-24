@@ -70,7 +70,10 @@ UnsignedInt Money::withdraw(UnsignedInt amountToWithdraw, Bool playSound)
 
 	if (amountToWithdraw == 0)
 		return amountToWithdraw;
+	// TheSuperHackers @build Leex 24/08/2026 Exclude passive cash capture when the modern analyzer consumer is absent. (#TBD)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	const UnsignedInt replayAnalyzerBefore = m_money;
+#endif
 
 	if (playSound)
 	{
@@ -95,7 +98,10 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 {
 	if (amountToDeposit == 0)
 		return;
+	// TheSuperHackers @build Leex 24/08/2026 Exclude passive deposit capture when the modern analyzer consumer is absent. (#TBD)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	const UnsignedInt replayAnalyzerBefore = m_money;
+#endif
 
 	if (playSound)
 	{
@@ -132,7 +138,10 @@ void Money::deposit(UnsignedInt amountToDeposit, Bool playSound, Bool trackIncom
 // ------------------------------------------------------------------------------------------------
 void Money::setStartingCash(UnsignedInt amount)
 {
+	// TheSuperHackers @build Leex 24/08/2026 Exclude passive starting-cash capture when the modern analyzer consumer is absent. (#TBD)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	const UnsignedInt replayAnalyzerBefore = m_money;
+#endif
 	m_money = amount;
 	std::fill(m_incomeBuckets, m_incomeBuckets + ARRAY_SIZE(m_incomeBuckets), 0u);
 	m_currentBucket = 0u;

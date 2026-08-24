@@ -1152,6 +1152,8 @@ if(NOT IS_VS6_BUILD)
     # TheSuperHackers @feature Leex 18/08/2026 Compile passive replay telemetry and its semantic catalog only in the modern analyzer block. (#TBD)
     list(APPEND GAMEENGINE_SRC
 		Include/Common/ReplayCombat.h
+        # TheSuperHackers @feature Leex 24/08/2026 Compile passive replay CRC pairing only in modern analyzer builds. (#TBD)
+        Include/Common/ReplayCRCDiagnostics.h
         Include/Common/ReplayGameDataExport.h
         Include/Common/ReplayMapExport.h
         Include/Common/ReplayEconomy.h
@@ -1165,6 +1167,7 @@ if(NOT IS_VS6_BUILD)
         Include/Common/ReplayScoreKeeper.h
         Include/Common/ReplayTelemetry.h
 		Source/Common/ReplayCombat.cpp
+        Source/Common/ReplayCRCDiagnostics.cpp
         Source/Common/ReplayGameDataExport.cpp
         Source/Common/ReplayMapExport.cpp
         Source/Common/ReplayEconomy.cpp

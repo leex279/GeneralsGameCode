@@ -115,7 +115,10 @@ Bool SupplyCenterDockUpdate::action( Object* docker, Object *drone )
 		return FALSE;
 
 	UnsignedInt value = 0;
+	// TheSuperHackers @build Leex 24/08/2026 Exclude passive delivered-box capture when the modern analyzer consumer is absent. (#TBD)
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 	const Int deliveredBoxes = supplyTruckAI->getNumberBoxes();
+#endif
 
 	value += getUpgradedSupplyBoostValue( supplyTruckAI );
 

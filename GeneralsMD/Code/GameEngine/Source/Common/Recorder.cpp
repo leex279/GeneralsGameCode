@@ -27,6 +27,9 @@
 #include "Common/Recorder.h"
 #if defined(RTS_REPLAY_ANALYZER)
 #include "Common/ReplayCombat.h"
+#if !defined(IS_VS6_BUILD)
+#include "Common/ReplayCRCDiagnostics.h"
+#endif
 #include "Common/ReplayParseDump.h"
 #include "Common/ReplayOutcome.h"
 #include "Common/ReplayTelemetry.h"
@@ -1282,6 +1285,11 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 				m_crcInfo.setSawCRCMismatch();
 			}
 		}
+#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
+		// TheSuperHackers @feature Leex 24/08/2026 Publish the already-decided CRC comparison without feeding diagnostics back into replay control flow. (#TBD)
+		ReplayCRCDiagnostics::observePair(playbackCRC.frame, playbackCRC.value, TheGameLogic->getFrame(), newCRC,
+			m_crcInfo.GetQueueSize(), localPlayerIndex);
+#endif
 		return;
 	}
 
@@ -1425,6 +1433,15 @@ Bool RecorderClass::playbackFile(AsciiString filename)
 
 	Int maxFPS = 0;
 	const Int maxFPSBytesRead = m_file->read(&maxFPS, sizeof(maxFPS));
+
+#if !defined(RTS_REPLAY_ANALYZER)
+	// TheSuperHackers @build Leex 24/08/2026 Reference analyzer-only setup read counts when their consumer is excluded. (#TBD)
+	(void)setupStartOffset;
+	(void)difficultyBytesRead;
+	(void)originalGameModeBytesRead;
+	(void)rankPointsBytesRead;
+	(void)maxFPSBytesRead;
+#endif
 
 #if defined(RTS_REPLAY_ANALYZER)
 	// TheSuperHackers @feature Leex 18/08/2026 Preserve the four serialized setup integers and their measured source range.
@@ -1601,7 +1618,10 @@ void RecorderClass::readNextFrame() {
  * This reads the next command from the replay file and appends it to TheCommandList.
  */
 void RecorderClass::appendNextCommand() {
+	// TheSuperHackers @build Leex 24/08/2026 Exclude passive command offsets when the modern analyzer consumer is absent. (#TBD)
+#if defined(RTS_REPLAY_ANALYZER)
 	const Int commandStartOffset = m_file->seek(0, File::CURRENT);
+#endif
 	GameMessage::Type type;
 	Int bytesRead = m_file->read(&type, sizeof(type));
 	if (bytesRead != sizeof(type)) {

@@ -6,6 +6,7 @@
 
 #include "Common/GlobalData.h"
 #include "Common/ReplayCombat.h"
+#include "Common/ReplayCRCDiagnostics.h"
 #include "Common/ReplayGameDataExport.h"
 #include "Common/ReplayMapExport.h"
 #include "Common/ReplayMovementSampler.h"
@@ -514,6 +515,8 @@ void ReplayTelemetry::configure(const AsciiString &tracePath, const AsciiString 
 	ReplayMapExport::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local combat and terminal observations before a new replay. (#TBD)
 	ReplayCombat::reset();
+	// TheSuperHackers @feature Leex 24/08/2026 Reset CRC pair indices with each configured telemetry transaction. (#TBD)
+	ReplayCRCDiagnostics::reset();
 	// TheSuperHackers @feature Leex 23/08/2026 Start each trace with an empty terminal ScoreKeeper domain. (#0)
 	ReplayScoreKeeper::reset();
 	// TheSuperHackers @feature Leex 20/08/2026 Reset trace-local economy and queue identities before a new replay. (#TBD)
@@ -587,6 +590,8 @@ void ReplayTelemetry::begin(const RecorderClass::ReplayHeader &header)
 		return;
 	}
 	ReplayCombat::reset();
+	// TheSuperHackers @feature Leex 24/08/2026 Restart CRC pair numbering at the exact replay transaction boundary. (#TBD)
+	ReplayCRCDiagnostics::reset();
 	// TheSuperHackers @feature Leex 23/08/2026 Reset terminal ScoreKeeper emission at the exact replay transaction boundary. (#0)
 	ReplayScoreKeeper::reset();
 	// TheSuperHackers @feature Leex 21/08/2026 Begin every replay with an empty trace-local authoritative map reference. (#TBD)
@@ -820,6 +825,8 @@ void ReplayTelemetry::discard()
 {
 	// TheSuperHackers @feature Leex 20/08/2026 Discard reset and reconfiguration transactions that have no replay termination boundary. (#TBD)
 	s_finishDeferred = FALSE;
+	// TheSuperHackers @feature Leex 24/08/2026 Clear passive CRC pairing state when discarding an unfinished trace. (#TBD)
+	ReplayCRCDiagnostics::reset();
 	if (s_output != nullptr)
 	{
 		discardPendingOutput("could not close discarded telemetry output");
