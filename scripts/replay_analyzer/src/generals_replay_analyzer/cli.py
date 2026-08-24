@@ -33,6 +33,10 @@ if TYPE_CHECKING:
     from .worker import WorkerRuntime
 
 
+# TheSuperHackers @fix Leex 24/08/2026 Keep production engine acquisitions leased beyond the measured replay runtime. (#TBD)
+DEFAULT_EXTERNAL_WORKER_LEASE_SECONDS = 900
+
+
 def _parser() -> argparse.ArgumentParser:
     """Build the compact public CLI parser without network or model dependencies."""
     parser = argparse.ArgumentParser(prog="replay-analyzer")
@@ -66,7 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=8765, help="loopback TCP port (default: 8765)")
     worker = subcommands.add_parser("worker", help="run the external replay-analysis worker")
     worker.add_argument("--poll-seconds", type=int, default=1, help="interruptible idle poll interval (default: 1)")
-    worker.add_argument("--lease-seconds", type=int, default=120, help="durable job lease duration (default: 120)")
+    worker.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=DEFAULT_EXTERNAL_WORKER_LEASE_SECONDS,
+        help="durable job lease duration (default: 900)",
+    )
     analyze = subcommands.add_parser("analyze", help="plan or execute one replay analysis")
     analyze.add_argument("replay_public_id")
     analyze.add_argument("--execute", action="store_true", help="execute only safe analytics jobs for this replay")
@@ -417,7 +426,7 @@ class _LazyAnalysisRuntime:
                 waiter=EventWaiter(),
                 worker_public_id=str(uuid4()),
                 poll_seconds=1,
-                lease_seconds=120,
+                lease_seconds=DEFAULT_EXTERNAL_WORKER_LEASE_SECONDS,
             )
         return self._runtime.run_once(selector)
 

@@ -445,7 +445,7 @@ def test_worker_command_uses_external_runtime_defaults_without_uvicorn_or_migrat
     monkeypatch.setattr(cli_module, "_serve_web", lambda *_args: pytest.fail("worker started Uvicorn"))
 
     assert main(["worker"]) == 0
-    assert calls == [(1, 120), (-1, -1), (-3, -3), (-2, -2)]
+    assert calls == [(1, 900), (-1, -1), (-3, -3), (-2, -2)]
 
 
 def test_worker_command_validates_cross_field_bounds_before_composition(
@@ -815,6 +815,26 @@ def test_configured_foreground_analyze_composition_registers_engine_telemetry(
         assert "telemetry" in application._runtime.control.registered_stages()
     finally:
         application.close()
+
+
+def test_foreground_analyze_execution_uses_production_replay_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch foreground execution expiring its lease before a valid full replay finishes."""
+    from generals_replay_analyzer.worker import WorkerRuntime
+
+    leases: list[int] = []
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        leases.append(cast(int, kwargs["lease_seconds"]))
+
+    monkeypatch.setattr(WorkerRuntime, "__init__", capture_init)
+    monkeypatch.setattr(WorkerRuntime, "run_once", lambda *_args: False)
+
+    runtime = cli_module._LazyAnalysisRuntime(cast(Any, object()))
+
+    assert runtime.run_once(cast(Any, object())) is False
+    assert leases == [900]
 
 
 def test_analyze_application_disposes_engine_when_runtime_shutdown_fails() -> None:
