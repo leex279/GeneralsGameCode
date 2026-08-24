@@ -10,12 +10,14 @@ import wave
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Self
+from uuid import uuid4
 
 from pydantic import Field, ValidationError, model_validator
 
 from generals_replay_analyzer.video.contracts import PublicId, Sha256, VideoContract, VideoSettingsV1
 
 ProbeRunner = Callable[[tuple[str, ...]], str]
+AudioDecodeRunner = Callable[[tuple[str, ...]], None]
 
 
 class MediaVerificationError(ValueError):
@@ -119,28 +121,47 @@ def _default_probe(argv: tuple[str, ...]) -> str:
     return completed.stdout
 
 
-def _require_pcm_signal(path: Path) -> int:
+def _require_pcm_signal(path: Path, label: str) -> tuple[int, int]:
     try:
         with wave.open(str(path), "rb") as source:
             if source.getcomptype() != "NONE" or source.getnchannels() != 1 or source.getnframes() <= 0:
-                raise MediaVerificationError("narration must be a non-empty mono PCM WAV")
+                raise MediaVerificationError(f"{label} must be a non-empty mono PCM WAV")
             sample_rate = source.getframerate()
-            frames = source.readframes(source.getnframes())
+            frame_count = source.getnframes()
+            frames = source.readframes(frame_count)
     except (OSError, EOFError, wave.Error) as error:
-        raise MediaVerificationError(f"narration WAV cannot be read: {error}") from error
+        raise MediaVerificationError(f"{label} WAV cannot be read: {error}") from error
     if not any(value != 0 for value in frames):
-        raise MediaVerificationError("narration source is silent")
-    return sample_rate
+        raise MediaVerificationError(f"{label} source is silent")
+    return sample_rate, frame_count
+
+
+def _default_audio_decode(argv: tuple[str, ...]) -> None:
+    completed = subprocess.run(argv, shell=False, check=False, capture_output=True, text=True, timeout=120)
+    if completed.returncode != 0:
+        raise MediaVerificationError(f"FFmpeg audio decode failed with exit code {completed.returncode}")
 
 
 # TheSuperHackers @feature Leex 24/08/2026 Verify final replay media against closed ffprobe facts before immutable publication. (#TBD)
 class MediaVerifier:
-    def __init__(self, ffprobe_executable: Path, *, probe_runner: ProbeRunner = _default_probe) -> None:
+    def __init__(
+        self,
+        ffprobe_executable: Path,
+        ffmpeg_executable: Path,
+        *,
+        probe_runner: ProbeRunner = _default_probe,
+        audio_decode_runner: AudioDecodeRunner = _default_audio_decode,
+    ) -> None:
         executable = ffprobe_executable.resolve()
         if not executable.is_absolute() or not executable.is_file():
             raise ValueError("ffprobe executable must be an existing absolute configured path")
         self._ffprobe_executable = executable
+        ffmpeg = ffmpeg_executable.resolve()
+        if not ffmpeg.is_absolute() or not ffmpeg.is_file():
+            raise ValueError("FFmpeg executable must be an existing absolute configured path")
+        self._ffmpeg_executable = ffmpeg
         self._probe_runner = probe_runner
+        self._audio_decode_runner = audio_decode_runner
 
     def verify(
         self,
@@ -163,11 +184,12 @@ class MediaVerifier:
             raise MediaVerificationError("subtitle track source must exist")
         if any(item.frame > final_frame for item in landmarks):
             raise MediaVerificationError("verification landmark exceeds authoritative evidence horizon")
-        narration_sample_rate = _require_pcm_signal(narration)
+        narration_sample_rate, _ = _require_pcm_signal(narration, "narration")
         document = self._probe(final)
         observed = self._observed(document)
         expected_duration = (final_frame + 1) / 30.0
         self._validate(observed, settings, expected_duration, final_frame, narration_sample_rate)
+        self._validate_final_audio(final, narration_sample_rate, expected_duration, settings.fps)
         return VerifiedMediaV1(
             final_video_sha256=_sha256(final),
             narration_sha256=_sha256(narration),
@@ -176,6 +198,45 @@ class MediaVerifier:
             observed=observed,
             landmarks=landmarks,
         )
+
+    def _validate_final_audio(
+        self,
+        final: Path,
+        sample_rate: int,
+        expected_duration: float,
+        fps: int,
+    ) -> None:
+        decoded = final.with_name(f".{final.name}.{uuid4().hex}.audio.wav")
+        argv = (
+            str(self._ffmpeg_executable),
+            "-nostdin",
+            "-v",
+            "error",
+            "-n",
+            "-i",
+            str(final),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            str(decoded),
+        )
+        try:
+            self._audio_decode_runner(argv)
+            decoded_rate, decoded_frames = _require_pcm_signal(decoded, "final audio")
+            if decoded_rate != sample_rate:
+                raise MediaVerificationError("decoded final audio sample rate differs from narration source")
+            if abs((decoded_frames / decoded_rate) - expected_duration) > (1.0 / fps):
+                raise MediaVerificationError("decoded final audio duration differs from authoritative duration")
+        finally:
+            decoded.unlink(missing_ok=True)
 
     def _probe(self, final: Path) -> FfprobeDocumentV1:
         argv = (str(self._ffprobe_executable), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(final))

@@ -16,12 +16,12 @@ from generals_replay_analyzer.video.verify import (
 )
 
 
-def _wav(path: Path, *, silent: bool = False) -> Path:
+def _wav(path: Path, *, silent: bool = False, frames: int = 2_000) -> Path:
     with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
         output.setframerate(30_000)
-        output.writeframes((b"\0\0" if silent else b"\x10\0") * 2_000)
+        output.writeframes((b"\0\0" if silent else b"\x10\0") * frames)
     return path
 
 
@@ -61,10 +61,12 @@ def _probe(
     )
 
 
-def _verify(tmp_path: Path, payload: str, *, silent: bool = False) -> object:
+def _verify(tmp_path: Path, payload: str, *, silent: bool = False, final_silent: bool = False) -> object:
     ffprobe = (tmp_path / "tools" / "ffprobe.exe").resolve()
+    ffmpeg = (tmp_path / "tools" / "ffmpeg.exe").resolve()
     ffprobe.parent.mkdir(exist_ok=True)
     ffprobe.write_bytes(b"tool")
+    ffmpeg.write_bytes(b"tool")
     final = tmp_path / "final.mp4"
     final.write_bytes(b"video")
     subtitles = tmp_path / "captions.vtt"
@@ -75,7 +77,10 @@ def _verify(tmp_path: Path, payload: str, *, silent: bool = False) -> object:
         captured.append(argv)
         return payload
 
-    result = MediaVerifier(ffprobe, probe_runner=runner).verify(
+    def decode(argv: tuple[str, ...]) -> None:
+        _wav(Path(argv[-1]), silent=final_silent, frames=60_000)
+
+    result = MediaVerifier(ffprobe, ffmpeg, probe_runner=runner, audio_decode_runner=decode).verify(
         final,
         _wav(tmp_path / "narration.wav", silent=silent),
         subtitles,
@@ -115,6 +120,9 @@ def test_verifier_rejects_silent_narration_and_unknown_ffprobe_fields(tmp_path: 
     with pytest.raises(MediaVerificationError, match="silent"):
         _verify(tmp_path, _probe(), silent=True)
 
+    with pytest.raises(MediaVerificationError, match="final audio source is silent"):
+        _verify(tmp_path, _probe(), final_silent=True)
+
     payload = json.loads(_probe())
     payload["unexpected"] = True
     with pytest.raises(MediaVerificationError, match="ffprobe"):
@@ -123,11 +131,13 @@ def test_verifier_rejects_silent_narration_and_unknown_ffprobe_fields(tmp_path: 
 
 def test_verifier_rejects_out_of_horizon_landmark(tmp_path: Path) -> None:
     ffprobe = (tmp_path / "ffprobe.exe").resolve()
+    ffmpeg = (tmp_path / "ffmpeg.exe").resolve()
     ffprobe.write_bytes(b"tool")
+    ffmpeg.write_bytes(b"tool")
     final = tmp_path / "final.mp4"
     final.write_bytes(b"video")
     with pytest.raises(MediaVerificationError, match="landmark"):
-        MediaVerifier(ffprobe, probe_runner=lambda _: _probe()).verify(
+        MediaVerifier(ffprobe, ffmpeg, probe_runner=lambda _: _probe(), audio_decode_runner=lambda argv: _wav(Path(argv[-1]), frames=60_000)).verify(
             final,
             _wav(tmp_path / "narration.wav"),
             None,

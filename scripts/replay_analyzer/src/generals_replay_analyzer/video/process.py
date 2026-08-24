@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self, cast
 
 from pydantic import Field, model_validator
 
@@ -26,6 +26,7 @@ class VideoProcessSpec(VideoContract):
     stdout_path: Path
     stderr_path: Path
     timeout_seconds: int = Field(ge=1, le=86_400)
+    cancellation: Any | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def _require_safe_argv_and_paths(self) -> Self:
@@ -48,6 +49,7 @@ class VideoProcessResult(VideoContract):
     duration_seconds: float = Field(ge=0.0)
     process_tree_terminated: bool
     termination_method: str | None
+    cancelled: bool = False
     stdout_path: Path
     stderr_path: Path
 
@@ -56,6 +58,10 @@ class VideoProcessError(RuntimeError):
     def __init__(self, message: str, result: VideoProcessResult | None = None) -> None:
         super().__init__(message)
         self.result = result
+
+
+class VideoProcessCancelled(VideoProcessError):
+    """An active child tree was settled because its durable job was cancelled."""
 
 
 # TheSuperHackers @feature Leex 24/08/2026 Reuse the hardened engine process-tree launcher for every video subprocess. (#TBD)
@@ -80,6 +86,7 @@ class VideoProcessRunner:
                         stdout_handle=stdout_handle,
                         stderr_handle=stderr_handle,
                         timeout_seconds=spec.timeout_seconds,
+                        cancellation=cast(Any, spec.cancellation),
                     )
                 )
         except FileExistsError as error:
@@ -87,6 +94,8 @@ class VideoProcessRunner:
         except OSError as error:
             raise VideoProcessError(f"video process could not launch: {error}") from error
         result = self._result(spec, execution)
+        if result.cancelled:
+            raise VideoProcessCancelled(f"video stage {spec.stage} was cancelled", result)
         if result.timed_out:
             raise VideoProcessError(f"video stage {spec.stage} timed out", result)
         if result.exit_code != 0:
@@ -102,6 +111,7 @@ class VideoProcessRunner:
             duration_seconds=execution.duration_seconds,
             process_tree_terminated=execution.process_tree_terminated,
             termination_method=execution.termination_method,
+            cancelled=execution.cancelled,
             stdout_path=spec.stdout_path,
             stderr_path=spec.stderr_path,
         )

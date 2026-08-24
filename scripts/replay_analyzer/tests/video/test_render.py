@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import wave
 from pathlib import Path
 from typing import cast
@@ -181,12 +182,14 @@ class _ProcessRunner:
         fail_stage: str | None = None,
         mutate_after_stage: tuple[str, Path] | None = None,
         cancellation: _Cancellation | None = None,
+        capture_result: dict[str, object] | None = None,
     ) -> None:
         self.stages = stages
         self.specs: list[VideoProcessSpec] = []
         self.fail_stage = fail_stage
         self.mutate_after_stage = mutate_after_stage
         self.cancellation = cancellation
+        self.capture_result = capture_result
 
     def run(self, spec: VideoProcessSpec) -> VideoProcessResult:
         self.specs.append(spec)
@@ -195,6 +198,24 @@ class _ProcessRunner:
             raise VideoProcessError(f"{spec.stage} launch failed")
         output = Path(spec.argv[spec.argv.index("-recordVideo") + 1]) if spec.stage == "engine_capture" else Path(spec.argv[-1])
         output.write_bytes(b"gameplay" if spec.stage == "engine_capture" else b"muxed-final")
+        if spec.stage == "engine_capture":
+            payload: dict[str, object] = {
+                        "schema_version": 1,
+                        "status": "success",
+                        "failure_code": "ok",
+                        "failure_detail": 0,
+                        "requested_width": 640,
+                        "requested_height": 360,
+                        "actual_width": 640,
+                        "actual_height": 360,
+                        "fps": 30,
+                        "logic_frames": 60,
+                        "presentation_frames": 60,
+                        "process_exit_code": 0,
+                    }
+            if self.capture_result is not None:
+                payload.update(self.capture_result)
+            (output.parent / f"{output.name}.capture-result.json").write_text(json.dumps(payload), encoding="utf-8")
         spec.stdout_path.write_bytes(b"")
         spec.stderr_path.write_bytes(b"")
         if self.mutate_after_stage is not None and self.mutate_after_stage[0] == spec.stage:
@@ -214,10 +235,11 @@ class _ProcessRunner:
 
 
 class _Verifier:
-    def __init__(self, stages: list[str], *, mutate: Path | None = None) -> None:
+    def __init__(self, stages: list[str], *, mutate: Path | None = None, wrong_auxiliary_hash: bool = False) -> None:
         self.stages = stages
         self.mutate = mutate
         self.calls: list[tuple[Path, Path, Path | None, int]] = []
+        self.wrong_auxiliary_hash = wrong_auxiliary_hash
 
     def verify(
         self,
@@ -235,8 +257,8 @@ class _Verifier:
             self.mutate.write_bytes(b"changed executable")
         return VerifiedMediaV1(
             final_video_sha256=_sha256(final_video),
-            narration_sha256=_sha256(narration_wav),
-            subtitle_sha256=_sha256(subtitles) if subtitles is not None else None,
+            narration_sha256="f" * 64 if self.wrong_auxiliary_hash else _sha256(narration_wav),
+            subtitle_sha256=("e" * 64 if self.wrong_auxiliary_hash and subtitles is not None else _sha256(subtitles) if subtitles is not None else None),
             expected_duration_seconds=(final_frame + 1) / 30.0,
             observed=ObservedVideoV1(
                 codec_name="h264",
@@ -363,7 +385,10 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert result.manifest_sha256 == _sha256(result.manifest_path)
     assert verifier.calls[0][3] == 59
     engine_spec, mux_spec = process.specs
-    assert engine_spec.argv[engine_spec.argv.index("-replay") + 1] == str(request.replay_path)
+    frozen_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
+    assert frozen_replay.parent == result.run_directory
+    assert frozen_replay.name == "replay.rep"
+    assert frozen_replay.read_bytes() == request.replay_path.read_bytes()
     assert engine_spec.argv[engine_spec.argv.index("-videoRes") + 1] == "640x360"
     assert engine_spec.argv[engine_spec.argv.index("-videoFps") + 1] == "30"
     assert mux_spec.argv[mux_spec.argv.index("-t") + 1] == "2.000000000"
@@ -382,6 +407,7 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
         "narration",
         "subtitles",
         "gameplay_video",
+        "native_capture_result",
         "final_video",
     }
     assert all(artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts)
@@ -396,10 +422,9 @@ def test_render_detects_replay_or_executable_identity_changes_after_external_sta
         commentary,
         voice_mutate=request.replay_path,
     )
-    with pytest.raises(VideoRenderError, match="immutable input changed"):
-        service.render(request)
-    assert publisher.manifests == []
-    assert not list(service.settings.video_run_directory.glob("*/final-*.mp4"))
+    result = service.render(request)
+    assert result.final_video_path.is_file()
+    assert result.gameplay_video_path.parent.joinpath("replay.rep").read_bytes() == b"retail replay"
 
     second_root = tmp_path / "second"
     second_root.mkdir()
@@ -434,6 +459,43 @@ def test_render_rejects_an_injected_camera_plan_for_a_different_authority(tmp_pa
         service.render(request)
 
     assert process.specs == []
+    assert publisher.manifests == []
+
+
+def test_render_rejects_verifier_auxiliary_hashes_that_do_not_match_frozen_inputs(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path)
+    stages: list[str] = []
+    verifier = _Verifier(stages, wrong_auxiliary_hash=True)
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, verifier=verifier)
+
+    with pytest.raises(VideoRenderError, match="verification narration hash"):
+        service.render(request)
+
+    assert publisher.manifests == []
+    assert not list(service.settings.video_run_directory.glob("*/final-*.mp4"))
+
+
+@pytest.mark.parametrize(
+    "capture_result",
+    [
+        {"status": "failed", "failure_code": "pipe_write_failed"},
+        {"logic_frames": 59},
+        {"presentation_frames": 61},
+        {"actual_width": 320},
+        {"process_exit_code": 1},
+    ],
+)
+def test_render_rejects_unsuccessful_or_mismatched_native_capture_result(
+    tmp_path: Path, capture_result: dict[str, object]
+) -> None:
+    request, camera, commentary = _request(tmp_path)
+    stages: list[str] = []
+    process = _ProcessRunner(stages, capture_result=capture_result)
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+
+    with pytest.raises((VideoRenderError, ValueError), match="native capture result"):
+        service.render(request)
+
     assert publisher.manifests == []
 
 
