@@ -199,7 +199,8 @@ def test_command_dialog_restores_the_actual_invoker_and_mobile_uses_the_menu() -
     assert "lastInvoker.focus()" in script
     assert "<kbd>Ctrl K</kbd>" not in html
     assert 'class="global-pipeline"' in html
-    assert "Pipeline unavailable" in html
+    assert "Pipeline idle" in html
+    assert "Pipeline unavailable" not in html
     assert "@media (max-width: 767px)" in css
     assert ".primary-row { display: none; }" in css
     assert ".library-meta a" in css and "min-height: 44px" in css

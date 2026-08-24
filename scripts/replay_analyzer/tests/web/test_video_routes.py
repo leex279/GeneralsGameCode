@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from generals_replay_analyzer.web.app import create_app
@@ -69,7 +70,26 @@ def test_video_route_renders_in_progress_state_without_download_controls() -> No
     assert "Cast production in progress" in response.text
     assert 'role="status"' in response.text
     assert "Downloads unavailable" in response.text
+    assert '<meta http-equiv="refresh" content="10">' in response.text
+    assert response.text.index('<meta http-equiv="refresh"') < response.text.index("</head>")
+    assert "This page refreshes while the worker produces the cast" in response.text
+    assert f'href="/jobs/{JOB_ID}"' in response.text
+    assert response.request.url.path == f"/video/{JOB_ID}"
     assert 'href="/video/' not in response.text.replace(f'href="/video/{JOB_ID}"', "")
+
+
+@pytest.mark.parametrize(
+    ("state", "refreshes"),
+    (("pending", True), ("running", True), ("succeeded", False), ("failed", False), ("cancelled", False)),
+)
+def test_video_route_refresh_policy_covers_every_job_state(state: str, refreshes: bool) -> None:
+    with _client(state) as client:
+        response = client.get(f"/video/{JOB_ID}", headers={"host": "localhost"})
+
+    assert response.status_code == 200
+    assert ('<meta http-equiv="refresh" content="10">' in response.text) is refreshes
+    assert ("This page refreshes while the worker produces the cast" in response.text) is refreshes
+    assert f'href="/jobs/{JOB_ID}"' in response.text
 
 
 def test_video_route_renders_failed_state_with_actionable_semantic_status() -> None:
@@ -101,6 +121,7 @@ def test_video_route_exposes_verified_download_labels_without_private_paths() ->
     assert 'aria-label="Download verified replay cast manifest"' in response.text
     assert "C:\\" not in response.text
     assert "/srv/" not in response.text
+    assert '<meta http-equiv="refresh"' not in response.text
 
 
 def test_video_route_rejects_noncanonical_public_ids() -> None:

@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#080f15">
+    {% block head_meta %}{% endblock %}
     {# TheSuperHackers @fix Leex 23/08/2026 Keep local HTMX enhancement compatible with the closed script and style policy. (#TBD) #}
     <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
     <title>{{ shell.page_title }}</title>
@@ -34,7 +35,8 @@
           {% if shell.pipeline %}
           <a class="global-pipeline" href="/jobs">Pipeline {{ shell.pipeline.stage }} / {{ shell.pipeline.state }}</a>
           {% else %}
-          <span class="global-pipeline" aria-disabled="true">Pipeline unavailable</span>
+          {# TheSuperHackers @fix Leex 24/08/2026 Describe the absence of active durable work as idle instead of a broken pipeline. (#TBD) #}
+          <span class="global-pipeline" aria-disabled="true">Pipeline idle</span>
           {% endif %}
           <span class="local-only">Local only</span>
           <button class="command-trigger clipped-control" type="button" data-command-palette-open aria-haspopup="dialog" aria-controls="command-palette">
