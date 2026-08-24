@@ -341,9 +341,22 @@ def test_parser_setup_projection_is_closed_and_preserves_every_exact_setup_field
                 "start_offset": parsed.setup.start_offset,
                 "end_offset": parsed.setup.end_offset,
             },
+            "timebase": {
+                "logic_frames_per_second": 60,
+                "observed_frames_per_second": pytest.approx(56_003 / 940),
+                "source": "replay_header_wall_clock",
+            },
         }
         assert canonical_json(replay.header_json) == canonical_json(
-            {"setup": parsed.setup.to_dict(), "header": parsed.header.to_dict()}
+            {
+                "setup": parsed.setup.to_dict(),
+                "header": parsed.header.to_dict(),
+                "timebase": {
+                    "logic_frames_per_second": 60,
+                    "observed_frames_per_second": 56_003 / 940,
+                    "source": "replay_header_wall_clock",
+                },
+            }
         )
         assert session.scalar(select(ParserRun).where(ParserRun.run_id == result.run_id)) is not None
 

@@ -65,6 +65,11 @@ def test_inspect_json_reports_observed_complete_replay_without_commands(capsys: 
     assert output["command_stream_offset"] > output["header"]["header_end_offset"]
     assert output["command_count"] > 0
     assert output["completion_status"] == "complete"
+    assert output["timebase"] == {
+        "logic_frames_per_second": 60,
+        "observed_frames_per_second": pytest.approx(56_003 / 940),
+        "source": "replay_header_wall_clock",
+    }
     assert "commands" not in output
 
 
@@ -89,6 +94,8 @@ def test_inspect_commands_uses_the_documented_complete_command_record(capsys: ob
     }
     command_with_argument = next(command for command in commands if command["arguments"])
     assert set(command_with_argument["arguments"][0]) == {"raw_bytes_hex", "type", "type_name", "value"}
+    timed_command = next(command for command in commands if command["frame"] > 0)
+    assert timed_command["seconds"] == pytest.approx(timed_command["frame"] / 60)
 
 
 def test_inspect_malformed_replay_returns_typed_error_without_traceback(tmp_path: Path, capsys: object) -> None:

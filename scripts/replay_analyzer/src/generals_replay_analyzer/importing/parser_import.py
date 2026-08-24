@@ -28,6 +28,7 @@ from ..db.models import (
 )
 from ..errors import ReplayParseError, UnsupportedArgumentTypeError
 from ..parser import ParsedReplay
+from ..timebase import infer_replay_timebase
 from .evidence_identity import parser_command_evidence_identities, validate_observed_evidence_identity
 from .stages import canonical_json
 
@@ -118,9 +119,15 @@ def _validate_commands(parsed: ParsedReplay) -> None:
 
 
 def _result_projection(parsed: ParsedReplay) -> dict[str, object]:
+    timebase = infer_replay_timebase(
+        frame_count=parsed.header.frame_count,
+        start_time=parsed.header.start_time,
+        end_time=parsed.header.end_time,
+    )
     return {
         "header": parsed.header.to_dict(),
         "setup": parsed.setup.to_dict(),
+        "timebase": timebase.to_dict(),
         "command_stream_offset": parsed.command_stream_offset,
         "end_offset": parsed.end_offset,
         "completion_status": parsed.completion_status,
@@ -574,6 +581,7 @@ class ParserObservationImporter:
             replay.header_json = {
                 "header": cast(dict[str, Any], projection["header"]),
                 "setup": cast(dict[str, Any], projection["setup"]),
+                "timebase": cast(dict[str, Any], projection["timebase"]),
             }
             run.result_sha256 = result_sha256
             run.completion_status = parsed.completion_status

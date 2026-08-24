@@ -20,6 +20,7 @@ from .contracts import MessageCatalogValidationError
 from .errors import ReplayParseError
 from .parser import ParsedReplay, parse_replay
 from .provenance import sha256_file
+from .timebase import infer_replay_timebase
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
@@ -97,11 +98,15 @@ def _argument_dict(argument: ReplayArgument) -> dict[str, object]:
     }
 
 
-def _command_dict(command: ReplayCommand) -> dict[str, object]:
+def _command_dict(command: ReplayCommand, logic_frames_per_second: int | None) -> dict[str, object]:
     """Return the complete decoded command record, including binary evidence boundaries."""
     return {
         "frame": command.frame,
-        "seconds": command.seconds,
+        "seconds": (
+            None
+            if logic_frames_per_second is None
+            else command.seconds_at(logic_frames_per_second)
+        ),
         "player_index": command.player_index,
         "message_type": command.message_type,
         "message_name": command.message_name,
@@ -113,6 +118,11 @@ def _command_dict(command: ReplayCommand) -> dict[str, object]:
 
 def _inspection_document(path: Path, parsed: ParsedReplay, include_commands: bool) -> dict[str, object]:
     """Return the stable observed-evidence JSON contract for a successfully parsed replay."""
+    timebase = infer_replay_timebase(
+        frame_count=parsed.header.frame_count,
+        start_time=parsed.header.start_time,
+        end_time=parsed.header.end_time,
+    )
     document: dict[str, object] = {
         "evidence_tier": "observed",
         "sha256": sha256_file(path),
@@ -123,9 +133,12 @@ def _inspection_document(path: Path, parsed: ParsedReplay, include_commands: boo
         "command_stream_offset": parsed.command_stream_offset,
         "command_count": len(parsed.commands),
         "completion_status": parsed.completion_status,
+        "timebase": timebase.to_dict(),
     }
     if include_commands:
-        document["commands"] = [_command_dict(command) for command in parsed.commands]
+        document["commands"] = [
+            _command_dict(command, timebase.logic_frames_per_second) for command in parsed.commands
+        ]
     return document
 
 

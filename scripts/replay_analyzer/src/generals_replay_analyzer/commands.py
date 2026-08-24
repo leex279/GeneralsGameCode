@@ -7,6 +7,7 @@ from typing import TypeAlias
 from .binary import BinaryReader, Coord3D, ICoord2D, IRegion2D
 from .contracts import message_name_for
 from .errors import UnsupportedArgumentTypeError
+from .timebase import frame_to_seconds
 
 
 class GameMessageArgumentDataType(IntEnum):
@@ -55,10 +56,9 @@ class ReplayCommand:
     start_offset: int
     end_offset: int
 
-    @property
-    def seconds(self) -> float:
-        """Expose replay time only as the fixed 30 Hz engine-frame conversion."""
-        return self.frame / 30.0
+    def seconds_at(self, logic_frames_per_second: int) -> float:
+        """Convert this command frame through an explicitly resolved replay clock."""
+        return frame_to_seconds(self.frame, logic_frames_per_second)
 
 
 # TheSuperHackers @feature Leex 19/08/2026 Decode Recorder command runs with validated generated symbolic names when known. (#TBD)

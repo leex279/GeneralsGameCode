@@ -42,7 +42,8 @@ def test_command_decodes_every_engine_argument_type(
     command = parse_command(encoded)
 
     assert command.frame == 90
-    assert command.seconds == 3.0
+    assert command.seconds_at(30) == 3.0
+    assert command.seconds_at(60) == 1.5
     assert command.player_index == 2
     assert command.message_type == 1000
     assert command.arguments == (
