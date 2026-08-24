@@ -38,8 +38,8 @@ def zero_hour_executable(repository_root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def zero_hour_runtime_executable(zero_hour_executable: Path) -> Iterator[Path]:
-    """Hardlink the build beside retail data without copying or replacing any installed file."""
+def zero_hour_runtime_directory() -> Path:
+    """Return the installed runtime directory; individual runs must bind their own executable."""
     override = os.environ.get("GENERALS_REPLAY_ANALYZER_GAME_DIR")
     game_directory = (
         Path(override)
@@ -48,6 +48,13 @@ def zero_hour_runtime_executable(zero_hour_executable: Path) -> Iterator[Path]:
     )
     if not game_directory.is_dir():
         pytest.skip(f"Zero Hour game data directory is absent: {game_directory}")
+    return game_directory.resolve()
+
+
+@pytest.fixture(scope="session")
+def zero_hour_runtime_executable(zero_hour_executable: Path, zero_hour_runtime_directory: Path) -> Iterator[Path]:
+    """Legacy fixture retained for native tests that invoke the engine outside the product runner."""
+    game_directory = zero_hour_runtime_directory
 
     runtime_executable = game_directory / f"generalszh_replay_analyzer_{os.getpid()}_{uuid4().hex}.exe"
     if runtime_executable.exists():

@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 from pydantic import Field
 
 from generals_replay_analyzer.config import AnalyzerSettings
+from generals_replay_analyzer.engine.runtime import bind_runtime_executable
 from generals_replay_analyzer.report.read_model import PublishedReportGraphDTO
 from generals_replay_analyzer.spatial.query import MapSceneReadModel
 from generals_replay_analyzer.video.camera import CameraPlanService
@@ -388,12 +389,14 @@ class VideoRenderService:
         self._check_cancelled(request)
 
         gameplay_path = run_directory / "gameplay.mp4"
-        engine_result = self._run_process(
-            VideoProcessSpec(
+        # TheSuperHackers @feature Leex 24/08/2026 Launch the analyzer beside retail runtime modules without altering the configured build. (#TBD)
+        with bind_runtime_executable(engine, engine_runtime) as engine_binding:
+            engine_result = self._run_process(
+                VideoProcessSpec(
                 stage="engine_capture",
                 run_id=run_id,
                 argv=(
-                    str(engine),
+                    str(engine_binding.launch_executable),
                     "-replay",
                     str(frozen_replay),
                     "-autocamera",
@@ -409,10 +412,10 @@ class VideoRenderService:
                 stdout_path=run_directory / "engine-capture.stdout.log",
                 stderr_path=run_directory / "engine-capture.stderr.log",
                 timeout_seconds=request.timeout_seconds,
-                cancellation=request.cancellation,
-            ),
-            immutable,
-        )
+                    cancellation=request.cancellation,
+                ),
+                immutable,
+            )
         del engine_result
         gameplay_path = _require_ordinary_file(gameplay_path, "native gameplay capture")
         capture_result_path = _require_ordinary_file(

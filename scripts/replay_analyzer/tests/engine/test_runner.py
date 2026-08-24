@@ -24,6 +24,7 @@ from generals_replay_analyzer.engine.runner import (
     ProcessLaunchRequest,
     export_telemetry,
 )
+from generals_replay_analyzer.engine.runtime import bind_runtime_executable
 from generals_replay_analyzer.telemetry.model import CompleteRecord
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
@@ -54,6 +55,42 @@ class FakeLauncher:
             process_tree_terminated=self.timed_out,
             termination_method="fake_process_tree" if self.timed_out else None,
         )
+
+
+def test_runtime_binding_uses_an_exclusive_samefile_link_and_removes_it_after_launch(tmp_path: Path) -> None:
+    source = tmp_path / "build" / "generalszh.exe"
+    runtime = tmp_path / "installed"
+    source.parent.mkdir()
+    runtime.mkdir()
+    source.write_bytes(b"engine-build")
+
+    with bind_runtime_executable(source.resolve(), runtime.resolve()) as binding:
+        assert binding.staged is True
+        assert binding.launch_executable.parent == runtime.resolve()
+        assert binding.launch_executable.exists()
+        assert os.path.samefile(binding.configured_executable, binding.launch_executable)
+        staged = binding.launch_executable
+
+    assert not staged.exists()
+
+
+def test_runtime_binding_refuses_to_delete_a_replaced_path(tmp_path: Path) -> None:
+    source = tmp_path / "build" / "generalszh.exe"
+    runtime = tmp_path / "installed"
+    source.parent.mkdir()
+    runtime.mkdir()
+    source.write_bytes(b"engine-build")
+    staged: Path | None = None
+
+    with (
+        pytest.raises(EngineRunConfigurationError, match="refusing to delete"),
+        bind_runtime_executable(source.resolve(), runtime.resolve()) as binding,
+    ):
+        staged = binding.launch_executable
+        staged.unlink()
+        staged.write_bytes(b"attacker replacement")
+
+    assert staged is not None and staged.read_bytes() == b"attacker replacement"
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -305,6 +342,9 @@ def test_explicit_runtime_directory_keeps_build_executable_separate_from_install
 
     assert result.status is EngineRunStatus.SUCCESS
     assert launcher.requests[0].cwd == runtime_directory
+    launch_executable = Path(launcher.requests[0].argv[0])
+    assert launch_executable.parent == runtime_directory
+    assert not launch_executable.exists()
     request_document = json.loads((result.run_dir / "request.json").read_text(encoding="utf-8"))
     assert request_document["cwd"] == str(runtime_directory)
     assert request_document["config"]["runtime_directory"] == str(runtime_directory)
@@ -1445,3 +1485,29 @@ def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
         else []
     )
     assert after_user_replays == before_user_replays
+
+
+def test_real_pinned_engine_runner_stages_build_into_installed_runtime(
+    tmp_path: Path,
+    zero_hour_executable: Path,
+    zero_hour_runtime_directory: Path,
+    pinned_replay: Path,
+) -> None:
+    """Prove the public runner itself owns and cleans the runtime-local build binding."""
+    short_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:8]
+    data_root = (tmp_path.parents[1] / f"g9-runtime-stage-{short_token}").resolve()
+    before = set(zero_hour_runtime_directory.glob("generalszh_replay_analyzer_*.exe"))
+
+    result = export_telemetry(
+        pinned_replay,
+        _config(
+            zero_hour_executable,
+            data_root,
+            timeout_seconds=120,
+            runtime_directory=zero_hour_runtime_directory,
+        ),
+        run_id_factory=lambda: "723e4567-e89b-42d3-a456-426614174000",
+    )
+
+    assert result.status is EngineRunStatus.VALID_CRC_MISMATCH
+    assert set(zero_hour_runtime_directory.glob("generalszh_replay_analyzer_*.exe")) == before
