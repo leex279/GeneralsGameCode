@@ -26,6 +26,19 @@ from generals_replay_analyzer.web.ports import (
 )
 
 
+# TheSuperHackers @fix Leex 24/08/2026 Derive cast authority from persisted parser and telemetry lifecycle, not issue wording. (#TBD)
+def _evidence_horizon(report_json: dict[str, object]) -> Literal["complete", "partial"]:
+    lifecycle = report_json.get("lifecycle")
+    if isinstance(lifecycle, dict):
+        if lifecycle.get("parser_completion_status") == "complete" and lifecycle.get("telemetry_status") == "complete":
+            return "complete"
+        return "partial"
+    issues = report_json.get("quality_issues", [])
+    return "partial" if isinstance(issues, list) and any(
+        isinstance(item, dict) and item.get("issue_code") == "crc_mismatch" for item in issues
+    ) else "complete"
+
+
 class AnalyticsVideoAdapter:
     """Enqueue a cast through public identities; it never starts a renderer."""
 
@@ -49,10 +62,7 @@ class AnalyticsVideoAdapter:
             if replay is None or report is None or report_job is None:
                 raise PublicProblem(status=409, code="video_report_unavailable", detail="A completed replay report is required")
             report_json = report.report_json if isinstance(report.report_json, dict) else {}
-            issues = report_json.get("quality_issues", [])
-            horizon: Literal["complete", "partial"] = "partial" if isinstance(issues, list) and any(
-                isinstance(item, dict) and item.get("issue_code") == "crc_mismatch" for item in issues
-            ) else "complete"
+            horizon = _evidence_horizon(report_json)
             planner = VideoJobPlanner(clock=self._clock)
             try:
                 spec = planner.plan(
