@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from pydantic import Field
@@ -31,6 +32,7 @@ from generals_replay_analyzer.video.contracts import (
 )
 from generals_replay_analyzer.video.manifest import ArtifactHashV1, VideoManifestPublisher, VideoManifestV1
 from generals_replay_analyzer.video.process import (
+    VideoProcessCancelled,
     VideoProcessResult,
     VideoProcessRunner,
     VideoProcessSpec,
@@ -145,6 +147,23 @@ class VideoRenderResult(VideoContract):
     manifest_sha256: Sha256
 
 
+class NativeCaptureResultV1(VideoContract):
+    """Closed result written by the in-engine D3D capture boundary."""
+
+    schema_version: Literal[1]
+    status: Literal["success"]
+    failure_code: Literal["ok"]
+    failure_detail: int
+    requested_width: int = Field(ge=1)
+    requested_height: int = Field(ge=1)
+    actual_width: int = Field(ge=1)
+    actual_height: int = Field(ge=1)
+    fps: Literal[30, 60]
+    logic_frames: int = Field(ge=1)
+    presentation_frames: int = Field(ge=1)
+    process_exit_code: Literal[0]
+
+
 RenderManifestInput = VideoManifestV1
 
 
@@ -255,6 +274,26 @@ def _ffmpeg_filter_path(path: Path) -> str:
     return value
 
 
+def _load_capture_result(path: Path, settings: VideoSettingsV1, final_frame: int) -> NativeCaptureResultV1:
+    sidecar = _require_ordinary_file(path, "native capture result")
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        result = NativeCaptureResultV1.model_validate(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise VideoRenderError("native capture result is not a valid successful closed record") from error
+    expected_logic_frames = final_frame + 1
+    expected_presentation_frames = expected_logic_frames * (settings.fps // 30)
+    if (
+        (result.requested_width, result.requested_height) != (settings.width, settings.height)
+        or (result.actual_width, result.actual_height) != (settings.width, settings.height)
+        or result.fps != settings.fps
+        or result.logic_frames != expected_logic_frames
+        or result.presentation_frames != expected_presentation_frames
+    ):
+        raise VideoRenderError("native capture result differs from the fixed render contract")
+    return result
+
+
 def _landmarks(camera: CameraPlanV1) -> tuple[VerificationLandmarkV1, ...]:
     by_frame: dict[int, set[str]] = {}
     for segment in camera.segments:
@@ -302,9 +341,12 @@ class VideoRenderService:
         replay = _require_ordinary_file(request.replay_path, "replay")
         if _sha256(replay) != request.authority.replay_sha256:
             raise VideoRenderError("replay hash differs from accepted camera authority")
-        immutable = self._snapshot((replay, engine, ffmpeg, ffprobe))
         run_id = str(self._uuid_factory())
         run_directory = self._create_run_directory(run_id)
+        frozen_replay = _copy_exclusive(replay, run_directory / "replay.rep")
+        if _sha256(frozen_replay) != request.authority.replay_sha256:
+            raise VideoRenderError("frozen replay hash differs from accepted camera authority")
+        immutable = self._snapshot((frozen_replay, engine, ffmpeg, ffprobe))
 
         camera = self._camera_planner.create(request.authority, request.report, request.scene)
         if type(camera) is not CameraPlanV1 or camera.authority != request.authority:
@@ -353,7 +395,7 @@ class VideoRenderService:
                 argv=(
                     str(engine),
                     "-replay",
-                    str(replay),
+                    str(frozen_replay),
                     "-autocamera",
                     str(camera_script_path),
                     "-recordVideo",
@@ -367,12 +409,18 @@ class VideoRenderService:
                 stdout_path=run_directory / "engine-capture.stdout.log",
                 stderr_path=run_directory / "engine-capture.stderr.log",
                 timeout_seconds=request.timeout_seconds,
+                cancellation=request.cancellation,
             ),
             immutable,
         )
         del engine_result
         gameplay_path = _require_ordinary_file(gameplay_path, "native gameplay capture")
-        immutable.update(self._snapshot((gameplay_path,)))
+        capture_result_path = _require_ordinary_file(
+            gameplay_path.with_name(f"{gameplay_path.name}.capture-result.json"),
+            "native capture result",
+        )
+        _load_capture_result(capture_result_path, settings, request.authority.evidence_horizon.frame_end)
+        immutable.update(self._snapshot((gameplay_path, capture_result_path)))
         self._check_cancelled(request)
 
         mux_candidate = run_directory / "mux-candidate.mp4"
@@ -393,6 +441,7 @@ class VideoRenderService:
                 stdout_path=run_directory / "mux.stdout.log",
                 stderr_path=run_directory / "mux.stderr.log",
                 timeout_seconds=request.timeout_seconds,
+                cancellation=request.cancellation,
             ),
             immutable,
         )
@@ -418,6 +467,11 @@ class VideoRenderService:
         final_sha256 = verification.final_video_sha256
         if final_sha256 != _sha256(mux_candidate):
             raise VideoRenderError("verification hash differs from the immutable mux candidate")
+        if verification.narration_sha256 != immutable[narration_path.resolve()]:
+            raise VideoRenderError("verification narration hash differs from the immutable narration")
+        expected_subtitle_hash = immutable[subtitles_path.resolve()] if settings.subtitle_mode == "track" else None
+        if verification.subtitle_sha256 != expected_subtitle_hash:
+            raise VideoRenderError("verification subtitle hash differs from the immutable subtitle contract")
         final_path = run_directory / f"final-{final_sha256}.mp4"
         manifest_path = run_directory / "video-manifest-v1.json"
         try:
@@ -428,7 +482,7 @@ class VideoRenderService:
                 verification_passed=True,
                 artifacts=self._manifest_artifacts(
                     immutable,
-                    replay=replay,
+                    replay=frozen_replay,
                     engine=engine,
                     ffmpeg=ffmpeg,
                     ffprobe=ffprobe,
@@ -439,6 +493,7 @@ class VideoRenderService:
                     narration=narration_path,
                     subtitles=subtitles_path,
                     gameplay=gameplay_path,
+                    capture_result=capture_result_path,
                     final=final_path,
                 ),
             )
@@ -525,7 +580,10 @@ class VideoRenderService:
         immutable: dict[Path, str],
     ) -> VideoProcessResult:
         self._assert_immutable(immutable)
-        result = self._process_runner.run(spec)
+        try:
+            result = self._process_runner.run(spec)
+        except VideoProcessCancelled as error:
+            raise VideoRenderCancelled("video render cancelled while settling an active child tree") from error
         self._assert_immutable(immutable)
         return result
 
@@ -635,6 +693,7 @@ class VideoRenderService:
         narration: Path,
         subtitles: Path,
         gameplay: Path,
+        capture_result: Path,
         final: Path,
     ) -> tuple[ArtifactHashV1, ...]:
         paths = {
@@ -648,6 +707,7 @@ class VideoRenderService:
             "narration": narration,
             "subtitles": subtitles,
             "gameplay_video": gameplay,
+            "native_capture_result": capture_result,
             "final_video": final,
         }
         paths.update(

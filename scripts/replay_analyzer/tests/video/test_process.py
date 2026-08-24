@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from generals_replay_analyzer.engine.runner import ProcessExecution, ProcessLaunchRequest
-from generals_replay_analyzer.video.process import VideoProcessError, VideoProcessRunner, VideoProcessSpec
+from generals_replay_analyzer.video.process import (
+    VideoProcessCancelled,
+    VideoProcessError,
+    VideoProcessRunner,
+    VideoProcessSpec,
+)
 
 RUN_ID = "10000000-0000-4000-8000-000000000001"
 
@@ -85,6 +90,28 @@ def test_runner_rejects_output_collisions_before_launch(tmp_path: Path) -> None:
         VideoProcessRunner(launcher=launcher).run(spec)
     assert called is False
     assert spec.stdout_path.read_text(encoding="utf-8") == "caller owned"
+
+
+def test_runner_propagates_cancellation_to_the_hardened_child_tree_launcher(tmp_path: Path) -> None:
+    cancellation = _Cancellation()
+    spec = _spec(tmp_path, "-version").model_copy(update={"cancellation": cancellation})
+    observed: list[ProcessLaunchRequest] = []
+
+    def launcher(request: ProcessLaunchRequest) -> ProcessExecution:
+        observed.append(request)
+        return ProcessExecution(1, False, 0.1, True, "windows_job_object_cancellation", True)
+
+    with pytest.raises(VideoProcessCancelled) as raised:
+        VideoProcessRunner(launcher=launcher).run(spec)
+
+    assert observed[0].cancellation is cancellation
+    assert raised.value.result is not None
+    assert raised.value.result.process_tree_terminated is True
+
+
+class _Cancellation:
+    def is_set(self) -> bool:
+        return True
 
 
 def test_process_spec_rejects_shell_strings_nul_and_relative_executables(tmp_path: Path) -> None:

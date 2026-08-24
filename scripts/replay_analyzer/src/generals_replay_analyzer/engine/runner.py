@@ -44,6 +44,12 @@ _CATALOG_PREFIX = "game-data-catalog-v1-"
 _CATALOG_SUFFIX = ".json"
 
 
+class ProcessCancellationSignal(Protocol):
+    """Cooperative cancellation boundary observed while a child tree is active."""
+
+    def is_set(self) -> bool: ...
+
+
 @dataclass(frozen=True)
 class ProcessLaunchRequest:
     """Complete no-shell process boundary supplied to an injected launcher."""
@@ -57,6 +63,7 @@ class ProcessLaunchRequest:
     stdout_handle: BinaryIO
     stderr_handle: BinaryIO
     timeout_seconds: int
+    cancellation: ProcessCancellationSignal | None = None
     shell: Literal[False] = False
 
 
@@ -69,6 +76,7 @@ class ProcessExecution:
     duration_seconds: float
     process_tree_terminated: bool
     termination_method: str | None
+    cancelled: bool = False
 
 
 # TheSuperHackers @fix Leex 22/08/2026 Mark only positively settled interrupted POSIX engine trees. (#TBD)
@@ -885,16 +893,39 @@ def _posix_process_launcher(request: ProcessLaunchRequest) -> ProcessExecution:
             except BaseException as cleanup_error:
                 raise restore_error from cleanup_error
             raise
-        try:
-            exit_code = process.wait(timeout=request.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = _settle_posix_process_group(process)
-            tree_terminated = True
-            termination_method = "posix_process_group"
+        cancelled = False
+        if request.cancellation is None:
+            try:
+                exit_code = process.wait(timeout=request.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = _settle_posix_process_group(process)
+                tree_terminated = True
+                termination_method = "posix_process_group"
+        else:
+            deadline = time.monotonic() + request.timeout_seconds
+            while True:
+                if request.cancellation.is_set():
+                    exit_code = _settle_posix_process_group(process)
+                    tree_terminated = True
+                    termination_method = "posix_process_group_cancellation"
+                    cancelled = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    timed_out = True
+                    exit_code = _settle_posix_process_group(process)
+                    tree_terminated = True
+                    termination_method = "posix_process_group"
+                    break
+                try:
+                    exit_code = process.wait(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except BaseException as interruption:  # noqa: BLE001 - POSIX signal handlers raise outside Exception.
         _raise_settled_posix_interruption(process, interruption)
-    return ProcessExecution(exit_code, timed_out, time.monotonic() - started, tree_terminated, termination_method)
+    return ProcessExecution(exit_code, timed_out, time.monotonic() - started, tree_terminated, termination_method, cancelled)
 
 
 # TheSuperHackers @feature Leex 21/08/2026 Contain every Windows engine child in a kill-on-close Job Object. (#TBD)
@@ -1065,14 +1096,28 @@ def _windows_process_launcher(request: ProcessLaunchRequest) -> ProcessExecution
         job_assigned = True
         if kernel32.ResumeThread(process_info.hThread) == 0xFFFFFFFF:
             raise ctypes.WinError(ctypes.get_last_error())
-        wait_result = kernel32.WaitForSingleObject(process_info.hProcess, request.timeout_seconds * 1000)
-        timed_out = wait_result == 0x00000102
+        cancelled = False
+        if request.cancellation is None:
+            wait_result = kernel32.WaitForSingleObject(process_info.hProcess, request.timeout_seconds * 1000)
+            timed_out = wait_result == 0x00000102
+        else:
+            deadline = time.monotonic() + request.timeout_seconds
+            wait_result = 0x00000102
+            while wait_result == 0x00000102:
+                if request.cancellation.is_set():
+                    cancelled = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                wait_result = kernel32.WaitForSingleObject(process_info.hProcess, max(1, min(100, int(remaining * 1000))))
+            timed_out = wait_result == 0x00000102 and not cancelled and time.monotonic() >= deadline
         tree_terminated = False
         termination_method: str | None = None
-        if timed_out:
+        if timed_out or cancelled:
             terminate_and_wait_for_job()
             tree_terminated = True
-            termination_method = "windows_job_object"
+            termination_method = "windows_job_object_cancellation" if cancelled else "windows_job_object"
         elif wait_result != 0:
             raise ctypes.WinError(ctypes.get_last_error())
         elif active_job_processes() != 0:
@@ -1083,7 +1128,7 @@ def _windows_process_launcher(request: ProcessLaunchRequest) -> ProcessExecution
         if not kernel32.GetExitCodeProcess(process_info.hProcess, ctypes.byref(exit_code)):
             raise ctypes.WinError(ctypes.get_last_error())
         return ProcessExecution(
-            int(exit_code.value), timed_out, time.monotonic() - started, tree_terminated, termination_method
+            int(exit_code.value), timed_out, time.monotonic() - started, tree_terminated, termination_method, cancelled
         )
     except Exception:
         if process_created:

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, NoReturn
 
@@ -118,6 +119,35 @@ def _install_noop_posix_signal_mask(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda operation, _mask: set() if operation == signal.SIG_BLOCK else {signal.SIGTERM},
         raising=False,
     )
+
+
+class _Cancelled:
+    def is_set(self) -> bool:
+        return True
+
+
+def test_posix_launcher_cancellation_settles_the_exact_child_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_noop_posix_signal_mask(monkeypatch)
+    monkeypatch.setattr(runner_module.signal, "SIGKILL", signal.SIGTERM, raising=False)
+    process = _ScriptedPosixProcess(1)
+    killpg_calls: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(runner_module.os, "killpg", lambda pid, sig: killpg_calls.append((pid, sig)), raising=False)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    with stdout_path.open("xb", buffering=0) as stdout_handle, stderr_path.open("xb", buffering=0) as stderr_handle:
+        request = replace(_process_launch_request(tmp_path, stdout_handle, stderr_handle), cancellation=_Cancelled())
+        execution = runner_module._posix_process_launcher(request)
+
+    assert execution.cancelled is True
+    assert execution.timed_out is False
+    assert execution.process_tree_terminated is True
+    assert execution.termination_method == "posix_process_group_cancellation"
+    assert killpg_calls == [(process.pid, runner_module.signal.SIGKILL)]
+    assert process.wait_calls == [None]
 
 
 def _argument_path(request: ProcessLaunchRequest, option: str) -> Path:
