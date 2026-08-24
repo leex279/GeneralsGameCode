@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/GeneralsOnlineDevelopmentTeam/GameClient.git",
+  "commit": "b7cfeaf08e53044240c8674ea1960738d49776b7",
+  "recorder_executable": {
+    "name": "GeneralsOnlineZH_60.exe",
+    "sha256": "15619eba088abd6a24e790d8203b95f84925fcf0ea04c7b8203a29c9fdfe5ca6",
+    "exe_crc": "0x48D67663",
+    "build_time": "Jun 20 2026 23:29:03",
+    "simulation_profile": "GENERALS_ONLINE_HIGH_FPS_SERVER",
+    "tested_non_causal_profile": "GENERALS_ONLINE_IBRA_STARTING_POS_LOGIC",
+    "provenance": "GeneralsOnlineDevelopmentTeam/GameClient at pinned commit",
+    "purpose": "Reference recorder executable for replay capture compatibility checks"
+  },
+  "replay_gate": {
+    "expected_frame100_crc": "0x582083DA",
+    "replay_sha256": "EA085767BFA11D2CFC167D9007173CE2EB29B5F557702FFD042E2E9A1A8F6BB8"
+  },
+  "comparison_scope_prefixes": [
+    "Core/GameEngine/",
+    "Core/GameEngineDevice/",
+    "GeneralsMD/Code/GameEngine/",
+    "GeneralsMD/Code/GameEngineDevice/",
+    "GeneralsMD/Code/Main/"
+  ],
+  "sync_mode": "fetch-only"
+}
