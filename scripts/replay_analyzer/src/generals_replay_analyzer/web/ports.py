@@ -674,6 +674,19 @@ class JobLogChunkDTO(BaseModel):
         return self
 
 
+class VideoCastRequestDTO(WebDTO):
+    replay_public_id: PublicId
+    report_public_id: PublicId
+    diagnostic_preview: bool = False
+
+
+class VideoCastSubmissionDTO(WebDTO):
+    job_public_id: PublicId
+    evidence_horizon: Literal["complete", "partial"]
+    diagnostic_preview: bool
+    availability: AvailabilityDTO
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Keep web routes isolated from ORM and mutable analytics state. (#0)
 class WebApplicationPort(Protocol):
     def readiness(self) -> ReadinessDTO: ...
@@ -701,6 +714,8 @@ class WebApplicationPort(Protocol):
     def cancel_job(self, command: CancelJobCommandDTO) -> JobMutationDTO: ...
 
     def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO: ...
+
+    def submit_video_cast(self, command: VideoCastRequestDTO) -> VideoCastSubmissionDTO: ...
 
 
 # TheSuperHackers @feature Leex 23/08/2026 Resolve mutable latest-report navigation into an immutable fixed report identity. (#TBD)

@@ -18,6 +18,7 @@ DERIVE_FEATURES = "derive_features"
 ASSESS_STRATEGIES = "assess_strategies"
 ANALYZE_LLM = "analyze_llm"
 RENDER_REPORT = "render_report"
+RENDER_VIDEO = "render_video"
 
 STAGES = frozenset(
     {
@@ -32,6 +33,7 @@ STAGES = frozenset(
         ASSESS_STRATEGIES,
         ANALYZE_LLM,
         RENDER_REPORT,
+        RENDER_VIDEO,
     }
 )
 
@@ -47,6 +49,7 @@ ASSESS_STRATEGIES_VERSION = "1"
 ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
+RENDER_VIDEO_VERSION = "1"
 
 
 def canonical_json(value: Any) -> str:

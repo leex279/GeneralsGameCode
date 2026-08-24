@@ -71,6 +71,8 @@ from generals_replay_analyzer.web.ports import (
     TimelineChartDTO,
     TimelineChartQueryDTO,
     UploadImportCommandDTO,
+    VideoCastRequestDTO,
+    VideoCastSubmissionDTO,
     WebApplicationPort,
 )
 
@@ -179,6 +181,9 @@ class UnavailableWebApplicationPort:
     def read_job_log(self, _query: JobLogQueryDTO) -> JobLogChunkDTO:
         raise PublicProblem(status=503, code="job_adapter_pending", detail="Job operations are unavailable")
 
+    def submit_video_cast(self, _command: VideoCastRequestDTO) -> VideoCastSubmissionDTO:
+        raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
+
 
 class UnavailablePortFactory:
     """Create one immutable null adapter for each request scope."""
@@ -205,6 +210,7 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         library: object | None = None,
         players: object | None = None,
         settings: object | None = None,
+        video: object | None = None,
     ) -> None:
         super().__init__(readiness)
         self._jobs = jobs
@@ -213,6 +219,7 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         self._library = library
         self._players = players
         self._settings = settings
+        self._video = video
 
     def _player_port(self) -> object:
         if self._players is None:
@@ -255,6 +262,11 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
 
     def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO:
         return self._jobs.read_job_log(query)  # type: ignore[attr-defined,no-any-return]
+
+    def submit_video_cast(self, command: VideoCastRequestDTO) -> VideoCastSubmissionDTO:
+        if self._video is None:
+            raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
+        return self._video.submit_video_cast(command)  # type: ignore[attr-defined,no-any-return]
 
     def resolve_latest(self, query: LatestReportQueryDTO) -> ReportResolutionDTO:
         return self._reports.resolve_latest(query)  # type: ignore[attr-defined,no-any-return]
@@ -468,6 +480,7 @@ class AnalyticsPortFactory:
         from generals_replay_analyzer.web.adapters.map import AnalyticsMapSceneAdapter
         from generals_replay_analyzer.web.adapters.players import AnalyticsPlayersAdapter
         from generals_replay_analyzer.web.adapters.report import AnalyticsReportAdapter
+        from generals_replay_analyzer.web.adapters.video import AnalyticsVideoAdapter
 
         engine = create_database_engine(self._settings.database_path)
         request_sessions = _RequestSessionFactory(create_session_factory(engine))
@@ -537,6 +550,7 @@ class AnalyticsPortFactory:
                 library=library,
                 players=players,
                 settings=self._settings_adapter,
+                video=AnalyticsVideoAdapter(session_factory, clock=lambda: datetime.now(UTC)),
             )
             request_sessions.commit()
         except BaseException:
