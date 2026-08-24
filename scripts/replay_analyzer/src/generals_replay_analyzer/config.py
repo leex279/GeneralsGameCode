@@ -77,6 +77,15 @@ class AnalyzerSettings(BaseSettings):
     minimum_longitudinal_sample_size: int = Field(default=5, ge=1)
     # TheSuperHackers @feature Leex 23/08/2026 Unify the effective movement sampling interval across analyzer stages. (#TBD)
     movement_sample_frames: int = Field(default=15, ge=1, le=3600)
+    # TheSuperHackers @feature Leex 24/08/2026 Keep video executables and closed production settings outside Web request control. (#TBD)
+    ffmpeg_executable: Path | None = None
+    ffprobe_executable: Path | None = None
+    video_voice_provider: Literal["windows_sapi"] = "windows_sapi"
+    video_voice_name: str = Field(default="Microsoft Zira Desktop", min_length=1, max_length=160)
+    video_width: int = Field(default=1280, ge=640, le=7680)
+    video_height: int = Field(default=720, ge=360, le=4320)
+    video_fps: Literal[30, 60] = 30
+    video_subtitle_mode: Literal["track", "burned"] = "track"
 
     @classmethod
     def _for_testing_with_repository_outputs(cls, **values: Any) -> Self:
@@ -140,6 +149,12 @@ class AnalyzerSettings(BaseSettings):
 
         if self.engine_executable is not None:
             object.__setattr__(self, "engine_executable", _absolute_path(self.engine_executable))
+        for field_name in ("ffmpeg_executable", "ffprobe_executable"):
+            executable = getattr(self, field_name)
+            if executable is not None:
+                object.__setattr__(self, field_name, _absolute_path(executable))
+        if self.video_width % 2 or self.video_height % 2:
+            raise ValueError("video dimensions must be even for yuv420p output")
         object.__setattr__(self, "watched_folders", tuple(_absolute_path(path) for path in self.watched_folders))
         return self
 
@@ -148,6 +163,11 @@ class AnalyzerSettings(BaseSettings):
         """Return the fixed Task 9 transaction parent below the configured product root."""
         return self.data_root / "runs"
 
+    @property
+    def video_run_directory(self) -> Path:
+        """Return the fixed product-owned parent for isolated video render transactions."""
+        return self.data_root / "video-runs"
+
     def ensure_directories(self) -> None:
         """Create only analyzer-owned output directories, never caller input locations."""
         directories = (
@@ -155,6 +175,7 @@ class AnalyzerSettings(BaseSettings):
             self.database_path.parent,
             self.managed_replay_directory,
             self.run_directory,
+            self.video_run_directory,
             self.map_asset_directory,
             self.cache_directory,
             self.log_directory,

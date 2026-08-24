@@ -48,6 +48,14 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
         import_mode="reference",
         minimum_longitudinal_sample_size=9,
         movement_sample_frames=30,
+        ffmpeg_executable=tmp_path / "tools" / "ffmpeg.exe",
+        ffprobe_executable=tmp_path / "tools" / "ffprobe.exe",
+        video_voice_provider="windows_sapi",
+        video_voice_name="Microsoft Zira Desktop",
+        video_width=1920,
+        video_height=1080,
+        video_fps=60,
+        video_subtitle_mode="burned",
     )
 
     assert settings.data_root == data_root.resolve()
@@ -64,6 +72,12 @@ def test_constructor_overrides_all_configurable_values(tmp_path: Path) -> None:
     assert settings.import_mode == "reference"
     assert settings.minimum_longitudinal_sample_size == 9
     assert settings.movement_sample_frames == 30
+    assert settings.ffmpeg_executable == (tmp_path / "tools" / "ffmpeg.exe").resolve()
+    assert settings.ffprobe_executable == (tmp_path / "tools" / "ffprobe.exe").resolve()
+    assert settings.video_voice_provider == "windows_sapi"
+    assert settings.video_voice_name == "Microsoft Zira Desktop"
+    assert (settings.video_width, settings.video_height, settings.video_fps) == (1920, 1080, 60)
+    assert settings.video_subtitle_mode == "burned"
 
 
 def test_prefixed_environment_variables_override_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,6 +106,32 @@ def test_default_paths_are_derived_from_data_root(tmp_path: Path) -> None:
     assert settings.map_asset_directory == settings.data_root / "map-assets-v1"
     assert settings.cache_directory == settings.data_root / "cache"
     assert settings.log_directory == settings.data_root / "logs"
+    assert settings.video_run_directory == settings.data_root / "video-runs"
+
+
+def test_video_settings_have_closed_safe_defaults_and_ranges(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    assert settings.ffmpeg_executable is None
+    assert settings.ffprobe_executable is None
+    assert settings.video_voice_provider == "windows_sapi"
+    assert settings.video_voice_name == "Microsoft Zira Desktop"
+    assert (settings.video_width, settings.video_height, settings.video_fps) == (1280, 720, 30)
+    assert settings.video_subtitle_mode == "track"
+
+    for changes in (
+        {"video_width": 1279},
+        {"video_height": 719},
+        {"video_width": 639},
+        {"video_height": 359},
+        {"video_width": 7682},
+        {"video_height": 4322},
+        {"video_fps": 25},
+        {"video_subtitle_mode": "none"},
+        {"video_voice_provider": "network"},
+        {"video_voice_name": ""},
+    ):
+        with pytest.raises(ValidationError):
+            _settings(tmp_path, **changes)
 
 
 def test_settings_construction_has_no_filesystem_side_effects(tmp_path: Path) -> None:
