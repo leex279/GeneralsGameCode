@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from generals_replay_analyzer.video.contracts import CommentaryEventV1
-from generals_replay_analyzer.video.voice import VoiceClipV1
+from generals_replay_analyzer.video.voice import NarrationScheduleError, VoiceClipV1
 
 
 class VoiceProviderError(RuntimeError):
@@ -80,6 +80,8 @@ class WindowsSapiVoiceProvider:
                 provider_name=self.provider_name,
                 voice_name=self.voice_name,
             )
+        except NarrationScheduleError as error:
+            raise VoiceProviderError(f"Windows SAPI produced an invalid WAV: {error}") from error
         except (OSError, subprocess.SubprocessError) as error:
             raise VoiceProviderError(f"Windows SAPI could not run: {error}") from error
         finally:
