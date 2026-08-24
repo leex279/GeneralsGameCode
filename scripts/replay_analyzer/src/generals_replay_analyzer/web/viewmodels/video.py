@@ -19,10 +19,12 @@ class VideoDetailViewModel(BaseModel):
 def video_detail_view(job: JobDetailDTO) -> VideoDetailViewModel:
     """Keep private render paths out of the video production page."""
     complete = job.summary.stage == "render_video" and job.summary.state == "succeeded"
+    failed = job.summary.state == "failed"
     job_id = job.summary.job_public_id
     return VideoDetailViewModel(
         job=job,
-        status_label="Verified cast ready" if complete else "Cast production in progress",
+        # TheSuperHackers @bugfix Leex 24/08/2026 Give failed cast jobs a truthful, screen-reader-visible status. (#TBD)
+        status_label="Verified cast ready" if complete else ("Cast production failed" if failed else "Cast production in progress"),
         video_download_url=f"/video/{job_id}/download" if complete else None,
         manifest_download_url=f"/video/{job_id}/manifest" if complete else None,
     )
