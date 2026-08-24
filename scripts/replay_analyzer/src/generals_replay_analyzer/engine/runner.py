@@ -34,6 +34,7 @@ from generals_replay_analyzer.engine.result import (
     RunDiagnostic,
     StrategyAnalysisScope,
 )
+from generals_replay_analyzer.engine.runtime import bind_runtime_executable
 from generals_replay_analyzer.telemetry.map_asset import ASSET_NAMES
 from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
@@ -527,6 +528,28 @@ def export_telemetry(
     launcher: ProcessLauncher | None = None,
     run_id_factory: Callable[[], str] = lambda: str(uuid4()),
 ) -> EngineRunResult:
+    """Bind a build safely into its game runtime before collecting one replay trace."""
+    if type(config) is not EngineRunConfig:
+        raise EngineRunConfigurationError("config must be an EngineRunConfig")
+    with bind_runtime_executable(config.executable, config.working_directory) as binding:
+        launch_config = replace(config, executable=binding.launch_executable)
+        return _export_telemetry_bound(
+            replay,
+            launch_config,
+            configured_executable=binding.configured_executable,
+            launcher=launcher,
+            run_id_factory=run_id_factory,
+        )
+
+
+def _export_telemetry_bound(
+    replay: Path,
+    config: EngineRunConfig,
+    *,
+    configured_executable: Path,
+    launcher: ProcessLauncher | None = None,
+    run_id_factory: Callable[[], str] = lambda: str(uuid4()),
+) -> EngineRunResult:
     """Launch one replay in a never-reused run directory and validate all evidence atomically."""
     if type(config) is not EngineRunConfig:
         raise EngineRunConfigurationError("config must be an EngineRunConfig")
@@ -575,8 +598,8 @@ def export_telemetry(
     argv = tuple(argv_parts)
     replay_sha256 = _sha256_file(replay)
     replay_size = replay.stat().st_size
-    executable_sha256 = _sha256_file(config.executable)
-    executable_size = config.executable.stat().st_size
+    executable_sha256 = _sha256_file(configured_executable)
+    executable_size = configured_executable.stat().st_size
     started_at = _utc_now()
     request_document: dict[str, object] = {
         "schema_version": 1,
@@ -585,7 +608,7 @@ def export_telemetry(
         "requested_at": started_at,
         "replay": {"path": str(replay), "sha256": replay_sha256, "size": replay_size},
         "engine": {
-            "path": str(config.executable),
+            "path": str(configured_executable),
             "sha256": executable_sha256,
             "size": executable_size,
             "version": None,
@@ -682,7 +705,7 @@ def export_telemetry(
     stderr_path = public_stderr
     replay_changed = _input_identity_changed(replay, "replay input", replay_sha256, replay_size)
     engine_changed = _input_identity_changed(
-        config.executable, "engine executable", executable_sha256, executable_size
+        configured_executable, "engine executable", executable_sha256, executable_size
     )
     if replay_changed or engine_changed:
         changed_inputs = " and ".join(
