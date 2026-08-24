@@ -89,7 +89,7 @@ def test_stage_handler_returns_only_public_verified_media_identity() -> None:
             })()
 
     handler = VideoRenderStageHandler(request_factory=lambda _input: object(), renderer=Renderer())
-    output = handler(type("Context", (), {"input_json": {"replay_public_id": _id()}})())
+    output = handler(type("Context", (), {"input": {"replay_public_id": _id()}})())
 
     assert output["schema_version"] == "video-stage-output-v1"
     assert set(output) == {"schema_version", "run_public_id", "final_video_sha256", "manifest_public_id", "manifest_sha256"}

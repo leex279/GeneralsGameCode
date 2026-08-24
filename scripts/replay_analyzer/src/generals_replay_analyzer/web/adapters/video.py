@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
 from typing import Literal
@@ -18,7 +18,12 @@ from generals_replay_analyzer.importing.jobs import JobCoordinator
 from generals_replay_analyzer.importing.stages import RENDER_REPORT
 from generals_replay_analyzer.video.jobs import VideoJobPlanner, VideoJobRequestError
 from generals_replay_analyzer.web.errors import PublicProblem
-from generals_replay_analyzer.web.ports import AvailabilityDTO, VideoCastRequestDTO, VideoCastSubmissionDTO
+from generals_replay_analyzer.web.ports import (
+    AvailabilityDTO,
+    VerifiedVideoMediaDTO,
+    VideoCastRequestDTO,
+    VideoCastSubmissionDTO,
+)
 
 
 class AnalyticsVideoAdapter:
@@ -34,7 +39,7 @@ class AnalyticsVideoAdapter:
         with self._session_factory() as session:
             replay = session.scalar(select(Replay).where(Replay.public_id == command.replay_public_id))
             report = session.scalar(
-                select(Report).where(Report.public_id == command.report_public_id, Report.replay_id == Replay.id)
+                select(Report).where(Report.public_id == command.report_public_id, Report.replay_id == (None if replay is None else replay.id))
             )
             report_job = session.scalar(
                 select(Job)
@@ -69,7 +74,7 @@ class AnalyticsVideoAdapter:
             availability=AvailabilityDTO(state="available"),
         )
 
-    def read_verified_media(self, job_public_id: str, manifest: bool) -> tuple[bytes, str, str]:
+    def read_verified_video_media(self, job_public_id: str, manifest: bool) -> VerifiedVideoMediaDTO:
         with self._session_factory() as session:
             row = session.scalar(select(Job).where(Job.public_id == job_public_id, Job.stage == "render_video", Job.status == "succeeded"))
             result = None if row is None else session.scalar(select(JobStageResult).where(JobStageResult.job_id == row.id))
@@ -86,18 +91,26 @@ class AnalyticsVideoAdapter:
             raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable")
         path = directory / ("video-manifest-v1.json" if manifest else f"final-{final_hash}.mp4")
         try:
-            content = path.read_bytes()
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
         except OSError as error:
             raise PublicProblem(status=404, code="verified_video_unavailable", detail="Verified replay cast is unavailable") from error
         expected = manifest_hash if manifest else final_hash
-        if hashlib.sha256(content).hexdigest() != expected:
+        if digest.hexdigest() != expected:
             raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified replay cast identity changed")
         if manifest:
             try:
-                document = json.loads(content)
+                document = json.loads(path.read_text(encoding="utf-8"))
             except ValueError as error:
                 raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified manifest is invalid") from error
             if document.get("render_public_id") != run_id or document.get("verification_passed") is not True:
                 raise PublicProblem(status=409, code="verified_video_identity_mismatch", detail="Verified manifest is invalid")
-            return content, "application/json", "video-manifest-v1.json"
-        return content, "video/mp4", f"replay-cast-{run_id}.mp4"
+        def chunks() -> Iterator[bytes]:
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    yield chunk
+        if manifest:
+            return VerifiedVideoMediaDTO(media_type="application/json", filename="video-manifest-v1.json", chunks=chunks)
+        return VerifiedVideoMediaDTO(media_type="video/mp4", filename=f"replay-cast-{run_id}.mp4", chunks=chunks)

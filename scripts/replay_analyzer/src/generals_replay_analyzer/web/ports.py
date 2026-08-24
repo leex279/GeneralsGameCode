@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, Literal, Protocol, Self, runtime_checkable
 from urllib.parse import unquote, urlsplit
@@ -687,6 +688,13 @@ class VideoCastSubmissionDTO(WebDTO):
     availability: AvailabilityDTO
 
 
+@dataclass(frozen=True)
+class VerifiedVideoMediaDTO:
+    media_type: Literal["video/mp4", "application/json"]
+    filename: str
+    chunks: Callable[[], Iterator[bytes]]
+
+
 # TheSuperHackers @feature Leex 22/08/2026 Keep web routes isolated from ORM and mutable analytics state. (#0)
 class WebApplicationPort(Protocol):
     def readiness(self) -> ReadinessDTO: ...
@@ -716,6 +724,8 @@ class WebApplicationPort(Protocol):
     def read_job_log(self, query: JobLogQueryDTO) -> JobLogChunkDTO: ...
 
     def submit_video_cast(self, command: VideoCastRequestDTO) -> VideoCastSubmissionDTO: ...
+
+    def read_verified_video_media(self, job_public_id: str, manifest: bool) -> VerifiedVideoMediaDTO: ...
 
 
 # TheSuperHackers @feature Leex 23/08/2026 Resolve mutable latest-report navigation into an immutable fixed report identity. (#TBD)

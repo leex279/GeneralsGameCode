@@ -43,7 +43,7 @@ class VideoRenderStageHandler:
 
     # TheSuperHackers @feature Leex 24/08/2026 Publish only verified content identities from the worker renderer. (#TBD)
     def __call__(self, context: object) -> Mapping[str, object]:
-        raw_input = getattr(context, "input_json", None)
+        raw_input = getattr(context, "input", None)
         if not isinstance(raw_input, Mapping):
             raise VideoJobRequestError("video job input is invalid")
         request = self._request_factory(raw_input)

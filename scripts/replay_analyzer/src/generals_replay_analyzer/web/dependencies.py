@@ -71,6 +71,7 @@ from generals_replay_analyzer.web.ports import (
     TimelineChartDTO,
     TimelineChartQueryDTO,
     UploadImportCommandDTO,
+    VerifiedVideoMediaDTO,
     VideoCastRequestDTO,
     VideoCastSubmissionDTO,
     WebApplicationPort,
@@ -184,6 +185,9 @@ class UnavailableWebApplicationPort:
     def submit_video_cast(self, _command: VideoCastRequestDTO) -> VideoCastSubmissionDTO:
         raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
 
+    def read_verified_video_media(self, _job_public_id: str, _manifest: bool) -> VerifiedVideoMediaDTO:
+        raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
+
 
 class UnavailablePortFactory:
     """Create one immutable null adapter for each request scope."""
@@ -267,6 +271,11 @@ class AnalyticsWebApplicationPort(UnavailableWebApplicationPort):
         if self._video is None:
             raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
         return self._video.submit_video_cast(command)  # type: ignore[attr-defined,no-any-return]
+
+    def read_verified_video_media(self, job_public_id: str, manifest: bool) -> VerifiedVideoMediaDTO:
+        if self._video is None:
+            raise PublicProblem(status=503, code="video_adapter_pending", detail="Replay video production is unavailable")
+        return self._video.read_verified_video_media(job_public_id, manifest)  # type: ignore[attr-defined,no-any-return]
 
     def resolve_latest(self, query: LatestReportQueryDTO) -> ReportResolutionDTO:
         return self._reports.resolve_latest(query)  # type: ignore[attr-defined,no-any-return]
