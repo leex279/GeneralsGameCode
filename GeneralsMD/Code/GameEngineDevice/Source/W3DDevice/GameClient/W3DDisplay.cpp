@@ -2008,10 +2008,15 @@ AGAIN:
 		Int numRenderTargetVertices=Debug_Statistics::Get_DX8_Vertices();
 
 		// start render block
+		Bool replayCaptureNeedsFrame = FALSE;
+		#if !defined(IS_VS6_BUILD)
+		// TheSuperHackers @bugfix Leex 24/08/2026 Render every replay frame while the native writer owns capture. (#TBD)
+		replayCaptureNeedsFrame = s_replayVideoWriter != nullptr;
+		#endif
 		#if defined(_ALLOW_DEBUG_CHEATS_IN_RELEASE)
-    if ( (TheGameLogic->getFrame() % 30 == 1) || ( ! ( !TheGameLogic->isGamePaused() && TheGlobalData->m_TiVOFastMode) ) )
+    if ( replayCaptureNeedsFrame || (TheGameLogic->getFrame() % 30 == 1) || ( ! ( !TheGameLogic->isGamePaused() && TheGlobalData->m_TiVOFastMode) ) )
 		#else
-	    if ( (TheGameLogic->getFrame() % 30 == 1) || ( ! (!TheGameLogic->isGamePaused() && TheGlobalData->m_TiVOFastMode && TheGameLogic->isInReplayGame())) )
+	    if ( replayCaptureNeedsFrame || (TheGameLogic->getFrame() % 30 == 1) || ( ! (!TheGameLogic->isGamePaused() && TheGlobalData->m_TiVOFastMode && TheGameLogic->isInReplayGame())) )
     #endif
 		{
 			//USE_PERF_TIMER(BigAssRenderLoop)

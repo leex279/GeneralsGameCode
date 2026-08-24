@@ -96,6 +96,20 @@ def test_presentation_runner_pins_client_cadence_to_sixty_hz(repository_root: Pa
     assert "return;" in visual_throttle
 
 
+def test_native_writer_bypasses_tivo_replay_render_decimation(repository_root: Path) -> None:
+    """Every authoritative replay frame must reach capture even when TiVO fast mode is active."""
+    display = _source(
+        repository_root,
+        "GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp",
+    )
+    render_gate = display.split("// start render block", maxsplit=1)[1].split(
+        "static Bool couldRender", maxsplit=1
+    )[0]
+
+    assert "s_replayVideoWriter != nullptr" in render_gate
+    assert render_gate.count("replayCaptureNeedsFrame ||") == 2
+
+
 def test_writer_uses_owned_argv_only_win32_child(repository_root: Path) -> None:
     """Catch shell composition, unbounded writes, or output paths escaping their argv item."""
     header = _source(
