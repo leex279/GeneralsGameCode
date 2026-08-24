@@ -334,7 +334,11 @@ class _Cancellation:
         return self.cancelled
 
 
-def _settings(tmp_path: Path) -> tuple[AnalyzerSettings, Path, Path, Path]:
+def _settings(
+    tmp_path: Path,
+    *,
+    engine_user_data_directory: Path | None = None,
+) -> tuple[AnalyzerSettings, Path, Path, Path]:
     tools = tmp_path / "tools with spaces & metacharacters"
     tools.mkdir()
     engine_runtime = tmp_path / "installed Zero Hour"
@@ -348,6 +352,7 @@ def _settings(tmp_path: Path) -> tuple[AnalyzerSettings, Path, Path, Path]:
         data_root=tmp_path / "product data & safe",
         engine_executable=engine,
         engine_runtime_directory=engine_runtime,
+        engine_user_data_directory=engine_user_data_directory,
         ffmpeg_executable=ffmpeg,
         ffprobe_executable=ffprobe,
         video_width=640,
@@ -392,8 +397,10 @@ def _service(
     process: _ProcessRunner | None = None,
     verifier: _Verifier | None = None,
     publisher: _ManifestPublisher | None = None,
+    settings: AnalyzerSettings | None = None,
 ) -> tuple[VideoRenderService, list[str], _ProcessRunner, _Verifier, _ManifestPublisher]:
-    settings, _, _, _ = _settings(tmp_path)
+    if settings is None:
+        settings, _, _, _ = _settings(tmp_path)
     stages: list[str] = []
     process = process or _ProcessRunner(stages)
     verifier = verifier or _Verifier(stages)
@@ -429,10 +436,14 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert verifier.calls[0][3] == 59
     engine_spec, mux_spec = process.specs
     assert engine_spec.cwd == (tmp_path / "installed Zero Hour").resolve()
-    frozen_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
-    assert frozen_replay.parent == result.run_directory
-    assert frozen_replay.name == "replay.rep"
-    assert frozen_replay.read_bytes() == request.replay_path.read_bytes()
+    replay_leaf = engine_spec.argv[engine_spec.argv.index("-replay") + 1]
+    replay_user_data_root = Path(
+        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
+    )
+    staged_replay = replay_user_data_root / "Replays" / replay_leaf
+    assert Path(replay_leaf).name == replay_leaf
+    assert staged_replay.read_bytes() == request.replay_path.read_bytes()
+    assert result.run_directory.joinpath("replay.rep").read_bytes() == request.replay_path.read_bytes()
     assert engine_spec.argv[engine_spec.argv.index("-videoRes") + 1] == "640x360"
     assert engine_spec.argv[engine_spec.argv.index("-xres") + 1] == "640"
     assert engine_spec.argv[engine_spec.argv.index("-yres") + 1] == "360"
@@ -459,6 +470,63 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert all(
         artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts
     )
+
+
+def test_render_launches_the_staged_replay_leaf_below_an_isolated_user_data_root(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path)
+    service, _, process, _, _ = _service(tmp_path, request, camera, commentary)
+
+    service.render(request)
+
+    engine_spec = process.specs[0]
+    replay_argument = engine_spec.argv[engine_spec.argv.index("-replay") + 1]
+    user_data_root = Path(
+        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
+    )
+    staged_replay = user_data_root / "Replays" / replay_argument
+    assert Path(replay_argument).name == replay_argument
+    assert staged_replay.read_bytes() == request.replay_path.read_bytes()
+
+
+def test_render_stages_the_replay_declared_custom_map_into_the_isolated_root(
+    tmp_path: Path,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[4]
+    replay = repository_root / "scripts/replay_analyzer/tests/fixtures/zero_hour_1_04/leex279_vs_fox27.rep"
+    authority = _authority(_sha256(replay))
+    request = VideoRenderRequest(
+        authority=authority,
+        report=cast(PublishedReportGraphDTO, object()),
+        scene=cast(MapSceneReadModel, object()),
+        replay_path=replay,
+    )
+    camera = _camera(authority)
+    commentary = _commentary(authority)
+    retail_user_data = tmp_path / "retail-user-data"
+    custom_map = retail_user_data / "Maps" / "[rank] sand scorpion"
+    custom_map.mkdir(parents=True)
+    (custom_map / "map.ini").write_text("fixed custom map", encoding="ascii")
+    settings, _, _, _ = _settings(
+        tmp_path,
+        engine_user_data_directory=retail_user_data,
+    )
+    service, _, process, _, _ = _service(
+        tmp_path,
+        request,
+        camera,
+        commentary,
+        settings=settings,
+    )
+
+    service.render(request)
+
+    engine_spec = process.specs[0]
+    isolated_root = Path(
+        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
+    )
+    assert (isolated_root / "Maps" / "[rank] sand scorpion" / "map.ini").read_text(
+        encoding="ascii"
+    ) == "fixed custom map"
 
 
 def test_explicit_diagnostic_preview_accepts_replay_validator_exit_one_only_with_success_sidecar(

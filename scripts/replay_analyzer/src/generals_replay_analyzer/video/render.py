@@ -18,6 +18,11 @@ from pydantic import Field
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.engine.config import EngineRunConfigurationError
 from generals_replay_analyzer.engine.runtime import bind_runtime_executable
+from generals_replay_analyzer.importing.engine_acquirer import (
+    _stage_declared_map,
+    _stage_replay_for_engine,
+)
+from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.report.read_model import PublishedReportGraphDTO
 from generals_replay_analyzer.spatial.query import MapSceneReadModel
 from generals_replay_analyzer.video.camera import CameraPlanService
@@ -358,6 +363,18 @@ class VideoRenderService:
         frozen_replay = _copy_exclusive(replay, run_directory / "replay.rep")
         if _sha256(frozen_replay) != request.authority.replay_sha256:
             raise VideoRenderError("frozen replay hash differs from accepted camera authority")
+        # TheSuperHackers @bugfix Leex 24/08/2026 Launch rendered casts through the same isolated replay lookup root as telemetry playback. (#TBD)
+        staged_replay, replay_user_data_root = _stage_replay_for_engine(
+            self.settings,
+            frozen_replay,
+            request.authority.replay_sha256,
+        )
+        if self.settings.engine_user_data_directory is not None:
+            _stage_declared_map(
+                self.settings,
+                parse_replay(frozen_replay).header.map,
+                replay_user_data_root,
+            )
         immutable = self._snapshot((frozen_replay, engine, ffmpeg, ffprobe))
 
         camera = self._camera_planner.create(request.authority, request.report, request.scene)
@@ -414,7 +431,9 @@ class VideoRenderService:
                             argv=(
                                 str(engine_binding.launch_executable),
                                 "-replay",
-                                str(frozen_replay),
+                                staged_replay.name,
+                                "-replay-user-data-root",
+                                str(replay_user_data_root),
                                 "-autocamera",
                                 str(camera_script_path),
                                 "-recordVideo",
