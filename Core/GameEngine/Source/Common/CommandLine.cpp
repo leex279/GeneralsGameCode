@@ -1150,7 +1150,6 @@ namespace
 		{
 			autoCameraCommandLineError(error.str());
 		}
-		TheWritableGlobalData->m_autoCameraScript = s_autoCameraScript;
 	}
 #endif
 }

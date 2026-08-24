@@ -27,7 +27,7 @@ def test_autocamera_switch_is_modern_zero_hour_only_and_validated_before_startup
     assert "validateAutoCameraOptions();" in command_line
     assert "AutoCameraDirector::validateCameraScript" in command_line
     assert "defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)" in command_line
-    assert "m_autoCameraScript" in global_header
+    assert "m_autoCameraScript" not in global_header
     assert "m_autoCameraScript" not in base_global_header
 
     zero_hour_block = cmake.split("if(RTS_BUILD_ZEROHOUR)", maxsplit=1)[1].split(
@@ -74,7 +74,9 @@ def test_autocamera_parser_consumes_every_field_and_rejects_invalid_scripts(
     assert "camera segment IDs must be unique" in source
     assert "camera row has an invalid field count" in source
     assert "camera script contains no rows" in source
-    assert "s_validatedCameraSegments.swap(parsedSegments)" in source
+    assert "AutoCameraValidationCache *s_validatedCameraCache = nullptr;" in source
+    assert "AsciiString s_validatedCameraScript;" not in source
+    assert "std::vector<AutoCameraSegment> s_validatedCameraSegments;" not in source
     assert "std::signbit(parsed)" in source
     assert "Ease rows are baked transition windows" in source
     assert "ease transition cannot be the first camera row" in source
@@ -107,9 +109,12 @@ def test_autocamera_parser_consumes_every_field_and_rejects_invalid_scripts(
         "Bool AutoCameraDirector::evaluateCameraAtFrame", maxsplit=1
     )[0]
     assert "parseCameraScript" in validate_body
-    assert "s_validatedCameraSegments.swap(parsedSegments)" in validate_body
+    assert "new AutoCameraValidationCache" in validate_body
+    assert "cache->m_segments.swap(parsedSegments)" in validate_body
     assert "parseCameraScript" not in load_body
-    assert "m_segments = s_validatedCameraSegments" in load_body
+    assert "m_segments = s_validatedCameraCache->m_segments" in load_body
+    assert "delete s_validatedCameraCache;" in load_body
+    assert "s_validatedCameraCache = nullptr;" in load_body
 
     forbidden_parsers = (
         "sscanf(",
