@@ -219,6 +219,7 @@ def _seed_query_service(
     duplicate_manifest: bool = False,
     map_display_name: str = "Tournament Desert",
     corrupt_projection: bool = False,
+    engine_native_map_events: bool = False,
 ) -> tuple[MapSceneQueryService, dict[str, str]]:
     settings = AnalyzerSettings(data_root=tmp_path / "map-query-data")
     settings.ensure_directories()
@@ -232,6 +233,9 @@ def _seed_query_service(
     combat_evidence_id = _uuid("combat-evidence")
     oob_evidence_id = _uuid("oob-evidence")
     duplicate_manifest_evidence_id = _uuid("duplicate-manifest-evidence")
+    visibility_evidence_id = _uuid("visibility-evidence")
+    visibility_summary_evidence_id = _uuid("visibility-summary-evidence")
+    heuristic_evidence_id = _uuid("heuristic-evidence")
     manifest_asset_id = _uuid("manifest-asset")
     projection = {
         "amphibious_passable": [True, True, True, True],
@@ -380,6 +384,14 @@ def _seed_query_service(
             (combat_evidence_id, 2),
             (oob_evidence_id, 3),
         ]
+        if engine_native_map_events:
+            evidence_specs.extend(
+                (
+                    (visibility_evidence_id, 4),
+                    (visibility_summary_evidence_id, 5),
+                    (heuristic_evidence_id, 6),
+                )
+            )
         if duplicate_manifest:
             evidence_specs.append((duplicate_manifest_evidence_id, 99))
         for public_id, sequence in evidence_specs:
@@ -442,6 +454,73 @@ def _seed_query_service(
             evidence_item_id=evidence_rows[3].id,
         )
         events = [manifest_event, sample_event, combat_event, oob_event]
+        if engine_native_map_events:
+            events.extend(
+                (
+                    TelemetryEvent(
+                        telemetry_run_id=telemetry.id,
+                        sequence=4,
+                        frame=15,
+                        logic_time_seconds=0.5,
+                        schema_version=2,
+                        event_type="object_visibility_changed",
+                        payload_json={
+                            "player_index": 0,
+                            "object_id": 42,
+                            "template_name": "AmericaRanger",
+                            "previous_status": "unseen",
+                            "status": "clear",
+                            "first_observed_clear": True,
+                            "position": {"x": 5.0, "y": 10.0, "z": 0.0},
+                            "sampling_cycle_id": 0,
+                        },
+                        raw_record_json={},
+                        evidence_item_id=evidence_rows[4].id,
+                    ),
+                    TelemetryEvent(
+                        telemetry_run_id=telemetry.id,
+                        sequence=5,
+                        frame=15,
+                        logic_time_seconds=0.5,
+                        schema_version=2,
+                        event_type="visibility_sampling_summary",
+                        payload_json={
+                            "eligible_pair_count": 9000,
+                            "sampled_pair_count": 8192,
+                            "maximum_pairs_per_pass": 8192,
+                            "sampling_cycle_id": 0,
+                            "cycle_complete": False,
+                        },
+                        raw_record_json={},
+                        evidence_item_id=evidence_rows[5].id,
+                    ),
+                    TelemetryEvent(
+                        telemetry_run_id=telemetry.id,
+                        sequence=6,
+                        frame=120,
+                        logic_time_seconds=4.0,
+                        schema_version=2,
+                        event_type="partition_engine_grid_sample",
+                        payload_json={
+                            "player_index": 0,
+                            "sampling_scheme": "uniform_partition_lattice_v1",
+                            "grid": {"complete": False},
+                            "cells": [
+                                {
+                                    "cell_x": 0,
+                                    "cell_y": 0,
+                                    "world_position": {"x": 5.0, "y": 5.0, "z": 0.0},
+                                    "shroud_status": "clear",
+                                    "threat_value": 12,
+                                    "cash_value": 4,
+                                }
+                            ],
+                        },
+                        raw_record_json={},
+                        evidence_item_id=evidence_rows[6].id,
+                    ),
+                )
+            )
         if duplicate_manifest:
             events.append(
                 TelemetryEvent(
@@ -453,7 +532,9 @@ def _seed_query_service(
                     event_type="manifest",
                     payload_json={"engine_build": telemetry.engine_build},
                     raw_record_json={},
-                    evidence_item_id=evidence_rows[4].id,
+                    evidence_item_id=next(
+                        item.id for item in evidence_rows if item.public_id == duplicate_manifest_evidence_id
+                    ),
                 )
             )
         session.add_all(events)
@@ -569,6 +650,7 @@ def _seed_query_service(
                 sample_evidence_id,
                 combat_evidence_id,
                 oob_evidence_id,
+                *((visibility_evidence_id, visibility_summary_evidence_id, heuristic_evidence_id) if engine_native_map_events else ()),
                 *((duplicate_manifest_evidence_id,) if duplicate_manifest else ()),
             ),
             ids["player:0"],
@@ -578,6 +660,9 @@ def _seed_query_service(
     ids["sample_evidence"] = sample_evidence_id
     ids["combat_evidence"] = combat_evidence_id
     ids["duplicate_manifest_evidence"] = duplicate_manifest_evidence_id
+    ids["visibility_evidence"] = visibility_evidence_id
+    ids["visibility_summary_evidence"] = visibility_summary_evidence_id
+    ids["heuristic_evidence"] = heuristic_evidence_id
     return service, ids
 
 
@@ -603,6 +688,84 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert payload["engagements"] == []
     assert payload["casualties"][0]["frame"] == 40
     assert "ignored/private/manifest.json" not in repr(payload)
+
+
+def test_map_v2_projects_scouting_and_only_opted_in_latest_engine_heuristics(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path, engine_native_map_events=True)
+    default_payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+    opted_in_payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(
+                ids["replay"],
+                ids["report"],
+                0,
+                120,
+                sample_budget=100,
+                include_engine_heuristics=True,
+            )
+        ).payload
+    )
+    before_sample_payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(
+                ids["replay"],
+                ids["report"],
+                0,
+                100,
+                sample_budget=100,
+                include_engine_heuristics=True,
+            )
+        ).payload
+    )
+    structures_only_payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(
+                ids["replay"],
+                ids["report"],
+                0,
+                120,
+                event_families=("structures",),
+                sample_budget=100,
+                include_engine_heuristics=True,
+            )
+        ).payload
+    )
+    heuristics_only_payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(
+                ids["replay"],
+                ids["report"],
+                0,
+                120,
+                event_families=("engine_heuristics",),
+                sample_budget=100,
+                include_engine_heuristics=True,
+            )
+        ).payload
+    )
+
+    assert isinstance(default_payload, dict)
+    assert isinstance(opted_in_payload, dict)
+    assert isinstance(before_sample_payload, dict)
+    assert default_payload["schema_version"] == "replay-map-scene-v2"
+    assert default_payload["visibility_transitions"][0]["first_observed_clear"] is True
+    assert default_payload["visibility_sampling_summaries"][0]["coverage_state"] == "incomplete"
+    assert default_payload["engine_heuristic_overlays"] == []
+    assert before_sample_payload["engine_heuristic_overlays"] == []
+    assert structures_only_payload["visibility_transitions"] == []
+    assert structures_only_payload["visibility_sampling_summaries"] == []
+    assert structures_only_payload["engine_heuristic_overlays"] == []
+    assert heuristics_only_payload["visibility_transitions"] == []
+    assert len(heuristics_only_payload["engine_heuristic_overlays"]) == 1
+    [overlay] = opted_in_payload["engine_heuristic_overlays"]
+    assert overlay["frame"] == 120
+    assert overlay["threat_label"] == "Engine AI threat heuristic"
+    assert overlay["cash_label"] == "Engine AI cash-value heuristic"
+    assert overlay["evidence"][0]["evidence_public_id"] == ids["heuristic_evidence"]
 
 
 def test_listed_scene_window_resolves_against_authoritative_telemetry(tmp_path: Path) -> None:

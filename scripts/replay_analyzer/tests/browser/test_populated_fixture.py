@@ -38,7 +38,7 @@ def _environment(runtime_root: Path) -> dict[str, str]:
 
 def test_manifest_contract_writes_exact_canonical_dynamic_identity_document(tmp_path: Path) -> None:
     manifest = PopulatedFixtureManifest(
-        schema_version="populated-browser-fixture-v1",
+        schema_version="populated-browser-fixture-v2",
         fixed_now_utc="2026-08-23T12:00:00Z",
         input_replay_sha256="a" * 64,
         telemetry_trace_sha256="b" * 64,
@@ -81,7 +81,7 @@ def test_manifest_contract_writes_exact_canonical_dynamic_identity_document(tmp_
             "00000000-0000-4000-8000-000000000002",
             0,
             20,
-            "replay-map-scene-v1",
+            "replay-map-scene-v2",
             "/map",
             "/api/map",
         ),
@@ -134,7 +134,7 @@ def test_manifest_contract_writes_exact_canonical_dynamic_identity_document(tmp_
 
     assert path == tmp_path / "populated-browser-fixture.json"
     document = json.loads(path.read_bytes())
-    assert document["schema_version"] == "populated-browser-fixture-v1"
+    assert document["schema_version"] == "populated-browser-fixture-v2"
     assert document["payload_sha256"] == manifest.fixture_digest
     assert document["payload"]["players"][0]["display_name"] == "leex279"
     assert document["payload"]["comparison"]["metric_definition_id"] == "economy.cash_change_total"
@@ -179,7 +179,7 @@ def test_builder_composes_pinned_replay_through_production_services_and_queries(
     result = build_populated_fixture(runtime_root, _environment(runtime_root), project_root=project_root)
     manifest = result.manifest
 
-    assert manifest.schema_version == "populated-browser-fixture-v1"
+    assert manifest.schema_version == "populated-browser-fixture-v2"
     assert tuple(player.display_name for player in manifest.players) == ("leex279", "FOX27")
     assert manifest.comparison.metric_definition_id == "economy.cash_change_total"
     assert manifest.pending_job.status == "pending"

@@ -15,6 +15,7 @@ import generals_replay_analyzer.report.query as report_query_module
 import generals_replay_analyzer.spatial.query as spatial_query_module
 import generals_replay_analyzer.web.adapters.map as map_adapter_module
 import generals_replay_analyzer.web.adapters.report as report_adapter_module
+import generals_replay_analyzer.web.ports as ports_module
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db import upgrade_database
 from generals_replay_analyzer.web.dependencies import AnalyticsPortFactory
@@ -66,12 +67,80 @@ def test_map_scene_query_normalizes_repeated_filters() -> None:
         frame_end=20,
         replay_player_public_ids=(PLAYER_B, PLAYER_A, PLAYER_B),
         entity_public_ids=(ENTITY_A, ENTITY_A),
-        event_families=("routes", "samples", "routes"),
+        event_families=("routes", "samples", "visibility", "engine_heuristics", "routes"),
     )
 
     assert query.replay_player_public_ids == (PLAYER_A, PLAYER_B)
     assert query.entity_public_ids == (ENTITY_A,)
-    assert query.event_families == ("routes", "samples")
+    assert query.event_families == ("engine_heuristics", "routes", "samples", "visibility")
+
+
+def test_engine_heuristic_overlays_are_explicitly_opted_in() -> None:
+    default_query = MapSceneQueryDTO(
+        replay_public_id=REPLAY_ID,
+        report_public_id=REPORT_ID,
+        frame_start=0,
+        frame_end=300,
+    )
+    opted_in = default_query.model_copy(update={"include_engine_heuristics": True})
+
+    assert default_query.include_engine_heuristics is False
+    assert opted_in.include_engine_heuristics is True
+
+    port = _ScenePort()
+    response = _scene_client(port).get(
+        f"/api/replays/{REPLAY_ID}/reports/{REPORT_ID}/map/scene"
+        "?frame_start=0&frame_end=300&heuristics=true"
+    )
+
+    assert response.status_code == 200
+    assert port.scene_queries[-1].include_engine_heuristics is True
+    assert response.json()["query"]["include_engine_heuristics"] is True
+
+
+def test_map_v2_types_scouting_transitions_and_engine_heuristic_labels() -> None:
+    evidence = (SpatialEvidenceReferenceDTO(evidence_public_id=EVIDENCE_ID, tier="observed"),)
+    visibility = ports_module.MapVisibilityTransitionDTO(
+        visibility_public_id="90000000-0000-4000-8000-000000000001",
+        replay_player_public_id=PLAYER_A,
+        entity_public_id=ENTITY_A,
+        frame=300,
+        template_name="AmericaCommandCenter",
+        previous_status="unseen",
+        status="clear",
+        first_observed_clear=True,
+        position=_position(),
+        sampling_cycle_id=0,
+        evidence=evidence,
+    )
+    cell = ports_module.MapEngineHeuristicCellDTO(
+        cell_x=0,
+        cell_y=0,
+        position=_position(0.0, 0.0),
+        shroud_status="clear",
+        threat_value=12,
+        cash_value=4,
+        evidence=evidence,
+    )
+    overlay = ports_module.MapEngineHeuristicOverlayDTO(
+        overlay_public_id="90000000-0000-4000-8000-000000000002",
+        replay_player_public_id=PLAYER_A,
+        frame=300,
+        sampling_scheme="uniform_partition_lattice_v1",
+        grid_complete=False,
+        threat_label="Engine AI threat heuristic",
+        cash_label="Engine AI cash-value heuristic",
+        cells=(cell,),
+        evidence=evidence,
+    )
+
+    assert visibility.first_observed_clear is True
+    assert overlay.threat_label == "Engine AI threat heuristic"
+    assert overlay.cash_label == "Engine AI cash-value heuristic"
+    payload = overlay.model_dump(mode="python")
+    payload["threat_label"] = "Map control"
+    with pytest.raises(ValidationError):
+        ports_module.MapEngineHeuristicOverlayDTO.model_validate(payload)
 
 
 @pytest.mark.parametrize("frame_start, frame_end", [(-1, 0), (2, 1)])
@@ -148,8 +217,52 @@ def _scene(query: MapSceneQueryDTO) -> MapSceneDTO:
         locomotor_surface="ground",
         evidence=evidence,
     )
+    visibility = ports_module.MapVisibilityTransitionDTO(
+        visibility_public_id="90000000-0000-4000-8000-000000000001",
+        replay_player_public_id=PLAYER_A,
+        entity_public_id=ENTITY_A,
+        frame=query.frame_start,
+        template_name="AmericaCommandCenter",
+        previous_status="unseen",
+        status="clear",
+        first_observed_clear=True,
+        position=_position(),
+        sampling_cycle_id=0,
+        evidence=evidence,
+    )
+    visibility_summary = ports_module.MapVisibilitySamplingSummaryDTO(
+        summary_public_id="90000000-0000-4000-8000-000000000003",
+        frame=query.frame_start,
+        eligible_pair_count=9000,
+        sampled_pair_count=8192,
+        maximum_pairs_per_pass=8192,
+        sampling_cycle_id=0,
+        cycle_complete=False,
+        coverage_state="incomplete",
+        evidence=evidence,
+    )
+    heuristic_cell = ports_module.MapEngineHeuristicCellDTO(
+        cell_x=0,
+        cell_y=0,
+        position=_position(0.0, 0.0),
+        shroud_status="clear",
+        threat_value=12,
+        cash_value=4,
+        evidence=evidence,
+    )
+    heuristic_overlay = ports_module.MapEngineHeuristicOverlayDTO(
+        overlay_public_id="90000000-0000-4000-8000-000000000002",
+        replay_player_public_id=PLAYER_A,
+        frame=query.frame_end,
+        sampling_scheme="uniform_partition_lattice_v1",
+        grid_complete=False,
+        threat_label="Engine AI threat heuristic",
+        cash_label="Engine AI cash-value heuristic",
+        cells=(heuristic_cell,),
+        evidence=evidence,
+    )
     return MapSceneDTO(
-        schema_version="replay-map-scene-v1",
+        schema_version="replay-map-scene-v2",
         replay_public_id=query.replay_public_id,
         report_public_id=query.report_public_id,
         report_version="report-v1",
@@ -187,6 +300,9 @@ def _scene(query: MapSceneQueryDTO) -> MapSceneDTO:
         engagements=(),
         casualties=(),
         control_windows=(),
+        visibility_transitions=(visibility,),
+        visibility_sampling_summaries=(visibility_summary,),
+        engine_heuristic_overlays=(heuristic_overlay,) if query.include_engine_heuristics else (),
         downsampling=DownsamplingDTO(
             algorithm_version="event-forced-stratified-v1",
             requested_sample_budget=query.sample_budget,
@@ -260,11 +376,27 @@ def test_scene_json_is_fixed_canonical_and_normalizes_filters() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     assert response.headers["etag"] == f'"{sha256(response.content).hexdigest()}"'
-    assert response.json()["schema_version"] == "replay-map-scene-v1"
+    assert response.json()["schema_version"] == "replay-map-scene-v2"
     assert response.json()["query"]["replay_player_public_ids"] == [PLAYER_A, PLAYER_B]
     assert response.json()["query"]["event_families"] == ["routes", "samples"]
     assert b"locator" not in response.content
     assert port.scene_queries[0].report_public_id == REPORT_ID
+
+
+def test_map_scene_v2_rejects_v1_payloads_instead_of_reinterpreting_them() -> None:
+    scene = _scene(
+        MapSceneQueryDTO(
+            replay_public_id=REPLAY_ID,
+            report_public_id=REPORT_ID,
+            frame_start=0,
+            frame_end=1800,
+        )
+    )
+    payload = scene.model_dump(mode="python")
+    payload["schema_version"] = "replay-map-scene-v1"
+
+    with pytest.raises(ValidationError):
+        MapSceneDTO.model_validate(payload)
 
 
 def test_scene_json_rejects_unknown_or_cross_identity_inputs() -> None:

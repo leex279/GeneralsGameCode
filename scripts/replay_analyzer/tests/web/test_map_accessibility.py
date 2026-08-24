@@ -132,6 +132,11 @@ def test_map_javascript_uses_supplied_positions_and_one_chart_instance() -> None
     assert "rawMinimumX" in source
     assert "map-chart-status" in source
     assert 'setAttribute("data-map-state", "unavailable")' not in source
+    assert "scene.visibility_transitions" in source
+    assert "scene.engine_heuristic_overlays" in source
+    assert 'name: "Sampled shroud status"' in source
+    assert 'name: "Engine AI threat heuristic"' in source
+    assert 'name: "Engine AI cash-value heuristic"' in source
 
 
 def test_map_chart_has_bounded_responsive_geometry_and_accessible_time_sliders() -> None:
@@ -156,6 +161,27 @@ def test_map_evidence_tables_have_labelled_keyboard_scroll_regions() -> None:
     assert response.status_code == 200
     assert '<div class="wide-table-scroll" role="region" aria-label="Map evidence tables" tabindex="0">' in response.text
     assert ".wide-table-scroll { max-width: 100%; overflow-x: auto;" in stylesheet
+
+
+def test_scouting_and_opted_in_heuristics_have_equivalent_evidence_tables() -> None:
+    response = _scene_client(_ScenePort()).get(
+        f"/replays/{REPLAY_ID}/reports/{REPORT_ID}/map?frame_start=0&frame_end=1800&heuristics=true"
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "First observed clear" in body
+    assert "Visibility sampling coverage" in body
+    assert "incomplete" in body
+    assert "Engine AI threat heuristic" in body
+    assert "Engine AI cash-value heuristic" in body
+    assert 'name="heuristics" value="true" checked' in body
+    assert f"/evidence/observed/{EVIDENCE_ID}?report_id={REPORT_ID}" in body
+    heuristic_table = body.split("<caption>Engine heuristic cell samples</caption>", maxsplit=1)[1].split(
+        "</table>", maxsplit=1
+    )[0]
+    assert "map control" not in heuristic_table.casefold()
+    assert "territory" not in heuristic_table.casefold()
 
 
 def test_map_javascript_reports_missing_echarts_instead_of_leaving_loading_status() -> None:

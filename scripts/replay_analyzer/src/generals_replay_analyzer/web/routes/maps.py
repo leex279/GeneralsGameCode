@@ -131,7 +131,8 @@ def fixed_map(
             406, title="Not Acceptable", code="not_acceptable", detail="This route provides only text/html"
         )
     allowed = {
-        "frame_start", "frame_end", "player", "entity", "family", "surface", "coordinate", "subject", "sample_budget"
+        "frame_start", "frame_end", "player", "entity", "family", "surface", "coordinate", "subject", "sample_budget",
+        "heuristics"
     }
     scalar = allowed.difference({"player", "entity", "family"})
     if set(request.query_params).difference(allowed) or any(
@@ -154,6 +155,7 @@ def fixed_map(
             "coordinate_display": request.query_params.get("coordinate") or "raw",
             "player_centric_subject_public_id": request.query_params.get("subject") or None,
             "sample_budget": request.query_params.get("sample_budget", 5000),
+            "include_engine_heuristics": request.query_params.get("heuristics", False),
         }
         query = MapSceneQueryDTO.model_validate(values)
     except (ValueError, ValidationError):
@@ -187,6 +189,7 @@ def fixed_map(
                 "coordinate_display": "raw",
                 "player_centric_subject_public_id": None,
                 "sample_budget": 20_000,
+                "include_engine_heuristics": False,
             }
         )
         option_scene = map_port.get_scene(option_query)
@@ -240,6 +243,7 @@ def map_scene(
         "coordinate",
         "subject",
         "sample_budget",
+        "heuristics",
     }
     scalar = allowed.difference({"player", "entity", "family"})
     if set(request.query_params).difference(allowed) or any(
@@ -262,6 +266,7 @@ def map_scene(
                 "coordinate_display": request.query_params.get("coordinate") or "raw",
                 "player_centric_subject_public_id": request.query_params.get("subject") or None,
                 "sample_budget": request.query_params.get("sample_budget", 5000),
+                "include_engine_heuristics": request.query_params.get("heuristics", False),
             }
         )
     except (KeyError, ValueError, ValidationError):
