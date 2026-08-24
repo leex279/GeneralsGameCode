@@ -35,6 +35,7 @@ from generals_replay_analyzer.web.routes import (
     players,
     replays,
     reports,
+    scouting,
     video,
 )
 from generals_replay_analyzer.web.routes import (
@@ -284,9 +285,10 @@ def create_app(
     app.include_router(replays.router)
     app.include_router(reports.router)
     app.include_router(evidence.router)
-    # TheSuperHackers @feature Leex 23/08/2026 Register installed map, player, comparison, and settings workspaces. (#TBD)
+    # TheSuperHackers @feature Leex 24/08/2026 Register installed map, player, scouting, comparison, and settings workspaces. (#TBD)
     app.include_router(maps.router)
     app.include_router(players.router)
+    app.include_router(scouting.router)
     app.include_router(comparisons.router)
     app.include_router(settings_routes.router)
     app.include_router(imports.router)

@@ -34,7 +34,7 @@ def test_shell_references_only_package_local_assets_and_keeps_vendor_bytes_pinne
     manifest = json.loads(_resource("web/static/vendor/vendor-manifest.json"))
     licenses = _resource("web/static/vendor/THIRD_PARTY_LICENSES.md")
 
-    assert 'href="/static/css/app.css?v=16"' in base
+    assert 'href="/static/css/app.css?v=17"' in base
     assert 'src="/static/js/app.js"' in base
     assert "http://" not in base and "https://" not in base
     assert "@import" not in stylesheet

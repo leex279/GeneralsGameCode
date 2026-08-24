@@ -35,6 +35,7 @@ def test_fake_snapshots_render_package_shell_for_each_reserved_page() -> None:
     for response, active in ((dashboard, 'href="/" aria-current="page"'), (players, 'href="/players" aria-current="page"')):
         assert 'href="/">Dashboard</a>' in response.text
         assert 'href="/players">Players</a>' in response.text
+        assert 'href="/scouting">Scouting</a>' in response.text
         assert active in response.text
         assert 'href="/maps">Maps</a>' in response.text
         assert 'href="/compare">Compare</a>' in response.text

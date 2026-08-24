@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="page-heading scouting-heading">
+  <div><span class="eyebrow">Opponent scouting</span><h1>Prepare for what they do next</h1><p>Recurring openings, timing pressure, and a replay-backed response plan.</p></div>
+  {% if view.selected_player %}<div class="scouting-heading-stat"><span>Selected opponent</span><strong>{{ view.selected_player.display_name }}</strong><small>{{ view.history_count }} analyzed matches</small></div>{% endif %}
+</header>
+
+{% if view.players %}
+<nav class="opponent-roster" aria-label="Choose an opponent">
+  {% for player in view.players %}
+  <a href="/scouting?player={{ player.player_public_id }}"{% if player.player_public_id == view.selected_player_public_id %} aria-current="true"{% endif %}>
+    <span class="opponent-mark" aria-hidden="true">{{ player.display_name[:2]|upper }}</span>
+    <span><strong>{{ player.display_name }}</strong><small>{{ player.match_count }} match{% if player.match_count != 1 %}es{% endif %}</small></span>
+  </a>
+  {% endfor %}
+</nav>
+{% endif %}
+
+{% if not view.players %}
+<section class="workspace-panel scouting-empty" aria-labelledby="scouting-empty-title">
+  <span class="eyebrow">No dossier available</span>
+  <h2 id="scouting-empty-title">Analyze more replays to build an opponent game plan</h2>
+  <p>No recurring strategy is claimed yet. Import replays with stable player identities, then return here for evidence-backed preparation.</p>
+  <a class="button button-primary" href="/replays">Open replay library</a>
+</section>
+{% elif not view.primary_opening %}
+<section class="workspace-panel scouting-empty" aria-labelledby="scouting-waiting-title">
+  <span class="eyebrow">Dossier building</span>
+  <h2 id="scouting-waiting-title">More comparable matches are needed for {{ view.selected_player.display_name }}</h2>
+  <p>No recurring strategy is claimed yet. Individual analyzed replays remain available while the cohort grows.</p>
+  <a class="button" href="/players/{{ view.selected_player_public_id }}">Review player evidence</a>
+</section>
+{% else %}
+<section class="scouting-command-grid" aria-labelledby="opponent-plan-title">
+  <article class="workspace-panel opening-command-card">
+    <div class="section-heading"><div><span class="eyebrow">Most common opening</span><h2 id="opponent-plan-title">Opponent game plan</h2></div><span class="threat-badge threat-{{ view.primary_opening.threat_level|lower }}">{{ view.primary_opening.threat_level }} threat</span></div>
+    <div class="opening-title-row">
+      <div><span>Observed opening</span><h3>{{ view.primary_opening.title }}</h3></div>
+      <strong class="opening-frequency">{{ view.primary_opening.frequency_label }}</strong>
+    </div>
+    {% if view.primary_opening.sequence %}
+    <ol class="build-sequence" aria-label="Recurring opening sequence">
+      {% for step in view.primary_opening.sequence %}<li><span>{{ "%02d"|format(loop.index) }}</span><strong>{{ step }}</strong></li>{% endfor %}
+    </ol>
+    {% endif %}
+    <div class="opening-proof-strip">
+      <span>{{ view.primary_opening.sample_label }}</span>
+      <span>{{ view.primary_opening.confidence_label }}</span>
+      {% if view.primary_opening.confidence_range %}<span>{{ view.primary_opening.confidence_range }}</span>{% endif %}
+      <span>{{ view.primary_opening.timing_label }}</span>
+    </div>
+    <div class="response-split">
+      <div><span class="eyebrow">Threat</span><p>{{ view.primary_opening.threat_copy }}</p></div>
+      <div><span class="eyebrow">Counter-plan</span><p>{{ view.primary_opening.counter_plan }}</p></div>
+    </div>
+    {% if view.primary_opening.evidence %}<div class="evidence-actions">{% for link in view.primary_opening.evidence %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</div>{% endif %}
+  </article>
+
+  <aside class="workspace-panel scouting-context" aria-label="Dossier context">
+    <span class="eyebrow">Dossier scope</span><h2>{{ view.selected_player.display_name }}</h2>
+    <dl>
+      <div><dt>Analyzed matches</dt><dd>{{ view.history_count }}</dd></div>
+      <div><dt>Factions seen</dt><dd>{{ view.faction_context|join(" · ") or "Not established" }}</dd></div>
+      <div><dt>Maps seen</dt><dd>{{ view.map_context|join(" · ") or "Not established" }}</dd></div>
+      <div><dt>Preparation priority</dt><dd>{{ view.primary_opening.threat_level }}</dd></div>
+    </dl>
+    <p>Claims are limited to the selected fixed player profile and its accepted evidence.</p>
+  </aside>
+</section>
+
+<section class="workspace-panel response-plan" aria-labelledby="response-plan-title">
+  <div class="section-heading"><div><span class="eyebrow">What to prepare</span><h2 id="response-plan-title">Three-step response plan</h2></div><span>Evidence before prediction</span></div>
+  <ol>
+    {% for step in view.plan %}
+    <li><span class="plan-number">{{ step.number }}</span><div><h3>{{ step.title }}</h3><p>{{ step.instruction }}</p><small>{{ step.evidence_label }}</small></div></li>
+    {% endfor %}
+  </ol>
+</section>
+
+{% if view.alternative_openings %}
+<section class="workspace-panel" aria-labelledby="alternatives-title">
+  <div class="section-heading"><div><span class="eyebrow">Do not overfit</span><h2 id="alternatives-title">Alternative openings</h2></div><span>{{ view.alternative_openings|length }} observed</span></div>
+  <div class="alternative-opening-grid">{% for opening in view.alternative_openings %}<article><h3>{{ opening.title }}</h3><strong>{{ opening.frequency_label }}</strong><p>{{ opening.counter_plan }}</p><small>{{ opening.sample_label }} · {{ opening.confidence_label }}</small></article>{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if view.signals %}
+<section class="workspace-panel scouting-signals" aria-labelledby="signals-title">
+  <div class="section-heading"><div><span class="eyebrow">Supporting tendencies</span><h2 id="signals-title">What changes the response</h2></div><span>{{ view.signals|length }} signals</span></div>
+  <div class="scouting-signal-grid">
+    {% for signal in view.signals %}<article><span>{{ signal.sample_label }}</span><h3>{{ signal.label }}</h3><strong>{{ signal.value }}</strong><p>{{ signal.meaning }}</p></article>{% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

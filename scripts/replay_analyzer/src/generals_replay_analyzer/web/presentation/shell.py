@@ -42,7 +42,7 @@ class PresentationDTO(BaseModel):
 
 def _presentation_strings(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
-        return () if value in {"/", "/players", "/replays", "/maps", "/compare", "/jobs", "/settings"} else (value,)
+        return () if value in {"/", "/players", "/scouting", "/replays", "/maps", "/compare", "/jobs", "/settings"} else (value,)
     if isinstance(value, BaseModel):
         return tuple(text for field in type(value).model_fields for text in _presentation_strings(getattr(value, field)))
     if isinstance(value, tuple):
@@ -60,7 +60,7 @@ class NavigationItemDTO(PresentationDTO):
     unavailable_reason_code: str | None = None
 
 
-NavigationPath = Literal["/", "/players", "/replays", "/maps", "/compare", "/jobs", "/settings"]
+NavigationPath = Literal["/", "/players", "/scouting", "/replays", "/maps", "/compare", "/jobs", "/settings"]
 
 
 class ShellContextDTO(PresentationDTO):
@@ -87,6 +87,9 @@ def _navigation(current_path: NavigationPath) -> tuple[NavigationItemDTO, ...]:
         ),
         NavigationItemDTO(
             label="Players", href="/players", active=current_path == "/players", availability="available"
+        ),
+        NavigationItemDTO(
+            label="Scouting", href="/scouting", active=current_path == "/scouting", availability="available"
         ),
         NavigationItemDTO(
             label="Library", href="/replays", active=current_path == "/replays", availability="available"
