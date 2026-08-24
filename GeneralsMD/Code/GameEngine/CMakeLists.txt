@@ -1213,6 +1213,14 @@ else()
     )
 endif()
 
+# TheSuperHackers @feature Leex 24/08/2026 Build the presentation-only camera director only in the modern compatibility runner. (#TBD)
+if(RTS_REPLAY_COMPAT_RUNNER AND NOT IS_VS6_BUILD)
+    list(APPEND GAMEENGINE_SRC
+        Include/GameClient/AutoCameraDirector.h
+        Source/GameClient/AutoCameraDirector.cpp
+    )
+endif()
+
 
 add_library(z_gameengine STATIC)
 

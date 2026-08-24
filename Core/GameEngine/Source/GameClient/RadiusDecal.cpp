@@ -66,6 +66,10 @@ void RadiusDecalTemplate::createRadiusDecal(const Coord3D& pos, Real radius, con
 	// it is now considered nonEmpty, regardless of the state of m_decal, etc
 	result.m_empty = false;
 
+	// TheSuperHackers @bugfix Leex 24/08/2026 Preserve decal-backed logic state while headless replay simulation has no projected-shadow renderer. (#TBD)
+	if (TheProjectedShadowManager == nullptr)
+		return;
+
 	if (!m_onlyVisibleToOwningPlayer || owningPlayer->getPlayerIndex() == ThePlayerList->getLocalPlayer()->getPlayerIndex()
 									 || ThePlayerList->getLocalPlayer()->isPlayerObserver())
 	{

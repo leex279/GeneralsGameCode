@@ -136,6 +136,14 @@ public:
 	virtual void forceRedraw() = 0;
 
 	virtual void lookAt(const Coord3D* o);														///< Center the view on the given coordinate
+	// TheSuperHackers @bugfix Leex 24/08/2026 Apply replay camera target and orientation through one renderer operation so elevated targets do not inherit the previous transform. (#TBD)
+	virtual void setCameraState(const Coord3D* target, Real zoom, Real pitch, Real angle)
+	{
+		setZoom(zoom);
+		setPitch(pitch);
+		setAngle(angle);
+		lookAt(target);
+	}
 	virtual void initHeightForMap() {};														///< Init the camera height for the map at the current position.
 	virtual void resetPivotToGround() {};													///< Set the camera pivot to the terrain height at the current position.
 	virtual void scrollBy(const Coord2D* delta);														///< Shift the view by the given delta

@@ -2636,28 +2636,57 @@ void W3DView::screenToTerrain( const ICoord2D *screen, Coord3D *world )
 //-------------------------------------------------------------------------------------------------
 void W3DView::lookAt( const Coord3D *o )
 {
-	Coord3D pos = *o;
+	Vector3 lookDirection(0.0f, 0.0f, 0.0f);
+	if (o->z > PATHFIND_CELL_SIZE_F + TheTerrainLogic->getGroundHeight(o->x, o->y))
+	{
+		Vector3 rayStart = m_3DCamera->Get_Position();
+		Vector3 rayEnd;
+		m_3DCamera->Un_Project(rayEnd, Vector2(0.0f, 0.0f));
+		lookDirection = rayEnd - rayStart;
+	}
+	lookAtUsingDirection(o, lookDirection);
+}
+
+//-------------------------------------------------------------------------------------------------
+// TheSuperHackers @bugfix Leex 24/08/2026 Derive elevated replay targets from the requested camera state instead of the preceding rendered transform. (#TBD)
+//-------------------------------------------------------------------------------------------------
+void W3DView::setCameraState(const Coord3D *target, Real zoom, Real pitch, Real angle)
+{
+	setZoom(zoom);
+	setPitch(pitch);
+	setAngle(angle);
+
+	Vector3 sourcePos;
+	Vector3 targetPos;
+	buildCameraPosition(sourcePos, targetPos);
+	lookAtUsingDirection(target, targetPos - sourcePos);
+
+	// Recalculate terrain-relative zoom after lookAtUsingDirection moves the camera pivot.
+	setZoom(zoom);
+}
+
+//-------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------
+void W3DView::lookAtUsingDirection(const Coord3D *target, Vector3 lookDirection)
+{
+	Coord3D pos = *target;
 
 // no, don't call the super-lookAt, since it will munge our coords
 // as for a 2d view. just call setPosition.
 //View::lookAt(&pos);
 
-	if (o->z > PATHFIND_CELL_SIZE_F+TheTerrainLogic->getGroundHeight(pos.x, pos.y)) {
+	if (target->z > PATHFIND_CELL_SIZE_F+TheTerrainLogic->getGroundHeight(pos.x, pos.y)) {
 		// Pos.z is not used, so if we want to look at something off the ground,
 		// we have to look at the spot on the ground such that the object intersects
 		// with the look at vector in the center of the screen.  jba.
-		Vector3 rayStart,rayEnd;
+		Vector3 rayStart(pos.x, pos.y, pos.z);
 		LineSegClass lineseg;
 		CastResultStruct result;
 		Vector3 intersection(0,0,0);
 
-		rayStart = m_3DCamera->Get_Position();	//get camera location
-		m_3DCamera->Un_Project(rayEnd,Vector2(0.0f,0.0f));	//get world space point
-		rayEnd -= rayStart;	//vector camera to world space point
-		rayEnd.Normalize();	//make unit vector
-		rayEnd *= m_3DCamera->Get_Depth();	//adjust length to reach far clip plane
-		rayStart.Set(pos.x, pos.y, pos.z);
-		rayEnd += rayStart;	//get point on far clip plane along ray from camera.
+		lookDirection.Normalize();	//make unit vector
+		lookDirection *= m_3DCamera->Get_Depth();	//adjust length to reach far clip plane
+		Vector3 rayEnd = rayStart + lookDirection;	//get point on far clip plane along ray from camera.
 		lineseg.Set(rayStart,rayEnd);
 
 		RayCollisionTestClass raytest(lineseg,&result);

@@ -42,6 +42,10 @@ static void drawFramerateBar();
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
 #include "Common/FramePacer.h"
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#include "Common/GameEngine.h"
+#include "Common/Recorder.h"
+#endif
 #include "Common/ThingFactory.h"
 #include "Common/GlobalData.h"
 #include "Common/PerfTimer.h"
@@ -72,6 +76,9 @@ static void drawFramerateBar();
 #include "W3DDevice/GameClient/W3DFileSystem.h"
 #include "W3DDevice/GameClient/W3DDynamicLight.h"
 #include "W3DDevice/GameClient/W3DProfilerFrameCapture.h"
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#include "W3DDevice/GameClient/W3DVideoWriter.h"
+#endif
 #include "W3DDevice/GameClient/HeightMap.h"
 #include "W3DDevice/GameClient/WorldHeightMap.h"
 #include "W3DDevice/GameClient/W3DScene.h"
@@ -114,6 +121,12 @@ static void drawFramerateBar();
 // DEFINE AND ENUMS ///////////////////////////////////////////////////////////
 
 #define no_SAMPLE_DYNAMIC_LIGHT	1
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+// TheSuperHackers @feature Leex 23/08/2026 Keep the modern recorder in the rendered client lifecycle and outside GameLogic. (#TBD)
+static W3DVideoWriter *s_replayVideoWriter = nullptr;
+static Bool s_replayVideoCaptureSawReplay = FALSE;
+static Bool s_replayVideoCaptureFinalized = FALSE;
+#endif
 #ifdef SAMPLE_DYNAMIC_LIGHT
 static W3DDynamicLight* theDynamicLight = nullptr;
 static Real theLightXOffset = 0.1f;
@@ -413,6 +426,15 @@ W3DDisplay::W3DDisplay()
 #ifdef PROFILER_ENABLED
 	m_profilerFrameCapture = NEW W3DProfilerFrameCapture();
 #endif
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	if (!TheGlobalData->m_recordVideoPath.isEmpty())
+	{
+		s_replayVideoCaptureFinalized = FALSE;
+		s_replayVideoWriter = NEW W3DVideoWriter(TheGlobalData->m_recordVideoPath.str(),
+			TheGlobalData->m_videoCaptureWidth, TheGlobalData->m_videoCaptureHeight,
+			TheGlobalData->m_videoCaptureFps);
+	}
+#endif
 }
 
 // W3DDisplay::~W3DDisplay ====================================================
@@ -420,6 +442,14 @@ W3DDisplay::W3DDisplay()
 //=============================================================================
 W3DDisplay::~W3DDisplay()
 {
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 23/08/2026 Finalize FFmpeg when replay/display teardown owns normal process shutdown. (#TBD)
+	finalizeReplayVideoCapture();
+	delete s_replayVideoWriter;
+	s_replayVideoWriter = nullptr;
+	s_replayVideoCaptureSawReplay = FALSE;
+	s_replayVideoCaptureFinalized = FALSE;
+#endif
 #ifdef PROFILER_ENABLED
 	delete m_profilerFrameCapture;
 	m_profilerFrameCapture = nullptr;
@@ -1796,6 +1826,24 @@ void W3DDisplay::step()
 	stepViews();
 }
 
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+// TheSuperHackers @bugfix Leex 24/08/2026 Publish FFmpeg close/output failures before GameMain samples the typed runner result. (#TBD)
+void W3DDisplay::finalizeReplayVideoCapture()
+{
+	if (s_replayVideoWriter == nullptr || s_replayVideoCaptureFinalized)
+	{
+		return;
+	}
+
+	s_replayVideoWriter->close();
+	s_replayVideoCaptureFinalized = TRUE;
+	if (s_replayVideoWriter->hasFailed())
+	{
+		TheWritableGlobalData->m_replayCompatRunnerFailed = TRUE;
+	}
+}
+#endif
+
 //DECLARE_PERF_TIMER(BigAssRenderLoop)
 
 // W3DDisplay::draw ===========================================================
@@ -1813,6 +1861,22 @@ void W3DDisplay::draw()
 
 	if (TheGlobalData->m_headless)
 		return;
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	if (s_replayVideoWriter != nullptr && s_replayVideoCaptureSawReplay && !s_replayVideoCaptureFinalized
+		&& TheRecorder != nullptr
+		&& (TheRecorder->sawCRCMismatch() || !TheRecorder->isPlaybackInProgress()))
+	{
+		// TheSuperHackers @feature Leex 23/08/2026 Let replay completion close capture without asking the writer to quit the game. (#TBD)
+		finalizeReplayVideoCapture();
+		if (s_replayVideoWriter->hasFailed())
+		{
+			// TheSuperHackers @bugfix Leex 24/08/2026 Surface FFmpeg close and output-validation failures through normal runner teardown. (#TBD)
+			TheWritableGlobalData->m_replayCompatRunnerFailed = TRUE;
+			TheGameEngine->setQuitting(TRUE);
+		}
+	}
+#endif
 
 	updateAverageFPS();
 
@@ -2092,6 +2156,21 @@ void W3DDisplay::draw()
 				if (m_profilerFrameCapture && !TheGlobalData->m_headless)
 				{
 					m_profilerFrameCapture->Capture(getWidth(), getHeight());
+				}
+#endif
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+				// TheSuperHackers @feature Leex 23/08/2026 Capture one rendered replay frame before End_Render presents or discards the backbuffer. (#TBD)
+				if (s_replayVideoWriter != nullptr && !s_replayVideoCaptureFinalized
+					&& !s_replayVideoWriter->hasFailed() && TheGameLogic->isInReplayGame())
+				{
+					s_replayVideoCaptureSawReplay = TRUE;
+					if (!s_replayVideoWriter->captureFrame(DX8Wrapper::_Get_D3D_Device8(), TheGameLogic->getFrame()))
+					{
+						// TheSuperHackers @bugfix Leex 24/08/2026 Propagate a typed native-capture failure to the runner process instead of returning false success. (#TBD)
+						TheWritableGlobalData->m_replayCompatRunnerFailed = TRUE;
+						s_replayVideoCaptureFinalized = TRUE;
+						TheGameEngine->setQuitting(TRUE);
+					}
 				}
 #endif
 				// render is all done!

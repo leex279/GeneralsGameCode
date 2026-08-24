@@ -31,6 +31,9 @@
 #include "Common/FramePacer.h"
 #include "Common/GameEngine.h"
 #include "Common/ReplaySimulation.h"
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#include "GameClient/Display.h"
+#endif
 
 
 /**
@@ -60,6 +63,19 @@ Int GameMain()
 		// run it
 		TheGameEngine->execute();
 	}
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @bugfix Leex 24/08/2026 Close capture while the renderer is alive so finalization failures affect the process result. (#TBD)
+	if (TheDisplay != nullptr)
+	{
+		TheDisplay->finalizeReplayVideoCapture();
+	}
+	// TheSuperHackers @bugfix Leex 24/08/2026 Return typed renderer failure through the runner after normal capture finalization. (#TBD)
+	if (TheGlobalData->m_replayCompatRunnerFailed)
+	{
+		exitcode = 1;
+	}
+#endif
 
 	// since execute() returned, we are exiting the game
 	delete TheFramePacer;

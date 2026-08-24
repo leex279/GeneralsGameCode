@@ -178,6 +178,7 @@ public:
 	virtual void setPitchToDefault() override;									///< Set the view pitch back to default
 
 	virtual void lookAt( const Coord3D *o ) override;											///< Center the view on the given coordinate
+	virtual void setCameraState(const Coord3D *target, Real zoom, Real pitch, Real angle) override;
 	virtual void initHeightForMap() override;												///< Init the camera height for the map at the current position.
 	virtual void resetPivotToGround() override;												///< Set the camera pivot to the terrain height at the current position.
 	virtual void moveCameraTo(const Coord3D *o, Int milliseconds,  Int shutter, Bool orient, Real easeIn, Real easeOut) override;
@@ -310,6 +311,7 @@ private:
 	void setCameraTransform(const Matrix3D &transform);
 	void buildCameraPosition(Vector3 &sourcePos, Vector3 &targetPos);
 	void buildCameraTransform(Matrix3D *transform, const Vector3 &sourcePos, const Vector3 &targetPos); ///< calculate (but do not set) the transform matrix of m_3DCamera, based on m_pos & m_angle
+	void lookAtUsingDirection(const Coord3D *target, Vector3 lookDirection);
 	Bool zoomCameraToDesiredHeight();
 	Bool movePivotToGround();
 	void updateCameraAreaConstraints();

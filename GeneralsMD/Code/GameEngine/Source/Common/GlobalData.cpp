@@ -1005,6 +1005,16 @@ GlobalData::GlobalData()
 	m_simulateReplays.clear();
 	m_simulateReplayJobs = SIMULATE_REPLAYS_SEQUENTIAL;
 
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 24/08/2026 Default presentation-only runner state to disabled without touching replay simulation inputs. (#TBD)
+	m_autoCameraScriptPath.clear();
+	m_recordVideoPath.clear();
+	m_videoCaptureWidth = 0;
+	m_videoCaptureHeight = 0;
+	m_videoCaptureFps = 0;
+	m_replayCompatRunnerFailed = FALSE;
+#endif
+
 	for (i = LEVEL_FIRST; i <= LEVEL_LAST; ++i)
 		m_healthBonus[i] = 1.0f;
 

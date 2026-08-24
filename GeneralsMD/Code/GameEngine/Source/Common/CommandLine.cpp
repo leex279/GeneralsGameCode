@@ -32,10 +32,19 @@
 #include "Common/Recorder.h"
 #include "Common/version.h"
 #include "GameClient/ClientInstance.h"
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#include "GameClient/AutoCameraDirector.h"
+#endif
 #include "GameClient/TerrainVisual.h" // for TERRAIN_LOD_MIN definition
 #include "GameClient/GameText.h"
 #include "GameNetwork/NetworkDefs.h"
 #include "trim.h"
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#endif
 
 
 
@@ -407,6 +416,168 @@ Int parseMapName(char *args[], int num)
 	}
 	return 1;
 }
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+static Bool s_hasAutoCameraScript = FALSE;
+static Bool s_hasRecordVideoPath = FALSE;
+static Bool s_hasVideoResolution = FALSE;
+static Bool s_hasVideoFps = FALSE;
+
+// TheSuperHackers @feature Leex 24/08/2026 Fail runner-only command lines before they can start a non-repeatable capture. (#TBD)
+static void replayCompatRunnerCommandLineError(const char *message)
+{
+	fprintf(stderr, "Replay compatibility runner: %s\n", message);
+	fflush(stderr);
+	// TheSuperHackers @bugfix Leex 24/08/2026 Avoid CRT/global teardown while command-line validation runs before engine initialization. (#TBD)
+	ExitProcess(1);
+}
+
+static Bool isAbsoluteReplayCompatRunnerPath(const Char *path)
+{
+	const Bool isDriveAbsolute = path[0] != '\0' && path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+	const Bool isUNCAbsolute = path[0] == '\\' && path[1] == '\\';
+	return isDriveAbsolute || isUNCAbsolute;
+}
+
+// TheSuperHackers @feature Leex 24/08/2026 Accept one frame-script path for the modern presentation controller. (#TBD)
+Int parseAutoCamera(char *args[], int num)
+{
+	if (num <= 1 || args[1][0] == '\0')
+	{
+		replayCompatRunnerCommandLineError("-autocamera requires a camera script path");
+	}
+	if (s_hasAutoCameraScript)
+	{
+		replayCompatRunnerCommandLineError("-autocamera may only be specified once");
+	}
+	TheWritableGlobalData->m_autoCameraScriptPath = args[1];
+	s_hasAutoCameraScript = TRUE;
+	return 2;
+}
+
+// TheSuperHackers @feature Leex 24/08/2026 Accept one absolute MP4 output destination for native capture. (#TBD)
+Int parseRecordVideo(char *args[], int num)
+{
+	if (num <= 1 || !isAbsoluteReplayCompatRunnerPath(args[1]))
+	{
+		replayCompatRunnerCommandLineError("-recordVideo requires an absolute MP4 output path");
+	}
+	if (s_hasRecordVideoPath)
+	{
+		replayCompatRunnerCommandLineError("-recordVideo may only be specified once");
+	}
+	TheWritableGlobalData->m_recordVideoPath = args[1];
+	s_hasRecordVideoPath = TRUE;
+	return 2;
+}
+
+// TheSuperHackers @feature Leex 24/08/2026 Parse one bounded even output resolution for the native capture writer. (#TBD)
+Int parseVideoResolution(char *args[], int num)
+{
+	if (num <= 1 || s_hasVideoResolution)
+	{
+		replayCompatRunnerCommandLineError("-videoRes requires one unique even WIDTHxHEIGHT value");
+	}
+	const Char *lowerSeparator = strchr(args[1], 'x');
+	const Char *upperSeparator = strchr(args[1], 'X');
+	if ((lowerSeparator == nullptr) == (upperSeparator == nullptr))
+	{
+		replayCompatRunnerCommandLineError("-videoRes requires WIDTHxHEIGHT");
+	}
+	const Char *separator = lowerSeparator != nullptr ? lowerSeparator : upperSeparator;
+	Char *widthEnd = nullptr;
+	Char *heightEnd = nullptr;
+	errno = 0;
+	const long width = strtol(args[1], &widthEnd, 10);
+	const long height = strtol(separator + 1, &heightEnd, 10);
+	if (errno == ERANGE || widthEnd != separator || heightEnd == separator + 1 || *heightEnd != '\0'
+		|| width < 16 || width > 7680 || height < 16 || height > 4320
+		|| (width % 2) != 0 || (height % 2) != 0)
+	{
+		replayCompatRunnerCommandLineError("-videoRes requires bounded even dimensions");
+	}
+	TheWritableGlobalData->m_videoCaptureWidth = static_cast<Int>(width);
+	TheWritableGlobalData->m_videoCaptureHeight = static_cast<Int>(height);
+	s_hasVideoResolution = TRUE;
+	return 2;
+}
+
+// TheSuperHackers @feature Leex 24/08/2026 Restrict native capture to the deterministic 30 or 60 frame output contracts. (#TBD)
+Int parseVideoFps(char *args[], int num)
+{
+	if (num <= 1 || s_hasVideoFps)
+	{
+		replayCompatRunnerCommandLineError("-videoFps requires one unique 30 or 60 value");
+	}
+	Char *end = nullptr;
+	errno = 0;
+	const long fps = strtol(args[1], &end, 10);
+	if (errno == ERANGE || end == args[1] || *end != '\0' || (fps != 30 && fps != 60))
+	{
+		replayCompatRunnerCommandLineError("-videoFps accepts exactly 30 or 60");
+	}
+	TheWritableGlobalData->m_videoCaptureFps = static_cast<Int>(fps);
+	s_hasVideoFps = TRUE;
+	return 2;
+}
+
+// TheSuperHackers @feature Leex 24/08/2026 Validate presentation-only options without mutating the pinned Generals Online replay profile. (#TBD)
+static void validateReplayCompatRunnerOptions()
+{
+	if (s_hasRecordVideoPath)
+	{
+		if (!s_hasVideoResolution || !s_hasVideoFps)
+		{
+			replayCompatRunnerCommandLineError("-recordVideo requires -videoRes and -videoFps");
+		}
+		if (!TheGlobalData->m_recordVideoPath.endsWithNoCase(".mp4"))
+		{
+			replayCompatRunnerCommandLineError("-recordVideo output must use the .mp4 extension");
+		}
+		// TheSuperHackers @bugfix Leex 24/08/2026 Reject stale outputs before FFmpeg or the create-once typed sidecar can become ambiguous. (#TBD)
+		if (GetFileAttributesA(TheGlobalData->m_recordVideoPath.str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			replayCompatRunnerCommandLineError("capture output already exists");
+		}
+		AsciiString sidecarPath = TheGlobalData->m_recordVideoPath;
+		sidecarPath.concat(".capture-result.json");
+		if (GetFileAttributesA(sidecarPath.str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			replayCompatRunnerCommandLineError("capture result sidecar already exists");
+		}
+	}
+	else if (s_hasVideoResolution || s_hasVideoFps)
+	{
+		replayCompatRunnerCommandLineError("-videoRes and -videoFps require -recordVideo");
+	}
+
+	if (!s_hasAutoCameraScript && !s_hasRecordVideoPath)
+	{
+		return;
+	}
+	if (TheGlobalData->m_headless || TheGlobalData->m_simulateReplays.size() != 1)
+	{
+		replayCompatRunnerCommandLineError("presentation options require exactly one rendered replay");
+	}
+	// TheSuperHackers @bugfix Leex 24/08/2026 Keep one presentation invocation from expanding into multiple replay jobs after preflight. (#TBD)
+	if (strpbrk(TheGlobalData->m_simulateReplays.front().str(), "*?") != nullptr)
+	{
+		replayCompatRunnerCommandLineError("presentation replay path must not contain wildcards");
+	}
+	if (TheGlobalData->m_simulateReplayJobs != SIMULATE_REPLAYS_SEQUENTIAL)
+	{
+		replayCompatRunnerCommandLineError("presentation options require sequential replay playback");
+	}
+	if (s_hasAutoCameraScript)
+	{
+		AsciiString error;
+		if (!AutoCameraDirector::validateCameraScript(TheGlobalData->m_autoCameraScriptPath, &error))
+		{
+			replayCompatRunnerCommandLineError(error.str());
+		}
+	}
+}
+#endif
 
 Int parseHeadless(char *args[], int num)
 {
@@ -1193,6 +1364,14 @@ static CommandLineParam paramsForStartup[] =
 
 	// URL to POST compressed stats JSON after export.
 	{ "-statsUrl", parseStatsUrl },
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 24/08/2026 Expose modern presentation controls without changing replay simulation or network flags. (#TBD)
+	{ "-autocamera", parseAutoCamera },
+	{ "-recordVideo", parseRecordVideo },
+	{ "-videoRes", parseVideoResolution },
+	{ "-videoFps", parseVideoFps },
+#endif
 };
 
 // These Params are parsed during Engine Init before INI data is loaded
@@ -1490,6 +1669,10 @@ void CommandLine::parseCommandLineForStartup()
 	TheWritableGlobalData->m_commandLineData.m_hasParsedCommandLineForStartup = true;
 
 	parseCommandLine(paramsForStartup, ARRAY_SIZE(paramsForStartup));
+
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	validateReplayCompatRunnerOptions();
+#endif
 }
 
 void CommandLine::parseCommandLineForEngineInit()

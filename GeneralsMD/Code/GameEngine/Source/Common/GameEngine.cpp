@@ -516,6 +516,15 @@ void GameEngine::init()
 		// special-case: parse command-line parameters after loading global data
 		CommandLine::parseCommandLineForEngineInit();
 
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+		if (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty())
+		{
+			// TheSuperHackers @bugfix Leex 24/08/2026 Override user and INI FPS settings for deterministic replay presentation. (#TBD)
+			TheWritableGlobalData->m_framesPerSecondLimit = 60;
+			TheWritableGlobalData->m_useFpsLimit = TRUE;
+		}
+#endif
+
 		TheArchiveFileSystem->loadMods();
 
 		// doesn't require resets so just create a single instance here.
@@ -952,18 +961,29 @@ void GameEngine::update()
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
 			VERIFY_CRC
 
-#if defined(GENERALS_ONLINE_HIGH_FPS_RENDER)
-			// NGMP_NOTE: Lock the shellmap to 30fps until we fix everything
-			if (TheNGMPGame != nullptr && TheGameLogic->isInGame() && !TheShell->isShellActive())
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates to 60 Hz before camera/capture sampling. (#TBD)
+			if (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty())
 			{
-				TheFramePacer->setFramesPerSecondLimit(NGMP_OnlineServicesManager::Settings.Graphics_GetFPSLimit());
-				TheWritableGlobalData->m_useFpsLimit = NGMP_OnlineServicesManager::Settings.Graphics_GetFPSLimit();
+				TheFramePacer->setFramesPerSecondLimit(60);
+				TheWritableGlobalData->m_useFpsLimit = TRUE;
 			}
 			else
-			{
-				TheFramePacer->setFramesPerSecondLimit(GENERALS_ONLINE_HIGH_FPS_LIMIT);
-			}
 #endif
+			{
+#if defined(GENERALS_ONLINE_HIGH_FPS_RENDER)
+				// NGMP_NOTE: Lock the shellmap to 30fps until we fix everything
+				if (TheNGMPGame != nullptr && TheGameLogic->isInGame() && !TheShell->isShellActive())
+				{
+					TheFramePacer->setFramesPerSecondLimit(NGMP_OnlineServicesManager::Settings.Graphics_GetFPSLimit());
+					TheWritableGlobalData->m_useFpsLimit = NGMP_OnlineServicesManager::Settings.Graphics_GetFPSLimit();
+				}
+				else
+				{
+					TheFramePacer->setFramesPerSecondLimit(GENERALS_ONLINE_HIGH_FPS_LIMIT);
+				}
+#endif
+			}
 			
 				TheRadar->UPDATE();
 
@@ -1060,6 +1080,16 @@ void GameEngine::execute()
 
 			{
 				update();
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+				// TheSuperHackers @feature Leex 24/08/2026 End compatibility-runner presentation at replay EOF or the first proven CRC mismatch. (#TBD)
+				if (TheGlobalData != nullptr
+					&& (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty())
+					&& TheRecorder != nullptr
+					&& (TheRecorder->sawCRCMismatch() || !TheRecorder->isPlaybackInProgress()))
+				{
+					TheGameEngine->setQuitting(TRUE);
+				}
+#endif
 // 				try
 // 				{
 // 					// compute a frame

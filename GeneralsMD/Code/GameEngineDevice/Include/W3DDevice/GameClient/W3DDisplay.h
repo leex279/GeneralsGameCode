@@ -82,6 +82,9 @@ public:
 
 	virtual void step() override; ///< Do one fixed time step
 	virtual void draw() override;  ///< redraw the entire display
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	virtual void finalizeReplayVideoCapture() override;
+#endif
 
 	/// @todo Replace these light management routines with a LightManager singleton
 	virtual void createLightPulse(const Coord3D* pos, const RGBColor* color, Real innerRadius, Real outerRadius,

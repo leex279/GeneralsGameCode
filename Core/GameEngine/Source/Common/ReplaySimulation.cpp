@@ -62,7 +62,17 @@ int ReplaySimulation::simulateReplaysInThisProcess(const std::vector<AsciiString
 		// If we are not in headless mode, we need to run the replay in the engine.
 		for (; s_replayIndex < s_replayCount; ++s_replayIndex)
 		{
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+			const Bool playbackStarted = TheRecorder->playbackFile(filenames[s_replayIndex]);
+			if (!playbackStarted)
+			{
+				// TheSuperHackers @bugfix Leex 24/08/2026 Return a runner failure when rendered replay playback cannot start. (#TBD)
+				numErrors++;
+				continue;
+			}
+#else
 			TheRecorder->playbackFile(filenames[s_replayIndex]);
+#endif
 			TheGameEngine->execute();
 			if (TheRecorder->sawCRCMismatch())
 				numErrors++;

@@ -1057,6 +1057,16 @@ void RecorderClass::handleCRCMessage(UnsignedInt newCRC, Int playerIndex, Bool f
 
 			// Print Mismatch in case we are simulating replays from console.
 			printf("CRC Mismatch in Frame %d\n", mismatchFrame);
+			// TheSuperHackers @fix Leex 24/08/2026 Flush replay diagnostics before compatibility-runner shutdown can finalize capture. (#TBD)
+			fflush(stdout);
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @feature Leex 24/08/2026 Mark runner-owned CRC termination independently of focus so presentation cannot stall on a paused replay. (#TBD)
+			if (TheGlobalData != nullptr
+				&& (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty()))
+			{
+				m_crcInfo.setSawCRCMismatch();
+			}
+#endif
 
 			// TheSuperHackers @tweak Pause the game on mismatch.
 			// But not when a window with focus is opened, because that can make resuming difficult.

@@ -121,6 +121,10 @@ public:
 
 	virtual void step() {}; ///< Do one fixed time step
 	virtual void draw() override;																		///< Redraw the entire display
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+	// TheSuperHackers @feature Leex 24/08/2026 Let the runner finalize presentation output through the client abstraction before status sampling. (#TBD)
+	virtual void finalizeReplayVideoCapture() {}
+#endif
 	virtual void setTimeOfDay(TimeOfDay tod) = 0;								///< Set the time of day for this display
 	virtual void createLightPulse(const Coord3D* pos, const RGBColor* color, Real innerRadius, Real attenuationWidth,
 		UnsignedInt increaseFrameTime, UnsignedInt decayFrameTime//, Bool donut = FALSE

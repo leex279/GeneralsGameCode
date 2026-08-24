@@ -192,6 +192,14 @@ set(GAMEENGINEDEVICE_SRC
 #    Source/Win32Device/GameClient/Win32Mouse.cpp
 )
 
+# TheSuperHackers @feature Leex 24/08/2026 Build the D3D8 capture writer only in the modern Zero Hour compatibility runner. (#TBD)
+if(RTS_REPLAY_COMPAT_RUNNER AND NOT IS_VS6_BUILD)
+	list(APPEND GAMEENGINEDEVICE_SRC
+		${CMAKE_SOURCE_DIR}/Core/GameEngineDevice/Include/W3DDevice/GameClient/W3DVideoWriter.h
+		${CMAKE_SOURCE_DIR}/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DVideoWriter.cpp
+	)
+endif()
+
 add_library(z_gameenginedevice STATIC)
 
 target_sources(z_gameenginedevice PRIVATE ${GAMEENGINEDEVICE_SRC})

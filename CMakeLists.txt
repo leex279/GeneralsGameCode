@@ -33,8 +33,21 @@ endif()
 # Top level project, doesn't really affect anything.
 project(genzh LANGUAGES C CXX)
 
+# TheSuperHackers @feature Leex 24/08/2026 Gate the replay compatibility runner without changing the pinned Generals Online simulation profile. (#TBD)
+option(RTS_REPLAY_COMPAT_RUNNER "Enable modern-only replay capture and camera runner plumbing" OFF)
+
+# TheSuperHackers @build Leex 24/08/2026 Reject unsupported pointer widths before the Direct3D 8 compatibility runner configures. (#TBD)
+if(RTS_REPLAY_COMPAT_RUNNER AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(FATAL_ERROR "RTS_REPLAY_COMPAT_RUNNER requires a 32-bit build")
+endif()
+
 # This file handles extra settings wanted/needed for different compilers.
 include(cmake/compilers.cmake)
+
+if(RTS_REPLAY_COMPAT_RUNNER AND NOT IS_VS6_BUILD)
+    # TheSuperHackers @feature Leex 24/08/2026 Define the runner process-wide so GlobalData keeps one ABI in engine and device targets. (#TBD)
+    add_compile_definitions(RTS_REPLAY_COMPAT_RUNNER=1)
+endif()
 
 # Debug symbol stripping for Release builds (MinGW)
 include(cmake/debug_strip.cmake)
