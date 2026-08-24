@@ -224,7 +224,10 @@ def test_configured_production_import_persists_complete_replay_telemetry_and_rep
         "clean_shutdown": True,
     }
     assert telemetry_assets
-    assert telemetry.trace_sha256 in {asset.sha256 for asset in telemetry_assets}
+    trace_assets = tuple(asset for asset in telemetry_assets if asset.kind == "telemetry_trace")
+    assert len(trace_assets) == 1
+    # TheSuperHackers @fix Leex 25/08/2026 Verify the full trace asset separately from the terminal digest over its preceding records. (#TBD)
+    assert telemetry.trace_asset_id == trace_assets[0].id
     for asset in telemetry_assets:
         verified = artifact_store.verify(asset.sha256)
         assert verified.sha256 == asset.sha256
