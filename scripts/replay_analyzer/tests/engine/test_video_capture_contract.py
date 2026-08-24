@@ -64,6 +64,29 @@ def test_capture_flags_are_closed_and_modern_zero_hour_only(repository_root: Pat
     assert "m_recordVideoPath" not in generals_header
 
 
+def test_presentation_runner_pins_client_cadence_to_sixty_hz(repository_root: Path) -> None:
+    """Client animation/capture must not inherit user FPS or visual-speed throttles."""
+    game_engine = _source(
+        repository_root, "GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp"
+    )
+    update_cadence = game_engine.split(
+        "TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates",
+        maxsplit=1,
+    )[1].split("TheRadar->UPDATE();", maxsplit=1)[0]
+    assert "TheFramePacer->setFramesPerSecondLimit(60)" in update_cadence
+    assert "m_useFpsLimit = TRUE" in update_cadence
+    assert "TheTacticalView->setTimeMultiplier(1)" in update_cadence
+
+    display = _source(
+        repository_root,
+        "GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp",
+    )
+    visual_throttle = display.split(
+        "if (TheTacticalView->getTimeMultiplier()>1)", maxsplit=1
+    )[1].split("do {", maxsplit=1)[0]
+    assert "return;" in visual_throttle
+
+
 def test_writer_uses_owned_argv_only_win32_child(repository_root: Path) -> None:
     """Catch shell composition, unbounded writes, or output paths escaping their argv item."""
     header = _source(

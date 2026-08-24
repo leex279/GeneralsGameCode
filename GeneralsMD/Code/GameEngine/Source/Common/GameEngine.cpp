@@ -901,6 +901,19 @@ void GameEngine::update()
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
 			VERIFY_CRC
 
+#if defined(RTS_REPLAY_COMPAT_RUNNER) && !defined(IS_VS6_BUILD)
+			// TheSuperHackers @bugfix Leex 24/08/2026 Pin replay presentation client updates to 60 Hz before camera/capture sampling. (#TBD)
+			if (!TheGlobalData->m_recordVideoPath.isEmpty() || !TheGlobalData->m_autoCameraScriptPath.isEmpty())
+			{
+				TheFramePacer->setFramesPerSecondLimit(60);
+				TheWritableGlobalData->m_useFpsLimit = TRUE;
+				if (TheTacticalView != nullptr)
+				{
+					// TheSuperHackers @bugfix Leex 24/08/2026 Disable the legacy visual-speed render throttle so native capture sees every authoritative replay frame. (#TBD)
+					TheTacticalView->setTimeMultiplier(1);
+				}
+			}
+#endif
 			TheRadar->UPDATE();
 
 			/// @todo Move audio init, update, etc, into GameClient update
