@@ -256,6 +256,22 @@ def test_claim_is_exclusive_and_increments_attempt_exactly_once(
         assert row is not None and row.attempt_count == 1 and row.lease_owner == "worker-a"
 
 
+def test_default_job_lease_covers_full_production_analysis_stage(
+    session_factory: sessionmaker[Session], clock: MutableClock
+) -> None:
+    jobs = JobCoordinator(session_factory, clock=clock)
+    created = jobs.create_job(_spec("derive_features"))
+
+    claimed = jobs.claim("production-worker", frozenset({"derive_features"}))
+
+    assert claimed is not None and claimed.public_id == created.public_id
+    with session_factory() as session:
+        row = session.scalar(select(Job).where(Job.public_id == created.public_id))
+        assert row is not None and row.lease_expires_at is not None
+        expires_at = row.lease_expires_at.replace(tzinfo=UTC)
+    assert expires_at - clock.current == timedelta(minutes=15)
+
+
 def test_retry_rejects_running_job_without_clearing_another_workers_lease(
     session_factory: sessionmaker[Session], clock: MutableClock
 ) -> None:

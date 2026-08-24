@@ -110,7 +110,8 @@ class JobCoordinator:
         session_factory: sessionmaker[Session],
         *,
         clock: Callable[[], datetime],
-        lease_duration: timedelta = timedelta(minutes=5),
+        # TheSuperHackers @fix Leex 24/08/2026 Keep in-process production analysis leased for the full replay-derived stage. (#TBD)
+        lease_duration: timedelta = timedelta(minutes=15),
         retry_base_delay: timedelta = timedelta(seconds=5),
         retry_max_delay: timedelta = timedelta(minutes=5),
     ) -> None:
