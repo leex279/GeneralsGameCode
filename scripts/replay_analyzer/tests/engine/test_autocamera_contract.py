@@ -74,8 +74,11 @@ def test_autocamera_parser_consumes_every_field_and_rejects_invalid_scripts(
     assert "camera segment IDs must be unique" in source
     assert "camera row has an invalid field count" in source
     assert "camera script contains no rows" in source
-    assert "m_segments.swap(parsedSegments)" in source
+    assert "s_validatedCameraSegments.swap(parsedSegments)" in source
     assert "std::signbit(parsed)" in source
+    assert "Ease rows are baked transition windows" in source
+    assert "ease transition cannot be the first camera row" in source
+    assert "ease transition must span at least two frames" in source
     for index, field in enumerate(
         (
             "m_startFrame",
@@ -97,7 +100,25 @@ def test_autocamera_parser_consumes_every_field_and_rejects_invalid_scripts(
     )[0]
     assert init_body.index("loadCameraScript") < init_body.index("m_enabled = TRUE")
 
-    forbidden_parsers = ("sscanf(", "strtok(", "atof(", "atoi(")
+    validate_body = source.split(
+        "Bool AutoCameraDirector::validateCameraScript", maxsplit=1
+    )[1].split("Bool AutoCameraDirector::loadCameraScript", maxsplit=1)[0]
+    load_body = source.split("Bool AutoCameraDirector::loadCameraScript", maxsplit=1)[1].split(
+        "Bool AutoCameraDirector::evaluateCameraAtFrame", maxsplit=1
+    )[0]
+    assert "parseCameraScript" in validate_body
+    assert "s_validatedCameraSegments.swap(parsedSegments)" in validate_body
+    assert "parseCameraScript" not in load_body
+    assert "m_segments = s_validatedCameraSegments" in load_body
+
+    forbidden_parsers = (
+        "sscanf(",
+        "strtok(",
+        "atof(",
+        "atoi(",
+        "std::ifstream",
+        "std::istringstream",
+    )
     assert not [token for token in forbidden_parsers if token in source]
     assert "clamp(" not in source
 
