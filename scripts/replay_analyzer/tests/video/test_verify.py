@@ -101,6 +101,21 @@ def test_verifier_accepts_probed_authoritative_media_and_records_landmarks(tmp_p
     assert result.landmarks[0].frame == 30
 
 
+def test_verifier_ignores_documented_ffprobe_metadata_extras_but_requires_authoritative_fields(tmp_path: Path) -> None:
+    payload = json.loads(_probe())
+    payload["format"].update({"filename": "C:\\private\\final.mp4", "format_name": "mov,mp4", "tags": {"encoder": "Lavf60.3"}})
+    payload["streams"][0].update({"index": 0, "codec_long_name": "H.264", "profile": "High", "time_base": "1/15360", "disposition": {"default": 1}, "tags": {"language": "und"}})
+    payload["streams"][1].update({"index": 1, "codec_long_name": "AAC", "sample_fmt": "fltp", "channel_layout": "mono", "time_base": "1/48000"})
+    payload["streams"][2].update({"index": 2, "codec_long_name": "MOV text", "codec_tag_string": "tx3g", "time_base": "1/1000000"})
+    result = _verify(tmp_path, json.dumps(payload))
+    assert result.observed.frame_count == 60
+
+    missing = json.loads(_probe())
+    del missing["streams"][0]["nb_frames"]
+    with pytest.raises(MediaVerificationError, match="incomplete"):
+        _verify(tmp_path, json.dumps(missing))
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

@@ -142,6 +142,34 @@ def _default_audio_decode(argv: tuple[str, ...]) -> None:
         raise MediaVerificationError(f"FFmpeg audio decode failed with exit code {completed.returncode}")
 
 
+_FORMAT_FIELDS = frozenset(("duration",))
+_STREAM_FIELDS = frozenset(
+    (
+        "codec_type", "codec_name", "pix_fmt", "width", "height", "avg_frame_rate",
+        "r_frame_rate", "nb_frames", "sample_rate", "channels", "duration",
+    )
+)
+
+
+# TheSuperHackers @bugfix Leex 24/08/2026 Ignore FFprobe metadata extras while retaining a strict authoritative media subset. (#TBD)
+def _closed_probe_payload(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != {"format", "streams"}:
+        raise MediaVerificationError("ffprobe response must contain only format and streams")
+    media_format = payload["format"]
+    streams = payload["streams"]
+    if not isinstance(media_format, dict) or not isinstance(streams, list):
+        raise MediaVerificationError("ffprobe format and streams have invalid shapes")
+    return {
+        "format": {key: media_format[key] for key in _FORMAT_FIELDS if key in media_format},
+        "streams": [
+            {key: stream[key] for key in _STREAM_FIELDS if key in stream}
+            if isinstance(stream, dict)
+            else stream
+            for stream in streams
+        ],
+    }
+
+
 # TheSuperHackers @feature Leex 24/08/2026 Verify final replay media against closed ffprobe facts before immutable publication. (#TBD)
 class MediaVerifier:
     def __init__(
@@ -242,7 +270,7 @@ class MediaVerifier:
         argv = (str(self._ffprobe_executable), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(final))
         try:
             raw = self._probe_runner(argv)
-            payload = json.loads(raw)
+            payload = _closed_probe_payload(json.loads(raw))
             return FfprobeDocumentV1.model_validate(payload)
         except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as error:
             if isinstance(error, MediaVerificationError):
