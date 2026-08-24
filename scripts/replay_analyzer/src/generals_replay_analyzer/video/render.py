@@ -506,8 +506,11 @@ class VideoRenderService:
             manifest = VideoManifestV1(
                 render_public_id=run_id,
                 verification_passed=True,
+                requested_settings=settings,
+                verified_media=verification,
                 artifacts=self._manifest_artifacts(
                     immutable,
+                    settings=settings,
                     replay=frozen_replay,
                     engine=engine,
                     ffmpeg=ffmpeg,
@@ -717,6 +720,7 @@ class VideoRenderService:
     def _manifest_artifacts(
         immutable: dict[Path, str],
         *,
+        settings: VideoSettingsV1,
         replay: Path,
         engine: Path,
         ffmpeg: Path,
@@ -740,11 +744,13 @@ class VideoRenderService:
             "camera_script": camera_script,
             "commentary_plan": commentary_plan,
             "narration": narration,
-            "subtitles": subtitles,
             "gameplay_video": gameplay,
             "native_capture_result": capture_result,
             "final_video": final,
         }
+        # TheSuperHackers @bugfix Leex 24/08/2026 Keep burned subtitles embedded in final video without publishing a standalone artifact. (#TBD)
+        if settings.subtitle_mode == "track":
+            paths["subtitles"] = subtitles
         paths.update(
             {f"voice_clip_{index:04d}": clip.source_path for index, clip in enumerate(voice_clips)}
         )
