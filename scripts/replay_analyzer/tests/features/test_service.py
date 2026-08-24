@@ -1674,6 +1674,76 @@ def _seed_replay_wide_observations(
     return replay, target, peer, conflicting_peer, evidence_ids
 
 
+def test_service_scopes_visibility_to_resolved_observer_and_rejects_invalid_observer(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, target, peer, _conflicting_peer, _evidence_ids = _seed_replay_wide_observations(
+        feature_factory, include_conflicting_parser=False
+    )
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+    with feature_factory() as session:
+        replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay_row.id)) if replay_row else None
+        assert replay_row is not None and telemetry is not None
+        # The fixture is already finalized; bypass its immutability triggers only to add test observations.
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_insert"))
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_insert"))
+        for sequence, player_index in ((50, 0), (51, 1)):
+            payload = {
+                "player_index": player_index,
+                "object_id": 10,
+                "template_name": "ChinaWarFactory",
+                "previous_status": "unseen",
+                "status": "clear",
+                "first_observed_clear": True,
+                "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+            }
+            evidence = EvidenceItem(
+                public_id=str(uuid5(NAMESPACE_URL, f"visibility:{sequence}")), replay_id=replay_row.id,
+                telemetry_run_id=telemetry.id, tier="observed", source_kind="telemetry",
+                source_key=f"telemetry:{telemetry.run_id}:sequence:{sequence}", schema_version=2, created_at=now,
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(TelemetryEvent(
+                telemetry_run_id=telemetry.id, sequence=sequence, frame=sequence, logic_time_seconds=sequence / 30.0,
+                schema_version=2, event_type="object_visibility_changed", payload_json=payload,
+                raw_record_json={"event_type": "object_visibility_changed", "payload": payload}, evidence_item_id=evidence.id,
+            ))
+        session.commit()
+    service = FeatureExtractionService(feature_factory)
+    target_context = service._build_context(_request(replay, target, "activity"))
+    peer_context = service._build_context(_request(replay, peer, "activity"))
+    target_visibility = [item for item in target_context.observed if item.event_type == "object_visibility_changed"]
+    peer_visibility = [item for item in peer_context.observed if item.event_type == "object_visibility_changed"]
+    assert len(target_visibility) == 1 and target_visibility[0].facts != peer_visibility[0].facts
+    assert len(peer_visibility) == 1
+    with feature_factory() as session:
+        replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
+        telemetry = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay_row.id)) if replay_row else None
+        assert replay_row is not None and telemetry is not None
+        payload = {
+            "player_index": 9, "object_id": 10, "template_name": "ChinaWarFactory",
+            "previous_status": "unseen", "status": "clear", "first_observed_clear": True,
+            "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+        }
+        evidence = EvidenceItem(
+            public_id=str(uuid5(NAMESPACE_URL, "visibility:52")), replay_id=replay_row.id,
+            telemetry_run_id=telemetry.id, tier="observed", source_kind="telemetry",
+            source_key=f"telemetry:{telemetry.run_id}:sequence:52", schema_version=2, created_at=now,
+        )
+        session.add(evidence)
+        session.flush()
+        session.add(TelemetryEvent(
+            telemetry_run_id=telemetry.id, sequence=52, frame=52, logic_time_seconds=52 / 30.0,
+            schema_version=2, event_type="object_visibility_changed", payload_json=payload,
+            raw_record_json={"event_type": "object_visibility_changed", "payload": payload}, evidence_item_id=evidence.id,
+        ))
+        session.commit()
+    with pytest.raises(FeatureExtractionError, match="visibility observer mapping"):
+        service._build_context(_request(replay, target, "activity"))
+
+
 def _context_capture_extractor(policy: str | None = None) -> object:
     class ContextCaptureExtractor:
         name = "context_capture"

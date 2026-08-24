@@ -17,6 +17,8 @@ EXPECTED_NAMES = (
     "combat.applied_damage_taken",
     "combat.killing_blow_count",
     "combat.observed_damage_trade_ratio",
+    "combat.observed_kill_timing",
+    "combat.turning_point_timing",
     "economy.cash_balance_final",
     "economy.cash_change_total",
     "economy.cash_per_minute_latest",
@@ -36,6 +38,8 @@ EXPECTED_NAMES = (
     "production.special_power_timing",
     "scorekeeper.event_reconciliation",
     "scorekeeper.terminal_snapshot",
+    "scouting.first_observed_clear_timing",
+    "scouting.visibility_transition_count",
     "state.entity_transition_count",
     "state.final_result",
 )

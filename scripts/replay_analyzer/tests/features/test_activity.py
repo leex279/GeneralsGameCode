@@ -226,3 +226,26 @@ def test_activity_rejects_changed_manifest_and_suppresses_consecutive_duplicate_
     )
     assert values["activity.supported_order_action_count"].raw_value == 1  # type: ignore[attr-defined]
     assert thaw_canonical(values["activity.effective_actions_per_minute"].details)["suppressed_count"] == 1  # type: ignore[attr-defined]
+
+
+def test_activity_exposes_observed_visibility_timing(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    item = observed(
+        event_type="object_visibility_changed",
+        frame=90,
+        facts={
+            "replay_player_public_id": player,
+            "object_id": 42,
+            "template_name": "ChinaWarFactory",
+            "status": "clear",
+            "previous_status": "unseen",
+            "first_observed_clear": True,
+        },
+    )
+    values = {value.name: value for value in ActivityExtractor().extract(player_context(item)).values}
+    assert thaw_canonical(values["scouting.first_observed_clear_timing"].raw_value) == [  # type: ignore[attr-defined]
+        {"frame": 90, "object_id": 42, "template_name": "ChinaWarFactory"}
+    ]
+    assert values["scouting.visibility_transition_count"].raw_value == 1  # type: ignore[attr-defined]

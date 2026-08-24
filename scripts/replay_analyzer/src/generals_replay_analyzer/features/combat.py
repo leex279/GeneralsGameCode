@@ -25,6 +25,8 @@ class CombatExtractor:
         "combat.applied_damage_taken",
         "combat.killing_blow_count",
         "combat.observed_damage_trade_ratio",
+        "combat.observed_kill_timing",
+        "combat.turning_point_timing",
     )
 
     def extract(self, context: FeatureContext) -> FeatureBundle:
@@ -50,6 +52,30 @@ class CombatExtractor:
             complete_value("combat.applied_damage_taken", taken, context.scope, window, refs, BASE_REGISTRY, details=details),
             complete_value("combat.killing_blow_count", killing_blows, context.scope, window, refs, BASE_REGISTRY),
         ]
+        # TheSuperHackers @fix Leex 24/08/2026 Keep observed killing blows separate from strategic turning points; no causal criterion is inferred. (#TBD)
+        observed_kills = tuple(
+            {
+                "frame": item.frame,
+                "attacker_template_name": fact(item, "attacker_template_name"),
+                "victim_template_name": fact(item, "victim_template_name"),
+            }
+            for item in dealt_events
+            if fact(item, "killing_blow") is True
+            and item.frame is not None
+            and type(fact(item, "attacker_template_name")) is str
+            and type(fact(item, "victim_template_name")) is str
+        )
+        values.append(
+            complete_value(
+                "combat.observed_kill_timing", observed_kills, context.scope, window,
+                tuple(item.ref for item in dealt_events if fact(item, "killing_blow") is True), BASE_REGISTRY,
+            )
+            if observed_kills
+            else unavailable_value("combat.observed_kill_timing", context.scope, window, "no_observed_killing_blows", BASE_REGISTRY)
+        )
+        values.append(
+            unavailable_value("combat.turning_point_timing", context.scope, window, "no_significance_criterion", BASE_REGISTRY)
+        )
         if taken == 0:
             values.append(
                 unavailable_value(

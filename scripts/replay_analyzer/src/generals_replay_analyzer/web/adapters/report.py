@@ -165,7 +165,7 @@ def _report_section(value: ReportValue, tier: str) -> ReportSectionKey:
         return "economy"
     if any(token in normalized for token in ("production", "upgrade", "composition", "unit")):
         return "production_composition"
-    if any(token in normalized for token in ("damage", "combat", "engagement", "attack", "kill")):
+    if any(token in normalized for token in ("damage", "combat", "engagement", "attack", "kill", "turning point")):
         return "combat_engagements"
     return "activity"
 

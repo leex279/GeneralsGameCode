@@ -68,3 +68,31 @@ def test_combat_excludes_ambiguous_sources_and_reports_zero_denominator_without_
 
     missing = _values(player_context(telemetry_status=None))
     assert all(value.quality_reason == "missing_successful_telemetry" for value in missing.values())  # type: ignore[attr-defined]
+
+
+def test_combat_exposes_killing_blows_as_evidence_backed_turning_points(
+    observed: Callable[..., ObservedEvidence], player_context: Callable[..., FeatureContext]
+) -> None:
+    player = "00000000-0000-4000-8000-000000000250"
+    item = observed(
+        event_type="damage_applied",
+        frame=210,
+        facts={
+            "source_replay_player_public_ids": [player],
+            "victim_replay_player_public_id": "00000000-0000-4000-8000-000000000251",
+            "applied_amount": 100.0,
+            "killing_blow": True,
+            "victim_template_name": "ChinaWarFactory",
+            "attacker_template_name": "AmericaVehicleHumvee",
+        },
+    )
+    values = _values(player_context(item))
+    assert thaw_canonical(values["combat.observed_kill_timing"].raw_value) == [  # type: ignore[attr-defined]
+        {
+            "frame": 210,
+            "attacker_template_name": "AmericaVehicleHumvee",
+            "victim_template_name": "ChinaWarFactory",
+        }
+    ]
+    assert values["combat.turning_point_timing"].raw_value is None  # type: ignore[attr-defined]
+    assert values["combat.turning_point_timing"].quality_reason == "no_significance_criterion"  # type: ignore[attr-defined]

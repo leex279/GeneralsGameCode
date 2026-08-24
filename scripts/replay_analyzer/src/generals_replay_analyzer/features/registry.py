@@ -135,6 +135,8 @@ _BASE_DEFINITIONS = (
     _definition("combat.applied_damage_taken", "real", "damage"),
     _definition("combat.killing_blow_count", "integer", "count"),
     _definition("combat.observed_damage_trade_ratio", "real", "ratio"),
+    _definition("combat.observed_kill_timing", "json", "json"),
+    _definition("combat.turning_point_timing", "json", "json"),
     _definition("economy.cash_balance_final", "real", "credits"),
     _definition("economy.cash_change_total", "real", "credits"),
     _definition("economy.cash_per_minute_latest", "integer", "credits_per_minute"),
@@ -154,6 +156,8 @@ _BASE_DEFINITIONS = (
     _definition("production.special_power_timing", "json", "json"),
     _definition("scorekeeper.event_reconciliation", "json", "json"),
     _definition("scorekeeper.terminal_snapshot", "json", "json"),
+    _definition("scouting.first_observed_clear_timing", "json", "json"),
+    _definition("scouting.visibility_transition_count", "integer", "count"),
     _definition("state.entity_transition_count", "integer", "count"),
     _definition("state.final_result", "json", "json"),
 )

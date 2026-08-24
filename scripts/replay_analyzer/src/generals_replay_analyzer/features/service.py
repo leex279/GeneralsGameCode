@@ -898,6 +898,11 @@ class FeatureExtractionService:
             facts["object_key"] = f"object:{object_id}"
             facts["owner_scope_key"] = owner_public_id
             facts["replay_player_public_id"] = owner_public_id
+        elif event_type == "object_visibility_changed":
+            # TheSuperHackers @feature Leex 24/08/2026 Bind engine visibility transitions to the resolved observer for player-scoped coaching. (#TBD)
+            if type(player_index) is not int or player_index not in valid_engine_players:
+                raise FeatureExtractionError("telemetry visibility observer mapping is invalid")
+            facts["replay_player_public_id"] = players[player_index]
         elif event_type == "players_initialized":
             if projected_slots is None:
                 raise FeatureExtractionError("telemetry player mapping initialization projection is unavailable")

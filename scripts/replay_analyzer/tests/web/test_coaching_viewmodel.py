@@ -36,6 +36,8 @@ STRATEGY_EVIDENCE = "123e4567-e89b-42d3-a456-426614170006"
 BUILD_EVIDENCE = "123e4567-e89b-42d3-a456-426614170007"
 METRIC_EVIDENCE = "123e4567-e89b-42d3-a456-426614170008"
 POWER_EVIDENCE = "123e4567-e89b-42d3-a456-426614170009"
+TURNING_EVIDENCE = "123e4567-e89b-42d3-a456-426614170010"
+SCOUTING_EVIDENCE = "123e4567-e89b-42d3-a456-426614170011"
 SECTION_KEYS = (
     "overview",
     "players_results",
@@ -122,10 +124,30 @@ def _report(*, partial: bool = False) -> ReplayReportDTO:
         evidence_id=POWER_EVIDENCE,
         frame_end=end,
     )
+    turning = _claim(
+        claim_id="feature:combat.observed_kill_timing:fixture",
+        section="combat_engagements",
+        label="combat.observed_kill_timing",
+        raw_value=[{"frame": 300, "victim_template_name": "ChinaWarFactory"}],
+        display_value='[{"frame":300,"victim_template_name":"ChinaWarFactory"}]',
+        evidence_id=TURNING_EVIDENCE,
+        frame_end=end,
+    )
+    scouting = _claim(
+        claim_id="feature:scouting.first_observed_clear_timing:fixture",
+        section="activity",
+        label="scouting.first_observed_clear_timing",
+        raw_value=[{"frame": 150, "object_id": 42, "template_name": "ChinaWarFactory"}],
+        display_value='[{"frame":150,"object_id":42,"template_name":"ChinaWarFactory"}]',
+        evidence_id=SCOUTING_EVIDENCE,
+        frame_end=end,
+    )
     claims_by_section = {
         "opening_build_order": (build,),
         "economy": (supply,),
         "production_composition": (power,),
+        "combat_engagements": (turning,),
+        "activity": (scouting,),
         "strategy_phases": () if partial else (strategy,),
     }
     sections = tuple(
@@ -250,6 +272,8 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
         item.title == "Special power timing" and item.evidence[0].public_id == POWER_EVIDENCE
         for item in coaching.highlights
     )
+    assert any(item.title == "Observed kills" for item in coaching.highlights)
+    assert any(item.title == "First scouting clears" for item in coaching.highlights)
     assert 1 <= len(coaching.prompts) <= 5
     assert coaching.prompts[0].strategy_id == "usa_humvee_pressure"
     assert coaching.prompts[0].evidence[0].public_id == STRATEGY_EVIDENCE

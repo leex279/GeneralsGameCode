@@ -50,12 +50,15 @@ _FEATURE_LABELS = MappingProxyType(
         "build.completed_count": "Structures completed",
         "build.completed_sequence": "Build order",
         "combat.applied_damage_taken": "Damage taken",
+        "combat.observed_kill_timing": "Observed kills",
         "economy.supply_collected_total": "Supply collected",
         "economy.supply_collection_rate": "Supply income",
         "production.completed_composition": "Army composition",
         "production.completed_count": "Units completed",
         "production.science_purchase_timing": "Science purchase timing",
         "production.special_power_timing": "Special power timing",
+        "scouting.first_observed_clear_timing": "First scouting clears",
+        "scouting.visibility_transition_count": "Visibility transitions",
         "state.final_result": "Match result",
     }
 )

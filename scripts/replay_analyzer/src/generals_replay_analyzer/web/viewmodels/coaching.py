@@ -25,6 +25,8 @@ _HIGHLIGHT_ORDER = (
     "production.completed_composition",
     "production.science_purchase_timing",
     "production.special_power_timing",
+    "combat.observed_kill_timing",
+    "scouting.first_observed_clear_timing",
     "combat.observed_damage_trade_ratio",
     "activity.effective_actions_per_minute",
 )
@@ -35,6 +37,8 @@ _HIGHLIGHT_EXPLANATIONS = MappingProxyType(
         "production.completed_composition": "Completed units and upgrades observed in the available trace.",
         "production.special_power_timing": "Observed special-power uses with engine-provided names and frame timings; names remain raw when unrecognized.",
         "production.science_purchase_timing": "Observed science purchases with engine-provided names and frame timings; names remain raw when unrecognized.",
+        "combat.observed_kill_timing": "Observed killing blows with engine-provided frame and template facts; these are not causal turning-point claims.",
+        "scouting.first_observed_clear_timing": "Engine visibility transitions show when an object was first observed clear by this player.",
         "combat.observed_damage_trade_ratio": "Observed applied damage dealt divided by observed damage taken.",
         "activity.effective_actions_per_minute": "Supported replay orders per observed minute, not raw click APM.",
     }
@@ -295,6 +299,18 @@ def _metric_value(claim: ReportClaimDTO) -> str:
             for item in raw
             if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("item_name")) is str
         ) or "No observed timing events"
+    if claim.label == "combat.observed_kill_timing" and isinstance(raw, list):
+        return ", ".join(
+            f"{game_label(item['victim_template_name'])} at {format_frame(item['frame'])}"
+            for item in raw
+            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("victim_template_name")) is str
+        ) or "No observed kills"
+    if claim.label == "scouting.first_observed_clear_timing" and isinstance(raw, list):
+        return ", ".join(
+            f"{game_label(item['template_name'])} at {format_frame(item['frame'])}"
+            for item in raw
+            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("template_name")) is str
+        ) or "No observed scouting clears"
     return claim.display_value or "Unavailable"
 
 

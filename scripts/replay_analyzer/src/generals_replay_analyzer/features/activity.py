@@ -42,6 +42,8 @@ class ActivityExtractor:
         "activity.supported_order_coverage",
         "state.entity_transition_count",
         "state.final_result",
+        "scouting.first_observed_clear_timing",
+        "scouting.visibility_transition_count",
     )
 
     def extract(self, context: FeatureContext) -> FeatureBundle:
@@ -50,7 +52,41 @@ class ActivityExtractor:
             return self._all_unavailable(context, window, "missing_successful_telemetry")
         values = list(self._activity_values(context, window))
         values.extend(self._state_values(context, window))
+        values.extend(self._scouting_values(context, window))
         return FeatureBundle(self.name, self.version, tuple(sorted(values, key=lambda value: value.name)))
+
+    def _scouting_values(self, context: FeatureContext, window: FeatureWindow) -> tuple[FeatureValue, ...]:
+        transitions = tuple(item for item in context.observed if item.event_type == "object_visibility_changed")
+        first_clear = tuple(item for item in transitions if fact(item, "first_observed_clear") is True)
+        if not transitions:
+            return (
+                unavailable_value("scouting.first_observed_clear_timing", context.scope, window, "no_observed_events", BASE_REGISTRY),
+                unavailable_value("scouting.visibility_transition_count", context.scope, window, "no_observed_events", BASE_REGISTRY),
+            )
+        timing = tuple(
+            {
+                "frame": item.frame,
+                "object_id": fact(item, "object_id"),
+                "template_name": fact(item, "template_name"),
+            }
+            for item in first_clear
+            if item.frame is not None
+            and type(fact(item, "object_id")) is int
+            and type(fact(item, "template_name")) is str
+        )
+        timing_value = (
+            complete_value(
+                "scouting.first_observed_clear_timing", timing, context.scope, window,
+                tuple(item.ref for item in first_clear), BASE_REGISTRY,
+            )
+            if timing
+            else unavailable_value("scouting.first_observed_clear_timing", context.scope, window, "no_first_clear_events", BASE_REGISTRY)
+        )
+        count = complete_value(
+            "scouting.visibility_transition_count", len(transitions), context.scope, window,
+            tuple(item.ref for item in transitions), BASE_REGISTRY,
+        )
+        return timing_value, count
 
     def _activity_values(self, context: FeatureContext, window: FeatureWindow) -> tuple[FeatureValue, ...]:
         manifests = tuple(item for item in context.observed if item.event_type == "manifest")
