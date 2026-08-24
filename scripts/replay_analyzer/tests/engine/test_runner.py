@@ -74,7 +74,7 @@ def test_runtime_binding_uses_an_exclusive_samefile_link_and_removes_it_after_la
     assert not staged.exists()
 
 
-def test_runtime_binding_refuses_to_delete_a_replaced_path(tmp_path: Path) -> None:
+def test_runtime_binding_prevents_replacing_its_owned_path(tmp_path: Path) -> None:
     source = tmp_path / "build" / "generalszh.exe"
     runtime = tmp_path / "installed"
     source.parent.mkdir()
@@ -82,15 +82,15 @@ def test_runtime_binding_refuses_to_delete_a_replaced_path(tmp_path: Path) -> No
     source.write_bytes(b"engine-build")
     staged: Path | None = None
 
-    with (
-        pytest.raises(EngineRunConfigurationError, match="refusing to delete"),
-        bind_runtime_executable(source.resolve(), runtime.resolve()) as binding,
-    ):
+    with bind_runtime_executable(source.resolve(), runtime.resolve()) as binding:
         staged = binding.launch_executable
-        staged.unlink()
-        staged.write_bytes(b"attacker replacement")
+        with pytest.raises(PermissionError):
+            staged.unlink()
+        with pytest.raises(PermissionError):
+            staged.write_bytes(b"attacker replacement")
 
-    assert staged is not None and staged.read_bytes() == b"attacker replacement"
+    assert staged is not None and not staged.exists()
+    assert source.read_bytes() == b"engine-build"
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -1379,11 +1379,13 @@ def test_runner_detects_replay_mutation_without_restoring_or_deleting_caller_byt
 
 
 def test_runner_detects_engine_mutation_without_restoring_or_deleting_caller_bytes(tmp_path: Path) -> None:
-    """Catch the launched binary identity changing while its outputs are being produced."""
+    """Catch the selected binary becoming writable while its outputs are being produced."""
     executable, replay, data_root = _inputs(tmp_path)
 
     def mutate_engine(request: ProcessLaunchRequest) -> None:
-        Path(request.argv[0]).write_bytes(b"mutated-engine")
+        with pytest.raises(PermissionError):
+            Path(request.argv[0]).write_bytes(b"mutated-engine")
+        _publish_valid_evidence(request)
 
     result = export_telemetry(
         replay,
@@ -1392,8 +1394,8 @@ def test_runner_detects_engine_mutation_without_restoring_or_deleting_caller_byt
         run_id_factory=lambda: "513e4567-e89b-42d3-a456-426614174000",
     )
 
-    assert result.status is EngineRunStatus.INPUT_CHANGED
-    assert executable.read_bytes() == b"mutated-engine"
+    assert result.status is EngineRunStatus.SUCCESS
+    assert executable.read_bytes() == b"test-engine"
     assert result.run_dir.is_dir()
 
 

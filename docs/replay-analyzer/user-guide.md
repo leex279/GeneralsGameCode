@@ -22,7 +22,9 @@ cmake --build build/win32 --target z_generals --config Release
 uv sync --project scripts/replay_analyzer
 ```
 
-Keep the instrumented development executable in the build output and set the legal Zero Hour installation as its runtime directory. For every telemetry or native-video run, the analyzer creates one random, exclusive hardlink to that build beside the installed runtime modules, verifies it is the same ordinary file, starts it without a shell, settles the child process tree, and deletes only that unchanged owned link. It never replaces, renames, or modifies the retail executable:
+Keep the instrumented development executable in the build output and set the legal Zero Hour installation as its runtime directory. When the configured build and runtime directories differ, the analyzer creates one random, exclusive hardlink to that build beside the installed runtime modules. On Windows it holds the exact file object against writes, rename, replacement, and deletion through child-tree settlement, then deletes only its owned link through that same handle. When the build already resides in the runtime directory, it launches that path under the same held-handle protection without staging. It never replaces, renames, or modifies the retail executable:
+
+Runtime executable binding fails closed on platforms without Windows mandatory share-mode enforcement.
 
 ```powershell
 $env:GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE = (Resolve-Path 'build/win32/GeneralsMD/Release/generalszh.exe').Path
