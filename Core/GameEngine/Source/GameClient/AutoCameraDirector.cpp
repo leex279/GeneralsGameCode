@@ -22,7 +22,6 @@
 
 #include "GameClient/AutoCameraDirector.h"
 
-#include "Common/GlobalData.h"
 #include "GameClient/View.h"
 #include "GameLogic/GameLogic.h"
 
@@ -46,9 +45,14 @@ namespace
 	const Real MIN_CAMERA_YAW = -360.0f;
 	const Real MAX_CAMERA_YAW = 360.0f;
 	const size_t MAX_CAMERA_LINE_LENGTH = 1024;
-	// TheSuperHackers @info Leex 23/08/2026 Retain the exact startup-validated plan so later lifecycle initialization cannot reopen changed bytes. (#TBD)
-	AsciiString s_validatedCameraScript;
-	std::vector<AutoCameraSegment> s_validatedCameraSegments;
+	struct AutoCameraValidationCache
+	{
+		AsciiString m_script;
+		std::vector<AutoCameraSegment> m_segments;
+	};
+
+	// TheSuperHackers @bugfix Leex 24/08/2026 Keep optional camera validation storage inert until command-line validation runs after engine memory initialization. (#TBD)
+	AutoCameraValidationCache *s_validatedCameraCache = nullptr;
 
 	class ScopedCameraFile
 	{
@@ -357,12 +361,13 @@ AutoCameraDirector::~AutoCameraDirector()
 void AutoCameraDirector::init()
 {
 	m_enabled = FALSE;
-	if (TheGlobalData == nullptr || TheGlobalData->m_autoCameraScript.isEmpty())
+	if (s_validatedCameraCache == nullptr)
 	{
 		return;
 	}
+	AsciiString filename = s_validatedCameraCache->m_script;
 	AsciiString error;
-	if (!loadCameraScript(TheGlobalData->m_autoCameraScript, &error))
+	if (!loadCameraScript(filename, &error))
 	{
 		fprintf(stderr, "Replay camera: %s\n", error.str());
 		fflush(stderr);
@@ -378,26 +383,31 @@ void AutoCameraDirector::reset()
 
 Bool AutoCameraDirector::validateCameraScript(const AsciiString &filename, AsciiString *error)
 {
-	s_validatedCameraScript.clear();
-	s_validatedCameraSegments.clear();
 	std::vector<AutoCameraSegment> parsedSegments;
 	if (!parseCameraScript(filename, &parsedSegments, error))
 	{
 		return FALSE;
 	}
-	s_validatedCameraScript = filename;
-	s_validatedCameraSegments.swap(parsedSegments);
+	AutoCameraValidationCache *cache = new AutoCameraValidationCache;
+	cache->m_script = filename;
+	cache->m_segments.swap(parsedSegments);
+	delete s_validatedCameraCache;
+	s_validatedCameraCache = cache;
 	return TRUE;
 }
 
 Bool AutoCameraDirector::loadCameraScript(const AsciiString &filename, AsciiString *error)
 {
-	if (s_validatedCameraSegments.empty() || strcmp(filename.str(), s_validatedCameraScript.str()) != 0)
+	if (s_validatedCameraCache == nullptr || s_validatedCameraCache->m_segments.empty()
+		|| strcmp(filename.str(), s_validatedCameraCache->m_script.str()) != 0)
 	{
 		setError(error, "camera script does not match the validated startup snapshot");
 		return FALSE;
 	}
-	m_segments = s_validatedCameraSegments;
+	m_segments = s_validatedCameraCache->m_segments;
+	// TheSuperHackers @bugfix Leex 24/08/2026 Consume the immutable startup snapshot after GameClient owns its copy so it cannot be reopened or outlive client initialization. (#TBD)
+	delete s_validatedCameraCache;
+	s_validatedCameraCache = nullptr;
 	return TRUE;
 }
 

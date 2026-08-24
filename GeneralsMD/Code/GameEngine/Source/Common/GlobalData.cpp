@@ -637,10 +637,6 @@ GlobalData::GlobalData()
 	m_framesPerSecondLimit = 0;
 	m_chipSetType = 0;
 	m_headless = FALSE;
-#if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
-	// TheSuperHackers @feature Leex 23/08/2026 Default native replay direction to disabled until its complete script validates. (#TBD)
-	m_autoCameraScript.clear();
-#endif
 	m_windowed = 0;
 	m_xResolution = DEFAULT_DISPLAY_WIDTH;
 	m_yResolution = DEFAULT_DISPLAY_HEIGHT;
