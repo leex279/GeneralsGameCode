@@ -60,8 +60,8 @@ RENDER_REPORT_VERSION = "4"
 # TheSuperHackers @feature Leex 25/08/2026 Requeue casts with calmer camera pacing and sparse identity-specific combat calls. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts after making equal-frame commentary anchors totally ordered. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Invalidate casts that predate terminal commentary coverage enforcement. (#TBD)
-# TheSuperHackers @fix Leex 25/08/2026 Requeue long casts with an evidence-cited terminal exchange inside the narration silence budget. (#TBD)
-RENDER_VIDEO_VERSION = "28"
+# TheSuperHackers @fix Leex 25/08/2026 Requeue casts against the rebuilt production engine containing explicit BT.709 capture conversion. (#TBD)
+RENDER_VIDEO_VERSION = "29"
 
 
 def canonical_json(value: Any) -> str:
