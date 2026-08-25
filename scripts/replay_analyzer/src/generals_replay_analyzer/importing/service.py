@@ -270,6 +270,7 @@ class ImportStageExecutor(StageExecutorPort):
                 failure.code,
                 _sanitize_failure_text(failure.message),
                 failure.retryable,
+                failure.details,
             )
         except Exception as error:  # noqa: BLE001 - executor outcomes must retain an unexpected failure safely.
             return StageExecutionOutcomeDTO(
@@ -329,7 +330,8 @@ class _MaterializingWorkerControlAdapter:
         claim: WorkerLeaseDTO,
         outcome: StageExecutionOutcomeDTO,
     ) -> None:
-        self._lifecycle.settle_failure(worker_public_id, claim, outcome)
+        # TheSuperHackers @fix Leex 26/08/2026 Preserve bounded private stage details across external-worker settlement without exposing them in public DTOs. (#TBD)
+        self._lifecycle.settle_failure(worker_public_id, claim, outcome, safe_details=outcome.error_details)
 
     def settle_cancelled(
         self,

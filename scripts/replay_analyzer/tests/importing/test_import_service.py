@@ -6,9 +6,9 @@ import hashlib
 import json
 import shutil
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -131,6 +131,42 @@ def test_external_executor_resolves_private_input_and_persists_result_before_set
     with session_factory() as session:
         job = session.scalar(select(Job).where(Job.public_id == claim.job_public_id))
         assert job is not None and job.status == "succeeded" and job.attempt_count == 1
+
+
+def test_external_executor_round_trips_safe_failure_details_into_private_settlement(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    submission = service.submit(ImportRequest(replay_file))
+    worker = "00000000-0000-4000-8000-000000000952"
+    control = service.worker_control_port()
+    claim = control.claim_next(worker, 30)
+    assert claim is not None
+
+    def fail_claimed(_claimed: object) -> Mapping[str, Any]:
+        raise StageFailure(
+            "telemetry_attempt_failed", "telemetry attempt failed", retryable=False,
+            details={"attempt": 2, "telemetry_run_public_id": "run-2"},
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_handlers",
+        MappingProxyType({**service._handlers, claim.stage: fail_claimed}),
+    )
+    outcome = service.stage_executor_port().execute(claim.job_public_id, claim.execution_public_id)
+    round_tripped = type(outcome)(**json.loads(json.dumps(asdict(outcome))))
+    assert round_tripped.error_details == {"attempt": 2, "telemetry_run_public_id": "run-2"}
+    control.settle_failure(worker, claim, round_tripped)
+    with session_factory() as session:
+        job = session.scalar(select(Job).where(Job.public_id == submission.discovery_job.public_id))
+        assert job is not None and job.error_details_json == round_tripped.error_details
 
 
 def test_single_file_creates_provenance_lowercase_replay_and_expected_dag(

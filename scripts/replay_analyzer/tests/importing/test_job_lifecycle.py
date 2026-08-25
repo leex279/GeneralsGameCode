@@ -979,6 +979,13 @@ def test_contracts_validate_public_ids_states_outcomes_and_export_frozen_domain_
         StageExecutionOutcomeDTO("succeeded", None, "unexpected", "unexpected", False)
     with pytest.raises(ValueError):
         StageExecutionOutcomeDTO("unknown", None, "stable_code", "safe message", False)  # type: ignore[arg-type]
+    details = {"attempt": 2, "telemetry_run_public_id": "run-1"}
+    outcome = StageExecutionOutcomeDTO("failed", None, "stable_code", "safe message", False, details)
+    assert outcome.error_details == details
+    with pytest.raises((TypeError, ValueError)):
+        StageExecutionOutcomeDTO("failed", None, "stable_code", "safe message", False, {"bad": object()})
+    with pytest.raises(ValueError):
+        StageExecutionOutcomeDTO("failed", None, "stable_code", "safe message", False, {"x": "a" * 20000})
     with pytest.raises(ValueError):
         contracts.JobLogChunkDTO("unknown", "", None)  # type: ignore[arg-type]
     assert tuple(value.value for value in contracts.JobEventKind) == (

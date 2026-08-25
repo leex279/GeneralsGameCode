@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from .stages import STAGES
@@ -465,6 +467,7 @@ class JobMutationDTO:
             raise ValueError("job mutation counters are invalid")
 
 
+# TheSuperHackers @fix Leex 26/08/2026 Carry bounded canonical private failure details through the worker protocol only. (#TBD)
 @dataclass(frozen=True)
 class StageExecutionOutcomeDTO:
     status: Literal["succeeded", "retryable_failure", "failed"]
@@ -472,13 +475,14 @@ class StageExecutionOutcomeDTO:
     error_code: str | None
     error_message: str | None
     retryable: bool
+    error_details: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _boolean(self.retryable, "retryable")
         if self.status not in {"succeeded", "retryable_failure", "failed"}:
             raise ValueError("stage outcome status is invalid")
         if self.status == "succeeded":
-            if self.result_public_id is None or self.error_code is not None or self.error_message is not None or self.retryable:
+            if self.result_public_id is None or self.error_code is not None or self.error_message is not None or self.retryable or self.error_details is not None:
                 raise ValueError("successful stage outcome fields are inconsistent")
             _uuid(self.result_public_id, "result_public_id")
             return
@@ -488,6 +492,25 @@ class StageExecutionOutcomeDTO:
         _text(self.error_message, "error_message", 512)
         if (self.status == "retryable_failure") != self.retryable:
             raise ValueError("stage retryability is inconsistent")
+        if self.error_details is None:
+            return
+        if not isinstance(self.error_details, Mapping):
+            raise TypeError("error_details must be a mapping")
+        if any(type(key) is not str for key in self.error_details):
+            raise TypeError("error_details keys must be strings")
+        try:
+            encoded = json.dumps(
+                dict(self.error_details), ensure_ascii=True, allow_nan=False,
+                separators=(",", ":"), sort_keys=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("error_details must be canonical JSON") from error
+        if len(encoded.encode("utf-8")) > 16384:
+            raise ValueError("error_details exceeds the bounded size")
+        canonical = json.loads(encoded)
+        if not isinstance(canonical, dict):
+            raise TypeError("error_details must be a JSON object")
+        object.__setattr__(self, "error_details", canonical)
 
 
 @dataclass(frozen=True)
