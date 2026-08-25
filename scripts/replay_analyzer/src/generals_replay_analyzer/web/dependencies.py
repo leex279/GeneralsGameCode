@@ -458,6 +458,8 @@ class AnalyticsPortFactory:
             )
         self._settings = runtime.settings
         self._readiness = readiness
+        # TheSuperHackers @performance Leex 25/08/2026 Preserve validated immutable report graphs across short Web request scopes. (#TBD)
+        self._report_graph_cache: dict[tuple[str, str], Any] = {}
         settings_store = runtime.store
         self._settings_adapter = SettingsDiagnosticsAdapter(
             settings_store,
@@ -514,6 +516,7 @@ class AnalyticsPortFactory:
             report_service = ReportQueryService(
                 cast("sessionmaker[Session]", request_sessions),
                 settings=self._settings,
+                report_graph_cache=self._report_graph_cache,
             )
             reports = AnalyticsReportAdapter(report_service)
             maps = AnalyticsMapSceneAdapter(

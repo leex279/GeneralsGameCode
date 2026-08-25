@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import generals_replay_analyzer.comparison.service as comparison_module
 import generals_replay_analyzer.db as database_module
+import generals_replay_analyzer.report.query as report_query_module
 import generals_replay_analyzer.web.routes.jobs as jobs_routes
 from generals_replay_analyzer.config import AnalyzerSettings, load_runtime_configuration
 from generals_replay_analyzer.configuration import ConfigurationStore, SettingChange
@@ -207,6 +208,32 @@ def test_production_factory_exposes_player_and_comparison_ports(tmp_path: Path) 
         page = port.list_players(PlayerIndexQueryDTO(active_only=False))
 
     assert page.items == ()
+
+
+def test_production_factory_shares_validated_report_cache_across_request_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caches: list[object] = []
+    original_init = report_query_module.ReportQueryService.__init__
+
+    def recording_init(self: object, *args: object, **kwargs: object) -> None:
+        caches.append(kwargs.get("report_graph_cache"))
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(report_query_module.ReportQueryService, "__init__", recording_init)
+    settings = AnalyzerSettings.model_validate({"data_root": tmp_path / "product-data"})
+    settings.ensure_directories()
+    upgrade_database(settings.database_path)
+    factory = AnalyticsPortFactory(settings, _Readiness())
+
+    with factory():
+        pass
+    with factory():
+        pass
+
+    assert len(caches) == 2
+    assert caches[0] is caches[1]
 
 
 def test_production_factory_binds_one_comparison_minimum_sample_size(

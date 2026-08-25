@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from datetime import UTC
 from typing import Literal, cast
@@ -411,17 +411,39 @@ class ReportQueryService:
         *,
         settings: AnalyzerSettings,
         store: ContentAddressedStore | None = None,
+        report_graph_cache: MutableMapping[tuple[str, str], PublishedReportGraphDTO] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._store = store or ContentAddressedStore(settings.cache_directory / "reports")
+        # TheSuperHackers @performance Leex 25/08/2026 Cache only fully validated immutable report graphs per service instance. (#TBD)
+        self._report_graph_cache = report_graph_cache if report_graph_cache is not None else {}
 
     # TheSuperHackers @feature Leex 23/08/2026 Select only an exact completed report stage graph for read-only consumers. (#TBD)
     def get_report(self, query: FixedReportQuery) -> PublishedReportGraphDTO:
         if type(query) is not FixedReportQuery:
             raise TypeError("query must be a FixedReportQuery")
+        cache_key = (query.replay_public_id, query.report_public_id)
+        cached = self._report_graph_cache.get(cache_key)
+        if cached is not None:
+            return cached
         graph, _selection = self._read_graph(query)
+        self._report_graph_cache[cache_key] = graph
         return graph
+
+    # TheSuperHackers @performance Leex 25/08/2026 Invalidate report graph cache entries when immutable data is refreshed. (#TBD)
+    def invalidate_report_cache(
+        self,
+        replay_public_id: str | None = None,
+        report_public_id: str | None = None,
+    ) -> None:
+        """Drop one fixed report cache entry, or all entries when unqualified."""
+        if replay_public_id is None and report_public_id is None:
+            self._report_graph_cache.clear()
+            return
+        if replay_public_id is None or report_public_id is None:
+            raise ValueError("replay and report public IDs must be supplied together")
+        self._report_graph_cache.pop((replay_public_id, report_public_id), None)
 
     # TheSuperHackers @feature Leex 23/08/2026 Resolve one latest immutable report subject without assembling or writing. (#TBD)
     def resolve_latest(self, query: LatestReportQuery) -> ResolvedReportDTO:

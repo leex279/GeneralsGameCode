@@ -1304,6 +1304,71 @@ def test_fixed_query_verifies_assets_and_aggregates_replay_and_players_without_w
     assert str(report_database.settings.data_root) not in repr(graph)
 
 
+def test_fixed_report_query_caches_successful_validation_and_supports_invalidation(
+    published_graph: PublishedGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    original = published_graph.service._validate_render_graph
+    calls = 0
+
+    def counted(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(published_graph.service, "_validate_render_graph", counted)
+    published_graph.service.get_report(query)
+    published_graph.service.get_report(query)
+    assert calls == 1
+    published_graph.service.invalidate_report_cache(
+        published_graph.replay_public_id, published_graph.player_report_id
+    )
+    published_graph.service.get_report(query)
+    assert calls == 2
+
+
+def test_fixed_report_query_cache_keys_include_report_identity(
+    published_graph: PublishedGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = published_graph.service._read_graph
+    calls = 0
+
+    def counted(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(published_graph.service, "_read_graph", counted)
+    published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+    published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.replay_wide_report_id)
+    )
+    assert calls == 2
+
+
+def test_fixed_report_query_does_not_cache_failures(
+    published_graph: PublishedGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    calls = 0
+
+    def failed(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise ReportGraphContractError("validation failed")
+
+    monkeypatch.setattr(published_graph.service, "_read_graph", failed)
+    for _ in range(2):
+        with pytest.raises(ReportGraphContractError, match="validation failed"):
+            published_graph.service.get_report(query)
+    assert calls == 2
+
+
 def test_latest_resolution_selects_exact_replay_and_player_reports_without_writes(
     report_database: SeededReportDatabase,
     published_graph: PublishedGraph,
