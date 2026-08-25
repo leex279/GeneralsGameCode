@@ -886,6 +886,51 @@ def test_new_observation_version_requeues_without_mutating_exhausted_history(
         assert (imports[0].public_id, imports[0].idempotency_key) == original_identity
 
 
+def test_new_report_version_requeues_without_mutating_exhausted_history(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a report-authority fix that cannot create a fresh durable job after v4 exhausted."""
+    current_version = importing_service.RENDER_REPORT_VERSION
+    monkeypatch.setattr(importing_service, "RENDER_REPORT_VERSION", "4")
+    original_service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    original_service.submit(ImportRequest(replay_file))
+    _drain(original_service, worker="report-v4")
+
+    with session_factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == "render_report"))
+        assert original is not None
+        original.status = "failed"
+        original.attempt_count = original.max_attempts
+        original.completed_at = clock()
+        original.error_code = "render_report_failed"
+        original.error_message = "legacy report authority selection exhausted"
+        original.error_details_json = {}
+        original.retryable = False
+        original_identity = (original.public_id, original.idempotency_key)
+
+    monkeypatch.setattr(importing_service, "RENDER_REPORT_VERSION", current_version)
+    repeated_source = tmp_path / "same-replay-new-report-version.rep"
+    shutil.copyfile(replay_file, repeated_source)
+    recovery_service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    recovery_service.submit(ImportRequest(repeated_source))
+    _drain(recovery_service, worker="report-current")
+
+    with session_factory() as session:
+        reports = list(session.scalars(select(Job).where(Job.stage == "render_report").order_by(Job.id)))
+        assert [(job.component_version, job.status) for job in reports] == [
+            ("4", "failed"),
+            ("5", "pending"),
+        ]
+        assert (reports[0].public_id, reports[0].idempotency_key) == original_identity
+
+
 def test_converged_materialized_jobs_coalesce_without_losing_downstream_edges(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
