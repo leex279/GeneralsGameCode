@@ -157,6 +157,15 @@ def test_review_hardening_keeps_controls_readable_and_unavailable_non_failure() 
     assert "box-shadow" not in css
 
 
+def test_player_pattern_evidence_has_a_wrapping_scroll_contract() -> None:
+    css = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/static/css/app.css").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/templates/players/detail.html").read_text(encoding="utf-8")
+
+    assert 'wide-table-scroll player-pattern-table' in html
+    assert ".player-pattern-table table { min-width: 960px; }" in css
+    assert ".player-pattern-table th, .player-pattern-table td { overflow-wrap: anywhere; vertical-align: top; }" in css
+
+
 def test_strategy_report_has_tactical_panels_and_matching_chart_palette() -> None:
     css = package_resource("web/static/css/app.css").read_text(encoding="utf-8")
     scripts = tuple(

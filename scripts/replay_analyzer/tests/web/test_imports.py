@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from threading import Barrier
 from urllib.parse import urlencode
 
@@ -151,6 +152,14 @@ def test_import_dialog_leads_with_the_working_replay_path_and_one_primary_action
     assert 'class="button button-primary" type="submit">Analyze replay</button>' in response.text
     assert '>Cancel<' in response.text
     assert response.text.count("opaque_ingress_handoff_pending") == 1
+
+
+def test_import_dialog_uses_spacious_grouped_layout_contract() -> None:
+    css = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/static/css/app.css").read_text(encoding="utf-8")
+
+    assert ".import-dialog-body { display: grid; gap: var(--cc-space-4); padding: var(--cc-space-5); }" in css
+    assert ".import-group { border: 1px solid var(--cc-rule); padding: var(--cc-space-5); }" in css
+    assert ".import-group h2 { margin-bottom: var(--cc-space-2); }" in css
 
 
 def test_direct_import_navigation_renders_full_shell_with_real_library_return_link() -> None:
