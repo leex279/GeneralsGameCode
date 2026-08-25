@@ -121,6 +121,9 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .insight-card { display: grid; gap: var(--cc-space-2); padding: var(--cc-space-4); border: 1px solid var(--cc-rule); background: var(--cc-surface-2); }
 .insight-card > span, .insight-card > small { color: var(--cc-muted); }
 .insight-card > strong { color: var(--cc-pale); font-family: var(--cc-condensed); font-size: clamp(1.25rem, 3vw, 2rem); font-variant-numeric: tabular-nums; text-transform: uppercase; }
+/* TheSuperHackers @bugfix Leex 25/08/2026 Give composition and event narratives a readable full-width report lane. (#TBD) */
+.insight-card-narrative { grid-column: 1 / -1; }
+.insight-card-narrative > strong { font-family: var(--cc-sans); font-size: clamp(1rem, 1.5vw, 1.2rem); line-height: 1.55; text-transform: none; }
 .insight-card::before, .strategy-card::before, .player-match-card::before { background: var(--cc-cyan); content: ""; height: 2px; left: 0; position: absolute; right: 48%; top: 0; }
 .insight-card, .strategy-card, .player-match-card { clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%); position: relative; }
 .analysis-scope-warning { border-left: 3px solid var(--cc-amber); color: var(--cc-muted); margin: var(--cc-space-3); padding: var(--cc-space-2) var(--cc-space-3); }

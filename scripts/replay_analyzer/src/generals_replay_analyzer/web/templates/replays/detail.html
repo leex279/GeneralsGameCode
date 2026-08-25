@@ -57,7 +57,7 @@
     {% if coaching.highlights %}
       <div class="insight-grid" aria-label="Evidence-backed player highlights">
         {% for highlight in coaching.highlights %}
-          <article class="insight-card">
+          <article class="insight-card insight-card-{{ highlight.layout }}" data-signal-id="{{ highlight.signal_id }}">
             <span>{{ highlight.title }}</span><strong class="report-claim-value">{{ highlight.value }}</strong><small>{{ highlight.explanation }}</small>
             <div class="evidence-links">{% for evidence in highlight.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">View {{ evidence.tier }} evidence</a>{% endfor %}</div>
           </article>

@@ -347,6 +347,48 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
         )
 
 
+def test_report_marks_long_form_highlights_for_readable_full_width_presentation() -> None:
+    """Catch long composition narratives rendering with oversized compact-metric typography."""
+    report = _report()
+    composition = ReportSectionDTO(
+        key="production_composition",
+        title="Production composition",
+        availability=AvailabilityDTO(state="available"),
+        claims=(
+            ReportClaimDTO(
+                **{
+                    **_claim("production_composition").model_dump(),
+                    "claim_id": "feature:production.completed_composition:fixture",
+                    "label": "production.completed_composition",
+                    "raw_value": [
+                        {"count": 14, "template_name": "GLAInfantryTunnelDefender"},
+                        {"count": 20, "template_name": "GLAInfantryWorker"},
+                    ],
+                    "display_value": "14 Tunnel Defenders, 20 Workers",
+                    "unit": "json",
+                    "evidence": (ReportEvidenceReferenceDTO(public_id=EVIDENCE_ID, tier="derived"),),
+                }
+            ),
+        ),
+    )
+    player_report = _replace_report(
+        report,
+        sections=tuple(
+            composition if section.key == "production_composition" else section for section in report.sections
+        ),
+    )
+
+    with _client(_ReportPort(player_report)) as client:
+        response = client.get(
+            f"/replays/{REPLAY_ID}/reports/{REPORT_ID}",
+            headers={"host": "localhost", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    assert 'class="insight-card insight-card-narrative"' in response.text
+    assert 'data-signal-id="production.completed_composition"' in response.text
+
+
 def test_report_surfaces_timestamped_tactical_review_moments_before_the_raw_timeline() -> None:
     """Catch scouting and engagement evidence being buried in metric prose or technical rows."""
     report = _report()

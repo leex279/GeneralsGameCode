@@ -301,6 +301,74 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
     assert coaching.signal_reads[0].evidence[0].public_id == METRIC_EVIDENCE
 
 
+def test_long_form_highlights_are_not_presented_as_headline_metrics() -> None:
+    """Catch composition and event narratives being forced into compact numeric cards."""
+    report = _report()
+    composition = _claim(
+        claim_id="feature:production.completed_composition:fixture",
+        section="production_composition",
+        label="production.completed_composition",
+        raw_value=[
+            {"count": 14, "template_name": "GLAInfantryTunnelDefender"},
+            {"count": 20, "template_name": "GLAInfantryWorker"},
+        ],
+        display_value="14 Tunnel Defenders, 20 Workers",
+        evidence_id=METRIC_EVIDENCE,
+        frame_end=3_600,
+    )
+    sections = tuple(
+        section.model_copy(update={"claims": (composition, *section.claims)})
+        if section.key == "production_composition"
+        else section
+        for section in report.sections
+    )
+
+    highlights = coaching_view(report.model_copy(update={"sections": sections}), _timeline()).highlights
+
+    assert next(item for item in highlights if item.signal_id == "production.completed_composition").layout == "narrative"
+    assert next(item for item in highlights if item.signal_id == "economy.supply_collection_rate").layout == "metric"
+
+
+def test_dense_timed_highlight_keeps_early_and_late_evidence_without_dumping_every_event() -> None:
+    """Catch the player summary expanding into the complete observed kill log."""
+    report = _report()
+    kills = _claim(
+        claim_id="feature:combat.observed_kill_timing:dense-fixture",
+        section="combat_engagements",
+        label="combat.observed_kill_timing",
+        raw_value=[
+            {"frame": frame, "victim_template_name": "AmericaVehicleHumvee"}
+            for frame in (30, 60, 90, 120, 150, 180, 210)
+        ],
+        display_value="7 observed kills",
+        evidence_id=TURNING_EVIDENCE,
+        frame_end=3_600,
+    )
+    sections = tuple(
+        section.model_copy(
+            update={
+                "claims": tuple(
+                    kills if claim.label == "combat.observed_kill_timing" else claim for claim in section.claims
+                )
+            }
+        )
+        if section.key == "combat_engagements"
+        else section
+        for section in report.sections
+    )
+
+    observed = next(
+        item
+        for item in coaching_view(report.model_copy(update={"sections": sections}), _timeline()).highlights
+        if item.signal_id == "combat.observed_kill_timing"
+    )
+
+    assert observed.value == (
+        "Humvee at 0:01.0 (frame 30), Humvee at 0:02.0 (frame 60), Humvee at 0:03.0 (frame 90); "
+        "2 additional observed events; latest: Humvee at 0:06.0 (frame 180), Humvee at 0:07.0 (frame 210)"
+    )
+
+
 def test_strategy_claim_projects_when_its_contract_is_valid_without_derived_tier() -> None:
     """Keep valid strategy claims visible when their stable claim contract is authoritative."""
     report = _report()

@@ -46,6 +46,17 @@ _HIGHLIGHT_EXPLANATIONS = MappingProxyType(
         "activity.effective_actions_per_minute": "Supported replay orders per observed minute, not raw click APM.",
     }
 )
+# TheSuperHackers @bugfix Leex 25/08/2026 Separate narrative evidence lists from compact numeric report metrics. (#TBD)
+_NARRATIVE_HIGHLIGHTS = frozenset(
+    {
+        "production.completed_composition",
+        "production.science_purchase_timing",
+        "production.special_power_timing",
+        "combat.turning_point_timing",
+        "combat.observed_kill_timing",
+        "scouting.first_observed_clear_timing",
+    }
+)
 _ADVICE = MappingProxyType(
     {
         "all_in_aggression": "Review whether the larger Humvee count was supported by steady supply income and unit preservation.",
@@ -103,6 +114,7 @@ class BuildOrderStepView(_FrozenView):
 
 class CoachingHighlightView(_FrozenView):
     signal_id: str
+    layout: Literal["metric", "narrative"]
     title: str
     value: str
     explanation: str
@@ -348,6 +360,16 @@ def _build_order(
     return tuple(sorted(output, key=lambda item: (item.frame, item.player_label, item.structure_label))[:24])
 
 
+# TheSuperHackers @bugfix Leex 25/08/2026 Keep dense event summaries useful without rendering the full match log. (#TBD)
+def _event_summary(events: list[str], empty_label: str) -> str:
+    if not events:
+        return empty_label
+    if len(events) <= 5:
+        return ", ".join(events)
+    hidden_count = len(events) - 5
+    return f"{', '.join(events[:3])}; {hidden_count} additional observed events; latest: {', '.join(events[-2:])}"
+
+
 def _metric_value(claim: ReportClaimDTO, frames_per_second: int) -> str:
     raw = _thaw(claim.raw_value)
     if claim.label == "economy.supply_collection_rate" and type(raw) in (int, float):
@@ -367,34 +389,56 @@ def _metric_value(claim: ReportClaimDTO, frames_per_second: int) -> str:
         if composition:
             return ", ".join(composition)
     if claim.label in ("production.science_purchase_timing", "production.special_power_timing") and isinstance(raw, list):
-        return ", ".join(
-            f"{game_label(item['item_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
-            for item in raw
-            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("item_name")) is str
-        ) or "No observed timing events"
-    if claim.label == "combat.observed_kill_timing" and isinstance(raw, list):
-        return ", ".join(
-            f"{game_label(item['victim_template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
-            for item in raw
-            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("victim_template_name")) is str
-        ) or "No observed kills"
-    if claim.label == "combat.turning_point_timing" and isinstance(raw, list):
-        return ", ".join(
-            f"{game_label(item['attacker_template_name'])} over {game_label(item['victim_template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
-            for item in raw
-            if (
-                isinstance(item, dict)
+        return _event_summary(
+            [
+                f"{game_label(item['item_name'])} at "
+                f"{format_frame(item['frame'], frames_per_second=frames_per_second)}"
+                for item in raw
+                if isinstance(item, dict)
                 and type(item.get("frame")) is int
-                and type(item.get("attacker_template_name")) is str
+                and type(item.get("item_name")) is str
+            ],
+            "No observed timing events",
+        )
+    if claim.label == "combat.observed_kill_timing" and isinstance(raw, list):
+        return _event_summary(
+            [
+                f"{game_label(item['victim_template_name'])} at "
+                f"{format_frame(item['frame'], frames_per_second=frames_per_second)}"
+                for item in raw
+                if isinstance(item, dict)
+                and type(item.get("frame")) is int
                 and type(item.get("victim_template_name")) is str
-            )
-        ) or "No evidence-backed engagement swing candidates"
+            ],
+            "No observed kills",
+        )
+    if claim.label == "combat.turning_point_timing" and isinstance(raw, list):
+        return _event_summary(
+            [
+                f"{game_label(item['attacker_template_name'])} over {game_label(item['victim_template_name'])} at "
+                f"{format_frame(item['frame'], frames_per_second=frames_per_second)}"
+                for item in raw
+                if (
+                    isinstance(item, dict)
+                    and type(item.get("frame")) is int
+                    and type(item.get("attacker_template_name")) is str
+                    and type(item.get("victim_template_name")) is str
+                )
+            ],
+            "No evidence-backed engagement swing candidates",
+        )
     if claim.label == "scouting.first_observed_clear_timing" and isinstance(raw, list):
-        return ", ".join(
-            f"{game_label(item['template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
-            for item in raw
-            if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("template_name")) is str
-        ) or "No observed scouting clears"
+        return _event_summary(
+            [
+                f"{game_label(item['template_name'])} at "
+                f"{format_frame(item['frame'], frames_per_second=frames_per_second)}"
+                for item in raw
+                if isinstance(item, dict)
+                and type(item.get("frame")) is int
+                and type(item.get("template_name")) is str
+            ],
+            "No observed scouting clears",
+        )
     return claim.display_value or "Unavailable"
 
 
@@ -415,6 +459,7 @@ def _highlights(
     return tuple(
         CoachingHighlightView(
             signal_id=name,
+            layout="narrative" if name in _NARRATIVE_HIGHLIGHTS else "metric",
             title=feature_label(name),
             value=_metric_value(claims[name], frames_per_second),
             explanation=_HIGHLIGHT_EXPLANATIONS[name],
