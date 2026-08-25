@@ -555,9 +555,12 @@ def test_production_factory_wires_fixed_page_to_the_same_report_authority(
     report_service = object()
     captured: dict[str, object] = {}
 
-    def report_query_service(session_factory: object, *, settings: object) -> object:
+    def report_query_service(
+        session_factory: object, *, settings: object, report_graph_cache: object
+    ) -> object:
         captured["report_sessions"] = session_factory
         captured["settings"] = settings
+        captured["report_graph_cache"] = report_graph_cache
         return report_service
 
     def map_scene_service(session_factory: object, authority: object) -> object:
@@ -580,6 +583,7 @@ def test_production_factory_wires_fixed_page_to_the_same_report_authority(
     assert tuple((item.frame_start, item.frame_end) for item in port.scene_queries) == ((0, 0), (0, 1800))
     assert captured["authority"] is report_service
     assert captured["map_sessions"] is captured["report_sessions"]
+    assert captured["report_graph_cache"] is not None
 
 
 def test_raster_resource_uses_only_public_ids_and_exact_immutable_bytes() -> None:
