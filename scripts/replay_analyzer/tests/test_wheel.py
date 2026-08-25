@@ -108,6 +108,7 @@ WEB_PLAYER_TEMPLATE_STATIC_RESOURCES = {
     "generals_replay_analyzer/web/templates/players/identity.html",
     "generals_replay_analyzer/web/templates/players/_history.html",
     "generals_replay_analyzer/web/templates/players/_identity_confirmation.html",
+    "generals_replay_analyzer/web/templates/scouting/index.html",
     "generals_replay_analyzer/web/templates/compare/index.html",
     "generals_replay_analyzer/web/templates/compare/_result.html",
     "generals_replay_analyzer/web/static/js/compare.js",

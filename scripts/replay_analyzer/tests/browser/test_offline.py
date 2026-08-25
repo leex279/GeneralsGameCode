@@ -27,6 +27,7 @@ PRIMARY_CONTENT = (
     ("/maps", "Authoritative map scenes"),
     ("/players", "Player Evidence"),
     ("/compare", "Pattern Comparison"),
+    ("/scouting", "Prepare for what they do next"),
     ("/settings", "Analyzer settings"),
 )
 VIEWPORTS = {
@@ -332,7 +333,7 @@ def test_primary_pages_remain_same_origin_without_browser_cache(
 @pytest.mark.parametrize("viewport_name", tuple(VIEWPORTS))
 @pytest.mark.parametrize(
     ("path", "heading"),
-    (("/replays", "Replay library"), ("/maps", "Authoritative map scenes"), ("/compare", "Pattern Comparison")),
+    (("/replays", "Replay library"), ("/maps", "Authoritative map scenes"), ("/compare", "Pattern Comparison"), ("/scouting", "Prepare for what they do next")),
 )
 def test_required_index_pages_reflow_without_document_overflow(
     installed_server: object,
@@ -461,6 +462,61 @@ def test_populated_library_report_map_and_comparison_reflow_offline(
         assert dimensions["scrollWidth"] <= dimensions["clientWidth"]
     assert rejected == []
     assert_browser_clean(console_errors, page_errors)
+    context.close()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("viewport_name", tuple(VIEWPORTS))
+def test_populated_scouting_is_same_origin_honest_and_reflowed(
+    populated_server: object,
+    populated_fixture_template: PopulatedFixtureResult,
+    browser: Browser,
+    viewport_name: str,
+) -> None:
+    origin = populated_server.origin
+    player = populated_fixture_template.manifest.players[0]
+    context = browser.new_context(**deterministic_context_options(VIEWPORTS[viewport_name]))
+    page = context.new_page()
+    console_errors, page_errors = install_browser_error_guard(page)
+    rejected = install_same_origin_guard(page, origin)
+    page.goto(f"{origin}/scouting?player={player.player_public_id}", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.get_by_role("heading", name="Prepare for what they do next", exact=True)).to_be_visible()
+    expect(page.get_by_text("More comparable matches are needed", exact=False)).to_be_visible()
+    expect(page.get_by_text("No recurring strategy is claimed yet", exact=True)).to_be_visible()
+    dimensions = page.evaluate("({scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth})")
+    assert dimensions["scrollWidth"] <= dimensions["clientWidth"]
+    assert rejected == []
+    assert_browser_clean(console_errors, page_errors)
+    context.close()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("viewport_name", ("desktop", "mobile"))
+def test_report_first_viewport_keeps_identity_horizon_and_primary_action_visible(
+    populated_server: object,
+    populated_fixture_template: PopulatedFixtureResult,
+    browser: Browser,
+    viewport_name: str,
+) -> None:
+    origin = populated_server.origin
+    manifest = populated_fixture_template.manifest
+    context = browser.new_context(**deterministic_context_options(VIEWPORTS[viewport_name]))
+    page = context.new_page()
+    _goto_populated_page(page, origin, manifest.replay_report.fixed_url, populated_fixture_template)
+    expect(page.locator("h1")).to_be_visible()
+    expect(page.locator(".report-hero")).to_be_visible()
+    expect(page.get_by_text("Evidence horizon", exact=True).first).to_be_visible()
+    expect(page.get_by_role("link", name="Open match map", exact=True)).to_be_visible()
+    visible_top = page.evaluate("""() => {
+      const selectors = ['h1', '.report-hero', '.report-hero .status-chip', 'a.button'];
+      return selectors.every(selector => {
+        const element = document.querySelector(selector);
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.top >= 0 && rect.bottom <= window.innerHeight;
+      });
+    }""")
+    assert visible_top
     context.close()
 
 
