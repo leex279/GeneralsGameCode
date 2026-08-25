@@ -344,8 +344,8 @@ def test_real_offline_import_observation_deterministic_analytics_to_report(tmp_p
                 observation,
                 TerminalDependencyPolicy(failed_stages=frozenset({"parse", "telemetry"})),
             ),
-            StageHandlerRegistration("derive_features", "1", derive_features),
-            StageHandlerRegistration("assess_strategies", "1", assess_strategies),
+            StageHandlerRegistration("derive_features", "2", derive_features),
+            StageHandlerRegistration("assess_strategies", "2", assess_strategies),
         ),
     )
     import_service.submit(ImportRequest(replay_path, request_telemetry=True))

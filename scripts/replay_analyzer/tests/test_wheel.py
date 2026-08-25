@@ -96,6 +96,9 @@ WEB_REPORT_TEMPLATE_STATIC_RESOURCES = {
     "generals_replay_analyzer/web/templates/evidence/detail.html",
     "generals_replay_analyzer/web/static/js/report.js",
 }
+WEB_VIDEO_TEMPLATE_RESOURCES = {
+    "generals_replay_analyzer/web/templates/video/detail.html",
+}
 WEB_MAP_TEMPLATE_STATIC_RESOURCES = {
     "generals_replay_analyzer/web/templates/maps/index.html",
     "generals_replay_analyzer/web/templates/maps/detail.html",
@@ -135,6 +138,7 @@ WEB_PACKAGED_TEMPLATE_STATIC_RESOURCES = (
     | WEB_LIBRARY_TEMPLATE_RESOURCES
     | WEB_JOB_TEMPLATE_RESOURCES
     | WEB_REPORT_TEMPLATE_STATIC_RESOURCES
+    | WEB_VIDEO_TEMPLATE_RESOURCES
     | WEB_MAP_TEMPLATE_STATIC_RESOURCES
     | WEB_PLAYER_TEMPLATE_STATIC_RESOURCES
     | WEB_SETTINGS_TEMPLATE_RESOURCES
