@@ -15,6 +15,18 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..db.models import Job, JobDependency, Replay
 from .job_contracts import JobLifecycleError
+from .stages import (
+    ANALYZE_LLM,
+    ASSESS_STRATEGIES,
+    DERIVE_FEATURES,
+    RENDER_REPORT,
+    RENDER_VIDEO,
+    TELEMETRY,
+)
+
+_LONG_RUNNING_ANALYSIS_STAGES = frozenset(
+    {TELEMETRY, DERIVE_FEATURES, ASSESS_STRATEGIES, ANALYZE_LLM, RENDER_REPORT, RENDER_VIDEO}
+)
 
 
 class DependencyCycleError(ValueError):
@@ -110,18 +122,24 @@ class JobCoordinator:
         session_factory: sessionmaker[Session],
         *,
         clock: Callable[[], datetime],
-        # TheSuperHackers @fix Leex 24/08/2026 Keep in-process production analysis leased for the full replay-derived stage. (#TBD)
-        lease_duration: timedelta = timedelta(minutes=15),
+        lease_duration: timedelta | None = None,
         retry_base_delay: timedelta = timedelta(seconds=5),
         retry_max_delay: timedelta = timedelta(minutes=5),
     ) -> None:
-        if lease_duration < timedelta(seconds=1) or lease_duration > timedelta(hours=1):
+        default_lease_duration = timedelta(minutes=5) if lease_duration is None else lease_duration
+        analysis_lease_duration = timedelta(minutes=15) if lease_duration is None else lease_duration
+        # TheSuperHackers @fix Leex 25/08/2026 Extend only production analysis leases while preserving prompt import crash recovery. (#TBD)
+        stage_lease_durations = {
+            stage: analysis_lease_duration for stage in _LONG_RUNNING_ANALYSIS_STAGES
+        }
+        if default_lease_duration < timedelta(seconds=1) or default_lease_duration > timedelta(hours=1):
             raise ValueError("job lease and retry durations are invalid")
         if retry_base_delay < timedelta(0) or retry_max_delay < retry_base_delay:
             raise ValueError("job retry durations are invalid")
         self._session_factory = session_factory
         self._clock = clock
-        self._lease_duration = lease_duration
+        self._lease_duration = default_lease_duration
+        self._stage_lease_durations = stage_lease_durations
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
         self._claims: dict[tuple[str, str], object] = {}
@@ -143,6 +161,11 @@ class JobCoordinator:
             terminal_failure_stages=terminal_failure_stages,
             retry_base_delay=self._retry_base_delay,
             retry_max_delay=self._retry_max_delay,
+            _stage_lease_seconds={
+                stage: int(duration.total_seconds())
+                for stage, duration in self._stage_lease_durations.items()
+                if stage in stages
+            },
             _allow_legacy_worker_identifiers=True,
         )
 

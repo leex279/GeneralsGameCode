@@ -23,14 +23,24 @@ def write_test_map_asset(
 ) -> dict[str, object]:
     """Write deterministic authoritative-format map bytes and return their strict reference."""
     element_count = grid_width * grid_height
+    # TheSuperHackers @fix Leex 25/08/2026 Keep synthetic logical map members content-distinct for managed-asset identity tests. (#TBD)
     raw_members = {
         "height.f32.zlib": ("float32", struct.pack(f"<{element_count}f", *([0.0] * element_count))),
-        "pathing-amphibious.u8.zlib": ("uint8", bytes((1,)) * element_count),
-        "pathing-ground.u8.zlib": ("uint8", bytes((1,)) * element_count),
-        "terrain.u8.zlib": ("uint8", bytes((0,)) * element_count),
+        "pathing-amphibious.u8.zlib": (
+            "uint8",
+            bytes(1 if index % 4 < 2 else 0 for index in range(element_count)),
+        ),
+        "pathing-ground.u8.zlib": (
+            "uint8",
+            bytes(1 if index % 4 == 0 else 0 for index in range(element_count)),
+        ),
+        "terrain.u8.zlib": (
+            "uint8",
+            bytes((0, 1, 2, 4)[index % 4] for index in range(element_count)),
+        ),
         "zones.i32.zlib": (
             "int32",
-            struct.pack(f"<{element_count}i", *(index % 16_384 for index in range(element_count))),
+            struct.pack(f"<{element_count}i", *((index % 16_383) + 1 for index in range(element_count))),
         ),
     }
     compressed: dict[str, bytes] = {}

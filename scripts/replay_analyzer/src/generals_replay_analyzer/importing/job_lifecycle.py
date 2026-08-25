@@ -227,6 +227,7 @@ class JobLifecycleService:
         log_store: ContentAddressedStore | None = None,
         log_data_root: Path | None = None,
         redaction_values: Collection[str] = (),
+        _stage_lease_seconds: Mapping[str, int] | None = None,
         _allow_legacy_worker_identifiers: bool = False,
     ) -> None:
         stages = tuple(sorted(set(registered_stages)))
@@ -250,6 +251,12 @@ class JobLifecycleService:
         }
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
+        # TheSuperHackers @fix Leex 25/08/2026 Honor bounded per-stage leases for long telemetry and rendering jobs. (#TBD)
+        self._stage_lease_seconds = {
+            stage: int(_validate_seconds(seconds).total_seconds())
+            for stage, seconds in (_stage_lease_seconds or {}).items()
+            if stage in stages
+        }
         self._log_store = log_store
         self._log_data_root = resolved_log_root
         normalized_redactions: set[str] = set()
@@ -318,7 +325,7 @@ class JobLifecycleService:
         selector: JobClaimSelectorDTO = DEFAULT_JOB_CLAIM_SELECTOR,
     ) -> WorkerLeaseDTO | None:
         worker = self._worker_identifier(worker_public_id)
-        duration = _validate_seconds(lease_seconds)
+        default_duration = _validate_seconds(lease_seconds)
         if type(selector) is not JobClaimSelectorDTO:
             raise TypeError("selector must be an exact JobClaimSelectorDTO")
         if not self._stages:
@@ -352,6 +359,12 @@ class JobLifecycleService:
             for candidate in session.scalars(candidate_query):
                 if not self._dependencies_satisfied(session, candidate):
                     continue
+                duration = timedelta(
+                    seconds=self._stage_lease_seconds.get(
+                        candidate.stage,
+                        int(default_duration.total_seconds()),
+                    )
+                )
                 token = secrets.token_urlsafe(32)
                 execution_public_id = str(uuid4())
                 next_revision = candidate.revision + 1

@@ -99,16 +99,15 @@ def _identity(info: os.stat_result, *, link_count: int | None = None) -> _Identi
 
 def _object_matches(info: os.stat_result, expected: _Identity) -> bool:
     current = _identity(info)
+    # TheSuperHackers @bugfix Leex 25/08/2026 Compare stable object identity separately from mutable Windows file attributes. (#TBD)
     return (
         current.device,
         current.inode,
         stat.S_IFMT(current.mode),
-        current.attributes,
     ) == (
         expected.device,
         expected.inode,
         stat.S_IFMT(expected.mode),
-        expected.attributes,
     )
 
 
@@ -364,14 +363,17 @@ def _copy_snapshot_to_owned(root: Path, snapshot: _TreeSnapshot, owned: _OwnedTr
         destination = owned.root / Path(relative)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         destination_descriptor = os.open(destination, flags, 0o600)
-        owned.files[destination] = _identity(os.fstat(destination_descriptor))
         try:
             size, digest = _stream_descriptor(source_descriptor, destination_descriptor)
             if _descriptor_identity(source_descriptor) != expected or size != expected.size:
                 raise ValueError("declared replay map source changed during staging")
         finally:
-            os.close(destination_descriptor)
-            os.close(source_descriptor)
+            try:
+                # TheSuperHackers @bugfix Leex 25/08/2026 Capture the completed file identity after Windows applies write-time attributes. (#TBD)
+                owned.files[destination] = _descriptor_identity(destination_descriptor)
+            finally:
+                os.close(destination_descriptor)
+                os.close(source_descriptor)
         files.append((relative, size, digest))
     return tuple(relative for relative, _identity_value in snapshot.directories), tuple(files)
 
@@ -455,7 +457,12 @@ def _stage_replay_for_engine(settings: AnalyzerSettings, replay: Path, replay_sh
             os.close(temporary_descriptor)
         if temporary_identity is not None:
             try:
-                if _object_matches(temporary.lstat(), temporary_identity):
+                temporary_info = temporary.lstat()
+                if (
+                    _object_matches(temporary_info, temporary_identity)
+                    and not _is_reparse(temporary_info)
+                    and stat.S_ISREG(temporary_info.st_mode)
+                ):
                     temporary.unlink()
             except OSError:
                 pass
