@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
 from uuid import uuid4
+from urllib.parse import urlparse
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -115,6 +116,26 @@ class PlayerIdentityService:
         if player is None:
             raise IdentityNotFoundError(f"unknown player {public_id}")
         return cast(Player, player)
+
+    @staticmethod
+    def validate_external_profile(url: str | None, source: str | None) -> None:
+        if url is None and source is None:
+            return
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("external profile URL is required when source is supplied")
+        parsed = urlparse(url.strip())
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError("external profile URL must be an HTTPS public URL")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("external profile source is required")
+
+    def update_external_profile(self, player_public_id: str, url: str | None, source: str | None) -> None:
+        self.validate_external_profile(url, source)
+        with self._writer() as session:
+            player = self._player(session, player_public_id)
+            player.external_profile_url = url.strip() if url else None
+            player.external_profile_source = source.strip() if source else None
+            player.updated_at = self._now_factory()
 
     def _revisions(self, players: list[Player]) -> tuple[tuple[str, int], ...]:
         return tuple(sorted((player.public_id, player.identity_revision) for player in players))

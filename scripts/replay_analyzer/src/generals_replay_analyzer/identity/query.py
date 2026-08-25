@@ -96,6 +96,8 @@ class PlayerSummary:
     match_count: int
     latest_match_at_utc: datetime | None
     availability: Availability
+    external_profile_url: str | None = None
+    external_profile_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +334,8 @@ class PlayerQueryService:
             len({replay.id for replay, _row in rows}),
             max((value for value in starts if value is not None), default=None),
             Availability("available"),
+            player.external_profile_url,
+            player.external_profile_source,
         )
 
     def resolve_profile(self, selection: PlayerProfileSelection) -> PlayerProfileResolution:
@@ -494,6 +498,8 @@ class PlayerQueryService:
                 len({item.replay_public_id for item in history_all}),
                 max((item.started_at_utc for item in history_all if item.started_at_utc), default=None),
                 availability,
+                player.external_profile_url,
+                player.external_profile_source,
             )
             profile_public_id = str(uuid5(_PROFILE_NAMESPACE, query.profile_input_digest))
             start = (query.page - 1) * query.page_size

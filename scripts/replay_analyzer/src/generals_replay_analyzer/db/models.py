@@ -259,6 +259,9 @@ class Player(IntegerPrimaryKeyMixin, PublicIdMixin, CreatedAtMixin, Base):
     __table_args__ = (CheckConstraint("identity_revision >= 0", name="identity_revision_nonnegative"),)
 
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # TheSuperHackers @feature Leex 25/08/2026 Keep optional public profile metadata on canonical players only. (#TBD)
+    external_profile_url: Mapped[str | None] = mapped_column(Text)
+    external_profile_source: Mapped[str | None] = mapped_column(String(64))
     identity_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
