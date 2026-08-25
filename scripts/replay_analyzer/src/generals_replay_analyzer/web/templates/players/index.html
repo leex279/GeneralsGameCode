@@ -15,6 +15,7 @@
   </div><button type="submit">Apply Player Filters</button></fieldset>
 </form>
 <section class="workspace-panel" aria-labelledby="player-results-title">
+  {% if view.page.items %}<div class="player-external-profiles">{% for player in view.page.items %}{% if player.external_profile_url %}<a href="{{ player.external_profile_url }}" rel="noopener noreferrer">{{ player.display_name }} — {{ player.external_profile_source or 'External' }} profile</a>{% endif %}{% endfor %}</div>{% endif %}
   <div class="section-heading"><div><span class="eyebrow">{{ view.page.total_items }} identities</span><h2 id="player-results-title">Player Directory</h2></div><span>{{ view.page.availability.state }}</span></div>
   {% if view.page.items %}<table><caption>Canonical players in the selected immutable result page</caption><thead><tr><th scope="col">Player</th><th scope="col">State</th><th scope="col">Matches</th><th scope="col">Latest Match</th><th scope="col">Evidence</th></tr></thead><tbody>
   {% for player in view.page.items %}<tr><th scope="row"><a href="/players/{{ player.player_public_id }}">{{ player.display_name }}</a><small>Revision {{ player.identity_revision }}</small></th><td>{{ player.state }}</td><td>{{ player.match_count }}</td><td>{{ player.latest_match_at_utc or 'Unavailable' }}</td><td>{{ player.availability.state }}{% if player.availability.reason_codes %}: {{ player.availability.reason_codes|join(', ') }}{% endif %}</td></tr>{% endfor %}

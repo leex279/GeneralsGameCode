@@ -320,6 +320,22 @@ def test_player_index_maps_native_filters_and_preserves_port_order() -> None:
     ]
     assert "Leex279" in response.text and "active" in response.text
 
+def test_player_profile_renders_safe_external_profile_link_and_played_as_label() -> None:
+    profile = _full_profile()
+    player = profile.player.model_copy(update={"external_profile_url": "https://profiles.example.test/leex279", "external_profile_source": "Community"})
+    history = profile.replay_history[0].model_copy(update={"original_name": "old-leex"})
+    port = _PlayerPort(profile.model_copy(update={"player": player, "replay_history": (history,)}))
+
+    with _client(port) as client:
+        resolution = client.get(f"/players/{PLAYER_ID}", headers={"accept": "text/html"}, follow_redirects=False)
+        fixed = client.get(resolution.headers["location"], headers={"accept": "text/html"})
+
+    assert fixed.status_code == 200
+    assert 'href="https://profiles.example.test/leex279"' in fixed.text
+    assert 'rel="noopener noreferrer"' in fixed.text
+    assert "Community profile" in fixed.text
+    assert "Played as" in fixed.text and "old-leex" in fixed.text
+
 
 def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidence_families() -> None:
     """Catch current identity/report resolution leaking into a fixed profile read."""

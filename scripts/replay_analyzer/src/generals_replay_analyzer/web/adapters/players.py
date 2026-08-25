@@ -196,6 +196,8 @@ class AnalyticsPlayersAdapter:
                     match_count=item.match_count,
                     latest_match_at_utc=item.latest_match_at_utc,
                     availability=_availability(item.availability),
+                    external_profile_url=getattr(item, "external_profile_url", None),
+                    external_profile_source=getattr(item, "external_profile_source", None),
                 )
                 for item in page.items
             ),
@@ -265,6 +267,8 @@ class AnalyticsPlayersAdapter:
                 match_count=profile.player.match_count,
                 latest_match_at_utc=profile.player.latest_match_at_utc,
                 availability=_availability(profile.player.availability),
+                external_profile_url=getattr(profile.player, "external_profile_url", None),
+                external_profile_source=getattr(profile.player, "external_profile_source", None),
             ),
             embedded_aliases=tuple(
                 EmbeddedAliasDTO(
@@ -301,6 +305,7 @@ class AnalyticsPlayersAdapter:
                     replay_public_id=item.replay_public_id,
                     replay_player_public_id=item.replay_player_public_id,
                     observed_name=item.observed_name,
+                    original_name=getattr(item, "original_name", None),
                     faction=item.faction,
                     opponent_factions=item.opponent_factions,
                     opponent_player_public_ids=item.opponent_player_public_ids,

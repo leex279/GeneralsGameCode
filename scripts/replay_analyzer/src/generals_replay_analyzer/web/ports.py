@@ -2284,6 +2284,19 @@ class PlayerSummaryDTO(WebDTO):
     match_count: int = Field(ge=0)
     latest_match_at_utc: AwareDatetime | None = None
     availability: AvailabilityDTO
+    # TheSuperHackers @feature Leex 25/08/2026 Carry optional canonical external profile references to web views. (#TBD)
+    external_profile_url: str | None = Field(default=None, max_length=2048)
+    external_profile_source: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("external_profile_url")
+    @classmethod
+    def _safe_external_profile_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("external profile URL must use http or https")
+        return value
 
     @field_validator("latest_match_at_utc")
     @classmethod
@@ -2389,6 +2402,7 @@ class ReplayHistoryItemDTO(WebDTO):
     replay_public_id: PublicId
     replay_player_public_id: PublicId
     observed_name: str = Field(min_length=1, max_length=256)
+    original_name: str | None = Field(default=None, min_length=1, max_length=256)
     faction: str | None = Field(default=None, min_length=1, max_length=64)
     opponent_factions: tuple[str, ...]
     opponent_player_public_ids: tuple[PublicId, ...]
