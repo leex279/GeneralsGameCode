@@ -152,7 +152,12 @@ def fixed_report(
             detail="Report identity is outside the requested scope",
         )
     timeline = report_port.timeline_chart(
-        TimelineChartQueryDTO(replay_public_id=query.replay_public_id, report_public_id=query.report_public_id)
+        # TheSuperHackers @performance Leex 25/08/2026 Load only lightweight strategy geometry for initial HTML while the interactive chart fetches selected families asynchronously. (#TBD)
+        TimelineChartQueryDTO(
+            replay_public_id=query.replay_public_id,
+            report_public_id=query.report_public_id,
+            families=("strategy",),
+        )
     )
     try:
         view = replay_report_view(report, timeline)

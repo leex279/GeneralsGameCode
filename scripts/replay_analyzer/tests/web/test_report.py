@@ -605,12 +605,52 @@ def test_fixed_report_route_keeps_all_sections_inside_collapsed_provenance_and_u
 
     assert response.status_code == 200
     assert port.report_queries == [FixedReportQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)]
-    assert port.timeline_queries == [TimelineChartQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)]
+    assert port.timeline_queries == [
+        TimelineChartQueryDTO(
+            replay_public_id=REPLAY_ID,
+            report_public_id=REPORT_ID,
+            families=("strategy",),
+        )
+    ]
     assert response.text.index("What happened") < response.text.index("Technical evidence and provenance")
     for key in SECTION_KEYS:
         assert f'id="section-{key}"' in response.text
     assert 'src="/static/vendor/echarts.min.js"' in response.text
     assert 'src="/static/js/report.js"' in response.text
+
+
+def test_fixed_report_bounds_inline_evidence_links_and_reports_the_full_count() -> None:
+    """Catch high-cardinality derived evidence expanding one report page into tens of megabytes."""
+    evidence = tuple(
+        ReportEvidenceReferenceDTO(
+            public_id=f"123e4567-e89b-42d3-a456-42661417{index:04d}",
+            tier="observed",
+        )
+        for index in range(7)
+    )
+    report = _report()
+    first = report.sections[0]
+    sections = (
+        first.model_copy(
+            update={
+                "claims": (
+                    first.claims[0].model_copy(update={"evidence": evidence}),
+                )
+            }
+        ),
+        *report.sections[1:],
+    )
+
+    with _client(_ReportPort(_replace_report(report, sections=sections))) as client:
+        response = client.get(
+            f"/replays/{REPLAY_ID}/reports/{REPORT_ID}",
+            headers={"host": "localhost", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    assert 'data-evidence-public-id="123e4567-e89b-42d3-a456-426614170004"' in response.text
+    assert 'data-evidence-public-id="123e4567-e89b-42d3-a456-426614170005"' not in response.text
+    assert "Showing 5 of 7 direct evidence references" in response.text
 
 
 def test_fixed_report_route_fails_closed_on_cross_report_port_data() -> None:
