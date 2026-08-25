@@ -107,10 +107,10 @@ def _insert_legacy_jobs(database_path: Path) -> None:
         engine.dispose()
 
 
-def test_0005_is_the_only_head_and_matches_application_metadata(database_path: Path) -> None:
+def test_0006_is_the_only_head_and_matches_application_metadata(database_path: Path) -> None:
     """Catch a missing/branched migration or model shape that diverges from the installed schema."""
     scripts = ScriptDirectory.from_config(make_alembic_config(database_path))
-    assert scripts.get_heads() == ["0005_llm_graph_immutability"]
+    assert scripts.get_heads() == ["0006_player_external_profile"]
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
     try:

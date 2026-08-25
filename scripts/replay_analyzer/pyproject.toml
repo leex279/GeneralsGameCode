@@ -55,6 +55,7 @@ exclude = [
 "src/generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py" = "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py"
 "src/generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py" = "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py"
 "src/generals_replay_analyzer/db/migrations/versions/0005_llm_graph_immutability.py" = "generals_replay_analyzer/db/migrations/versions/0005_llm_graph_immutability.py"
+"src/generals_replay_analyzer/db/migrations/versions/0006_player_external_profile.py" = "generals_replay_analyzer/db/migrations/versions/0006_player_external_profile.py"
 "src/generals_replay_analyzer/data/strategy-report-v1.txt" = "generals_replay_analyzer/data/strategy-report-v1.txt"
 "src/generals_replay_analyzer/data/strategy-report-response-v1.schema.json" = "generals_replay_analyzer/data/strategy-report-response-v1.schema.json"
 "src/generals_replay_analyzer/data/strategy-taxonomy-v1.json" = "generals_replay_analyzer/data/strategy-taxonomy-v1.json"

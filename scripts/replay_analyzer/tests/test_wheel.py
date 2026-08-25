@@ -26,6 +26,7 @@ MIGRATION_RESOURCES = {
     "generals_replay_analyzer/db/migrations/versions/0003_feature_partial_quality.py",
     "generals_replay_analyzer/db/migrations/versions/0004_job_lifecycle.py",
     "generals_replay_analyzer/db/migrations/versions/0005_llm_graph_immutability.py",
+    "generals_replay_analyzer/db/migrations/versions/0006_player_external_profile.py",
 }
 LLM_RESOURCES = {
     "generals_replay_analyzer/data/strategy-report-v1.txt",
@@ -376,7 +377,7 @@ def test_installed_wheel_contains_and_executes_packaged_migrations(tmp_path: Pat
         upgrade_database(database)
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "0005_llm_graph_immutability",
+                "0006_player_external_profile",
             )
             assert {
                 row[1]
