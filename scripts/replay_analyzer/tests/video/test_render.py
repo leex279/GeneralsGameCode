@@ -35,6 +35,7 @@ from generals_replay_analyzer.video.render import (
     VideoRenderError,
     VideoRenderRequest,
     VideoRenderService,
+    _load_capture_result,
 )
 from generals_replay_analyzer.video.verify import ObservedVideoV1, VerificationLandmarkV1, VerifiedMediaV1
 from generals_replay_analyzer.video.voice import VoiceClipV1
@@ -55,6 +56,43 @@ def _sha256(path: Path) -> str:
 
 def test_media_verifier_protocol_requires_logic_timebase() -> None:
     assert "logic_frames_per_second" in inspect.signature(MediaVerifier.verify).parameters
+
+
+def test_native_capture_accepts_absolute_replay_range_and_rounded_presentation_horizon(
+    tmp_path: Path,
+) -> None:
+    sidecar = tmp_path / "gameplay.mp4.capture-result.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "success",
+                "failure_code": "ok",
+                "failure_detail": 0,
+                "requested_width": 1280,
+                "requested_height": 720,
+                "actual_width": 1280,
+                "actual_height": 720,
+                "fps": 30,
+                "logic_frames": 55_996,
+                "presentation_frames": 28_002,
+                "first_logic_frame": 7,
+                "last_logic_frame": 56_002,
+                "process_exit_code": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _load_capture_result(
+        sidecar,
+        VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="track"),
+        56_002,
+        60,
+    )
+
+    assert result.presentation_frames == 28_002
+    assert result.first_logic_frame == 7
 
 
 def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
@@ -232,6 +270,8 @@ class _ProcessRunner:
                 "fps": 30,
                 "logic_frames": 60,
                 "presentation_frames": 60,
+                "first_logic_frame": 0,
+                "last_logic_frame": 59,
                 "process_exit_code": 0,
             }
             if self.capture_result is not None:
@@ -667,6 +707,7 @@ def test_render_rejects_verifier_auxiliary_hashes_that_do_not_match_frozen_input
         {"status": "failed", "failure_code": "pipe_write_failed"},
         {"logic_frames": 59},
         {"presentation_frames": 61},
+        {"last_logic_frame": 58},
         {"requested_width": 320},
         {"process_exit_code": 1},
     ],

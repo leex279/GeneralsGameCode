@@ -130,17 +130,22 @@ namespace W3DVideoCaptureContract
 		return true;
 	}
 
-	// TheSuperHackers @feature Leex 23/08/2026 Express 60 FPS as two presentations of one 30 Hz simulation image. (#TBD)
-	inline int presentationCopiesForFps(int fps)
+	// TheSuperHackers @bugfix Leex 25/08/2026 Resample absolute logic frames into 30 or 60 FPS presentation frames without duration drift. (#TBD)
+	inline int presentationCopiesForLogicFrame(unsigned int logicFrame, int logicFps, int outputFps, bool firstCapture)
 	{
-		return fps == 30 ? 1 : (fps == 60 ? 2 : 0);
+		if ((logicFps != 30 && logicFps != 60) || (outputFps != 30 && outputFps != 60)) return -1;
+		const unsigned long long throughCurrent =
+			((static_cast<unsigned long long>(logicFrame) + 1) * outputFps + logicFps - 1) / logicFps;
+		const unsigned long long throughPrevious = firstCapture ? 0
+			: (static_cast<unsigned long long>(logicFrame) * outputFps + logicFps - 1) / logicFps;
+		return static_cast<int>(throughCurrent - throughPrevious);
 	}
 }
 
 class W3DVideoWriter
 {
 public:
-	W3DVideoWriter(const char *outputPath, int requestedWidth, int requestedHeight, int fps);
+	W3DVideoWriter(const char *outputPath, int requestedWidth, int requestedHeight, int fps, int logicFps);
 	~W3DVideoWriter();
 
 	bool captureFrame(IDirect3DDevice8 *device, unsigned int logicFrame);
@@ -164,11 +169,13 @@ private:
 	int m_requestedWidth;
 	int m_requestedHeight;
 	int m_fps;
+	int m_logicFps;
 	unsigned int m_actualWidth;
 	unsigned int m_actualHeight;
 	DWORD m_surfaceFormat;
 	int m_surfacePitch;
 	LONG m_lastLogicFrame;
+	LONG m_firstLogicFrame;
 	unsigned int m_logicFrames;
 	unsigned int m_presentationFrames;
 	W3DVideoCaptureFailure m_failure;

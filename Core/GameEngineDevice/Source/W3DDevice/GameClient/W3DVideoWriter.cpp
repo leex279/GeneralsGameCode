@@ -96,17 +96,19 @@ namespace
 }
 
 // TheSuperHackers @feature Leex 23/08/2026 Own the D3D staging surface, restricted FFmpeg child, and typed capture result as one renderer-only lifetime. (#TBD)
-W3DVideoWriter::W3DVideoWriter(const char *outputPath, int requestedWidth, int requestedHeight, int fps) :
+W3DVideoWriter::W3DVideoWriter(const char *outputPath, int requestedWidth, int requestedHeight, int fps, int logicFps) :
 	m_outputPath(ansiToWide(outputPath)),
 	m_sidecarPath(m_outputPath + L".capture-result.json"),
 	m_requestedWidth(requestedWidth),
 	m_requestedHeight(requestedHeight),
 	m_fps(fps),
+	m_logicFps(logicFps),
 	m_actualWidth(0),
 	m_actualHeight(0),
 	m_surfaceFormat(0),
 	m_surfacePitch(0),
 	m_lastLogicFrame(-1),
+	m_firstLogicFrame(-1),
 	m_logicFrames(0),
 	m_presentationFrames(0),
 	m_failure(W3D_VIDEO_CAPTURE_OK),
@@ -120,7 +122,7 @@ W3DVideoWriter::W3DVideoWriter(const char *outputPath, int requestedWidth, int r
 	m_sidecarWritten(false)
 {
 	if (m_outputPath.empty() || requestedWidth <= 0 || requestedHeight <= 0
-		|| W3DVideoCaptureContract::presentationCopiesForFps(fps) == 0)
+		|| W3DVideoCaptureContract::presentationCopiesForLogicFrame(0, logicFps, fps, true) < 0)
 	{
 		m_failure = W3D_VIDEO_CAPTURE_INVALID_CONFIGURATION;
 		m_failureDetail = ERROR_INVALID_PARAMETER;
@@ -317,6 +319,18 @@ bool W3DVideoWriter::captureFrame(IDirect3DDevice8 *device, unsigned int logicFr
 			return false;
 		}
 	}
+	const bool firstCapture = m_logicFrames == 0;
+	const int presentationCopies = W3DVideoCaptureContract::presentationCopiesForLogicFrame(
+		logicFrame, m_logicFps, m_fps, firstCapture);
+	if (presentationCopies < 0)
+	{
+		fail(W3D_VIDEO_CAPTURE_INVALID_CONFIGURATION, ERROR_INVALID_PARAMETER);
+		return false;
+	}
+	if (firstCapture) m_firstLogicFrame = static_cast<LONG>(logicFrame);
+	m_lastLogicFrame = static_cast<LONG>(logicFrame);
+	++m_logicFrames;
+	if (presentationCopies == 0) return true;
 
 	IDirect3DSurface8 *backBuffer = nullptr;
 	HRESULT result = device == nullptr ? E_POINTER
@@ -374,14 +388,11 @@ bool W3DVideoWriter::captureFrame(IDirect3DDevice8 *device, unsigned int logicFr
 		return false;
 	}
 
-	const int presentationCopies = W3DVideoCaptureContract::presentationCopiesForFps(m_fps);
 	for (int copy = 0; copy < presentationCopies; ++copy)
 	{
 		if (!writeAll(&m_rgb24[0], m_rgb24.size())) return false;
 		++m_presentationFrames;
 	}
-	m_lastLogicFrame = static_cast<LONG>(logicFrame);
-	++m_logicFrames;
 	return true;
 }
 
@@ -529,6 +540,8 @@ void W3DVideoWriter::writeSidecar()
 	json << "\"fps\":" << m_fps << ",";
 	json << "\"logic_frames\":" << m_logicFrames << ",";
 	json << "\"presentation_frames\":" << m_presentationFrames << ",";
+	json << "\"first_logic_frame\":" << m_firstLogicFrame << ",";
+	json << "\"last_logic_frame\":" << m_lastLogicFrame << ",";
 	json << "\"process_exit_code\":" << m_processExitCode;
 	json << "}\n";
 	const std::string value = json.str();

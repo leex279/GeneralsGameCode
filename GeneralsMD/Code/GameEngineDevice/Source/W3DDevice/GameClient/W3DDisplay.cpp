@@ -427,7 +427,8 @@ W3DDisplay::W3DDisplay()
 	{
 		s_replayVideoWriter = NEW W3DVideoWriter(TheGlobalData->m_recordVideoPath.str(),
 			TheGlobalData->m_videoCaptureWidth, TheGlobalData->m_videoCaptureHeight,
-			TheGlobalData->m_videoCaptureFps);
+			// TheSuperHackers @bugfix Leex 25/08/2026 Bind output sampling to the authoritative replay logic cadence. (#TBD)
+			TheGlobalData->m_videoCaptureFps, LOGICFRAMES_PER_SECOND);
 	}
 #endif
 }

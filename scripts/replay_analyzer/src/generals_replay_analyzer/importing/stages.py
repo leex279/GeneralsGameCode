@@ -53,7 +53,8 @@ RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @bugfix Leex 25/08/2026 Keep camera render jobs valid for engine-validated airspace targets above terrain bounds. (#TBD)
 # TheSuperHackers @feature Leex 25/08/2026 Render sparse strategy, build, production, and battle commentary from full-match evidence. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with the rendered absolute replay launch contract. (#TBD)
-RENDER_VIDEO_VERSION = "20"
+# TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with logic-timebase video sampling and absolute capture horizons. (#TBD)
+RENDER_VIDEO_VERSION = "21"
 
 
 def canonical_json(value: Any) -> str:

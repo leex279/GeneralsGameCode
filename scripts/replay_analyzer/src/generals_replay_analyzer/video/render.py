@@ -173,6 +173,8 @@ class NativeCaptureResultV1(VideoContract):
     fps: Literal[30, 60]
     logic_frames: int = Field(ge=1)
     presentation_frames: int = Field(ge=1)
+    first_logic_frame: int = Field(ge=0)
+    last_logic_frame: int = Field(ge=0)
     process_exit_code: Literal[0]
 
 
@@ -295,18 +297,21 @@ def _load_capture_result(
         result = NativeCaptureResultV1.model_validate(payload)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise VideoRenderError("native capture result is not a valid successful closed record") from error
-    expected_logic_frames = final_frame + 1
     if type(logic_frames_per_second) is not int or logic_frames_per_second not in (30, 60):
         raise ValueError("logic_frames_per_second must be 30 or 60")
+    expected_logic_frames = final_frame + 1
     presentation_numerator = expected_logic_frames * settings.fps
-    if presentation_numerator % logic_frames_per_second:
-        raise VideoRenderError("output FPS must divide exactly into the authoritative logic duration")
-    expected_presentation_frames = presentation_numerator // logic_frames_per_second
+    expected_presentation_frames = (
+        presentation_numerator + logic_frames_per_second - 1
+    ) // logic_frames_per_second
     # TheSuperHackers @bugfix Leex 24/08/2026 Treat actual dimensions as the bounded source backbuffer; requested dimensions plus ffprobe verify the scaled output. (#TBD)
+    # TheSuperHackers @bugfix Leex 25/08/2026 Validate the absolute captured frame range because rendered replay startup can precede the first client callback. (#TBD)
     if (
         (result.requested_width, result.requested_height) != (settings.width, settings.height)
         or result.fps != settings.fps
-        or result.logic_frames != expected_logic_frames
+        or result.first_logic_frame > logic_frames_per_second
+        or result.last_logic_frame != final_frame
+        or result.logic_frames != result.last_logic_frame - result.first_logic_frame + 1
         or result.presentation_frames != expected_presentation_frames
     ):
         raise VideoRenderError("native capture result differs from the fixed render contract")

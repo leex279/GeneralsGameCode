@@ -173,9 +173,13 @@ int main()
 	if (failure != W3D_VIDEO_CAPTURE_INVALID_PITCH) return 5;
 	if (W3DVideoCaptureContract::convertBgraToRgb24(source, INT_MAX, 1, 3, converted, failure)) return 6;
 	if (failure != W3D_VIDEO_CAPTURE_INVALID_PITCH) return 7;
-	if (W3DVideoCaptureContract::presentationCopiesForFps(30) != 1) return 8;
-	if (W3DVideoCaptureContract::presentationCopiesForFps(60) != 2) return 9;
-	if (W3DVideoCaptureContract::presentationCopiesForFps(59) != 0) return 10;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(0, 30, 30, true) != 1) return 8;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(0, 30, 60, true) != 2) return 9;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(0, 60, 30, true) != 1) return 10;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(1, 60, 30, false) != 0) return 15;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(2, 60, 30, false) != 1) return 16;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(7, 60, 30, true) != 4) return 17;
+	if (W3DVideoCaptureContract::presentationCopiesForLogicFrame(0, 60, 59, true) != -1) return 18;
 	if (W3DVideoCaptureContract::quoteWindowsArgument(L"plain") != L"plain") return 11;
 	if (W3DVideoCaptureContract::quoteWindowsArgument(L"C:\\render dir\\match & whoami.mp4")
 		!= L"\"C:\\render dir\\match & whoami.mp4\"") return 12;
@@ -280,7 +284,7 @@ def test_display_captures_once_per_logic_frame_and_replay_owns_shutdown(
     assert "captureFrame" in capture_hook
     assert "close" not in capture_hook
     assert "m_lastLogicFrame" in writer
-    assert "presentationCopiesForFps" in writer
+    assert "presentationCopiesForLogicFrame" in writer
     assert "for (int copy = 0; copy < presentationCopies; ++copy)" in writer
     assert "setQuitting" not in writer
     assert "update()" not in writer

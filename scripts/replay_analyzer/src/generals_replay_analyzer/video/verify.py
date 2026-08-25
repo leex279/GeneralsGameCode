@@ -330,9 +330,8 @@ class MediaVerifier:
         if observed.fps_numerator != settings.fps * observed.fps_denominator:
             raise MediaVerificationError("final video FPS differs from fixed settings")
         numerator = (final_frame + 1) * settings.fps
-        if numerator % logic_frames_per_second:
-            raise MediaVerificationError("output FPS must divide exactly into the authoritative logic duration")
-        expected_frames = numerator // logic_frames_per_second
+        # TheSuperHackers @bugfix Leex 25/08/2026 Round an inclusive logic horizon up to the first complete presentation frame. (#TBD)
+        expected_frames = (numerator + logic_frames_per_second - 1) // logic_frames_per_second
         if observed.frame_count != expected_frames:
             raise MediaVerificationError("final video frame count differs from authoritative duration")
         tolerance = 1.0 / settings.fps
