@@ -1735,6 +1735,94 @@ def test_fixed_query_accepts_structurally_identical_successful_stage_graph_claim
     assert graph.selected.document.report_public_id == published_graph.player_report_id
 
 
+def test_legacy_report_uses_unique_derive_dependency_available_at_assess_completion(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    legacy_completed_at = datetime(2026, 8, 23, 10, 0, tzinfo=UTC)
+    late_edge_at = datetime(2026, 8, 23, 10, 1, tzinfo=UTC)
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None
+        legacy_report = _add_legacy_report_claimant(
+            session,
+            original,
+            legacy_completed_at,
+            label="query-legacy-late-derive-edge",
+        )
+        legacy_assess_id = session.scalar(
+            select(JobDependency.depends_on_job_id).where(JobDependency.job_id == legacy_report.id)
+        )
+        assert legacy_assess_id is not None
+        legacy_assess = session.get(Job, legacy_assess_id)
+        assert legacy_assess is not None
+        legacy_derive_id = session.scalar(
+            select(JobDependency.depends_on_job_id).where(JobDependency.job_id == legacy_assess.id)
+        )
+        assert legacy_derive_id is not None
+        legacy_derive = session.get(Job, legacy_derive_id)
+        assert legacy_derive is not None and isinstance(legacy_derive.output_json, dict)
+        replay = session.get(Replay, legacy_report.replay_id)
+        assert replay is not None
+        late_derive = _job(
+            public_id=stable_uuid("query-legacy-late-derive"),
+            replay_id=replay.id,
+            replay_sha256=replay.sha256,
+            stage=DERIVE_FEATURES,
+            component_version=DERIVE_FEATURES_VERSION,
+            input_json=dict(legacy_derive.input_json),
+            output_json=dict(legacy_derive.output_json),
+            now=late_edge_at,
+        )
+        session.add(late_derive)
+        session.flush()
+        session.add_all(
+            (
+                JobDependency(
+                    job_id=legacy_assess.id,
+                    depends_on_job_id=late_derive.id,
+                    created_at=late_edge_at,
+                ),
+                _stage_result(
+                    late_derive,
+                    dict(legacy_derive.output_json),
+                    late_edge_at,
+                    "query-legacy-late-derive-result",
+                ),
+            )
+        )
+        late_derive_id = late_derive.id
+
+    graph = published_graph.service.get_report(
+        FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+    )
+
+    assert graph.selected.document.report_public_id == published_graph.player_report_id
+
+    with factory.begin() as session:
+        late_derive = session.get(Job, late_derive_id)
+        assert late_derive is not None
+        late_derive.created_at = legacy_completed_at
+        late_derive.completed_at = legacy_completed_at
+        late_dependency = session.scalar(
+            select(JobDependency).where(
+                JobDependency.job_id == legacy_assess_id,
+                JobDependency.depends_on_job_id == late_derive_id,
+            )
+        )
+        assert late_dependency is not None
+        late_dependency.created_at = legacy_completed_at
+
+    published_graph.service.invalidate_report_cache(
+        published_graph.replay_public_id, published_graph.player_report_id
+    )
+    with pytest.raises(ReportGraphContractError, match="one exact historical direct dependency"):
+        published_graph.service.get_report(
+            FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
+        )
+
+
 @pytest.mark.parametrize(
     ("telemetry_variant", "expected_run_id"),
     (

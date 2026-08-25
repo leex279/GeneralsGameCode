@@ -1077,7 +1077,7 @@ class ReportQueryService:
             ASSESS_STRATEGIES, assess.component_version
         ):
             raise ReportGraphContractError("legacy report graph requires one assessment dependency")
-        derive = self._dependency(session, replay, assess)
+        derive = self._legacy_dependency_before_parent_completion(session, replay, assess)
         if derive.stage != DERIVE_FEATURES or not _supported_analysis_stage_version(
             DERIVE_FEATURES, derive.component_version
         ):
@@ -1543,6 +1543,34 @@ class ReportQueryService:
         dependency = dependencies[0]
         if dependency.replay_id != replay.id or dependency.status != "succeeded":
             raise ReportGraphContractError("analysis dependency is outside the succeeded replay graph")
+        result = ReportQueryService._exact_result(session, dependency)
+        if dependency.output_json != result.output_json:
+            raise ReportGraphContractError("analysis dependency and immutable stage result disagree")
+        return dependency
+
+    @staticmethod
+    def _legacy_dependency_before_parent_completion(session: Session, replay: Replay, job: Job) -> Job:
+        # TheSuperHackers @bugfix Leex 26/08/2026 Preserve completed legacy reports when a newer dependency edge is appended after their assessment finished. (#TBD)
+        if job.completed_at is None:
+            raise ReportGraphContractError("legacy analysis stage has no completion boundary")
+        dependencies = tuple(
+            session.scalars(
+                select(Job)
+                .join(JobDependency, Job.id == JobDependency.depends_on_job_id)
+                .where(
+                    JobDependency.job_id == job.id,
+                    JobDependency.created_at <= job.completed_at,
+                    Job.replay_id == replay.id,
+                    Job.status == "succeeded",
+                    Job.created_at <= job.completed_at,
+                    Job.completed_at.is_not(None),
+                    Job.completed_at <= job.completed_at,
+                )
+            )
+        )
+        if len(dependencies) != 1:
+            raise ReportGraphContractError("legacy analysis stage requires one exact historical direct dependency")
+        dependency = dependencies[0]
         result = ReportQueryService._exact_result(session, dependency)
         if dependency.output_json != result.output_json:
             raise ReportGraphContractError("analysis dependency and immutable stage result disagree")
