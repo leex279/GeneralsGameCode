@@ -190,6 +190,47 @@ def test_complete_parser_import_preserves_commands_and_is_idempotent(
         assert replay.replay_name == parsed.header.replay_name
 
 
+def test_parser_success_cache_ignores_downstream_evidence_linked_to_the_same_run(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
+) -> None:
+    """Keep later feature and strategy citations from invalidating canonical parser-command reuse."""
+    replay_sha256, managed_path = _managed_replay(session_factory, settings, tmp_path)
+    base = parse_replay(managed_path)
+    projected = replace(base, commands=base.commands[:3], end_offset=base.commands[2].end_offset)
+    first = _importer(session_factory, settings, parser=lambda _path: projected).import_replay(replay_sha256)
+
+    with session_factory.begin() as session:
+        run = session.scalar(select(ParserRun).where(ParserRun.run_id == first.run_id))
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert run is not None and replay is not None
+        session.add_all(
+            [
+                EvidenceItem(
+                    public_id=f"00000000-0000-0000-0000-{index:012d}",
+                    replay_id=replay.id,
+                    parser_run_id=run.id,
+                    telemetry_run_id=None,
+                    tier="derived",
+                    source_kind=source_kind,
+                    source_key=f"{source_kind}:parser-reuse-regression",
+                    schema_version=1,
+                    created_at=NOW,
+                )
+                for index, source_kind in ((70_001, "feature"), (70_002, "strategy_rule"))
+            ]
+        )
+
+    cached = _importer(
+        session_factory,
+        settings,
+        parser=lambda _path: projected,
+        uuid_start=80_000,
+    ).import_replay(replay_sha256)
+
+    assert cached.run_id == first.run_id
+    assert cached.cache_hit is True
+
+
 def test_truncated_parser_prefix_is_observed_but_invalid_attempt_is_atomic(
     session_factory: sessionmaker[Session], settings: AnalyzerSettings, tmp_path: Path
 ) -> None:

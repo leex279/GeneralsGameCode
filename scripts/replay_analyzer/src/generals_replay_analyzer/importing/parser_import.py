@@ -492,9 +492,15 @@ class ParserObservationImporter:
                     evidence_ids.add(evidence.id)
             except ValueError as error:
                 raise ValueError("parser command evidence identity drift") from error
+            # TheSuperHackers @bugfix Leex 25/08/2026 Count only canonical parser-command evidence when reusing a run with derived citations. (#TBD)
             evidence_count = int(
                 session.scalar(
-                    select(func.count(EvidenceItem.id)).where(EvidenceItem.parser_run_id == run.id)
+                    select(func.count(EvidenceItem.id)).where(
+                        EvidenceItem.parser_run_id == run.id,
+                        EvidenceItem.telemetry_run_id.is_(None),
+                        EvidenceItem.tier == "observed",
+                        EvidenceItem.source_kind == "parser_command",
+                    )
                 )
                 or 0
             )
