@@ -211,6 +211,7 @@ def _context(
         parser_completion_status="complete",
         telemetry_status="succeeded",
         final_frame=300,
+        logic_frames_per_second=30,
         catalog_identity="f" * 64,
         observed=observed,
         settings={"spatial": _spatial_settings()} if settings is None else settings,
