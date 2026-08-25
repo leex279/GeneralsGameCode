@@ -3331,6 +3331,120 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
             assert session.scalar(select(func.count()).select_from(model)) == 0
 
 
+def test_exact_retry_recovers_childless_running_telemetry_shell(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    """Catch a killed importer leaving an exact running shell that permanently collides on retry."""
+    replay_sha256 = _replay(session_factory, settings, "childless-running-retry")
+    run_id = "e23e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v1_bundle(settings.data_root / "childless-running" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    importer = _importer(session_factory, settings)
+    importer._create_attempt(replay_sha256, attempt, NOW, "stable-import-key")
+
+    result = importer.import_replay(replay_sha256, attempt, idempotency_key="stable-import-key")
+
+    assert result.status == "succeeded" and result.cache_hit is False
+    with session_factory() as session:
+        runs = list(session.scalars(select(TelemetryRun).where(TelemetryRun.run_id == run_id)))
+        assert len(runs) == 1 and runs[0].status == "succeeded"
+
+
+def test_running_telemetry_shell_with_any_child_is_an_unsafe_collision(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    """Catch partial telemetry graphs being deleted or appended to during retry recovery."""
+    replay_sha256 = _replay(session_factory, settings, "partial-running-collision")
+    run_id = "f23e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v1_bundle(settings.data_root / "partial-running" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    importer = _importer(session_factory, settings)
+    importer._create_attempt(replay_sha256, attempt, NOW, "stable-import-key")
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert replay is not None and run is not None
+        session.add(
+            EvidenceItem(
+                public_id="f33e4567-e89b-12d3-a456-426614174000",
+                replay_id=replay.id,
+                parser_run_id=None,
+                telemetry_run_id=run.id,
+                tier="observed",
+                source_kind="telemetry_event",
+                source_key=f"telemetry:{run_id}:sequence:0",
+                schema_version=1,
+                created_at=NOW,
+            )
+        )
+
+    with pytest.raises(ValueError, match="collides"):
+        importer.import_replay(replay_sha256, attempt, idempotency_key="stable-import-key")
+
+    with session_factory() as session:
+        run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert run is not None and run.status == "running"
+        assert session.scalar(select(func.count(EvidenceItem.id)).where(EvidenceItem.telemetry_run_id == run.id)) == 1
+
+
+def test_large_valid_trace_is_persisted_in_bounded_batches(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch large imports rebuilding one trace-sized identity/raw/payload/ORM collection."""
+    replay_sha256 = _replay(session_factory, settings, "bounded-large-trace")
+    run_id = "a33e4567-e89b-12d3-a456-426614174000"
+    records = [
+        _record(
+            1,
+            run_id,
+            0,
+            "manifest",
+            {
+                "engine_build": "historical-build",
+                "replay_version": "1.04",
+                "map_identity": "maps/historical.map",
+                "initial_seed": 1,
+                "exporter_settings": {"movement_sample_frames": 15},
+            },
+        )
+    ]
+    for sequence in range(1, 1_251):
+        records.append(
+            _record(
+                1,
+                run_id,
+                sequence,
+                "cash_changed",
+                {
+                    "player_index": 0,
+                    "before": sequence,
+                    "delta": 1,
+                    "after": sequence + 1,
+                    "track_income": False,
+                    "reason": "synthetic_load",
+                },
+            )
+        )
+    records.append(_completion(1, run_id, records))
+    trace = _write_records(settings.data_root / "bounded-large" / run_id / "trace.ndjson", records)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    canonical = telemetry_import_module.telemetry_event_evidence_identities
+    batch_sizes: list[int] = []
+
+    def measured_identities(public_id: object, sequences: object):  # type: ignore[no-untyped-def]
+        materialized = tuple(cast(Any, sequences))
+        batch_sizes.append(len(materialized))
+        return canonical(public_id, materialized)
+
+    monkeypatch.setattr(telemetry_import_module, "telemetry_event_evidence_identities", measured_identities)
+    result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
+
+    assert result.status == "succeeded" and result.event_count == 1_252
+    assert batch_sizes == [500, 500, 252]
+
+
 def test_seeded_map_feature_permutations_are_semantically_canonical_and_duplicates_fail(
     tmp_path: Path,
 ) -> None:

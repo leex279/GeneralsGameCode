@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -22,67 +23,71 @@ def bridge_v2_damage_victim_template_name(trace_path: Path) -> tuple[str | None,
     The original trace hash is verified before rewriting the disposable validation copy, and the
     extension is returned by sequence so persistence can retain it after strict validation.
     """
-    source = trace_path.read_bytes()
-    lines = source.splitlines(keepends=True)
-    decoded_lines: list[dict[str, object] | None] = []
     victim_templates: dict[int, str | None] = {}
-    changed_indices: set[int] = set()
-    for index, raw_line in enumerate(lines):
-        try:
-            decoded = json.loads(raw_line)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None, {}
-        if not isinstance(decoded, dict):
-            decoded_lines.append(None)
-            continue
-        decoded_lines.append(decoded)
-        payload = decoded.get("payload")
-        if (
-            decoded.get("schema_version") != 2
-            or decoded.get("event_type") != "damage_applied"
-            or not isinstance(payload, dict)
-            or "victim_template_name" not in payload
-        ):
-            continue
-        sequence = decoded.get("sequence")
-        value = payload.get("victim_template_name")
-        if type(sequence) is not int or sequence in victim_templates or (
-            value is not None and (not isinstance(value, str) or not value)
-        ):
-            return None, {}
-        victim_templates[sequence] = value
-        payload.pop("victim_template_name")
-        changed_indices.add(index)
-
-    if not changed_indices:
-        return None, {}
-    complete = decoded_lines[-1] if decoded_lines else None
-    complete_payload = complete.get("payload") if isinstance(complete, dict) else None
-    if (
-        not isinstance(complete, dict)
-        or complete.get("schema_version") != 2
-        or complete.get("event_type") != "complete"
-        or not isinstance(complete_payload, dict)
-    ):
-        return None, {}
-    original_trace_sha256 = complete_payload.get("trace_sha256")
-    if not isinstance(original_trace_sha256, str):
-        return None, {}
-    if hashlib.sha256(b"".join(lines[:-1])).hexdigest() != original_trace_sha256:
-        return None, {}
-
-    prepared_lines = list(lines)
-    for index in changed_indices:
-        decoded = decoded_lines[index]
-        assert decoded is not None
-        prepared_lines[index] = (
-            json.dumps(decoded, separators=(",", ":"), allow_nan=False).encode("utf-8")
-            + _trace_line_ending(lines[index])
-        )
-    complete_payload["trace_sha256"] = hashlib.sha256(b"".join(prepared_lines[:-1])).hexdigest()
-    prepared_lines[-1] = (
-        json.dumps(complete, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        + _trace_line_ending(lines[-1])
-    )
-    trace_path.write_bytes(b"".join(prepared_lines))
-    return original_trace_sha256, victim_templates
+    temporary = trace_path.with_name(f".{trace_path.name}.compat-{os.getpid()}.tmp")
+    original_digest = hashlib.sha256()
+    prepared_digest = hashlib.sha256()
+    pending: bytes | None = None
+    try:
+        with trace_path.open("rb") as source, temporary.open("wb") as destination:
+            for raw_line in source:
+                if pending is None:
+                    pending = raw_line
+                    continue
+                original_digest.update(pending)
+                try:
+                    decoded = json.loads(pending)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return None, {}
+                prepared = pending
+                payload = decoded.get("payload") if isinstance(decoded, dict) else None
+                if (
+                    isinstance(decoded, dict)
+                    and decoded.get("schema_version") == 2
+                    and decoded.get("event_type") == "damage_applied"
+                    and isinstance(payload, dict)
+                    and "victim_template_name" in payload
+                ):
+                    sequence = decoded.get("sequence")
+                    value = payload.get("victim_template_name")
+                    if type(sequence) is not int or sequence in victim_templates or (
+                        value is not None and (not isinstance(value, str) or not value)
+                    ):
+                        return None, {}
+                    victim_templates[sequence] = value
+                    payload.pop("victim_template_name")
+                    prepared = (
+                        json.dumps(decoded, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                        + _trace_line_ending(pending)
+                    )
+                destination.write(prepared)
+                prepared_digest.update(prepared)
+                pending = raw_line
+            if not victim_templates:
+                return None, {}
+            try:
+                complete = json.loads(pending) if pending is not None else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None, {}
+            complete_payload = complete.get("payload") if isinstance(complete, dict) else None
+            if (
+                not isinstance(complete, dict)
+                or complete.get("schema_version") != 2
+                or complete.get("event_type") != "complete"
+                or not isinstance(complete_payload, dict)
+            ):
+                return None, {}
+            original_trace_sha256 = complete_payload.get("trace_sha256")
+            if not isinstance(original_trace_sha256, str) or original_digest.hexdigest() != original_trace_sha256:
+                return None, {}
+            complete_payload["trace_sha256"] = prepared_digest.hexdigest()
+            assert pending is not None
+            destination.write(
+                json.dumps(complete, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                + _trace_line_ending(pending)
+            )
+        # TheSuperHackers @performance Leex 26/08/2026 Stream the production compatibility bridge one line at a time. (#TBD)
+        os.replace(temporary, trace_path)
+        return original_trace_sha256, victim_templates
+    finally:
+        temporary.unlink(missing_ok=True)

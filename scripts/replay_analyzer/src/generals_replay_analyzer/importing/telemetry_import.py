@@ -34,10 +34,13 @@ from ..db.models import (
     TelemetryRun,
 )
 from ..identity.service import IdentityError
-from ..telemetry import ValidatedTelemetryBundle, load_validated_telemetry_bundle
+from ..telemetry import ValidatedTelemetryBundle, iter_bundle_records, load_validated_telemetry_bundle
 from ..telemetry.compatibility import bridge_v2_damage_victim_template_name
 from ..telemetry.model import TelemetryRecord
-from .evidence_identity import telemetry_event_evidence_identities, validate_observed_evidence_identity
+from .evidence_identity import (
+    telemetry_event_evidence_identities,
+    validate_observed_evidence_identity,
+)
 from .identity_import import (
     IdentityResolutionContractError,
     ParserObservationImportPort,
@@ -147,9 +150,9 @@ class _VerifiedArtifact:
 class _NormalizedTelemetry:
     bundle: ValidatedTelemetryBundle
     map_projection: NormalizedMap | None
-    records: tuple[dict[str, Any], ...]
-    payloads: tuple[dict[str, Any], ...]
     source_trace_sha256: str | None
+    victim_templates: Mapping[int, str | None]
+    working_root: Path
 
 
 def _normalized_record_json(record: TelemetryRecord) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -357,9 +360,21 @@ class TelemetryObservationImporter:
             ):
                 # TheSuperHackers @bugfix Leex 22/08/2026 Reuse one exact childless failed telemetry attempt after lease replay. (#TBD)
                 return TelemetryImportResult(run_id, "failed", 0, True)
-            raise _TelemetryAttemptCollisionError(
-                "telemetry run UUID collides with another immutable attempt"
-            )
+            if (
+                cached.status == "running"
+                and idempotency_key is not None
+                and self._recover_childless_running_attempt(
+                    cached,
+                    sha256,
+                    attempt,
+                    idempotency_key,
+                )
+            ):
+                cached = None
+            else:
+                raise _TelemetryAttemptCollisionError(
+                    "telemetry run UUID collides with another immutable attempt"
+                )
         replay_id, verified = self._create_attempt(sha256, attempt, now, idempotency_key)
         if attempt.upstream_failure_code is not None:
             issue_code = attempt.upstream_quality_issue_code or "invalid_trace"
@@ -371,12 +386,15 @@ class TelemetryObservationImporter:
         try:
             self._validate_registered_artifacts(verified, attempt.artifacts)
             normalized = self._load_normalized_bundle(verified, attempt)
-            self._commit_success(replay_id, run_id, attempt, verified, normalized, now)
+            try:
+                event_count = self._commit_success(replay_id, run_id, attempt, verified, normalized, now)
+            finally:
+                shutil.rmtree(normalized.working_root, ignore_errors=True)
         except Exception as error:  # noqa: BLE001 - invalid evidence must finish its durable attempt shell.
             issue_code = self._validation_issue(error)
             self._commit_failure(replay_id, run_id, attempt, issue_code, now, error)
             return TelemetryImportResult(run_id, "failed", 0, False)
-        return TelemetryImportResult(run_id, "succeeded", len(normalized.records), False)
+        return TelemetryImportResult(run_id, "succeeded", event_count, False)
 
     @staticmethod
     def _validate_attempt_metadata(attempt: TelemetryAttempt) -> None:
@@ -443,15 +461,18 @@ class TelemetryObservationImporter:
                 normalized = self._load_normalized_bundle(verified, attempt)
             except (OSError, ValueError):
                 return False
-            return (
-                settings == _successful_attempt_settings(
-                    attempt,
-                    idempotency_key,
-                    normalized.bundle,
+            try:
+                return (
+                    settings == _successful_attempt_settings(
+                        attempt,
+                        idempotency_key,
+                        normalized.bundle,
+                    )
+                    and run.trace_sha256
+                    == (normalized.source_trace_sha256 or normalized.bundle.complete.payload.trace_sha256)
                 )
-                and run.trace_sha256
-                == (normalized.source_trace_sha256 or normalized.bundle.complete.payload.trace_sha256)
-            )
+            finally:
+                shutil.rmtree(normalized.working_root, ignore_errors=True)
 
     # TheSuperHackers @bugfix Leex 23/08/2026 Reuse only telemetry graphs with canonical sequence citations. (#TBD)
     @staticmethod
@@ -606,6 +627,69 @@ class TelemetryObservationImporter:
             return len(actual_issues) == len(issues) and sorted(
                 canonical_json(item) for item in actual_issues
             ) == sorted(canonical_json(item) for item in expected_issues)
+
+    def _recover_childless_running_attempt(
+        self,
+        run: TelemetryRun,
+        replay_sha256: str,
+        attempt: TelemetryAttempt,
+        idempotency_key: str,
+    ) -> bool:
+        """Delete only an exact, unpublished shell left by an interrupted importer."""
+        if (
+            run.status != "running"
+            or run.schema_version != 0
+            or run.map_id is not None
+            or run.final_frame is not None
+            or run.command_count is not None
+            or run.completed_at is not None
+        ):
+            return False
+        with self._session_factory.begin() as session:
+            current = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run.run_id))
+            if current is None or current.status != "running":
+                return False
+            replay = session.get(Replay, current.replay_id)
+            if not (
+                replay is not None
+                and replay.sha256 == replay_sha256
+                and current.runner_status == attempt.runner_status
+                and current.strategy_analysis_scope == attempt.strategy_analysis_scope
+                and current.process_exit_code == attempt.process_exit_code
+                and current.engine_build == (attempt.engine_build or "unavailable")
+                and current.engine_executable_sha256 == attempt.engine_executable_sha256
+                and current.settings_json == _attempt_settings(attempt, idempotency_key)
+                and current.diagnostics_json == [dict(diagnostic) for diagnostic in attempt.diagnostics]
+            ):
+                return False
+            assert replay is not None
+            try:
+                self._reverify_managed_replay(session, replay, replay_sha256)
+                verified = self._reverify_artifacts(session, attempt.artifacts)
+            except (OSError, ValueError):
+                return False
+            if not self._run_asset_links_match(current, verified):
+                return False
+            child_count = sum(
+                int(session.scalar(statement) or 0)
+                for statement in (
+                    select(func.count()).select_from(TelemetryEvent).where(TelemetryEvent.telemetry_run_id == current.id),
+                    select(func.count()).select_from(Entity).where(Entity.telemetry_run_id == current.id),
+                    select(func.count()).select_from(EntitySample).where(EntitySample.telemetry_run_id == current.id),
+                    select(func.count()).select_from(ProductionEvent).where(ProductionEvent.telemetry_run_id == current.id),
+                    select(func.count()).select_from(EconomyEvent).where(EconomyEvent.telemetry_run_id == current.id),
+                    select(func.count()).select_from(CombatEvent).where(CombatEvent.telemetry_run_id == current.id),
+                    select(func.count()).select_from(EvidenceItem).where(EvidenceItem.telemetry_run_id == current.id),
+                    select(func.count()).select_from(ReplayQualityIssue).where(
+                        ReplayQualityIssue.telemetry_run_id == current.id
+                    ),
+                )
+            )
+            if child_count:
+                return False
+            # TheSuperHackers @bugfix Leex 26/08/2026 Recover only exact childless running shells after worker loss. (#TBD)
+            session.delete(current)
+        return True
 
     def _reverify_managed_replay(self, session: Session, replay: Replay, expected_sha256: str) -> None:
         if replay.sha256 != expected_sha256 or replay.managed_asset_id is None:
@@ -811,8 +895,8 @@ class TelemetryObservationImporter:
     def _load_normalized_bundle(
         self, verified: tuple[_VerifiedArtifact, ...], attempt: TelemetryAttempt
     ) -> _NormalizedTelemetry:
-        with tempfile.TemporaryDirectory(prefix="replay-analyzer-telemetry-") as temporary:
-            root = Path(temporary)
+        root = Path(tempfile.mkdtemp(prefix="replay-analyzer-telemetry-"))
+        try:
             trace_path: Path | None = None
             for artifact in verified:
                 source = artifact.managed_path
@@ -836,29 +920,23 @@ class TelemetryObservationImporter:
             if trace_path is None:
                 raise ValueError("missing telemetry trace")
             source_trace_sha256, victim_templates = bridge_v2_damage_victim_template_name(trace_path)
-            bundle = load_validated_telemetry_bundle(trace_path)
+            bundle = load_validated_telemetry_bundle(trace_path, retain_records=False)
             if str(bundle.manifest.run_id) != attempt.run_id:
                 raise ValueError("telemetry run ID differs from the selected artifact metadata")
             if attempt.engine_build is not None and bundle.manifest.payload.engine_build != attempt.engine_build:
                 raise ValueError("telemetry engine build differs from the selected runner metadata")
             self._validate_bundle_topology(root, bundle, verified)
             map_projection = normalize_map_asset(bundle.map_asset) if bundle.map_asset is not None else None
-            records: list[dict[str, Any]] = []
-            payloads: list[dict[str, Any]] = []
-            for record in bundle.records:
-                raw_record, payload = _normalized_record_json(record)
-                if record.event_type == "damage_applied" and record.sequence in victim_templates:
-                    payload["victim_template_name"] = victim_templates[record.sequence]
-                    raw_record["payload"] = payload
-                records.append(raw_record)
-                payloads.append(payload)
             return _NormalizedTelemetry(
                 bundle,
                 map_projection,
-                tuple(records),
-                tuple(payloads),
                 source_trace_sha256,
+                victim_templates,
+                root,
             )
+        except Exception:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
 
     @staticmethod
     def _validate_bundle_topology(
@@ -888,7 +966,7 @@ class TelemetryObservationImporter:
         verified: tuple[_VerifiedArtifact, ...],
         normalized: _NormalizedTelemetry,
         now: datetime,
-    ) -> None:
+    ) -> int:
         with self._session_factory.begin() as session:
             replay = session.get(Replay, replay_id)
             run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
@@ -929,109 +1007,112 @@ class TelemetryObservationImporter:
             run.completed_at = now
             session.flush()
 
-            # TheSuperHackers @bugfix Leex 23/08/2026 Keep event citations stable across retries and process order. (#TBD)
-            event_rows: dict[int, TelemetryEvent] = {}
-            evidence_identities = {
-                record.sequence: identity
-                for record, identity in zip(
-                    normalized.bundle.records,
-                    telemetry_event_evidence_identities(
-                        run.run_id,
-                        (record.sequence for record in normalized.bundle.records),
-                    ),
-                    strict=True,
-                )
-            }
-            for record, raw_record, payload in zip(
-                normalized.bundle.records, normalized.records, normalized.payloads, strict=True
-            ):
-                identity = evidence_identities[record.sequence]
-                evidence = EvidenceItem(
-                    public_id=identity.public_id,
-                    replay_id=replay.id,
-                    parser_run_id=None,
-                    telemetry_run_id=run.id,
-                    tier="observed",
-                    source_kind=identity.source_kind,
-                    source_key=identity.source_key,
-                    schema_version=record.schema_version,
-                    created_at=now,
-                )
-                session.add(evidence)
-                session.flush()
-                event = TelemetryEvent(
-                    telemetry_run_id=run.id,
-                    sequence=record.sequence,
-                    frame=record.frame,
-                    logic_time_seconds=record.logic_time_seconds,
-                    schema_version=record.schema_version,
-                    event_type=record.event_type,
-                    payload_json=payload,
-                    raw_record_json=raw_record,
-                    evidence_item_id=evidence.id,
-                )
-                session.add(event)
-                session.flush()
-                event_rows[record.sequence] = event
-
             entities: dict[int, Entity] = {}
-            for record, payload in zip(normalized.bundle.records, normalized.payloads, strict=True):
-                if record.event_type != "object_created":
-                    continue
-                object_id = cast(int, payload["object_id"])
-                if object_id in entities:
-                    raise ValueError("duplicate object_created identity")
-                entity = Entity(
-                    public_id=str(self._uuid_factory()),
-                    telemetry_run_id=run.id,
-                    replay_id=replay.id,
-                    object_id=object_id,
-                    template_name=cast(str, payload["template_name"]),
-                    initial_owner_player_index=_optional_int(payload.get("owner_player_index")),
-                    initial_team_id=_optional_int(payload.get("team_id")),
-                    kind_of_flags_json=list(payload.get("kind_of_flags") or []),
-                    creation_sequence=record.sequence,
-                    creation_frame=record.frame,
-                    destruction_sequence=None,
-                    destruction_frame=None,
-                    observed_json=payload,
-                )
-                session.add(entity)
-                entities[object_id] = entity
-            session.flush()
-            player_map = self._parser_player_map(session, replay.id, attempt.parser_run_id, normalized.payloads)
+            player_map = self._parser_player_map(session, replay.id, attempt.parser_run_id, normalized.bundle)
             unavailable: list[dict[str, object]] = []
-            for record, payload in zip(normalized.bundle.records, normalized.payloads, strict=True):
-                event = event_rows[record.sequence]
-                if record.event_type == "entity_sample":
-                    missing = [
-                        field
-                        for field in ("current_state_source", "sample_reason")
-                        if not isinstance(payload.get(field), str) or not payload.get(field)
-                    ]
-                    if missing:
-                        unavailable.append(
-                            {"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing}
+            event_count = 0
+            chunk: list[tuple[TelemetryRecord, dict[str, Any], dict[str, Any]]] = []
+
+            def persist_chunk() -> None:
+                nonlocal event_count
+                if not chunk:
+                    return
+                evidences: list[EvidenceItem] = []
+                identities = telemetry_event_evidence_identities(
+                    run.run_id,
+                    (record.sequence for record, _raw_record, _payload in chunk),
+                )
+                for (record, _raw_record, _payload), identity in zip(chunk, identities, strict=True):
+                    evidences.append(
+                        EvidenceItem(
+                            public_id=identity.public_id,
+                            replay_id=replay.id,
+                            parser_run_id=None,
+                            telemetry_run_id=run.id,
+                            tier="observed",
+                            source_kind=identity.source_kind,
+                            source_key=identity.source_key,
+                            schema_version=record.schema_version,
+                            created_at=now,
                         )
-                    else:
-                        self._add_sample(session, run, event, payload, entities)
-                elif record.event_type in _PRODUCTION_TYPES:
-                    missing = [
-                        field
-                        for field in ("quantity", "state")
-                        if (type(payload.get(field)) is not int if field == "quantity" else not isinstance(payload.get(field), str))
-                    ]
-                    if missing:
-                        unavailable.append(
-                            {"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing}
-                        )
-                    else:
-                        self._add_production(session, replay, run, event, payload, entities, player_map)
-                elif record.event_type in _ECONOMY_TYPES:
-                    self._add_economy(session, replay, run, event, payload, entities, player_map)
-                elif record.event_type in _COMBAT_TYPES:
-                    self._add_combat(session, replay, run, event, payload, entities, player_map)
-            session.flush()
+                    )
+                session.add_all(evidences)
+                session.flush()
+                events = [
+                    TelemetryEvent(
+                        telemetry_run_id=run.id,
+                        sequence=record.sequence,
+                        frame=record.frame,
+                        logic_time_seconds=record.logic_time_seconds,
+                        schema_version=record.schema_version,
+                        event_type=record.event_type,
+                        payload_json=payload,
+                        raw_record_json=raw_record,
+                        evidence_item_id=evidence.id,
+                    )
+                    for (record, raw_record, payload), evidence in zip(chunk, evidences, strict=True)
+                ]
+                session.add_all(events)
+                session.flush()
+                for record, _raw_record, payload in chunk:
+                    if record.event_type != "object_created":
+                        continue
+                    object_id = cast(int, payload["object_id"])
+                    if object_id in entities:
+                        raise ValueError("duplicate object_created identity")
+                    entity = Entity(
+                        public_id=str(self._uuid_factory()),
+                        telemetry_run_id=run.id,
+                        replay_id=replay.id,
+                        object_id=object_id,
+                        template_name=cast(str, payload["template_name"]),
+                        initial_owner_player_index=_optional_int(payload.get("owner_player_index")),
+                        initial_team_id=_optional_int(payload.get("team_id")),
+                        kind_of_flags_json=list(payload.get("kind_of_flags") or []),
+                        creation_sequence=record.sequence,
+                        creation_frame=record.frame,
+                        destruction_sequence=None,
+                        destruction_frame=None,
+                        observed_json=payload,
+                    )
+                    session.add(entity)
+                    entities[object_id] = entity
+                session.flush()
+                for (record, _raw_record, payload), event in zip(chunk, events, strict=True):
+                    if record.event_type == "entity_sample":
+                        missing = [field for field in ("current_state_source", "sample_reason") if not isinstance(payload.get(field), str) or not payload.get(field)]
+                        if missing:
+                            unavailable.append({"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing})
+                        else:
+                            self._add_sample(session, run, event, payload, entities)
+                    elif record.event_type in _PRODUCTION_TYPES:
+                        missing = [field for field in ("quantity", "state") if (type(payload.get(field)) is not int if field == "quantity" else not isinstance(payload.get(field), str))]
+                        if missing:
+                            unavailable.append({"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing})
+                        else:
+                            self._add_production(session, replay, run, event, payload, entities, player_map)
+                    elif record.event_type in _ECONOMY_TYPES:
+                        self._add_economy(session, replay, run, event, payload, entities, player_map)
+                    elif record.event_type in _COMBAT_TYPES:
+                        self._add_combat(session, replay, run, event, payload, entities, player_map)
+                session.flush()
+                event_count += len(chunk)
+                for event in events:
+                    session.expunge(event)
+                for evidence in evidences:
+                    session.expunge(evidence)
+                chunk.clear()
+
+            # TheSuperHackers @performance Leex 26/08/2026 Persist validated observations in bounded atomic batches. (#TBD)
+            for record in iter_bundle_records(normalized.bundle):
+                raw_record, payload = _normalized_record_json(record)
+                if record.event_type == "damage_applied" and record.sequence in normalized.victim_templates:
+                    payload["victim_template_name"] = normalized.victim_templates[record.sequence]
+                    raw_record["payload"] = payload
+                chunk.append((record, raw_record, payload))
+                if len(chunk) == 500:
+                    persist_chunk()
+            persist_chunk()
             if unavailable:
                 self._add_issue(
                     session,
@@ -1080,13 +1161,14 @@ class TelemetryObservationImporter:
             session.flush()
             self._recompute_lifecycle(session, replay)
             session.flush()
+            return event_count
 
     @staticmethod
     def _parser_player_map(
         session: Session,
         replay_id: int,
         parser_run_id: str | None,
-        payloads: tuple[dict[str, Any], ...],
+        bundle: ValidatedTelemetryBundle | tuple[dict[str, Any], ...],
     ) -> dict[int, ReplayPlayer]:
         if parser_run_id is None:
             return {}
@@ -1113,7 +1195,14 @@ class TelemetryObservationImporter:
                 "invalid_trace",
                 "selected parser run has ambiguous replay slot evidence",
             )
-        player_snapshots = [payload for payload in payloads if payload.get("slots") is not None]
+        if isinstance(bundle, tuple):
+            player_snapshots = [payload for payload in bundle if payload.get("slots") is not None]
+        else:
+            player_snapshots = [
+                record.payload.model_dump(mode="json")
+                for record in iter_bundle_records(bundle)
+                if record.event_type == "players_initialized"
+            ]
         if not player_snapshots:
             return {}
         if len(player_snapshots) != 1:

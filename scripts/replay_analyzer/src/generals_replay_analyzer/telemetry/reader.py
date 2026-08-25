@@ -3,7 +3,7 @@
 import hashlib
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
@@ -1243,10 +1243,10 @@ def _validate_v2_outcome(
 
 def _validate_v2_catalog_identities(
     path: Path,
-    records: tuple[TelemetryRecord, ...],
+    records: Iterable[tuple[int, TelemetryRecord]],
     identities: _CatalogIdentities,
 ) -> None:
-    for line_number, record in enumerate(records, start=1):
+    for line_number, record in records:
         payload = record.payload.model_dump()
         if record.event_type.startswith("production_") and payload["template_name"] not in identities.thing_templates:
             raise _error(path, line_number, record.sequence, "template_name is absent from game data catalog")
@@ -1716,7 +1716,7 @@ def _validate_v2_order_movement(
 # TheSuperHackers @feature Leex 23/08/2026 Validate engine-native evidence without modifying replay state. (#0)
 def _validate_v2_engine_native_trace(
     path: Path,
-    records: tuple[TelemetryRecord, ...],
+    records: Iterable[TelemetryRecord] | Iterable[tuple[int, TelemetryRecord]],
     final_frame: int,
     logic_frames_per_second: int,
     engine_player_indices: frozenset[int],
@@ -1727,7 +1727,7 @@ def _validate_v2_engine_native_trace(
     cash_sample_interval = logic_frames_per_second
     visibility_sample_interval = logic_frames_per_second // 2
     partition_sample_interval = logic_frames_per_second * 10
-    score_indexes: list[int] = []
+    score_records: list[tuple[int, int, TelemetryRecord]] = []
     cpm_by_frame: dict[int, TelemetryRecord] = {}
     grid_players_by_frame: dict[int, set[int]] = {}
     grid_layout: tuple[int, int, tuple[tuple[int, int], ...]] | None = None
@@ -1746,15 +1746,19 @@ def _validate_v2_engine_native_trace(
     income_buckets = {player_index: [0] * 60 for player_index in resolved_occupied_player_indices}
     current_income_bucket = dict.fromkeys(resolved_occupied_player_indices, 0)
     missing_income_provenance = False
+    score_followed_by_outcome = False
 
     if not resolved_occupied_player_indices <= engine_player_indices:
         raise TelemetryTraceValidationError(
             f"trace '{path}': resolved occupied players must belong to the engine player domain"
         )
 
-    def fail(record_index: int, detail: str) -> None:
-        record = records[record_index]
-        raise _error(path, record_index + 1, record.sequence, detail)
+    current_line_number = 0
+    current_record: TelemetryRecord | None = None
+
+    def fail(_record_index: int, detail: str) -> None:
+        assert current_record is not None
+        raise _error(path, current_line_number, current_record.sequence, detail)
 
     def require_nondecreasing_income_frame(frame: int) -> None:
         nonlocal last_income_frame
@@ -1770,7 +1774,15 @@ def _validate_v2_engine_native_trace(
             income_buckets[player_index][target_bucket] = 0
             current_income_bucket[player_index] = target_bucket
 
-    for index, record in enumerate(records):
+    for index, item in enumerate(records):
+        if isinstance(item, tuple):
+            line_number, record = item
+        else:
+            line_number, record = index + 1, item
+        current_line_number = line_number
+        current_record = record
+        if score_records and index == score_records[-1][0] + 1:
+            score_followed_by_outcome = record.event_type == "match_outcome"
         event_type = record.event_type
         payload = cast(dict[str, object], record.payload.model_dump())
         if event_type == "object_created":
@@ -1778,7 +1790,7 @@ def _validate_v2_engine_native_trace(
         elif event_type == "object_destroyed":
             live_objects.pop(cast(int, payload["object_id"]), None)
         elif event_type == "scorekeeper_snapshot":
-            score_indexes.append(index)
+            score_records.append((index, line_number, record))
             players = cast(list[dict[str, object]], payload["players"])
             if {
                 cast(int, player["player_index"]) for player in players
@@ -1941,14 +1953,19 @@ def _validate_v2_engine_native_trace(
                 fail(index, "duplicate partition sample for player and frame")
             sampled_grid_players.add(player_index)
 
-    if score_indexes:
-        if len(score_indexes) != 1:
+    if score_records:
+        if len(score_records) != 1:
             raise TelemetryTraceValidationError(
                 f"trace '{path}': engine-native family requires exactly one scorekeeper_snapshot"
             )
-        score_index = score_indexes[0]
-        if score_index + 1 >= len(records) or records[score_index + 1].event_type != "match_outcome":
-            fail(score_index, "scorekeeper_snapshot must immediately precede match_outcome")
+        _score_index, score_line, score_record = score_records[0]
+        if not score_followed_by_outcome:
+            raise _error(
+                path,
+                score_line,
+                score_record.sequence,
+                "scorekeeper_snapshot must immediately precede match_outcome",
+            )
     if cpm_by_frame:
         expected_frames = set(range(cash_sample_interval, final_frame + 1, cash_sample_interval))
         expected_frames.add(final_frame)
@@ -2001,12 +2018,43 @@ def iter_validated_trace(path: Path) -> Iterator[TelemetryRecord]:
     return iter(load_validated_telemetry_bundle(path).records)
 
 
-def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
+def _iter_typed_records(path: Path) -> Iterator[tuple[int, TelemetryRecord]]:
+    """Reparse a trace that already passed the complete strict validation pass."""
+    with path.open("rb") as source:
+        for line_number, raw_line in enumerate(source, start=1):
+            decoded = json.loads(
+                raw_line,
+                parse_constant=_reject_nonstandard_constant,
+                parse_float=_parse_finite_float,
+            )
+            assert isinstance(decoded, dict)
+            version = decoded.get("schema_version")
+            selected_version = version if type(version) is int else SCHEMA_VERSION
+            yield line_number, _RECORD_ADAPTER.validate_python(
+                decoded,
+                context={"schema_version": selected_version},
+            )
+
+
+def iter_bundle_records(bundle: ValidatedTelemetryBundle) -> Iterator[TelemetryRecord]:
+    """Iterate records after the bundle's complete validation barrier has succeeded."""
+    if bundle.records:
+        yield from bundle.records
+        return
+    for _line_number, record in _iter_typed_records(bundle.trace_path):
+        yield record
+
+
+def load_validated_telemetry_bundle(path: Path, *, retain_records: bool = True) -> ValidatedTelemetryBundle:
     """Read and validate the whole evidence bundle before exposing any record or asset."""
-    try:
-        source = path.read_bytes()
-    except OSError as error:
-        raise TelemetryTraceValidationError(f"trace '{path}': cannot read trace: {error}") from error
+
+    def raw_lines() -> Iterator[bytes]:
+        # TheSuperHackers @performance Leex 26/08/2026 Bound trace input memory to one NDJSON line during validation. (#TBD)
+        try:
+            with path.open("rb") as source:
+                yield from source
+        except OSError as error:
+            raise TelemetryTraceValidationError(f"trace '{path}': cannot read trace: {error}") from error
 
     prior_sequence: int | None = None
     prior_order_movement_frame: int | None = None
@@ -2049,7 +2097,7 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
     last_entity_samples: dict[int, _LastEntitySample] = {}
     task7_frame_ordering = _Task7FrameOrdering()
 
-    for line_number, raw_line in enumerate(source.splitlines(keepends=True), start=1):
+    for line_number, raw_line in enumerate(raw_lines(), start=1):
         try:
             line = raw_line.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -2342,7 +2390,8 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
             complete_record = validated
         else:
             digest.update(raw_line)
-        validated_records.append(validated)
+        if retain_records:
+            validated_records.append(validated)
 
     if records_seen == 0:
         raise TelemetryTraceValidationError(f"trace '{path}': trace is empty")
@@ -2371,9 +2420,14 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
         assert resolved_occupied_player_indices is not None
         assert expected_logic_frames_per_second is not None
         _validate_v2_final_cash_balances(path, complete_record, cash_after_by_player, engine_player_indices)
+        trace_records = (
+            tuple(enumerate(validated_records, start=1))
+            if retain_records
+            else _iter_typed_records(path)
+        )
         _validate_v2_engine_native_trace(
             path,
-            tuple(validated_records),
+            trace_records,
             complete_record.payload.final_frame,
             expected_logic_frames_per_second,
             engine_player_indices,
@@ -2381,14 +2435,19 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
         )
         _validate_v2_outcome(
             path,
-            tuple(validated_records),
+            tuple(validated_records) if retain_records else (outcome_records[0], complete_record),
             tuple(outcome_records),
             complete_record,
             engine_player_indices,
             frozenset(observed_disconnected_slots),
         )
         assert catalog_identities is not None
-        _validate_v2_catalog_identities(path, tuple(validated_records), catalog_identities)
+        catalog_records = (
+            tuple(enumerate(validated_records, start=1))
+            if retain_records
+            else _iter_typed_records(path)
+        )
+        _validate_v2_catalog_identities(path, catalog_records, catalog_identities)
         _validate_v2_map_features(
             path,
             authoritative_map,
@@ -2418,10 +2477,16 @@ def load_validated_telemetry_bundle(path: Path) -> ValidatedTelemetryBundle:
                     f"trace '{path}': moving entity sample tail gap exceeds movement_sample_frames"
                 )
     records = tuple(validated_records)
-    manifest = records[0]
-    complete = records[-1]
-    assert isinstance(manifest, ManifestRecord)
-    assert isinstance(complete, CompleteRecord)
+    assert complete_record is not None
+    complete = complete_record
+    if retain_records:
+        manifest = records[0]
+        assert isinstance(manifest, ManifestRecord)
+    else:
+        # The manifest is the only non-terminal record callers need after bounded validation.
+        with path.open("rb") as source:
+            first = json.loads(source.readline())
+        manifest = cast(ManifestRecord, _RECORD_ADAPTER.validate_python(first))
     assert expected_logic_frames_per_second is not None
     if expected_schema_version == 1:
         return ValidatedTelemetryBundle(

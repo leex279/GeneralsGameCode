@@ -375,6 +375,39 @@ def test_public_bundle_loader_exposes_one_immutable_validated_v1_v2_authority(tm
     assert v1_bundle.map_asset is None
 
 
+def test_bundle_validation_can_stream_without_retaining_record_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch production validation regressing to whole-file bytes or a retained record tuple."""
+    records = [
+        _record(
+            1,
+            0,
+            "manifest",
+            {
+                "engine_build": "historical-build",
+                "replay_version": "1.04",
+                "map_identity": "maps/historical.map",
+                "initial_seed": 1,
+                "exporter_settings": {"movement_sample_frames": 15},
+            },
+        )
+    ]
+    records.append(_completion(1, records))
+    trace = _write_records(tmp_path / "streamed-v1.ndjson", records)
+
+    def reject_whole_file_reads(_path: Path) -> bytes:
+        raise AssertionError("streaming validation must not read the whole trace")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_reads)
+    bundle = load_validated_telemetry_bundle(trace, retain_records=False)
+
+    assert bundle.records == ()
+    assert bundle.manifest.event_type == "manifest"
+    assert bundle.complete.event_type == "complete"
+
+
 def test_v2_reader_uses_manifest_sixty_hertz_for_every_event_time(tmp_path: Path) -> None:
     reference = _write_catalog(tmp_path)
     trace = _write_v2_trace(tmp_path, reference, name="sixty-hertz.ndjson")
