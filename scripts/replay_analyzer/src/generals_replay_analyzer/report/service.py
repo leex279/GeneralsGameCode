@@ -988,6 +988,11 @@ class ReportService:
             query = query.where(FeatureSet.replay_player_id == replay_player.id)
         else:
             query = query.where(FeatureSet.replay_player_id.is_(None))
+        # TheSuperHackers @bugfix Leex 25/08/2026 Select features from the report's current telemetry authority instead of stale parser-only generations. (#TBD)
+        if telemetry is None:
+            query = query.where(EvidenceItem.telemetry_run_id.is_(None))
+        else:
+            query = query.where(EvidenceItem.telemetry_run_id == telemetry.id)
         rows = tuple(session.execute(query))
         feature_ids = tuple(row.id for row, _feature_set, _own in rows)
         linked_by_feature: dict[int, list[EvidenceItem]] = {feature_id: [] for feature_id in feature_ids}
@@ -1063,12 +1068,20 @@ class ReportService:
         feature_query = (
             select(Feature.evidence_item_id)
             .join(FeatureSet, Feature.feature_set_id == FeatureSet.id)
+            .join(EvidenceItem, Feature.evidence_item_id == EvidenceItem.id)
             .where(FeatureSet.replay_id == replay_id, FeatureSet.status == "succeeded")
         )
         if replay_player is None:
             feature_query = feature_query.where(FeatureSet.replay_player_id.is_(None))
         else:
             feature_query = feature_query.where(FeatureSet.replay_player_id == replay_player.id)
+        # TheSuperHackers @bugfix Leex 25/08/2026 Keep strategies and their feature predecessors on the report's selected telemetry branch. (#TBD)
+        if telemetry is None:
+            query = query.where(EvidenceItem.telemetry_run_id.is_(None))
+            feature_query = feature_query.where(EvidenceItem.telemetry_run_id.is_(None))
+        else:
+            query = query.where(EvidenceItem.telemetry_run_id == telemetry.id)
+            feature_query = feature_query.where(EvidenceItem.telemetry_run_id == telemetry.id)
         allowed_derived = set(session.scalars(feature_query))
         rows = tuple(session.execute(query))
         assessment_ids = tuple(row.id for row, _own in rows)

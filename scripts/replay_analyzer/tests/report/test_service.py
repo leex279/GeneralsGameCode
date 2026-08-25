@@ -17,6 +17,7 @@ from generals_replay_analyzer.db.models import (
     EvidenceItem,
     Feature,
     FeatureEvidence,
+    FeatureSet,
     LongitudinalMember,
     LongitudinalResult,
     ManagedAsset,
@@ -232,6 +233,151 @@ def test_report_feature_assembly_query_count_is_bounded_by_batches(
     assert len(tuple(value for value in receipt.document.derived if value.section == "features")) == 13
     assert expanded <= baseline + 2
     assert elapsed < 5.0
+
+
+def test_report_ignores_stale_parser_only_features_after_telemetry_upgrade(
+    report_database: SeededReportDatabase,
+) -> None:
+    """Catch historical parser-only feature sets poisoning the selected telemetry report generation."""
+    now = datetime(2026, 8, 25, 21, 45, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+        player = session.scalar(
+            select(ReplayPlayer).where(
+                ReplayPlayer.public_id == report_database.replay_player_public_id
+            )
+        )
+        assert replay is not None and player is not None
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))
+        assert parser is not None
+        for scope, replay_player_id, scope_key in (
+            ("replay", None, report_database.replay_public_id),
+            ("player", player.id, report_database.replay_player_public_id),
+        ):
+            evidence = EvidenceItem(
+                public_id=stable_uuid(f"stale-parser-only-feature-evidence:{scope}"),
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                telemetry_run_id=None,
+                tier="derived",
+                source_kind="feature",
+                source_key=f"feature:stale-parser-only:{scope}",
+                schema_version=1,
+                created_at=now,
+            )
+            feature_set = FeatureSet(
+                public_id=stable_uuid(f"stale-parser-only-feature-set:{scope}"),
+                replay_id=replay.id,
+                replay_player_id=replay_player_id,
+                extractor_name="stale_parser_only",
+                extractor_version="stale-parser-only-v1",
+                input_digest=("a" if scope == "replay" else "b") * 64,
+                cache_key=("c" if scope == "replay" else "d") * 64,
+                status="running",
+                settings_json={},
+                completed_at=now,
+                created_at=now,
+            )
+            session.add_all((evidence, feature_set))
+            session.flush()
+            session.add(
+                Feature(
+                    public_id=stable_uuid(f"stale-parser-only-feature:{scope}"),
+                    feature_set_id=feature_set.id,
+                    evidence_item_id=evidence.id,
+                    name=f"stale_parser_only.{scope}",
+                    value_type="integer",
+                    integer_value=1,
+                    scope_type=scope,
+                    scope_key=scope_key,
+                    replay_player_id=replay_player_id,
+                    frame_start=0,
+                    frame_end=1,
+                    quality="available",
+                    details_json={},
+                )
+            )
+            feature_set.status = "succeeded"
+
+    service = _service(report_database)
+    replay_document = service.create(
+        ReportRequest(report_database.replay_public_id, publish=False)
+    ).document
+    player_document = service.create(
+        ReportRequest(
+            report_database.replay_public_id,
+            report_database.replay_player_public_id,
+            publish=False,
+        )
+    ).document
+
+    assert all(value.label != "stale_parser_only.replay" for value in replay_document.derived)
+    assert all(value.label != "stale_parser_only.player" for value in player_document.derived)
+
+
+def test_report_ignores_stale_parser_only_strategies_after_telemetry_upgrade(
+    report_database: SeededReportDatabase,
+) -> None:
+    """Catch historical parser-only assessments poisoning the selected telemetry report generation."""
+    now = datetime(2026, 8, 25, 21, 50, tzinfo=UTC)
+    with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
+        replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
+        player = session.scalar(
+            select(ReplayPlayer).where(
+                ReplayPlayer.public_id == report_database.replay_player_public_id
+            )
+        )
+        assert replay is not None and player is not None
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id))
+        assert parser is not None
+        for scope, replay_player_id in (("replay", None), ("player", player.id)):
+            evidence = EvidenceItem(
+                public_id=stable_uuid(f"stale-parser-only-strategy-evidence:{scope}"),
+                replay_id=replay.id,
+                parser_run_id=parser.id,
+                telemetry_run_id=None,
+                tier="derived",
+                source_kind="strategy_rule",
+                source_key=f"strategy:stale-parser-only:{scope}",
+                schema_version=1,
+                created_at=now,
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(
+                StrategyAssessment(
+                    public_id=stable_uuid(f"stale-parser-only-strategy:{scope}"),
+                    evidence_item_id=evidence.id,
+                    replay_id=replay.id,
+                    replay_player_id=replay_player_id,
+                    method="rule",
+                    strategy_label=f"stale_parser_only_{scope}",
+                    phase="opening",
+                    taxonomy_version="stale-taxonomy-v1",
+                    rule_version="stale-rule-v1",
+                    frame_start=0,
+                    frame_end=1,
+                    quality="available",
+                    confidence=1.0,
+                    details_json={},
+                    created_at=now,
+                )
+            )
+
+    service = _service(report_database)
+    replay_document = service.create(
+        ReportRequest(report_database.replay_public_id, publish=False)
+    ).document
+    player_document = service.create(
+        ReportRequest(
+            report_database.replay_public_id,
+            report_database.replay_player_public_id,
+            publish=False,
+        )
+    ).document
+
+    assert all(value.label != "stale_parser_only_replay" for value in replay_document.derived)
+    assert all(value.label != "stale_parser_only_player" for value in player_document.derived)
 
 
 def _full_llm_response(
