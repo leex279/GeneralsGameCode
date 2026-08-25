@@ -184,6 +184,22 @@ def _strategy_labels(report_json: object | None) -> tuple[str, ...]:
     return tuple(labels)
 
 
+# TheSuperHackers @bugfix Leex 25/08/2026 Select the most useful player-scoped report for library coaching navigation. (#TBD)
+def _player_report_usefulness(report: Report, player: ReplayPlayerDisplayDTO) -> tuple[int, int, int, int, int, str]:
+    """Rank player reports by strategy/economy evidence, then stable match facts."""
+
+    value = report.report_json
+    claims = [
+        claim
+        for section in ("observed", "derived", "inferred")
+        for claim in (value.get(section, []) if isinstance(value, Mapping) else [])
+        if isinstance(claim, Mapping) and claim.get("availability") in {"available", "partial"}
+    ]
+    strategy = sum(1 for claim in claims if claim.get("section") == "strategy")
+    economy = sum(1 for claim in claims if claim.get("section") in {"economy", "income"})
+    return (strategy, economy, len(claims), int(bool(claims)), int(player.result == "win"), report.public_id)
+
+
 def _pipeline(job: Job | None, replay_public_id: str) -> PipelineStateDTO | None:
     if job is None:
         return None
@@ -648,13 +664,20 @@ class AnalyticsLibraryAdapter:
         )
         reports_by_public_id.update({report.public_id: report for report in reports_by_replay.values()})
         selected_reports_by_replay = {
-            replay.id: next(
-                (
-                    reports_by_public_id[player.report_public_id]
-                    for player in players_by_replay[replay.id]
-                    if player.report_public_id is not None and player.report_public_id in reports_by_public_id
-                ),
-                reports_by_replay.get(replay.id),
+            replay.id: (
+                max(
+                    (
+                        (
+                            _player_report_usefulness(reports_by_public_id[player.report_public_id], player),
+                            reports_by_public_id[player.report_public_id],
+                        )
+                        for player in players_by_replay[replay.id]
+                        if player.report_public_id is not None and player.report_public_id in reports_by_public_id
+                    ),
+                    key=lambda candidate: candidate[0],
+                    default=((), None),
+                )[1]
+                or reports_by_replay.get(replay.id)
             )
             for replay in replays
         }
@@ -724,9 +747,11 @@ class AnalyticsLibraryAdapter:
             players=players,
             sources=(source,) if source is not None else (),
             evidence=(evidence,) if evidence is not None else (),
-            report_public_id=next(
-                (player.report_public_id for player in players if player.report_public_id is not None),
-                report.public_id if report is not None else None,
+            # TheSuperHackers @bugfix Leex 25/08/2026 Keep the selected coaching report aligned with its navigation target while exposing alternate players. (#TBD)
+            report_public_id=(
+                report.public_id
+                if report is not None
+                else next((player.report_public_id for player in players if player.report_public_id is not None), None)
             ),
             report_json=report.report_json if report is not None else None,
             pipeline=_pipeline(job, replay.public_id),

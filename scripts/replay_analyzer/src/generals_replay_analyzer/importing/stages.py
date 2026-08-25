@@ -49,8 +49,8 @@ ASSESS_STRATEGIES_VERSION = "1"
 ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
-# TheSuperHackers @bugfix Leex 24/08/2026 Invalidate casts whose map scene exceeded the presentable video window. (#TBD)
-RENDER_VIDEO_VERSION = "14"
+# TheSuperHackers @bugfix Leex 25/08/2026 Invalidate failed casts after production-scale scene authority resolution fixes. (#TBD)
+RENDER_VIDEO_VERSION = "15"
 
 
 def canonical_json(value: Any) -> str:

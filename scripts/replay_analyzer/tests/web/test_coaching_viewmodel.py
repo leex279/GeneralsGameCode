@@ -63,6 +63,8 @@ def _claim(
     evidence_id: str,
     frame_end: int,
     availability: str = "available",
+    evidence_tier: str = "derived",
+    extra_evidence_id: str | None = None,
 ) -> ReportClaimDTO:
     return ReportClaimDTO(
         claim_id=claim_id,
@@ -76,7 +78,11 @@ def _claim(
         scope={"scope_type": "player", "public_id": PLAYER},
         frame_window=(0, frame_end),
         confidence=None,
-        evidence=(ReportEvidenceReferenceDTO(public_id=evidence_id, tier="derived"),),
+        evidence=tuple(
+            ReportEvidenceReferenceDTO(public_id=item, tier=evidence_tier)
+            for item in (evidence_id, extra_evidence_id)
+            if item is not None
+        ),
         details={"definition_version": "fixture-v1"},
     )
 
@@ -293,6 +299,62 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
     assert coaching.signal_reads[0].title == "Economy signal"
     assert "does not establish spend" in coaching.signal_reads[0].statement
     assert coaching.signal_reads[0].evidence[0].public_id == METRIC_EVIDENCE
+
+
+def test_strategy_claim_projects_when_its_contract_is_valid_without_derived_tier() -> None:
+    """Keep valid strategy claims visible when their stable claim contract is authoritative."""
+    report = _report()
+    strategy_section = next(section for section in report.sections if section.key == "strategy_phases")
+    strategy = strategy_section.claims[0].model_copy(
+        update={
+            "evidence": (
+                ReportEvidenceReferenceDTO(public_id=STRATEGY_EVIDENCE, tier="observed"),
+            )
+        }
+    )
+    report = report.model_copy(
+        update={
+            "sections": tuple(
+                section.model_copy(update={"claims": (strategy,)})
+                if section.key == "strategy_phases"
+                else section
+                for section in report.sections
+            )
+        }
+    )
+
+    coaching = coaching_view(report, _timeline())
+
+    assert [item.strategy_id for item in coaching.strategies] == ["usa_humvee_pressure"]
+
+
+def test_opening_lane_events_cap_displayed_evidence_without_changing_claim_projection() -> None:
+    """Bound repeated lane links while preserving the complete claim evidence elsewhere."""
+    report = _report()
+    build_section = next(section for section in report.sections if section.key == "opening_build_order")
+    build = build_section.claims[0].model_copy(
+        update={
+            "evidence": (
+                ReportEvidenceReferenceDTO(public_id=BUILD_EVIDENCE, tier="derived"),
+                ReportEvidenceReferenceDTO(public_id=METRIC_EVIDENCE, tier="derived"),
+            )
+        }
+    )
+    report = report.model_copy(
+        update={
+            "sections": tuple(
+                section.model_copy(update={"claims": (build,)})
+                if section.key == "opening_build_order"
+                else section
+                for section in report.sections
+            )
+        }
+    )
+
+    coaching = coaching_view(report, _timeline())
+
+    assert len(coaching.build_order[0].evidence) == 2
+    assert all(len(event.evidence) == 1 for lane in coaching.opening_lanes for event in lane.events)
 
 
 def test_complete_engine_verified_report_uses_authoritative_timebase_despite_projection_warning() -> None:

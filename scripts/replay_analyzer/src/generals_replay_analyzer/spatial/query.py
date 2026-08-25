@@ -7,7 +7,7 @@ import hashlib
 import math
 import struct
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -402,6 +402,19 @@ class MapSceneQueryService:
             return total
         return (page - 1) * page_size
 
+    @staticmethod
+    def _evidence_rows(session: Session, evidence_ids: Collection[str]) -> tuple[EvidenceItem, ...]:
+        """Load the complete fixed evidence set without exceeding SQLite bind limits."""
+        ordered_ids = tuple(evidence_ids)
+        rows_by_id: dict[str, EvidenceItem] = {}
+        # TheSuperHackers @bugfix Leex 25/08/2026 Batch fixed-report evidence lookups while preserving the complete authority set. (#TBD)
+        for offset in range(0, len(ordered_ids), 900):
+            rows = session.scalars(
+                select(EvidenceItem).where(EvidenceItem.public_id.in_(ordered_ids[offset : offset + 900]))
+            )
+            rows_by_id.update({row.public_id: row for row in rows})
+        return tuple(rows_by_id[public_id] for public_id in ordered_ids if public_id in rows_by_id)
+
     def _authority(
         self, session: Session, query: MapSceneReadQuery, graph: Any
     ) -> tuple[Replay, Map, ParserRun, TelemetryRun, Any, frozenset[str]]:
@@ -429,13 +442,7 @@ class MapSceneQueryService:
             raise MapSceneContractError("parser authority is not completed")
         document = graph.selected.document
         report_evidence = self._report_evidence(document)
-        evidence_rows = tuple(
-            session.scalars(
-                select(EvidenceItem).where(
-                    EvidenceItem.public_id.in_(tuple(report_evidence)),
-                )
-            )
-        )
+        evidence_rows = self._evidence_rows(session, report_evidence)
         resolved = {item.public_id: item.tier for item in evidence_rows}
         if resolved != report_evidence:
             raise MapSceneContractError("report evidence membership is unresolved or inconsistent")
@@ -594,14 +601,50 @@ class MapSceneQueryService:
         }
 
     @staticmethod
-    def _player_map(session: Session, replay: Replay, parser: ParserRun) -> dict[int, ReplayPlayer]:
-        return {
-            item.player_index: item
-            for item in session.scalars(
-                select(ReplayPlayer).where(ReplayPlayer.replay_id == replay.id, ReplayPlayer.parser_run_id == parser.id)
+    # TheSuperHackers @bugfix Leex 25/08/2026 Resolve scene identities from the selected engine player slots without mutating parser rows. (#TBD)
+    def _player_map(
+        session: Session, replay: Replay, parser: ParserRun, telemetry: TelemetryRun
+    ) -> dict[int, ReplayPlayer]:
+        rows = tuple(
+            session.scalars(
+                select(ReplayPlayer).where(
+                    ReplayPlayer.replay_id == replay.id, ReplayPlayer.parser_run_id == parser.id
+                )
             )
-            if item.player_index is not None
-        }
+        )
+        by_slot = {item.slot_index: item for item in rows}
+        if len(by_slot) != len(rows):
+            raise MapSceneContractError("replay player slots are ambiguous")
+        initialization = tuple(
+            session.scalars(
+                select(TelemetryEvent).where(
+                    TelemetryEvent.telemetry_run_id == telemetry.id,
+                    TelemetryEvent.event_type == "players_initialized",
+                )
+            )
+        )
+        if len(initialization) != 1:
+            raise MapSceneContractError("telemetry player initialization is missing or ambiguous")
+        raw_slots = _mapping(initialization[0].payload_json, "players_initialized payload").get("slots")
+        if not isinstance(raw_slots, list):
+            raise MapSceneContractError("telemetry player initialization slots are invalid")
+        output: dict[int, ReplayPlayer] = {}
+        resolved_slots: set[int] = set()
+        for raw_slot in raw_slots:
+            if not isinstance(raw_slot, Mapping) or raw_slot.get("resolution_status") != "resolved":
+                continue
+            slot_index = raw_slot.get("slot_index")
+            player_index = raw_slot.get("player_index")
+            if type(slot_index) is not int or type(player_index) is not int:
+                raise MapSceneContractError("telemetry player initialization identity is invalid")
+            player = by_slot.get(slot_index)
+            if player is None or slot_index in resolved_slots or player_index in output:
+                raise MapSceneContractError("telemetry player initialization identity is ambiguous")
+            resolved_slots.add(slot_index)
+            output[player_index] = player
+        if not output:
+            raise MapSceneContractError("telemetry player initialization identities are unresolved")
+        return output
 
     def _transforms(
         self,
@@ -762,7 +805,7 @@ class MapSceneQueryService:
                 raise ValueError("map scene query exceeds the available frame window")
             manifest = self._manifest_evidence(session, telemetry, report_evidence_ids)
             projection = self._projection(session, map_row, manifest)
-            players = self._player_map(session, replay, parser)
+            players = self._player_map(session, replay, parser, telemetry)
             available_player_ids = {item.public_id for item in players.values()}
             if not set(query.replay_player_public_ids).issubset(available_player_ids):
                 raise MapSceneNotFoundError("player filter is outside the fixed scene")
@@ -869,6 +912,17 @@ class MapSceneQueryService:
                         "shrouded",
                     }:
                         raise MapSceneContractError("visibility status is outside the accepted domain")
+                    first_observed_clear = _boolean(
+                        payload.get("first_observed_clear"), "first observed clear"
+                    )
+                    sampling_cycle_id = _integer(
+                        payload.get("sampling_cycle_id"), "visibility sampling cycle"
+                    )
+                    template_name = _string(payload.get("template_name"), "visibility template")
+                    # TheSuperHackers @bugfix Leex 25/08/2026 Preserve valid visibility evidence while omitting engine observations outside the map bounds. (#TBD)
+                    if isinstance(world_to_map_normalized(raw_position, projection.world_bounds), SpatialUnavailable):
+                        omitted_reasons.append("map_coordinate_out_of_bounds")
+                        continue
                     visibility_values.append(
                         {
                             "visibility_public_id": _public_id(
@@ -877,16 +931,12 @@ class MapSceneQueryService:
                             "replay_player_public_id": player.public_id,
                             "entity_public_id": entity.public_id,
                             "frame": event.frame,
-                            "template_name": _string(payload.get("template_name"), "visibility template"),
+                            "template_name": template_name,
                             "previous_status": previous_status,
                             "status": status,
-                            "first_observed_clear": _boolean(
-                                payload.get("first_observed_clear"), "first observed clear"
-                            ),
+                            "first_observed_clear": first_observed_clear,
                             "position": self._position(raw_position, projection, selected_transform),
-                            "sampling_cycle_id": _integer(
-                                payload.get("sampling_cycle_id"), "visibility sampling cycle"
-                            ),
+                            "sampling_cycle_id": sampling_cycle_id,
                             "evidence": _evidence(evidence.public_id),
                         }
                     )

@@ -216,6 +216,7 @@ def _seed_query_service(
     *,
     combat_x: float = 10.0,
     out_of_bounds_sample_x: float = 25.0,
+    visibility_x: float = 5.0,
     duplicate_manifest: bool = False,
     map_display_name: str = "Tournament Desert",
     corrupt_projection: bool = False,
@@ -234,6 +235,7 @@ def _seed_query_service(
     oob_evidence_id = _uuid("oob-evidence")
     duplicate_manifest_evidence_id = _uuid("duplicate-manifest-evidence")
     visibility_evidence_id = _uuid("visibility-evidence")
+    players_initialized_evidence_id = _uuid("players-initialized-evidence")
     visibility_summary_evidence_id = _uuid("visibility-summary-evidence")
     heuristic_evidence_id = _uuid("heuristic-evidence")
     manifest_asset_id = _uuid("manifest-asset")
@@ -351,7 +353,7 @@ def _seed_query_service(
             slot_kind="human",
             original_name="Alice",
             normalized_name="alice",
-            player_index=0,
+            player_index=None,
             start_position=0,
             observed_json={},
         )
@@ -380,6 +382,7 @@ def _seed_query_service(
         evidence_rows = []
         evidence_specs = [
             (manifest_evidence_id, 0),
+            (players_initialized_evidence_id, 7),
             (sample_evidence_id, 1),
             (combat_evidence_id, 2),
             (oob_evidence_id, 3),
@@ -420,6 +423,19 @@ def _seed_query_service(
             raw_record_json={},
             evidence_item_id=evidence_rows[0].id,
         )
+        players_initialized_event = TelemetryEvent(
+            telemetry_run_id=telemetry.id,
+            sequence=7,
+            frame=1,
+            logic_time_seconds=1 / 30.0,
+            schema_version=2,
+            event_type="players_initialized",
+            payload_json={
+                "slots": [{"slot_index": 0, "player_index": 0, "resolution_status": "resolved"}]
+            },
+            raw_record_json={},
+            evidence_item_id=evidence_rows[1].id,
+        )
         sample_event = TelemetryEvent(
             telemetry_run_id=telemetry.id,
             sequence=1,
@@ -429,7 +445,7 @@ def _seed_query_service(
             event_type="entity_sample",
             payload_json={},
             raw_record_json={},
-            evidence_item_id=evidence_rows[1].id,
+            evidence_item_id=evidence_rows[2].id,
         )
         combat_event = TelemetryEvent(
             telemetry_run_id=telemetry.id,
@@ -440,7 +456,7 @@ def _seed_query_service(
             event_type="damage_applied",
             payload_json={},
             raw_record_json={},
-            evidence_item_id=evidence_rows[2].id,
+            evidence_item_id=evidence_rows[3].id,
         )
         oob_event = TelemetryEvent(
             telemetry_run_id=telemetry.id,
@@ -451,9 +467,9 @@ def _seed_query_service(
             event_type="entity_sample",
             payload_json={},
             raw_record_json={},
-            evidence_item_id=evidence_rows[3].id,
+            evidence_item_id=evidence_rows[4].id,
         )
-        events = [manifest_event, sample_event, combat_event, oob_event]
+        events = [manifest_event, players_initialized_event, sample_event, combat_event, oob_event]
         if engine_native_map_events:
             events.extend(
                 (
@@ -471,11 +487,11 @@ def _seed_query_service(
                             "previous_status": "unseen",
                             "status": "clear",
                             "first_observed_clear": True,
-                            "position": {"x": 5.0, "y": 10.0, "z": 0.0},
+                            "position": {"x": visibility_x, "y": 10.0, "z": 0.0},
                             "sampling_cycle_id": 0,
                         },
                         raw_record_json={},
-                        evidence_item_id=evidence_rows[4].id,
+                        evidence_item_id=evidence_rows[5].id,
                     ),
                     TelemetryEvent(
                         telemetry_run_id=telemetry.id,
@@ -492,7 +508,7 @@ def _seed_query_service(
                             "cycle_complete": False,
                         },
                         raw_record_json={},
-                        evidence_item_id=evidence_rows[5].id,
+                        evidence_item_id=evidence_rows[6].id,
                     ),
                     TelemetryEvent(
                         telemetry_run_id=telemetry.id,
@@ -517,7 +533,7 @@ def _seed_query_service(
                             ],
                         },
                         raw_record_json={},
-                        evidence_item_id=evidence_rows[6].id,
+                        evidence_item_id=evidence_rows[7].id,
                     ),
                 )
             )
@@ -690,6 +706,27 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert "ignored/private/manifest.json" not in repr(payload)
 
 
+def test_evidence_authority_load_batches_large_fixed_report_without_loss(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path)
+    evidence_ids = tuple(_uuid(f"large-report-evidence:{index}") for index in range(1101))
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add_all(
+            EvidenceItem(
+                public_id=public_id,
+                replay_id=replay.id,
+                tier="derived",
+                source_kind="large-report-test",
+                source_key=public_id,
+                schema_version=1,
+            )
+            for public_id in evidence_ids
+        )
+        session.commit()
+        rows = service._evidence_rows(session, evidence_ids)
+
+    assert tuple(row.public_id for row in rows) == evidence_ids
 def test_map_v2_projects_scouting_and_only_opted_in_latest_engine_heuristics(tmp_path: Path) -> None:
     service, ids = _seed_query_service(tmp_path, engine_native_map_events=True)
     default_payload = thaw_canonical(
@@ -1138,6 +1175,34 @@ def test_out_of_bounds_casualty_is_omitted_with_an_explicit_reason(tmp_path: Pat
     assert isinstance(payload, dict)
     assert payload["casualties"] == []
     assert "map_coordinate_out_of_bounds" in payload["availability"]["reason_codes"]
+
+
+def test_out_of_bounds_visibility_is_omitted_with_an_explicit_reason(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path, visibility_x=25.0, engine_native_map_events=True)
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["visibility_transitions"] == []
+    assert "map_coordinate_out_of_bounds" in payload["availability"]["reason_codes"]
+
+
+def test_in_bounds_visibility_remains_projected_when_other_rows_are_omitted(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path, visibility_x=5.0, engine_native_map_events=True)
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    assert isinstance(payload, dict)
+    assert len(payload["visibility_transitions"]) == 1
+    assert payload["visibility_transitions"][0]["position"]["raw"]["x"] == 5.0
 
 
 def test_seed_uses_migrated_sqlite_and_not_route_sql(tmp_path: Path) -> None:

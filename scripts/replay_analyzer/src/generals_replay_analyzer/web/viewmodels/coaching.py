@@ -132,7 +132,7 @@ class KeyMomentView(_FrozenView):
     evidence: tuple[ReportEvidenceReferenceDTO, ...]
 
 
-# TheSuperHackers @feature Leex 24/08/2026 Align observed opening events into evidence-bounded strategy lanes. (#TBD)
+# TheSuperHackers @bugfix Leex 25/08/2026 Keep one stable claim reference per opening-lane event so dense report evidence remains usable. (#TBD)
 class OpeningLaneEventView(_FrozenView):
     frame: int
     time_label: str
@@ -279,7 +279,6 @@ def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
             or not isinstance(raw, dict)
             or raw.get("strategy_label") != claim.label
             or raw.get("phase") not in _PHASE_RANK
-            or not any(item.tier == "derived" for item in claim.evidence)
         ):
             continue
         score = raw.get("confidence")
@@ -565,7 +564,7 @@ def _opening_lanes(
             frame=step.frame,
             time_label=format_frame(step.frame, frames_per_second=frames_per_second),
             title=f"{step.structure_label} completed",
-            evidence=step.evidence,
+            evidence=step.evidence[:1],
         )
         for step in build_order
     )
@@ -584,7 +583,7 @@ def _opening_lanes(
                 frame=moment.frame,
                 time_label=format_frame(moment.frame, frames_per_second=frames_per_second),
                 title=moment.title,
-                evidence=moment.evidence,
+                evidence=moment.evidence[:1],
             )
         )
     lane_config = (

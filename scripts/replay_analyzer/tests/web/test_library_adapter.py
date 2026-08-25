@@ -369,6 +369,34 @@ def test_library_uses_latest_succeeded_parser_and_opens_the_first_player_report(
     assert _adapter(library_database).list_replays(ReplayLibraryQueryDTO(search="Closed Slot")).items == ()
 
 
+def test_library_opens_the_most_evidence_rich_player_report_when_multiple_are_available(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        fox = session.scalar(select(ReplayPlayer).where(ReplayPlayer.public_id == "123e4567-e89b-42d3-a456-426614174101"))
+        assert fox is not None
+        session.add(
+            _report(
+                fox.replay_id,
+                "123e4567-e89b-42d3-a456-426614174199",
+                "player-rich",
+                datetime(2026, 8, 23, 13, 0, tzinfo=UTC),
+                replay_player_id=fox.id,
+            )
+        )
+        session.flush()
+        rich = session.scalar(select(Report).where(Report.public_id == "123e4567-e89b-42d3-a456-426614174199"))
+        assert rich is not None
+        rich.report_json = _strategy_report_json("gla_terror_tech", "gla_map_control")
+
+    item = _adapter(library_database).list_replays(ReplayLibraryQueryDTO(page_size=1)).items[0]
+
+    assert item.report_public_id == "123e4567-e89b-42d3-a456-426614174199"
+    assert item.strategy_labels[0] == "Terror Tech"
+    assert item.strategy_labels[1].startswith("gla map control")
+
+
 @pytest.mark.parametrize(
     ("field", "matching", "missing"),
     [
