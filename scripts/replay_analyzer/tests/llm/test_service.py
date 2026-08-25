@@ -1713,7 +1713,8 @@ async def test_missing_or_corrupt_pinned_resource_persists_sanitized_unavailable
 @pytest.mark.ollama
 @pytest.mark.anyio
 async def test_opt_in_live_loopback_ollama_returns_one_validated_schema_response(tmp_path: Path) -> None:
-    if os.environ.get("GENERALS_REPLAY_ANALYZER_RUN_OLLAMA_INTEGRATION") != "1":
+    # Keep the test-only opt-in outside the strict production settings prefix.
+    if os.environ.get("RUN_GENERALS_REPLAY_ANALYZER_OLLAMA_INTEGRATION") != "1":
         pytest.skip("live loopback Ollama integration is opt-in")
     settings, engine, factory, request, now = _seed_request(tmp_path)
     transport = HttpxOllamaTransport(OllamaClientConfig(settings.ollama_url))
@@ -1730,5 +1731,5 @@ async def test_opt_in_live_loopback_ollama_returns_one_validated_schema_response
     finally:
         await transport.aclose()
         engine.dispose()
-    assert outcome.llm_status == "succeeded"
+    assert outcome.llm_status == "succeeded", outcome.code
     assert outcome.validated_response is not None

@@ -168,6 +168,7 @@ def _tags(model: str = "qwen3.6:27b", digest: str = "d" * 64) -> dict[str, JSONV
                 "modified_at": "2026-08-22T00:00:00Z",
                 "size": 123,
                 "digest": digest,
+                "capabilities": ["vision", "completion", "tools", "thinking"],
                 "details": {
                     "parent_model": "",
                     "format": "gguf",
@@ -175,6 +176,8 @@ def _tags(model: str = "qwen3.6:27b", digest: str = "d" * 64) -> dict[str, JSONV
                     "families": ["qwen"],
                     "parameter_size": "27B",
                     "quantization_level": "Q4_K_M",
+                    "context_length": 262144,
+                    "embedding_length": 5120,
                 },
             }
         ]
@@ -473,6 +476,46 @@ async def test_raw_http_json_with_utf8_content_type_is_strictly_decoded(public_i
         ({"models": [{"name": "qwen3.6:27b", "digest": "d" * 64, "size": -1}]}, "discovery_envelope_invalid"),
         (
             {"models": [{"name": "qwen3.6:27b", "digest": "d" * 64, "details": {"families": "qwen"}}]},
+            "discovery_envelope_invalid",
+        ),
+        (
+            {"models": [{"name": "qwen3.6:27b", "digest": "d" * 64, "capabilities": "completion"}]},
+            "discovery_envelope_invalid",
+        ),
+        (
+            {
+                "models": [
+                    {
+                        "name": "qwen3.6:27b",
+                        "digest": "d" * 64,
+                        "capabilities": ["completion", "completion"],
+                    }
+                ]
+            },
+            "discovery_envelope_invalid",
+        ),
+        (
+            {
+                "models": [
+                    {
+                        "name": "qwen3.6:27b",
+                        "digest": "d" * 64,
+                        "details": {"context_length": -1},
+                    }
+                ]
+            },
+            "discovery_envelope_invalid",
+        ),
+        (
+            {
+                "models": [
+                    {
+                        "name": "qwen3.6:27b",
+                        "digest": "d" * 64,
+                        "details": {"embedding_length": True},
+                    }
+                ]
+            },
             "discovery_envelope_invalid",
         ),
     ],

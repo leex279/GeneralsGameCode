@@ -25,8 +25,18 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_HTTP_BYTES = 262144
 _MAX_MODELS = 256
 _MAX_TEXT_BYTES = 4096
-_TAG_KEYS = {"name", "model", "modified_at", "size", "digest", "details"}
-_DETAIL_KEYS = {"parent_model", "format", "family", "families", "parameter_size", "quantization_level"}
+_MAX_MODEL_DIMENSION = 1 << 30
+_TAG_KEYS = {"name", "model", "modified_at", "size", "digest", "details", "capabilities"}
+_DETAIL_KEYS = {
+    "parent_model",
+    "format",
+    "family",
+    "families",
+    "parameter_size",
+    "quantization_level",
+    "context_length",
+    "embedding_length",
+}
 _CHAT_KEYS = {
     "model",
     "created_at",
@@ -60,6 +70,14 @@ def _short_text(value: object, *, allow_empty: bool = False) -> bool:
         and (allow_empty or bool(value))
         and len(value.encode("utf-8")) <= _MAX_TEXT_BYTES
     )
+
+
+def _short_text_list(value: object, *, unique: bool = False) -> bool:
+    if not isinstance(value, list) or len(value) > 32:
+        return False
+    if any(not _short_text(item) for item in value):
+        return False
+    return not unique or len(set(cast(list[str], value))) == len(value)
 
 
 def _unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
@@ -135,7 +153,10 @@ def _validate_details(value: object) -> bool:
         return False
     for key, item in value.items():
         if key == "families":
-            if not isinstance(item, list) or len(item) > 32 or any(not _short_text(name) for name in item):
+            if not _short_text_list(item):
+                return False
+        elif key in {"context_length", "embedding_length"}:
+            if type(item) is not int or not 0 < item <= _MAX_MODEL_DIMENSION:
                 return False
         elif not _short_text(item, allow_empty=True):
             return False
@@ -154,6 +175,9 @@ def _validate_tag_shape(value: object) -> bool:
     if "size" in value and (type(value["size"]) is not int or value["size"] < 0):
         return False
     if "digest" in value and type(value["digest"]) is not str:
+        return False
+    # TheSuperHackers @fix Leex 25/08/2026 Accept and bound the capability metadata emitted by current Ollama discovery responses. (#TBD)
+    if "capabilities" in value and not _short_text_list(value["capabilities"], unique=True):
         return False
     return "details" not in value or _validate_details(value["details"])
 
