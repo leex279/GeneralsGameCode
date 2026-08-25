@@ -23,6 +23,14 @@ from generals_replay_analyzer.web.routes.players import router
 from generals_replay_analyzer.web.viewmodels.players import profile_json_url
 
 PLAYER_ID = "123e4567-e89b-42d3-a456-426614174300"
+
+
+def test_profile_rejects_engine_verified_count_above_imported_history() -> None:
+    profile = _profile()
+    with pytest.raises(ValidationError, match="cannot exceed total history"):
+        PlayerProfileDTO.model_validate(
+            profile.model_copy(update={"engine_verified_history_count": profile.history_total_items + 1}).model_dump()
+        )
 PROFILE_ID = "123e4567-e89b-42d3-a456-426614174301"
 DIGEST = "a" * 64
 

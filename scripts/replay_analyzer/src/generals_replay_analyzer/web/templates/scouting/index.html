@@ -2,7 +2,7 @@
 {% block content %}
 <header class="page-heading scouting-heading">
   <div><span class="eyebrow">Opponent scouting</span><h1>Prepare for what they do next</h1><p>Recurring openings, timing pressure, and a replay-backed response plan.</p></div>
-  {% if view.selected_player %}<div class="scouting-heading-stat"><span>Selected opponent</span><strong>{{ view.selected_player.display_name }}</strong><small>{{ view.history_count }} analyzed matches</small></div>{% endif %}
+  {% if view.selected_player %}<div class="scouting-heading-stat"><span>Selected opponent</span><strong>{{ view.selected_player.display_name }}</strong><small>{{ view.history_count }} imported &middot; {{ view.engine_verified_history_count }} full analys{% if view.engine_verified_history_count == 1 %}is{% else %}es{% endif %}</small></div>{% endif %}
 </header>
 
 {% if view.players %}

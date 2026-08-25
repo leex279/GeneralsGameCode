@@ -250,6 +250,7 @@ def _full_profile() -> PlayerProfileDTO:
                 ).model_dump(),
             ),
             "history_total_items": 1,
+            "engine_verified_history_count": 1,
             "insights": tuple(item.model_dump() for item in insights),
             "availability": AvailabilityDTO(state="available").model_dump(),
         }
@@ -375,7 +376,8 @@ def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidenc
     json_url = profile_json_url(port.profile)
     assert "report_public_id=" in json_url and "report_public=" not in json_url
     assert REPORT_ID in fixed.text
-    assert fixed.text.index("Recent analyzed matches") < fixed.text.index("Identity and data")
+    assert "1 imported &middot; 1 full analysis" in fixed.text
+    assert fixed.text.index("Recent replay reports") < fixed.text.index("Identity and data")
     assert 'class="player-insight-grid"' in fixed.text
     assert '<details class="workspace-panel technical-evidence profile-identity">' in fixed.text
 
@@ -420,7 +422,7 @@ def test_one_match_profile_explains_the_sample_requirement_once_without_empty_ro
         fixed = client.get(resolution.headers["location"], headers={"accept": "text/html"})
 
     assert fixed.status_code == 200
-    assert fixed.text.count("More analyzed matches are needed") == 1
+    assert fixed.text.count("More engine-verified matches are needed") == 1
     assert "minimum_sample_not_met" not in fixed.text.split("Identity and data", 1)[0]
     assert "Unavailable:</td>" not in fixed.text
 

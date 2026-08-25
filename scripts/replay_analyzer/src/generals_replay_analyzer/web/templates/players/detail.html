@@ -2,13 +2,13 @@
 {% block content %}
 {% set profile = view.profile %}
 <header class="page-heading">
-  <div><span class="eyebrow">Player analysis</span><h1>{{ profile.player.display_name }}</h1><p>{{ profile.history_total_items }} analyzed match{% if profile.history_total_items != 1 %}es{% endif %} in this fixed profile.</p>{% if profile.player.external_profile_url %}<p><a href="{{ profile.player.external_profile_url }}" target="_blank" rel="noopener noreferrer">View {{ profile.player.external_profile_source or 'external' }} player profile</a></p>{% endif %}</div>
+  <div><span class="eyebrow">Player analysis</span><h1>{{ profile.player.display_name }}</h1><p>{{ profile.history_total_items }} imported &middot; {{ profile.engine_verified_history_count }} full analys{% if profile.engine_verified_history_count == 1 %}is{% else %}es{% endif %}</p>{% if profile.player.external_profile_url %}<p><a href="{{ profile.player.external_profile_url }}" target="_blank" rel="noopener noreferrer">View {{ profile.player.external_profile_source or 'external' }} player profile</a></p>{% endif %}</div>
   <div class="page-actions"><a class="button" href="/players/{{ profile.player.player_public_id }}/identity">Manage identity</a><a class="button" href="/players">All players</a></div>
 </header>
 
 <!-- TheSuperHackers @feature Leex 23/08/2026 Lead player profiles with matches and supported patterns instead of identity internals. (#TBD) -->
 <section aria-labelledby="recent-analysis-title">
-  <span class="eyebrow">Replay-backed history</span><h2 id="recent-analysis-title">Recent analyzed matches</h2>
+  <span class="eyebrow">Replay-backed history</span><h2 id="recent-analysis-title">Recent replay reports</h2>
 </section>
 {% include "players/_history.html" %}
 
@@ -33,7 +33,7 @@
       {% endfor %}
     </div>
   {% else %}
-    <div class="cohort-requirement"><strong>More analyzed matches are needed</strong><p>This profile does not yet have enough comparable evidence to claim a recurring tendency. The analyzed match remains available above.</p></div>
+    <div class="cohort-requirement"><strong>More engine-verified matches are needed</strong><p>This profile does not yet have enough comparable evidence to claim a recurring tendency. The replay report remains available above.</p></div>
   {% endif %}
 </section>
 

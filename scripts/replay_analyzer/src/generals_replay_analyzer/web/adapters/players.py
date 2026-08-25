@@ -324,6 +324,7 @@ class AnalyticsPlayersAdapter:
             history_page=query.page,
             history_page_size=query.page_size,
             history_total_items=profile.history_total_items,
+            engine_verified_history_count=profile.engine_verified_history_count,
             insights=tuple(
                 PlayerInsightDTO(
                     insight_kind=cast(object, item.insight_kind),  # type: ignore[arg-type]

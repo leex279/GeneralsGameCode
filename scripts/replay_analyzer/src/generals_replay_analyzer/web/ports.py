@@ -2506,6 +2506,7 @@ class PlayerProfileDTO(WebDTO):
     history_page: int = Field(ge=1)
     history_page_size: int = Field(ge=1, le=100)
     history_total_items: int = Field(ge=0)
+    engine_verified_history_count: int = Field(default=0, ge=0)
     insights: tuple[PlayerInsightDTO, ...]
     availability: AvailabilityDTO
 
@@ -2519,6 +2520,8 @@ class PlayerProfileDTO(WebDTO):
             raise ValueError("player profile identity must match its fixed query")
         if (self.history_page, self.history_page_size) != (self.query.page, self.query.page_size):
             raise ValueError("player history page must match its fixed query")
+        if self.engine_verified_history_count > self.history_total_items:
+            raise ValueError("engine verified history count cannot exceed total history")
         if tuple(item.run_id for item in self.version.longitudinal) != self.query.longitudinal_run_ids:
             raise ValueError("profile longitudinal bindings must match its fixed query")
         if tuple(item.report_public_id for item in self.version.fixed_reports) != self.query.report_public_ids:

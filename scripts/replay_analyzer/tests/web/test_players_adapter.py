@@ -120,6 +120,7 @@ def test_adapter_returns_only_frozen_web_dtos_and_preserves_preview_without_muta
         assert profile_resolution.fixed_query is not None
         profile = adapter.get_profile(profile_resolution.fixed_query)
         assert profile.player.display_name == "Alpha"
+        assert profile.engine_verified_history_count <= profile.history_total_items
         assert profile.version.identity_revision == 2
         draft = MergeIdentityDraftDTO(
             operation_kind="merge_players",

@@ -141,6 +141,7 @@ def test_selected_opponent_leads_with_recurring_opening_threat_and_counter_plan(
     assert port.profile_queries == [port.profile.query]
     assert port.evidence_queries == [EvidenceQueryDTO(report_public_id=REPORT_ID, evidence_public_id=EVIDENCE_ID, expected_tier="derived")]
     assert "Opponent game plan" in response.text
+    assert "1 imported &middot; 1 full analysis" in response.text
     assert "Power Plant" in response.text and "Barracks" in response.text and "Supply Center" in response.text
     assert "70%" in response.text
     assert "10 accepted matches" in response.text

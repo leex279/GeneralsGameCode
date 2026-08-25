@@ -135,6 +135,7 @@ def test_player_index_and_resolution_bind_current_revision_without_leaking_sourc
     assert profile.history[0].replay_player_public_id == replay_player_id
     assert profile.history[0].opponent_player_public_ids == (_id(3),)
     assert profile.history[0].opponent_factions == ("GLA",)
+    assert profile.engine_verified_history_count == 1
     assert "private.rep" not in repr(profile)
 
 

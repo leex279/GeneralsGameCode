@@ -66,6 +66,7 @@ class ScoutingWorkspaceViewModel(BaseModel):
     selected_player: PlayerSummaryDTO | None
     selected_player_public_id: str | None
     history_count: int
+    engine_verified_history_count: int
     faction_context: tuple[str, ...]
     map_context: tuple[str, ...]
     primary_opening: ScoutingOpeningViewModel | None
@@ -242,6 +243,7 @@ def scouting_workspace_view(
             selected_player=selected,
             selected_player_public_id=selected_player_public_id,
             history_count=0,
+            engine_verified_history_count=0,
             faction_context=(),
             map_context=(),
             primary_opening=None,
@@ -324,6 +326,7 @@ def scouting_workspace_view(
         selected_player=profile.player,
         selected_player_public_id=profile.player.player_public_id,
         history_count=profile.history_total_items,
+        engine_verified_history_count=profile.engine_verified_history_count,
         faction_context=factions,
         map_context=maps,
         primary_opening=primary,

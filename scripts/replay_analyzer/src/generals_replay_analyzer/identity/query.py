@@ -263,6 +263,8 @@ class PlayerProfile:
     strata_provenance: tuple[StrataProvenance, ...]
     history: tuple[ReplayHistoryItem, ...]
     history_total_items: int
+    # TheSuperHackers @feature Leex 26/08/2026 Keep imported replay history distinct from engine-verified analysis. (#TBD)
+    engine_verified_history_count: int
     insights: tuple[PlayerInsight, ...]
     availability: Availability
 
@@ -531,6 +533,7 @@ class PlayerQueryService:
                 provenance,
                 history_all[start : start + query.page_size],
                 len(history_all),
+                sum(item.lifecycle_state == "engine_verified" for item in history_all),
                 insights,
                 availability,
             )
