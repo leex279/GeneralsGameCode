@@ -84,13 +84,19 @@ def test_shell_uses_the_reference_three_band_chrome_and_clipped_active_navigatio
     assert '"Bahnschrift"' in css
 
 
-def test_dashboard_is_an_operational_workspace_with_honest_unavailable_state() -> None:
+def test_dashboard_is_a_player_first_workspace_with_honest_unavailable_state() -> None:
     html = _page("/")
 
     assert "<h1>Replay dashboard</h1>" in html
+    assert "Strategy / Match intelligence" in html
     assert 'class="command-strip"' in html
     assert 'class="dashboard-layout"' in html
     assert 'class="operations-rail"' not in html
+    assert "Opponent scouting" in html
+    assert "Compare matchups" in html
+    assert "Operations / Overview" not in html
+    assert "Inspect analysis jobs" not in html
+    assert "Review player identity" not in html
     assert "No replay evidence in this library yet" in html
     assert "analytics_adapter_pending" in html
     assert "kpi-card" not in html
@@ -304,9 +310,9 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     assert "Notable evidence" in response.text and "One replay needs evidence review" in response.text
     assert 'class="dashboard-table recent-match-table"' in response.text
     assert 'class="dashboard-kpi-grid"' in response.text
-    assert 'Replay count' in response.text
+    assert '>Replays<' in response.text
     assert 'Maps seen' in response.text
-    assert 'Replay identity and evidence' in response.text and '>Inspect<' in response.text
+    assert 'Match analysis' in response.text and '>Review<' in response.text
     assert (
         'href="/replays/123e4567-e89b-42d3-a456-426614174000/reports/'
         '123e4567-e89b-42d3-a456-426614174010">View analysis</a>'
@@ -324,7 +330,8 @@ def test_dashboard_recent_match_card_leads_with_fixed_report_analysis_facts() ->
     assert "replay.player_factions" in template
     assert "replay.observed_horizon" in template
     assert "replay.strategy_labels" in template
-    assert 'class="recent-match-operations"' in template
+    assert 'class="recent-match-operations"' not in template
+    assert 'class="dashboard-system-link"' in template
 
 
 def test_library_uses_a_desktop_filter_rail_and_preserves_mobile_labelled_rows() -> None:

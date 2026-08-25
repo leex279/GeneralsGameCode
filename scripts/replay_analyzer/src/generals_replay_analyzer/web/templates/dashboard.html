@@ -3,29 +3,31 @@
 {% block content %}
   <header class="page-heading">
     <div>
-      <span class="eyebrow">Operations / Overview</span>
+      <span class="eyebrow">Strategy / Match intelligence</span>
       <h1>Replay dashboard</h1>
-      <p>Trace replay evidence from ingestion through analysis without leaving the local machine.</p>
+      <p>See what each player attempted, where the match changed, and what to review next.</p>
     </div>
     <a class="button button-primary" href="/imports/dialog">Import replay</a>
   </header>
 
   <nav class="command-strip" aria-label="Dashboard shortcuts">
-    <a href="/replays"><span class="command-index">01</span><span><strong>Open replay library</strong><small>Filter matches and inspect evidence</small></span></a>
-    <a href="/jobs"><span class="command-index">02</span><span><strong>Inspect analysis jobs</strong><small>Progress, cancellation, and logs</small></span></a>
-    <a href="/players"><span class="command-index">03</span><span><strong>Review player identity</strong><small>Resolved names and match history</small></span></a>
+    {# TheSuperHackers @feature Leex 25/08/2026 Keep player decisions ahead of pipeline operations on the replay home screen. (#TBD) #}
+    {% set latest = dashboard.recent_replays[0] if dashboard.recent_replays else none %}
+    {% if latest and latest.report_public_id %}<a href="/replays/{{ latest.replay_public_id }}/reports/{{ latest.report_public_id }}"><span class="command-index">01</span><span><strong>Review latest analysis</strong><small>Strategies, key moments, and coaching</small></span></a>{% else %}<a href="/replays"><span class="command-index">01</span><span><strong>Open replay library</strong><small>Choose a match to analyze</small></span></a>{% endif %}
+    <a href="/scouting"><span class="command-index">02</span><span><strong>Opponent scouting</strong><small>Recurring openings and preparation</small></span></a>
+    <a href="/compare"><span class="command-index">03</span><span><strong>Compare matchups</strong><small>Evidence-safe player and cohort comparisons</small></span></a>
   </nav>
 
   <div class="dashboard-layout">
     <section class="workspace-panel" aria-labelledby="workspace-title">
       <div class="section-heading">
-        <div><span class="eyebrow">Replay evidence</span><h2 id="workspace-title">Analysis workspace</h2></div>
+        <div><span class="eyebrow">Match intelligence</span><h2 id="workspace-title">Recent analyses</h2></div>
         {{ badges.availability_badge(shell.availability) }}
       </div>
       {% if shell.availability.state != "unavailable" %}
         {# TheSuperHackers @feature Leex 24/08/2026 Lead with real workspace totals instead of technical shortcuts. (#TBD) #}
         <div class="dashboard-kpi-grid" aria-label="Workspace totals">
-          {% for label, value in (("Replay count", dashboard.replay_count), ("Analyzed", dashboard.analyzed_count), ("Failed jobs", dashboard.failed_jobs_count), ("Maps seen", dashboard.maps_seen)) %}
+          {% for label, value in (("Replays", dashboard.replay_count), ("Analyzed matches", dashboard.analyzed_count), ("Maps seen", dashboard.maps_seen)) %}
             <article class="dashboard-kpi"><span>{{ label }}</span><strong>{% if value is not none %}{{ value }}{% else %}Unavailable{% endif %}</strong></article>
           {% endfor %}
         </div>
@@ -35,10 +37,10 @@
           <div class="section-heading compact-heading"><div><span class="eyebrow">Latest evidence</span><h3 id="recent-matches-title">Recent matches</h3></div></div>
           <!-- TheSuperHackers @feature Leex 23/08/2026 Open recent fixed reports directly and lead with player-readable match context. (#TBD) -->
           <p id="recent-match-table-scroll-instruction" class="scroll-instruction">Scroll horizontally to inspect recent replay evidence.</p>
-          <div class="table-scroll" tabindex="0" aria-describedby="recent-match-table-scroll-instruction"><table class="dashboard-table recent-match-table"><caption>Recent replay evidence</caption><thead><tr><th scope="col">Replay identity and evidence</th><th scope="col">Inspect</th></tr></thead><tbody>
+          <div class="table-scroll" tabindex="0" aria-describedby="recent-match-table-scroll-instruction"><table class="dashboard-table recent-match-table"><caption>Recent match analyses</caption><thead><tr><th scope="col">Match analysis</th><th scope="col">Review</th></tr></thead><tbody>
             {% for replay in dashboard.recent_replays %}
               <tr><td class="recent-match-analysis">
-                  <span>{{ replay.analysis_state }} analysis &middot; {{ replay.evidence_tier or "evidence pending" }}</span>
+                  <span>{% if replay.analysis_state == "engine_verified" %}Full match analyzed{% elif replay.analysis_state == "desynced" %}Opening-only analysis{% else %}Analysis {{ replay.analysis_state|replace("_", " ") }}{% endif %}</span>
                   <h4>{{ replay.players|join(" vs ") }}</h4>
                   <dl>
                     <div><dt>Players</dt><dd>{{ replay.player_factions|join(" vs ") if replay.player_factions else replay.players|join(" vs ") }}</dd></div>
@@ -48,7 +50,6 @@
                   </dl>
                 </td>
                 <td class="recent-match-actions">{% if replay.report_public_id %}<a class="button button-primary" href="/replays/{{ replay.replay_public_id }}/reports/{{ replay.report_public_id }}">View analysis</a>{% else %}<a class="button button-primary" href="/replays/{{ replay.replay_public_id }}">View analysis</a>{% endif %}
-                <a class="recent-match-operations" href="/jobs">Operations &amp; job details</a>
               </td></tr>
             {% endfor %}
           </tbody></table></div>
@@ -78,11 +79,12 @@
       {% elif shell.availability.state == "partial" %}
         <p class="availability-detail">Analysis is partially available. Reason: {{ shell.availability.reason_codes|join(", ") or "availability_reason_not_supplied" }}. No completed report is implied.</p>
       {% else %}
-        <p class="availability-detail">Analysis data is available from the accepted adapter.</p>
+        <p class="availability-detail">Your analyzed matches are ready for review.</p>
         {% if not dashboard.recent_replays and not dashboard.trends and not dashboard.notable_evidence %}
         <p class="availability-detail">No recent evidence has been supplied for this workspace.</p>
         {% endif %}
       {% endif %}
+      <p class="dashboard-system-link"><a href="/jobs">System status and processing details</a></p>
     </section>
 
   </div>

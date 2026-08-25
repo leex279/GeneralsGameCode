@@ -108,10 +108,12 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .dossier-opening-grid h3 { margin: .45rem 0; }
 .dossier-opening-grid article > strong { color: var(--cc-pale); font-family: var(--cc-mono); }
 /* TheSuperHackers @feature Leex 24/08/2026 Match the reference dashboard with datastore-backed workspace totals. (#TBD) */
-.dashboard-kpi-grid { display: grid; gap: var(--cc-space-3); grid-template-columns: repeat(4, minmax(0, 1fr)); margin: var(--cc-space-4) 0; }
+.dashboard-kpi-grid { display: grid; gap: var(--cc-space-3); grid-template-columns: repeat(3, minmax(0, 1fr)); margin: var(--cc-space-4) 0; }
 .dashboard-kpi { background: var(--cc-surface-2); border: 1px solid var(--cc-rule); padding: var(--cc-space-3); }
 .dashboard-kpi span { color: var(--cc-muted); display: block; font-family: var(--cc-mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; }
 .dashboard-kpi strong { color: var(--cc-pale); display: block; font-family: var(--cc-mono); font-size: 1.65rem; margin-top: .35rem; }
+/* TheSuperHackers @feature Leex 25/08/2026 Keep system operations available as secondary disclosure on the player-first dashboard. (#TBD) */
+.dashboard-system-link { border-top: 1px solid var(--cc-rule); color: var(--cc-muted); font-family: var(--cc-mono); font-size: .72rem; margin: 0; padding: var(--cc-space-3) var(--cc-space-4); text-align: right; }
 .workspace-panel, .operations-rail, .library-panel, .results-panel { background: linear-gradient(135deg, var(--cc-surface-2), var(--cc-surface-1) 38%); border: 1px solid var(--cc-rule); clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); }
 .workspace-panel + .workspace-panel, main > .technical-evidence { margin-top: var(--cc-space-4); }
 /* TheSuperHackers @bugfix Leex 23/08/2026 Keep immutable canonical report values inside the viewport. (#TBD) */
