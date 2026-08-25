@@ -1,70 +1,41 @@
 # Replay Analyzer strategy-first release status
 
-<!-- TheSuperHackers @info Leex 23/08/2026 Record reproducible product evidence and explicit verification limits. (#TBD) -->
+<!-- TheSuperHackers @info Leex 25/08/2026 Record reproducible product evidence and explicit verification limits. (#TBD) -->
 
-Date: 2026-08-23  
-Tested product head: `40dd1e7df` on `feat/replay-analyzer-v2-product`  
-Base branch: `feat/replay-analyzer-v2` at `9387086be`
+Date: 2026-08-25
+Tested product head: `f1a8c9014`
 
 ## Player-visible outcome
 
-The installed web application opens the most useful player-specific report directly from the replay library. The pinned replay proof shows an honest opening-only trace through playback frame 108 (3.6 seconds at 30 FPS), with the CRC divergence attributed to snapshot frame 100: two identified players, 600 observed supplies, one observed Crusader, no invented winner, and no named strategy when the evidence is insufficient. Raw frame rows and provenance remain available behind disclosures.
-
-Player profiles no longer present zero-sample placeholders as established tendencies. Timeline controls are compact, the duplicate series legend is removed, and desktop/mobile reports retain the strategy summary above technical evidence.
+The current web report covers the full 15:33.3 replay, with report evidence through frame 56003; the telemetry complete event records final frame 56004. The full v47 production manifest verifies video/audio/subtitle evidence, BT.709 metadata, and 933.4 seconds. The v48 review video passed technical verification and was inspected separately from the live web report. Deterministic coaching remains available when Ollama interpretation fails.
 
 ## Exact verification
 
-From `scripts/replay_analyzer`:
+- Zero Hour Release build: successful.
+- v47 production manifest: video, audio, subtitles, BT.709, 933.4 seconds.
+- v48 review video: `C:\Users\Leex279\Documents\GitHub\GeneralsGameCode\.tmp\replay-analyzer-review\commented-cast-v48-normal-color-battle-safe-full-match.mp4`.
+- Video suite: `158 passed, 1 skipped`.
+- Packaged scouting test: passed.
+- Live browser review: completed against the current web report.
+- Broad Python full-suite run: in progress; no new aggregate result is claimed. Last verified baseline (2026-08-23): `3191 passed, 16 skipped`.
 
-```powershell
-uv run --no-sync --project . pytest tests --ignore=tests\browser --ignore=tests\watching\test_ingress_contract.py -q
-```
+## Ollama verification
 
-Result: `3191 passed, 16 skipped in 1087.75s`.
+- 27B: timeout.
+- 4B: invalid response envelope.
+- 9B: schema-validation failure.
 
-The excluded `tests/watching/test_ingress_contract.py` is a separate untracked user file and was neither edited nor committed by this branch.
+All three probes failed closed and retained the deterministic evidence-backed fallback. No live Ollama prose is treated as verified product evidence.
 
-```powershell
-uv run --no-sync --project . ruff check src tests --exclude tests\watching\test_ingress_contract.py
-uv run --no-sync --project . mypy --strict src\generals_replay_analyzer
-uv run --no-sync --project . pytest tests\browser -q
-```
+## Retained production evidence
 
-Results:
-
-- Ruff: `All checks passed!`
-- Mypy: `Success: no issues found in 161 source files`
-- Installed-wheel browser matrix: `139 passed in 137.45s`
-
-The browser matrix covers packaged-wheel isolation, same-origin/offline behavior, keyboard workflows, Axe scans, desktop/tablet/mobile reflow, populated reports, maps, player profiles, comparisons, and the pinned one-replay journey.
-
-## Frozen wheel and retained artifacts
-
-- Application wheel SHA-256: `7ac55932f1253a6cdd0c078d53c508c5b121b61badfc86445aacb371076ca558`
-- Installed module class: isolated wheel environment
-- Retained artifact folder: `replay-analyzer-artifacts/2026-08-23-task9-7ac55932f125/`
-- Run manifest: `run-manifest.json`
-- Primary proof: `strategy-first-one-replay--desktop.png`
-  - SHA-256: `6060de838532d4da1e774794118a2696755d513f9400c230a602a7e7618eea28`
-- Mobile report: `report--mobile.png`
-  - SHA-256: `d733b934147ae4f632effbfe8ed0ac25d0689e360e4e3354be63c3d9c13b3c3c`
-- Honest one-match profile: `player-profile--desktop.png`
-  - SHA-256: `bd0a73d33cac216d92ba41705fd8157815bb5f77520e55b30d4ff3b71320b075`
-
-The artifact folder is intentionally ignored by Git; the manifest records SHA-256 and byte size for all 38 release artifacts.
-
-## Launch
-
-```powershell
-cd scripts\replay_analyzer
-uv run --no-sync --project . replay-analyzer web --host 127.0.0.1 --port 8765
-```
-
-Open `http://127.0.0.1:8765/replays`. New replay analysis uses the watched-folder import journey and an external worker process.
+- v47 production manifest: `C:\gra-prod-20260825-status15\test_configured_production_imp0\p\video-runs\2174509c-d38b-4e3d-85a8-b348f97ebdb4\video-manifest-v1.json`.
+- v48 review video: `C:\Users\Leex279\Documents\GitHub\GeneralsGameCode\.tmp\replay-analyzer-review\commented-cast-v48-normal-color-battle-safe-full-match.mp4`.
+- Full replay report evidence: 15:33.3 / frame 56003; telemetry complete event final frame 56004.
+- Production media duration: 933.4 seconds, BT.709.
 
 ## Explicit limits
 
-- The pinned replay proof is partial at the snapshot-frame-100 CRC mismatch and stops at playback frame 108. It is not a full-match result and does not establish midgame, late-game, winner, or recurring player tendencies.
-- Ollama is unavailable in this environment. The deterministic evidence-backed coaching projection works without it; live LLM commentary was not verified.
-- CMake 4.2.1 and Visual Studio Community are installed, but Win32/VC6/MinGW engine builds and replay non-interference were not rerun for this product checkpoint. The worktree contains five unrelated protected engine edits, so compiling them would not prove the isolated web-product change.
-- `cl`, `gcc`, `g++`, `mingw32-make`, and `msdev` were not available on the current shell PATH. VC6 and MinGW retail/toolchain validation remain unverified here.
+- VC6 and MinGW builds, and retail replay non-interference, remain unverified.
+- Protected unrelated engine edits remain in the worktree and are outside this product checkpoint.
+- The protected browser fixture and telemetry-import test blocker remain untouched and are not branch-owned completion evidence.
