@@ -42,6 +42,16 @@ def test_scouting_workspace_has_a_first_class_empty_state() -> None:
     assert "No recurring strategy is claimed yet" in response.text
 
 
+def test_scouting_empty_state_offers_a_direct_import_next_step() -> None:
+    """Empty scouting should lead directly to the action that creates evidence."""
+    with _empty_client() as client:
+        response = client.get("/scouting", headers={"host": "localhost", "accept": "text/html"})
+
+    assert response.status_code == 200
+    assert 'href="/imports/dialog"' in response.text
+    assert ">Import replay<" in response.text
+
+
 def _profile_client(port: object) -> TestClient:
     app = FastAPI()
     app.include_router(router)

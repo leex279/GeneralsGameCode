@@ -21,7 +21,8 @@
   <span class="eyebrow">No dossier available</span>
   <h2 id="scouting-empty-title">Analyze more replays to build an opponent game plan</h2>
   <p>No recurring strategy is claimed yet. Import replays with stable player identities, then return here for evidence-backed preparation.</p>
-  <a class="button button-primary" href="/replays">Open replay library</a>
+  {# TheSuperHackers @feature Leex 25/08/2026 Make the evidence-creating next step immediate from an empty scouting workspace. (#TBD) #}
+  <div class="page-actions"><a class="button button-primary" href="/imports/dialog">Import replay</a><a class="button" href="/replays">Open replay library</a></div>
 </section>
 {% elif not view.primary_opening %}
 <section class="workspace-panel scouting-empty" aria-labelledby="scouting-waiting-title">
