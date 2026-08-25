@@ -903,6 +903,38 @@ def test_listed_scene_window_resolves_against_authoritative_telemetry(tmp_path: 
         service.get_scene(MapSceneReadQuery(ids["replay"], ids["report"], 0, 121))
 
 
+def test_scene_index_uses_authority_without_full_scene_hydration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Break caught: hydrating every selected scene just to advertise its authoritative frame window.
+    service, ids = _seed_query_service(tmp_path)
+    with service._session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        assert replay is not None
+        session.add(
+            Report(
+                public_id=ids["report"],
+                replay_id=replay.id,
+                report_version="replay-report-v1",
+                input_digest="1" * 64,
+                cache_key="2" * 64,
+                report_json={},
+                created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    def fail_full_scene_hydration(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("list_scenes must not hydrate a full scene")
+
+    monkeypatch.setattr(service, "_get_scene", fail_full_scene_hydration)
+
+    page = thaw_canonical(service.list_scenes(MapSceneIndexReadQuery()).payload)
+
+    assert isinstance(page, dict)
+    assert page["items"][0]["frame_window"] == {"frame_start": 0, "frame_end": 120}
+
+
 def test_scene_index_lists_only_replay_wide_map_authority_reports(tmp_path: Path) -> None:
     service, ids = _seed_query_service(tmp_path)
     with service.session_factory() as session:

@@ -470,6 +470,16 @@ class MapSceneQueryService:
             raise MapSceneContractError("selected telemetry has no manifest evidence")
         return replay, map_row, parser, telemetry, document, frozenset(report_evidence)
 
+    # TheSuperHackers @performance Leex 25/08/2026 Validate index authority without hydrating a full map scene. (#TBD)
+    def _index_authority(
+        self, session: Session, query: MapSceneReadQuery, graph: Any
+    ) -> dict[str, int]:
+        replay, map_row, parser, telemetry, _, _ = self._authority(session, query, graph)
+        manifest = self._manifest_evidence(session, telemetry)
+        self._projection(session, map_row, manifest)
+        self._player_map(session, replay, parser, telemetry)
+        return {"frame_start": 0, "frame_end": self._available_frame_end(replay, telemetry)}
+
     @staticmethod
     def _manifest_evidence(session: Session, telemetry: TelemetryRun) -> EvidenceItem:
         rows = tuple(
@@ -1341,19 +1351,8 @@ class MapSceneQueryService:
                     "selected map index candidate fixed report is unresolved"
                 ) from error
             try:
-                scene = _mapping(
-                    _thaw(
-                        self._get_scene(
-                            scene_query,
-                            graph,
-                            canonical_index_window=True,
-                        ).payload
-                    ),
-                    "canonical map scene",
-                )
-                frame_window = _mapping(
-                    scene.get("available_frame_window"), "available frame window"
-                )
+                with self._session_factory() as session:
+                    frame_window = self._index_authority(session, scene_query, graph)
             except (MapSceneContractError, ValueError) as error:
                 raise MapSceneContractError(
                     "selected map index candidate scene is unresolved"
