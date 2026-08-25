@@ -231,6 +231,14 @@ def test_unavailable_claim_preserves_reason_and_sorted_public_citations(public_i
     assert bundle.unknown_or_missing == ("missing_income",)
 
 
+def test_partial_claim_is_explicitly_listed_as_unknown_or_missing(public_ids: tuple[str, ...]) -> None:
+    bundle = _bundle(
+        public_ids,
+        (_claim(public_ids[0], claim_id="incomplete_income", quality="partial", quality_reason="missing_terminal"),),
+    )
+    assert bundle.unknown_or_missing == ("incomplete_income",)
+
+
 @pytest.mark.parametrize(
     "changes",
     [

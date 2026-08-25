@@ -546,7 +546,8 @@ class EvidenceBundle:
             type(item) is not str for item in self.unknown_or_missing
         ):
             raise EvidenceBundleError("invalid_bundle_metadata")
-        expected_missing = tuple(sorted(claim.claim_id for claim in self.claims if claim.quality == "unavailable"))
+        # TheSuperHackers @fix Leex 25/08/2026 Expose partial evidence gaps to the provider as explicit unknowns. (#TBD)
+        expected_missing = tuple(sorted(claim.claim_id for claim in self.claims if claim.quality != "complete"))
         if self.unknown_or_missing != expected_missing:
             raise EvidenceBundleError("invalid_bundle_metadata")
         if type(self.canonical_json) is not bytes or type(self.digest) is not str:
@@ -609,7 +610,7 @@ def build_evidence_bundle(
     if len(set(identities)) != len(identities):
         raise EvidenceBundleError("duplicate_claim")
     ordered = tuple(sorted(claims, key=lambda claim: (claim.kind, claim.claim_id)))
-    missing = tuple(sorted(claim.claim_id for claim in ordered if claim.quality == "unavailable"))
+    missing = tuple(sorted(claim.claim_id for claim in ordered if claim.quality != "complete"))
     document = {
         "schema_version": EVIDENCE_BUNDLE_VERSION,
         "replay_public_id": replay_public_id,
