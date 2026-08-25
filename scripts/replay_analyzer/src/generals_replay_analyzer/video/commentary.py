@@ -490,6 +490,7 @@ class CommentaryPlanService:
             occupied_frames.add(anchored.end_frame)
         events.sort(key=lambda item: (item.start_frame, item.event_id))
         events = self._keep_speakable_events(events, camera)
+        events = self._ensure_terminal_exchange(events, camera, horizon)
         intro_latest_end = events[0].start_frame - 1 if events else horizon
         if intro_latest_end < 0:
             raise CommentaryPlanContractError("commentary has no frame window for its match introduction")
@@ -514,6 +515,63 @@ class CommentaryPlanService:
             selected.append(event)
             next_start = event.start_frame
         return list(reversed(selected))
+
+    @staticmethod
+    def _ensure_terminal_exchange(
+        events: list[CommentaryEventV1], camera: CameraPlanV1, horizon: int
+    ) -> list[CommentaryEventV1]:
+        logic_hz = camera.authority.logic_frames_per_second
+        if horizon <= logic_hz * 10 or (
+            events and events[-1].start_frame >= horizon - logic_hz * 30
+        ):
+            return events
+        target_start = horizon - logic_hz * 25
+        segment = next(
+            (
+                item
+                for item in reversed(camera.segments)
+                if item.focus_kind == "damage"
+                and item.evidence
+                and item.start_frame <= target_start <= item.end_frame
+            ),
+            None,
+        )
+        if segment is None:
+            return events
+        start_frame = max(
+            segment.start_frame,
+            target_start,
+            max(item.frame_end for item in segment.evidence) + 1,
+            0 if not events else events[-1].latest_end_frame + 1,
+        )
+        text = "A late confirmed exchange sets up the closing moments."
+        if segment.end_frame - start_frame + 1 < _minimum_speech_frames(text, logic_hz):
+            return events
+        evidence_ids = ",".join(item.evidence_public_id for item in segment.evidence)
+        event_id = str(
+            uuid5(
+                _NAMESPACE,
+                f"{camera.authority.replay_public_id}:{camera.authority.report_public_id}:terminal-exchange:{start_frame}:{segment.end_frame}:{evidence_ids}",
+            )
+        )
+        # TheSuperHackers @feature Leex 25/08/2026 Close long casts with a late evidence-cited battle call inside the production silence budget. (#TBD)
+        return [
+            *events,
+            CommentaryEventV1(
+                event_id=event_id,
+                start_frame=start_frame,
+                latest_end_frame=segment.end_frame,
+                text=text,
+                subtitle_text=text,
+                role="outro",
+                player_public_ids=(),
+                strategy_identity=None,
+                evidence=segment.evidence,
+                confidence_tier=_tier(segment.evidence),
+                camera_segment_id=segment.segment_id,
+                template_version=_TEMPLATE_VERSION,
+            ),
+        ]
 
     @staticmethod
     def _intro_event(

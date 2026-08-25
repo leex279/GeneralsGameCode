@@ -286,6 +286,55 @@ def test_commentary_speech_window_never_crosses_its_camera_segment_cut() -> None
     assert strategy.latest_end_frame == 44
 
 
+def test_long_cast_adds_cited_late_exchange_inside_terminal_silence_budget() -> None:
+    graph = _report()
+    document = replace(
+        graph.replay_wide.document,
+        observed=tuple(
+            value
+            for value in graph.replay_wide.document.observed
+            if value.claim_id in ("map.start", "combat.engagement")
+        ),
+    )
+    report = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    base = _camera(3_600).segments[0].model_copy(update={"end_frame": 2_499})
+    late = CameraSegmentV1(
+        segment_id="60000000-0000-4000-8000-000000000013",
+        start_frame=2_500,
+        end_frame=3_600,
+        target_x=100.0,
+        target_y=100.0,
+        target_z=0.0,
+        zoom=1.05,
+        pitch=-45.0,
+        yaw=0.0,
+        transition="ease",
+        transition_frames=30,
+        focus_kind="damage",
+        label="Damage location",
+        evidence=(
+            EvidenceCitationV1(
+                evidence_public_id=ENGAGEMENT_EVIDENCE,
+                tier="observed",
+                frame_start=2_500,
+                frame_end=2_500,
+                support_role="event_timing",
+                observed_frame=2_500,
+            ),
+        ),
+    )
+    camera = CameraPlanV1(authority=_authority(3_600), segments=(base, late))
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    terminal = plan.events[-1]
+    assert terminal.role == "outro"
+    assert terminal.start_frame == 2_850
+    assert terminal.latest_end_frame == 3_600
+    assert terminal.camera_segment_id == late.segment_id
+    assert terminal.evidence == late.evidence
+
+
 def test_partial_plan_announces_boundary_without_later_phases_or_winner_and_is_offline_deterministic() -> None:
     service = CommentaryPlanService()
     first = service.create(_report(partial=True), _camera(105))
