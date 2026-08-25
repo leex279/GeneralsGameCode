@@ -396,6 +396,70 @@ def test_strategy_claim_projects_when_its_contract_is_valid_without_derived_tier
     assert [item.strategy_id for item in coaching.strategies] == ["usa_humvee_pressure"]
 
 
+def test_coaching_merges_exact_duplicate_strategy_cards_but_preserves_phase_candidates() -> None:
+    report = _report()
+    strategy_section = next(section for section in report.sections if section.key == "strategy_phases")
+    duplicate = strategy_section.claims[0].model_copy(
+        update={
+            "claim_id": "strategy:usa_humvee_pressure:duplicate",
+            "evidence": (ReportEvidenceReferenceDTO(public_id=METRIC_EVIDENCE, tier="observed"),),
+        }
+    )
+    different_phase = strategy_section.claims[0].model_copy(
+        update={
+            "claim_id": "strategy:usa_humvee_pressure:mid",
+            "raw_value": {"confidence": 0.5, "phase": "mid", "strategy_label": "usa_humvee_pressure"},
+        }
+    )
+    report = report.model_copy(
+        update={
+            "sections": tuple(
+                section.model_copy(update={"claims": (section.claims[0], duplicate, different_phase)})
+                if section.key == "strategy_phases"
+                else section
+                for section in report.sections
+            )
+        }
+    )
+
+    strategies = coaching_view(report, _timeline()).strategies
+
+    assert [(item.strategy_id, item.phase) for item in strategies] == [
+        ("usa_humvee_pressure", "early"),
+        ("usa_humvee_pressure", "mid"),
+    ]
+    assert {item.public_id for item in strategies[0].evidence} == {METRIC_EVIDENCE, STRATEGY_EVIDENCE}
+
+
+def test_coaching_merges_exact_duplicate_build_steps_and_unions_evidence() -> None:
+    report = _report()
+    build_section = next(section for section in report.sections if section.key == "opening_build_order")
+    duplicate = build_section.claims[0].model_copy(
+        update={
+            "claim_id": "feature:build.completed_sequence:duplicate",
+            "evidence": (ReportEvidenceReferenceDTO(public_id=METRIC_EVIDENCE, tier="observed"),),
+        }
+    )
+    report = report.model_copy(
+        update={
+            "sections": tuple(
+                section.model_copy(update={"claims": (section.claims[0], duplicate)})
+                if section.key == "opening_build_order"
+                else section
+                for section in report.sections
+            )
+        }
+    )
+
+    build_order = coaching_view(report, _timeline()).build_order
+
+    assert [(item.frame, item.structure_label) for item in build_order] == [
+        (45, "Power Plant"),
+        (90, "Barracks"),
+    ]
+    assert {item.public_id for item in build_order[0].evidence} == {METRIC_EVIDENCE, BUILD_EVIDENCE}
+
+
 def test_opening_lane_events_cap_displayed_evidence_without_changing_claim_projection() -> None:
     """Bound repeated lane links while preserving the complete claim evidence elsewhere."""
     report = _report()

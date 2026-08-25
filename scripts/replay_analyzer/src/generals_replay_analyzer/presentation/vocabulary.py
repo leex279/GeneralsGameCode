@@ -27,6 +27,14 @@ _GAME_LABELS = MappingProxyType(
         "AmericaStrategyCenter": "Strategy Center",
         "AmericaSupplyCenter": "Supply Center",
         "AmericaVehicleHumvee": "Humvee",
+        # TheSuperHackers @feature Leex 25/08/2026 Expand display-only Zero Hour template vocabulary for observed replay identities. (#TBD)
+        "AirFAmericaFireBase": "Firebase",
+        "AirFAmericaInfantryMissileDefender": "Missile Defender",
+        "AirFAmericaVehicleHumvee": "Humvee",
+        "AirF_AmericaVehicleMedic": "Ambulance",
+        "AmericaVehicleSpyDrone": "Spy Drone",
+        "AmericaVehicleBattleDrone": "Battle Drone",
+        "AmericaVehicleScoutDrone": "Scout Drone",
         "AmericaWarFactory": "War Factory",
         "AirF_AmericaVehicleCombatChinook": "Combat Chinook",
         "ChinaInfantryRedguard": "Red Guard",
@@ -34,13 +42,35 @@ _GAME_LABELS = MappingProxyType(
         "ChinaVehicleHelix": "Helix",
         "ChinaWarFactory": "War Factory",
         "GLAArmsDealer": "Arms Dealer",
+        "GLABarracks": "Barracks",
+        "GLABlackMarket": "Black Market",
+        "GLAInfantryJarmenKell": "Jarmen Kell",
+        "GLAInfantryRebel": "Rebel",
         "GLAInfantryTerrorist": "Terrorist",
+        "GLAInfantryTunnelDefender": "Tunnel Defender",
+        "GLAInfantryWorker": "Worker",
         "GLAPalace": "Palace",
+        "GLAStingerSite": "Stinger Site",
+        "GLASupplyStash": "Supply Stash",
         "GLATunnelNetwork": "Tunnel Network",
+        "GLATankScorpion": "Scorpion",
         "GLAVehicleTechnical": "Technical",
+        "GLAVehicleBattleBus": "Battle Bus",
+        "GLAVehicleCombatBike": "Combat Bike",
+        "GLAVehicleQuadCannon": "Quad Cannon",
+        "GLAVehicleRadarVan": "Radar Van",
+        "GLAVehicleRocketBuggy": "Rocket Buggy",
+        "GLAVehicleScudLauncher": "Scud Launcher",
         "TechOilDerrick": "Oil Derrick",
+        "UpgradeGLACamoNetting": "Camo Netting",
+        "UpgradeInfantryCaptureBuilding": "Capture Building",
     }
 )
+
+_COMPACT_GAME_LABELS = MappingProxyType(
+    {re.sub(r"[_\s]+", "", identity): label for identity, label in _GAME_LABELS.items()}
+)
+_KNOWN_PLAYER_LABELS = frozenset(_GAME_LABELS.values())
 
 # TheSuperHackers @feature Leex 24/08/2026 Name observed science and special-power timing metrics without rewriting engine identities. (#TBD)
 # TheSuperHackers @feature Leex 24/08/2026 Label evidence-backed engagement swing candidates without implying strategic causality. (#TBD)
@@ -130,8 +160,15 @@ def _readable_identity(value: str) -> str:
 def game_label(identity: str) -> str:
     """Return a known Zero Hour label or mark a safely split identity as unknown."""
 
-    known = _GAME_LABELS.get(identity)
-    return known if known is not None else f"{_readable_identity(identity)} (unrecognized)"
+    normalized = identity.strip()
+    known = _GAME_LABELS.get(normalized)
+    if known is not None:
+        return known
+    if normalized in _KNOWN_PLAYER_LABELS:
+        return normalized
+    # TheSuperHackers @fix Leex 25/08/2026 Recognize known report aliases after safe engine-name splitting without accepting unknown identities. (#TBD)
+    compact_known = _COMPACT_GAME_LABELS.get(re.sub(r"[_\s]+", "", normalized))
+    return compact_known if compact_known is not None else f"{_readable_identity(normalized)} (unrecognized)"
 
 
 # TheSuperHackers @fix Leex 24/08/2026 Keep unresolved replay slot codes out of player-facing faction labels. (#TBD)

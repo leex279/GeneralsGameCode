@@ -1,4 +1,14 @@
 {% extends "base.html" %}
+{# TheSuperHackers @feature Leex 25/08/2026 Keep coaching provenance one click away without flooding the primary analysis with duplicate evidence links. (#TBD) #}
+{% macro primary_evidence(items, label, report_id, aria_label="") -%}
+  {% if items %}
+    {% set evidence = items[0] %}
+    <div class="evidence-links">
+      <a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report_id }}"{% if aria_label %} aria-label="{{ aria_label }}"{% endif %}>{{ label }}</a>
+      {% if items|length > 1 %}<span class="evidence-count">{{ items|length }} cited records</span>{% endif %}
+    </div>
+  {% endif %}
+{%- endmacro %}
 {% block content %}
 {% if report_view %}
   {% set report = report_view.report %}
@@ -59,7 +69,7 @@
         {% for highlight in coaching.highlights %}
           <article class="insight-card insight-card-{{ highlight.layout }}" data-signal-id="{{ highlight.signal_id }}">
             <span>{{ highlight.title }}</span><strong class="report-claim-value">{{ highlight.value }}</strong><small>{{ highlight.explanation }}</small>
-            <div class="evidence-links">{% for evidence in highlight.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">View {{ evidence.tier }} evidence</a>{% endfor %}</div>
+            {{ primary_evidence(highlight.evidence, "View " ~ highlight.evidence[0].tier ~ " evidence" if highlight.evidence else "", report.fixed_report.report_public_id) }}
           </article>
         {% endfor %}
       </div>
@@ -70,7 +80,7 @@
         {% for read in coaching.signal_reads %}
           <article class="signal-read">
             <span class="eyebrow">{{ read.title }}</span><p>{{ read.statement }}</p>
-            <div class="evidence-links">{% for evidence in read.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
+            {{ primary_evidence(read.evidence, "Review " ~ read.evidence[0].tier ~ " evidence" if read.evidence else "", report.fixed_report.report_public_id) }}
           </article>
         {% endfor %}
       </div>
@@ -85,7 +95,7 @@
           <article class="strategy-card">
             <span>{{ strategy.phase_label }} · {{ strategy.quality }}</span><h3>{{ strategy.title }}</h3><p>{{ strategy.player_label }}{% if strategy.faction_label %} · {{ strategy.faction_label }}{% endif %}</p>
             {% if strategy.evidence_score is not none %}<small>Rule evidence score {{ "%.2f"|format(strategy.evidence_score) }} — transparent rule match, not a win probability.</small>{% endif %}
-            <div class="evidence-links">{% for evidence in strategy.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Why this strategy?</a>{% endfor %}</div>
+            {{ primary_evidence(strategy.evidence, "Why this strategy?", report.fixed_report.report_public_id) }}
           </article>
         {% endfor %}
       </div>
@@ -108,7 +118,7 @@
               {% for event in lane.events %}
                 <li>
                   <span class="lane-event-time" data-frame="{{ event.frame }}">{{ event.time_label }}</span><strong>{{ event.title }}</strong>
-                  <div class="evidence-links">{% for evidence in event.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}" aria-label="Review {{ evidence.tier }} evidence for {{ event.title }}">Evidence</a>{% endfor %}</div>
+                  {{ primary_evidence(event.evidence, "Evidence", report.fixed_report.report_public_id, "Review " ~ event.evidence[0].tier ~ " evidence for " ~ event.title if event.evidence else "") }}
                 </li>
               {% endfor %}
             </ol>
@@ -129,7 +139,7 @@
             <div class="key-moment-time"><time>{{ moment.time_label }}</time><span>{{ moment.category_label }}</span></div>
             <div class="key-moment-content"><h3>{{ moment.title }}</h3><p>{{ moment.review_prompt }}</p></div>
             <!-- TheSuperHackers @feature Leex 25/08/2026 Deep-link each coaching checkpoint into its bounded battlefield evidence window. (#TBD) -->
-            <div class="evidence-links"><a href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map?frame_start={{ moment.map_frame_start }}&amp;frame_end={{ moment.map_frame_end }}">Open on battlefield</a>{% for evidence in moment.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
+            <div class="evidence-links"><a href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map?frame_start={{ moment.map_frame_start }}&amp;frame_end={{ moment.map_frame_end }}">Open on battlefield</a>{% if moment.evidence %}{% set evidence = moment.evidence[0] %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review cited evidence</a>{% if moment.evidence|length > 1 %}<span class="evidence-count">{{ moment.evidence|length }} cited records</span>{% endif %}{% endif %}</div>
           </li>
         {% endfor %}
       </ol>
@@ -140,7 +150,7 @@
     <section id="worth-reviewing" class="workspace-panel" aria-labelledby="worth-reviewing-title">
       <div class="section-heading"><div><span class="eyebrow">Evidence-backed preparation</span><h2 id="worth-reviewing-title">Coaching plan</h2></div></div>
       <p>Prioritized review questions from transparent strategy rules. These are preparation prompts, not predicted outcomes.</p>
-      <ol class="review-prompt-list">{% for prompt in coaching.prompts %}<li><p>{{ prompt.text }}</p>{% for evidence in prompt.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Open supporting evidence</a>{% endfor %}</li>{% endfor %}</ol>
+      <ol class="review-prompt-list">{% for prompt in coaching.prompts %}<li><p>{{ prompt.text }}</p>{{ primary_evidence(prompt.evidence, "Open supporting evidence", report.fixed_report.report_public_id) }}</li>{% endfor %}</ol>
     </section>
   {% endif %}
 

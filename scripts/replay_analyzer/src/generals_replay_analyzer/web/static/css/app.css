@@ -156,6 +156,8 @@ h3 { font-size: 1.25rem; margin-bottom: var(--cc-space-1); }
 .strategy-card p, .strategy-card small { color: var(--cc-muted); }
 .evidence-links { display: flex; flex-wrap: wrap; gap: var(--cc-space-2); margin-top: var(--cc-space-3); }
 .evidence-links a { border-bottom: 1px solid var(--cc-blue); color: var(--cc-cyan); font-family: var(--cc-mono); font-size: 0.72rem; text-decoration: none; }
+/* TheSuperHackers @feature Leex 25/08/2026 Summarize additional citations instead of repeating identical player-facing evidence actions. (#TBD) */
+.evidence-count { align-self: center; color: var(--cc-muted); font-family: var(--cc-mono); font-size: 0.68rem; }
 .review-prompt-list { list-style: none; margin: 0; padding: 0 var(--cc-space-4) var(--cc-space-4); }
 .review-prompt-list li { border-left: 3px solid var(--cc-warning); border-top: 1px solid var(--cc-rule); display: grid; gap: var(--cc-space-2); padding: var(--cc-space-3) var(--cc-space-4); }
 .review-prompt-list p { margin: 0; }

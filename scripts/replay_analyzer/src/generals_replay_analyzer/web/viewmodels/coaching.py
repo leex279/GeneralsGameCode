@@ -190,6 +190,17 @@ def _claim_evidence(claim: ReportClaimDTO) -> tuple[ReportEvidenceReferenceDTO, 
     return tuple(sorted(claim.evidence, key=lambda item: (item.tier, item.public_id)))
 
 
+# TheSuperHackers @bugfix Leex 25/08/2026 Merge evidence only when coaching facts are semantically identical. (#TBD)
+def _merge_evidence(
+    first: tuple[ReportEvidenceReferenceDTO, ...],
+    second: tuple[ReportEvidenceReferenceDTO, ...],
+) -> tuple[ReportEvidenceReferenceDTO, ...]:
+    """Union evidence references in stable order for semantically merged views."""
+
+    merged = {(item.tier, item.public_id): item for item in (*first, *second)}
+    return tuple(sorted(merged.values(), key=lambda item: (item.tier, item.public_id)))
+
+
 def _available_claims(report: ReplayReportDTO, section_key: str) -> tuple[ReportClaimDTO, ...]:
     section = next(section for section in report.sections if section.key == section_key)
     return tuple(claim for claim in section.claims if claim.availability in ("available", "partial"))
@@ -283,7 +294,7 @@ def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
     player = _selected_player(report)
     player_label = "Replay" if player is None else player.display_name
     faction = None if player is None or player.faction is None else game_label(player.faction)
-    output: list[PlayerStrategyView] = []
+    output: dict[tuple[str, str, str, str | None], PlayerStrategyView] = {}
     for claim in _available_claims(report, "strategy_phases"):
         if not _claim_inside_horizon(claim, horizon):
             continue
@@ -298,8 +309,7 @@ def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
         score = raw.get("confidence")
         evidence_score = float(cast(int | float, score)) if type(score) in (int, float) else None
         phase = cast(str, raw["phase"])
-        output.append(
-            PlayerStrategyView(
+        view = PlayerStrategyView(
                 strategy_id=claim.label,
                 title=strategy_label(claim.label),
                 player_label=player_label,
@@ -310,11 +320,25 @@ def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
                 evidence_score=evidence_score,
                 evidence=_claim_evidence(claim),
             )
-        )
+        key = (view.strategy_id, view.phase, view.player_label, view.faction_label)
+        prior = output.get(key)
+        if prior is None:
+            output[key] = view
+        else:
+            output[key] = prior.model_copy(
+                update={
+                    "quality": "available" if "available" in (prior.quality, view.quality) else "partial",
+                    "evidence_score": max(
+                        (score for score in (prior.evidence_score, view.evidence_score) if score is not None),
+                        default=None,
+                    ),
+                    "evidence": _merge_evidence(prior.evidence, view.evidence),
+                }
+            )
     slot = 0 if player is None else player.slot
     return tuple(
         sorted(
-            output,
+            output.values(),
             key=lambda item: (slot, _PHASE_RANK[item.phase], -(item.evidence_score or 0.0), item.strategy_id),
         )
     )
@@ -329,7 +353,7 @@ def _build_order(
         return ()
     player = _selected_player(report)
     player_label = "Replay" if player is None else player.display_name
-    output: list[BuildOrderStepView] = []
+    output: dict[tuple[int, str, str], BuildOrderStepView] = {}
     for claim in _available_claims(report, "opening_build_order"):
         if claim.label != "build.completed_sequence" or not claim.claim_id.startswith(
             "feature:build.completed_sequence:"
@@ -348,16 +372,19 @@ def _build_order(
             frame = cast(int, step["frame"])
             if frame < 0 or frame > horizon.frame_end:
                 continue
-            output.append(
-                BuildOrderStepView(
+            view = BuildOrderStepView(
                     frame=frame,
                     time_label=format_frame(frame, frames_per_second=frames_per_second),
                     player_label=player_label,
                     structure_label=game_label(cast(str, step["template_name"])),
                     evidence=_claim_evidence(claim),
                 )
+            key = (view.frame, view.player_label, view.structure_label)
+            prior = output.get(key)
+            output[key] = view if prior is None else prior.model_copy(
+                update={"evidence": _merge_evidence(prior.evidence, view.evidence)}
             )
-    return tuple(sorted(output, key=lambda item: (item.frame, item.player_label, item.structure_label))[:24])
+    return tuple(sorted(output.values(), key=lambda item: (item.frame, item.player_label, item.structure_label))[:24])
 
 
 # TheSuperHackers @bugfix Leex 25/08/2026 Keep dense event summaries useful without rendering the full match log. (#TBD)

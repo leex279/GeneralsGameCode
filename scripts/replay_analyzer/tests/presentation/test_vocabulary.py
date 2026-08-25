@@ -16,6 +16,47 @@ def test_known_game_identities_use_zero_hour_player_vocabulary() -> None:
     assert game_label("GLAArmsDealer") == "Arms Dealer"
 
 
+def test_observed_zero_hour_templates_use_player_vocabulary() -> None:
+    expected = {
+        "GLAInfantryJarmenKell": "Jarmen Kell",
+        "GLAInfantryRebel": "Rebel",
+        "GLAInfantryTunnelDefender": "Tunnel Defender",
+        "GLAInfantryWorker": "Worker",
+        "GLATankScorpion": "Scorpion",
+        "GLAVehicleBattleBus": "Battle Bus",
+        "GLAVehicleCombatBike": "Combat Bike",
+        "GLAVehicleQuadCannon": "Quad Cannon",
+        "GLAVehicleRadarVan": "Radar Van",
+        "GLAVehicleRocketBuggy": "Rocket Buggy",
+        "GLAVehicleScudLauncher": "Scud Launcher",
+        "AirFAmericaVehicleHumvee": "Humvee",
+        "AirFAmericaInfantryMissileDefender": "Missile Defender",
+        "AirFAmericaFireBase": "Firebase",
+        "AmericaVehicleSpyDrone": "Spy Drone",
+        "AmericaVehicleBattleDrone": "Battle Drone",
+        "GLAStingerSite": "Stinger Site",
+        "GLAArmsDealer": "Arms Dealer",
+        "GLABlackMarket": "Black Market",
+    }
+    assert {identity: game_label(identity) for identity in expected} == expected
+
+
+def test_known_split_report_aliases_remain_normal_player_vocabulary() -> None:
+    expected = {
+        "GLA": "GLA",
+        "Air F America Fire Base": "Firebase",
+        "Air F America Infantry Missile Defender": "Missile Defender",
+        "Air F America Vehicle Humvee": "Humvee",
+        "Air F America Vehicle Medic": "Ambulance",
+        "America Vehicle Scout Drone": "Scout Drone",
+        "GLA Barracks": "Barracks",
+        "GLA Supply Stash": "Supply Stash",
+        "Upgrade GLA Camo Netting": "Camo Netting",
+        "Upgrade Infantry Capture Building": "Capture Building",
+    }
+    assert {identity: game_label(identity) for identity in expected} == expected
+
+
 def test_feature_and_reason_codes_are_translated_for_players() -> None:
     assert feature_label("economy.supply_collection_rate") == "Supply income"
     assert reason_label("minimum_sample_not_met") == "More analyzed matches are needed"

@@ -347,6 +347,55 @@ def test_report_page_leads_with_player_reports_and_evidence_backed_highlights() 
         )
 
 
+def test_player_facing_cards_link_one_primary_evidence_record_and_report_the_citation_count() -> None:
+    """Keep provenance available without turning each coaching card into a wall of links."""
+    evidence = tuple(
+        ReportEvidenceReferenceDTO(
+            public_id=f"123e4567-e89b-42d3-a456-4266141741{index:02d}",
+            tier="derived",
+        )
+        for index in range(3)
+    )
+    report = _report()
+    economy = ReportSectionDTO(
+        key="economy",
+        title="Economy",
+        availability=AvailabilityDTO(state="available"),
+        claims=(
+            ReportClaimDTO(
+                **{
+                    **_claim("economy").model_dump(),
+                    "claim_id": "feature:economy.supply_collection_rate:bounded-links",
+                    "label": "economy.supply_collection_rate",
+                    "raw_value": 1_350.0,
+                    "display_value": "1350",
+                    "unit": "credits_per_minute",
+                    "evidence": evidence,
+                    "evidence_total_count": len(evidence),
+                }
+            ),
+        ),
+    )
+    player_report = _replace_report(
+        report,
+        sections=tuple(
+            economy if section.key == "economy" else section for section in report.sections
+        ),
+    )
+
+    with _client(_ReportPort(player_report)) as client:
+        response = client.get(
+            f"/replays/{REPLAY_ID}/reports/{REPORT_ID}",
+            headers={"host": "localhost", "accept": "text/html"},
+        )
+
+    assert response.status_code == 200
+    player_facing = response.text.split('<details id="technical-evidence"', maxsplit=1)[0]
+    assert player_facing.count("View derived evidence") == 1
+    assert player_facing.count("Review derived evidence") == 1
+    assert player_facing.count("3 cited records") == 2
+
+
 def test_report_marks_long_form_highlights_for_readable_full_width_presentation() -> None:
     """Catch long composition narratives rendering with oversized compact-metric typography."""
     report = _report()
