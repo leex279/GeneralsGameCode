@@ -3,6 +3,7 @@
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/ReplayEconomy.h"
+#include "Common/ReplayAnalyzerOptimization.h"
 
 #include "Common/Money.h"
 #include "Common/Player.h"

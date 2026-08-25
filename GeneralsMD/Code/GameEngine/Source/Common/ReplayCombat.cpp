@@ -14,6 +14,7 @@
 
 #define DEFINE_DEATH_NAMES
 #include "Common/ReplayCombat.h"
+#include "Common/ReplayAnalyzerOptimization.h"
 
 #include "Common/Player.h"
 #include "Common/PlayerList.h"

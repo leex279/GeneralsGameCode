@@ -13,6 +13,7 @@
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/ReplayVisibilitySampler.h"
+#include "Common/ReplayAnalyzerOptimization.h"
 
 #include "Common/Player.h"
 #include "Common/PlayerList.h"

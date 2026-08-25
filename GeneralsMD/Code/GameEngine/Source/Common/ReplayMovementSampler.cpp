@@ -13,6 +13,7 @@
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/ReplayMovementSampler.h"
+#include "Common/ReplayAnalyzerOptimization.h"
 
 #include "Common/KindOf.h"
 #include "Common/MessageStream.h"

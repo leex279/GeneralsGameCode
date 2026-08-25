@@ -1,6 +1,7 @@
 """Opt-in integration gate against the modern Zero Hour replay observer."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -216,6 +217,11 @@ def _runtime_environment(repository_root: Path) -> dict[str, str]:
     return environment
 
 
+def _stable_engine_output(output: str) -> str:
+    """Retain replay progress while excluding its intentionally wall-clock elapsed field."""
+    return re.sub(r"Elapsed Time: \d{2}:\d{2}", "Elapsed Time: <wall-clock>", output)
+
+
 def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
     tmp_path: Path,
     repository_root: Path,
@@ -275,7 +281,7 @@ def test_modern_engine_dump_matches_the_pinned_replay_byte_for_byte(
 
     if (
         completed.returncode != baseline.returncode
-        or completed.stdout != baseline.stdout
+        or _stable_engine_output(completed.stdout) != _stable_engine_output(baseline.stdout)
         or completed.stderr != baseline.stderr
     ):
         pytest.fail(

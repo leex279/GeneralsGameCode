@@ -3,6 +3,7 @@
 #if defined(RTS_REPLAY_ANALYZER) && !defined(IS_VS6_BUILD)
 
 #include "Common/ReplayTelemetry.h"
+#include "Common/ReplayAnalyzerOptimization.h"
 
 #include "Common/GlobalData.h"
 #include "Common/ReplayCombat.h"

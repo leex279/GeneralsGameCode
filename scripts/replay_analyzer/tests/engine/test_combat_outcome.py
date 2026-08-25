@@ -1,5 +1,7 @@
 """Real-engine contracts for passive combat and authoritative terminal observations."""
 
+import hashlib
+import json
 import os
 import subprocess
 from collections import Counter
@@ -7,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from generals_replay_analyzer.importing.telemetry_import import bridge_v2_damage_victim_template_name
 from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
@@ -25,6 +28,8 @@ def _environment(repository_root: Path) -> dict[str, str]:
 
 def _run(executable: Path, replay: Path, trace: Path, repository_root: Path) -> subprocess.CompletedProcess[str]:
     try:
+        # Combat/outcome coverage does not need the production-density spatial stream; one sample every two minutes
+        # avoids serializing roughly 160,000 unrelated entity_sample records in each focused integration run.
         return subprocess.run(
             [
                 str(executable),
@@ -32,6 +37,8 @@ def _run(executable: Path, replay: Path, trace: Path, repository_root: Path) -> 
                 "-noaudio",
                 "-replay",
                 str(replay),
+                "-telemetry-movement-frames",
+                "3600",
                 "-telemetry",
                 str(trace),
                 "-telemetry-run-id",
@@ -41,7 +48,7 @@ def _run(executable: Path, replay: Path, trace: Path, repository_root: Path) -> 
             env=_environment(repository_root),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=900,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
@@ -60,7 +67,43 @@ def _write_crc_stripped_derivative(source: Path, destination: Path) -> None:
     destination.write_bytes(b"".join(pieces))
 
 
-def test_natural_crc_boundary_has_only_unknown_authoritative_outcome(
+def _load_engine_trace(trace: Path):
+    """Apply the one supported producer bridge before strict trace validation."""
+    source_trace_sha256, victim_templates = bridge_v2_damage_victim_template_name(trace)
+    return tuple(iter_validated_trace(trace)), source_trace_sha256, victim_templates
+
+
+def test_public_bridge_prepares_the_known_victim_template_extension(tmp_path: Path) -> None:
+    """Exercise the narrow producer bridge with a self-contained synthetic trace."""
+    trace = tmp_path / "victim-template.ndjson"
+    damage = {
+        "schema_version": 2,
+        "event_type": "damage_applied",
+        "sequence": 7,
+        "payload": {"victim_template_name": "ChinaTankBattleMaster"},
+    }
+    damage_line = json.dumps(damage, separators=(",", ":")).encode() + b"\n"
+    source_trace_sha256 = hashlib.sha256(damage_line).hexdigest()
+    complete = {
+        "schema_version": 2,
+        "event_type": "complete",
+        "sequence": 8,
+        "payload": {"trace_sha256": source_trace_sha256},
+    }
+    trace.write_bytes(damage_line + json.dumps(complete, separators=(",", ":")).encode() + b"\n")
+
+    bridged_source_sha256, victim_templates = bridge_v2_damage_victim_template_name(trace)
+
+    prepared_lines = trace.read_bytes().splitlines(keepends=True)
+    prepared_damage = json.loads(prepared_lines[0])
+    prepared_complete = json.loads(prepared_lines[1])
+    assert bridged_source_sha256 == source_trace_sha256
+    assert victim_templates == {7: "ChinaTankBattleMaster"}
+    assert "victim_template_name" not in prepared_damage["payload"]
+    assert prepared_complete["payload"]["trace_sha256"] == hashlib.sha256(prepared_lines[0]).hexdigest()
+
+
+def test_natural_replay_reaches_its_authoritative_clean_outcome(
     tmp_path: Path,
     repository_root: Path,
     zero_hour_runtime_executable: Path,
@@ -70,24 +113,23 @@ def test_natural_crc_boundary_has_only_unknown_authoritative_outcome(
     completed = _run(zero_hour_runtime_executable, pinned_replay, trace, repository_root)
 
     assert trace.is_file(), completed.stdout[-2000:] + completed.stderr[-2000:]
-    records = tuple(iter_validated_trace(trace))
+    records, _, _ = _load_engine_trace(trace)
     counts = Counter(record.event_type for record in records)
     assert counts["match_outcome"] == 1
-    assert counts["damage_applied"] == 0
-    assert counts["healing_applied"] == 0
-    assert counts["veterancy_changed"] == 0
+    assert counts["damage_applied"] > 0
+    assert counts["healing_applied"] > 0
+    assert counts["veterancy_changed"] > 0
     outcome = records[-2]
     complete = records[-1]
     assert outcome.event_type == "match_outcome"
-    assert outcome.payload.status == "unknown"
-    assert outcome.payload.winner_player_indices == []
-    assert outcome.payload.loser_player_indices == []
-    assert outcome.payload.terminal_reason == "crc_mismatch"
-    assert complete.payload.final_frame == 108
-    assert complete.payload.crc_mismatch is True
-    # The paired queue attributes the mismatch to its frame-100 snapshot while
-    # playback still closes at the frame-108 command boundary.
-    assert complete.payload.crc_mismatch_frame == outcome.payload.crc_mismatch_frame == 100
+    assert outcome.payload.status == "decided"
+    assert outcome.payload.winner_player_indices == [2]
+    assert outcome.payload.loser_player_indices == [3]
+    assert outcome.payload.terminal_reason == "clean_completion"
+    assert complete.payload.final_frame == 56004
+    assert complete.payload.crc_mismatch is False
+    assert complete.payload.crc_mismatch_frame is outcome.payload.crc_mismatch_frame is None
+    assert complete.payload.clean_shutdown is True
     assert complete.payload.quit_early == outcome.payload.quit_early
     assert complete.payload.replay_header_desync == outcome.payload.replay_header_desync
 
@@ -107,7 +149,7 @@ def test_crc_stripped_derivative_exercises_combat_mechanics_without_outcome_clai
 
     assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
     assert pinned_replay.read_bytes() == original
-    records = tuple(iter_validated_trace(trace))
+    records, _, _ = _load_engine_trace(trace)
     counts = Counter(record.event_type for record in records)
     assert counts["damage_applied"] > 0
     # This disposable derivative contains no authoritative healing or veterancy
@@ -177,6 +219,28 @@ def test_replay_combat_state_is_modern_only_and_retains_no_engine_pointers(repos
     assert "s_state = ReplayCombatState()" in reset
     assert "playerTransitionStack.push_back" in push
     assert "playerTransitionStack.pop_back" in pop
+
+
+def test_replay_observers_enable_scoped_speed_optimization_only_for_modern_msvc(repository_root: Path) -> None:
+    """Keep analyzer observers optimized without changing simulation or legacy compiler flags."""
+    common = repository_root / "GeneralsMD/Code/GameEngine"
+    optimization = (common / "Include/Common/ReplayAnalyzerOptimization.h").read_text(encoding="utf-8")
+    observers = (
+        "ReplayCombat.cpp",
+        "ReplayEconomy.cpp",
+        "ReplayEntityLifecycle.cpp",
+        "ReplayMovementSampler.cpp",
+        "ReplayPartitionSampler.cpp",
+        "ReplayTelemetry.cpp",
+        "ReplayVisibilitySampler.cpp",
+    )
+
+    assert "#if defined(RTS_REPLAY_ANALYZER) && defined(_MSC_VER) && !defined(IS_VS6_BUILD)" in optimization
+    assert '#pragma optimize("gt", on)' in optimization
+    assert "TheSuperHackers @performance" in optimization
+    for observer in observers:
+        source = (common / "Source/Common" / observer).read_text(encoding="utf-8")
+        assert '#include "Common/ReplayAnalyzerOptimization.h"' in source
 
 
 def test_replay_header_and_frozen_player_domain_survive_new_game_reset(repository_root: Path) -> None:

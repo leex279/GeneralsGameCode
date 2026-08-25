@@ -161,7 +161,7 @@ def _trace_line_ending(raw_line: bytes) -> bytes:
 
 
 # TheSuperHackers @fix Leex 25/08/2026 Bridge only the known Zero Hour victim-template producer skew while retaining its observed evidence. (#TBD)
-def _bridge_v2_damage_victim_template_name(trace_path: Path) -> tuple[str | None, dict[int, str | None]]:
+def bridge_v2_damage_victim_template_name(trace_path: Path) -> tuple[str | None, dict[int, str | None]]:
     """Prepare the one known v2 producer extension for the protected strict telemetry reader.
 
     The original trace hash is verified before rewriting the disposable validation copy, and the
@@ -916,7 +916,7 @@ class TelemetryObservationImporter:
                     trace_path = destination
             if trace_path is None:
                 raise ValueError("missing telemetry trace")
-            source_trace_sha256, victim_templates = _bridge_v2_damage_victim_template_name(trace_path)
+            source_trace_sha256, victim_templates = bridge_v2_damage_victim_template_name(trace_path)
             bundle = load_validated_telemetry_bundle(trace_path)
             if str(bundle.manifest.run_id) != attempt.run_id:
                 raise ValueError("telemetry run ID differs from the selected artifact metadata")

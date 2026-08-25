@@ -52,6 +52,14 @@ FramePacer::~FramePacer()
 
 void FramePacer::update()
 {
+	// TheSuperHackers @performance Leex 25/08/2026 Advance headless simulation by one fixed logic frame without wall-clock pacing. (#TBD)
+	if (TheGlobalData != nullptr && TheGlobalData->m_headless)
+	{
+		m_frameRateLimit.reset();
+		m_updateTime = SECONDS_PER_LOGICFRAME_REAL;
+		return;
+	}
+
 	// TheSuperHackers @bugfix xezon 05/08/2025 Re-implements the frame rate limiter
 	// with higher resolution counters to cap the frame rate more accurately to the desired limit.
 	const UnsignedInt maxFps = getActualFramesPerSecondLimit();// allowFpsLimit ? getFramesPerSecondLimit() : RenderFpsPreset::UncappedFpsValue;
