@@ -45,6 +45,10 @@
 
 static const char *BIGFileIdentifier = "BIGF";
 
+#if RTS_ZEROHOUR
+#define STEAM_GENERALS_ASSET_DIRECTORY "ZH_Generals"
+#endif
+
 Win32BIGFileSystem::Win32BIGFileSystem() : ArchiveFileSystem() {
 }
 
@@ -60,13 +64,18 @@ void Win32BIGFileSystem::init() {
 	loadBigFilesFromDirectory("", "*.big");
 
 #if RTS_ZEROHOUR
-    // load original Generals assets
-    AsciiString installPath;
-    GetStringFromGeneralsRegistry("", "InstallPath", installPath );
-    //@todo this will need to be ramped up to a crash for release
-    DEBUG_ASSERTCRASH(!installPath.isEmpty(), ("Be 1337! Go install Generals!"));
-    if (!installPath.isEmpty())
-      loadBigFilesFromDirectory(installPath, "*.big");
+	// load original Generals assets
+	AsciiString installPath;
+	GetStringFromGeneralsRegistry("", "InstallPath", installPath);
+	// TheSuperHackers @bugfix Leex 25/08/2026 Load base Generals archives from the Steam co-install when its legacy registry path is absent. (#TBD)
+	if (installPath.isEmpty()) {
+		installPath = STEAM_GENERALS_ASSET_DIRECTORY;
+	}
+	//@todo this will need to be ramped up to a crash for release
+	DEBUG_ASSERTCRASH(!installPath.isEmpty(), ("Be 1337! Go install Generals!"));
+	if (!installPath.isEmpty()) {
+		loadBigFilesFromDirectory(installPath, "*.big");
+	}
 #endif
 }
 
