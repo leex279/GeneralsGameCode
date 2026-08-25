@@ -436,12 +436,9 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert verifier.calls[0][3] == 59
     engine_spec, mux_spec = process.specs
     assert engine_spec.cwd == (tmp_path / "installed Zero Hour").resolve()
-    replay_leaf = engine_spec.argv[engine_spec.argv.index("-replay") + 1]
-    replay_user_data_root = Path(
-        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
-    )
-    staged_replay = replay_user_data_root / "Replays" / replay_leaf
-    assert Path(replay_leaf).name == replay_leaf
+    staged_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
+    assert staged_replay.is_absolute()
+    assert "-replay-user-data-root" not in engine_spec.argv
     assert staged_replay.read_bytes() == request.replay_path.read_bytes()
     assert result.run_directory.joinpath("replay.rep").read_bytes() == request.replay_path.read_bytes()
     assert engine_spec.argv[engine_spec.argv.index("-videoRes") + 1] == "640x360"
@@ -472,19 +469,18 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     )
 
 
-def test_render_launches_the_staged_replay_leaf_below_an_isolated_user_data_root(tmp_path: Path) -> None:
+def test_render_launches_the_absolute_staged_replay_without_the_headless_user_data_option(
+    tmp_path: Path,
+) -> None:
     request, camera, commentary = _request(tmp_path)
     service, _, process, _, _ = _service(tmp_path, request, camera, commentary)
 
     service.render(request)
 
     engine_spec = process.specs[0]
-    replay_argument = engine_spec.argv[engine_spec.argv.index("-replay") + 1]
-    user_data_root = Path(
-        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
-    )
-    staged_replay = user_data_root / "Replays" / replay_argument
-    assert Path(replay_argument).name == replay_argument
+    staged_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
+    assert staged_replay.is_absolute()
+    assert "-replay-user-data-root" not in engine_spec.argv
     assert staged_replay.read_bytes() == request.replay_path.read_bytes()
 
 
@@ -521,9 +517,9 @@ def test_render_stages_the_replay_declared_custom_map_into_the_isolated_root(
     service.render(request)
 
     engine_spec = process.specs[0]
-    isolated_root = Path(
-        engine_spec.argv[engine_spec.argv.index("-replay-user-data-root") + 1]
-    )
+    staged_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
+    isolated_root = staged_replay.parent.parent
+    assert "-replay-user-data-root" not in engine_spec.argv
     assert (isolated_root / "Maps" / "[rank] sand scorpion" / "map.ini").read_text(
         encoding="ascii"
     ) == "fixed custom map"

@@ -431,9 +431,8 @@ class VideoRenderService:
                             argv=(
                                 str(engine_binding.launch_executable),
                                 "-replay",
-                                staged_replay.name,
-                                "-replay-user-data-root",
-                                str(replay_user_data_root),
+                                # TheSuperHackers @bugfix Leex 25/08/2026 Use the immutable absolute replay path because isolated user-data roots are currently reserved for headless playback. (#TBD)
+                                str(staged_replay),
                                 "-autocamera",
                                 str(camera_script_path),
                                 "-recordVideo",
