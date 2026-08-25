@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -224,6 +224,48 @@ def test_fixed_profile_recomputes_query_definition_and_report_ownership_bindings
         service.get_profile(replace(fixed, definition_binding_digest="f" * 64))
     with pytest.raises(ValueError, match="cross_player_report_binding"):
         service.get_profile(replace(fixed, report_public_ids=(_id(8),)))
+
+
+def test_profile_binds_only_the_newest_report_for_each_replay_player(
+    identity_session_factory: sessionmaker[Session],
+) -> None:
+    """Catch UUID ordering selecting an obsolete report after an analysis rerun."""
+    player_id, replay_player_public_id = _seed(identity_session_factory)
+    with identity_session_factory.begin() as session:
+        replay = session.query(Replay).one()
+        replay_player = session.query(ReplayPlayer).filter_by(public_id=replay_player_public_id).one()
+        session.add_all(
+            (
+                Report(
+                    public_id=_id(20),
+                    replay_id=replay.id,
+                    replay_player_id=replay_player.id,
+                    report_version="replay-report-v1",
+                    input_digest="8" * 64,
+                    cache_key="9" * 64,
+                    report_json={"schema_version": "replay-report-v1"},
+                    created_at=NOW,
+                ),
+                Report(
+                    public_id=_id(10),
+                    replay_id=replay.id,
+                    replay_player_id=replay_player.id,
+                    report_version="replay-report-v2",
+                    input_digest="a" * 64,
+                    cache_key="b" * 64,
+                    report_json={"schema_version": "replay-report-v2"},
+                    created_at=NOW + timedelta(minutes=1),
+                ),
+            )
+        )
+
+    service = PlayerQueryService(identity_session_factory)
+    fixed = service.resolve_profile(PlayerProfileSelection(player_public_id=player_id)).fixed_query
+    assert fixed is not None
+    assert fixed.report_public_ids == (_id(10),)
+    report = service.get_profile(fixed).history[0].fixed_report
+    assert report is not None
+    assert report.report_public_id == _id(10)
 
 
 def test_profile_dates_are_canonical_and_quality_policy_selects_only_exact_runs(

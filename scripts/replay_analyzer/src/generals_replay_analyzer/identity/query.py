@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from generals_replay_analyzer.db.models import (
@@ -361,11 +361,26 @@ class PlayerQueryService:
                     if _digest(_mapping(row.segment_key_json).get("quality_policy", {}))
                     == selection.quality_policy_digest
                 )
+            # TheSuperHackers @bugfix Leex 26/08/2026 Bind each replay-player history row to its newest report. (#TBD)
+            report_ranks = (
+                select(
+                    Report.id.label("report_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=Report.replay_player_id,
+                        order_by=(Report.created_at.desc(), Report.public_id.desc()),
+                    )
+                    .label("report_rank"),
+                )
+                .join(ReplayPlayer, Report.replay_player_id == ReplayPlayer.id)
+                .where(ReplayPlayer.player_id == player.id)
+                .subquery()
+            )
             report_rows = tuple(
                 session.scalars(
                     select(Report)
-                    .join(ReplayPlayer, Report.replay_player_id == ReplayPlayer.id)
-                    .where(ReplayPlayer.player_id == player.id)
+                    .join(report_ranks, Report.id == report_ranks.c.report_id)
+                    .where(report_ranks.c.report_rank == 1)
                     .order_by(Report.public_id)
                 )
             )
