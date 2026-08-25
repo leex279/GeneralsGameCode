@@ -281,6 +281,45 @@ def _request(replay: str, player: str, *extractors: str, settings: object = ()) 
     return ExtractFeaturesRequest(replay, player, tuple(extractors), settings)  # type: ignore[arg-type]
 
 
+def test_extract_reuses_digest_for_each_distinct_observation_context(
+    feature_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+
+    class EmptyExtractor:
+        feature_names = ()
+        version = "test-v1"
+
+        def __init__(self, name: str, policy: str = "target_player") -> None:
+            self.name = name
+            self.observation_policy = policy
+
+        def extract(self, _context: FeatureContext) -> FeatureBundle:
+            return FeatureBundle(self.name, self.version, ())
+
+    extractors = (EmptyExtractor("target-a"), EmptyExtractor("target-b"), EmptyExtractor("wide", "replay_wide_telemetry"))
+    target_context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "target-a"))
+
+    class ContextService(FeatureExtractionService):
+        def _build_context_with_policy(self, request: ExtractFeaturesRequest, policy: str) -> FeatureContext:
+            return target_context if policy == "target_player" else replace(target_context, settings={"policy": policy})
+
+    service = ContextService(feature_factory, extractors=extractors)  # type: ignore[arg-type]
+    original_input_digest = input_digest
+    digest_calls = 0
+
+    def counted_input_digest(context: FeatureContext) -> str:
+        nonlocal digest_calls
+        digest_calls += 1
+        return original_input_digest(context)
+
+    monkeypatch.setattr("generals_replay_analyzer.features.service.input_digest", counted_input_digest)
+
+    service.extract(_request(replay, player, "target-a", "target-b", "wide"))
+
+    assert digest_calls == 2
+
+
 def _attach_spatial_projection(
     factory: sessionmaker[Session], replay_public_id: str, telemetry_run_id: str, *, defect: str | None = None
 ) -> tuple[int, int]:

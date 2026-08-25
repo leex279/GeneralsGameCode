@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from generals_replay_analyzer.features import context as feature_context
 from generals_replay_analyzer.features.base import FeatureScope
 from generals_replay_analyzer.features.context import FeatureContext, cache_key, canonical_json, input_digest
 from generals_replay_analyzer.features.evidence import EvidenceRef, ObservedEvidence
@@ -63,6 +64,14 @@ def test_cache_identity_changes_for_every_semantic_input_and_version() -> None:
     assert all(cache_key(item, "fixture", "v1") != base_key for item in variants)
     assert cache_key(base, "fixture", "v2") != base_key
     assert cache_key(base, "fixture", "v1", registry_schema="feature-registry-v2") != base_key
+
+
+def test_cache_key_can_reuse_an_already_computed_context_digest() -> None:
+    item = _observation("00000000-0000-4000-8000-000000000239", "telemetry:1", 10, {"amount": 1.25})
+    context = _context(observed=(item,))
+    digest = input_digest(context)
+
+    assert feature_context.cache_key_from_digest(digest, "fixture", "v1") == cache_key(context, "fixture", "v1")
 
 
 @pytest.mark.parametrize(

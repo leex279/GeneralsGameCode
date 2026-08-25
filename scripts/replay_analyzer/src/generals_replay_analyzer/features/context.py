@@ -151,6 +151,23 @@ def input_digest(context: FeatureContext) -> str:
     return hashlib.sha256(canonical_json(context).encode("utf-8")).hexdigest()
 
 
+def cache_key_from_digest(
+    context_digest: str,
+    extractor_name: str,
+    extractor_version: str,
+    *,
+    registry_schema: str = REGISTRY_SCHEMA,
+) -> str:
+    # TheSuperHackers @performance Leex 25/08/2026 Reuse the canonical context digest instead of serializing full telemetry per extractor. (#TBD)
+    identity = {
+        "cache_schema": "feature-cache-v2",
+        "context_digest": context_digest,
+        "extractor": {"name": extractor_name, "version": extractor_version},
+        "registry_schema": registry_schema,
+    }
+    return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+
+
 def cache_key(
     context: FeatureContext,
     extractor_name: str,
@@ -158,10 +175,6 @@ def cache_key(
     *,
     registry_schema: str = REGISTRY_SCHEMA,
 ) -> str:
-    identity = {
-        "cache_schema": "feature-cache-v1",
-        "context": context,
-        "extractor": {"name": extractor_name, "version": extractor_version},
-        "registry_schema": registry_schema,
-    }
-    return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+    return cache_key_from_digest(
+        input_digest(context), extractor_name, extractor_version, registry_schema=registry_schema
+    )
