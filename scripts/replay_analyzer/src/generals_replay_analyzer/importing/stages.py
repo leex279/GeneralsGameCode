@@ -56,7 +56,8 @@ RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with the rendered absolute replay launch contract. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with logic-timebase video sampling and absolute capture horizons. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with bounded terminal settlement-frame padding. (#TBD)
-RENDER_VIDEO_VERSION = "22"
+# TheSuperHackers @feature Leex 25/08/2026 Requeue casts with calmer camera pacing and sparse identity-specific combat calls. (#TBD)
+RENDER_VIDEO_VERSION = "23"
 
 
 def canonical_json(value: Any) -> str:

@@ -455,3 +455,67 @@ def test_full_match_player_features_create_timed_strategy_build_and_production_c
     assert "Quad Cannon" in texts
     assert "fast Palace" in texts
     assert len(plan.events) >= 4
+
+
+def test_observed_kill_timing_gets_specific_commentary_and_replaces_cluster() -> None:
+    graph = _player_selected_report()
+    observed_kills = ReportValue(
+        claim_id="feature:combat.observed_kill_timing:test",
+        section="features",
+        label="combat.observed_kill_timing",
+        raw_value=(
+            {
+                "frame": 180,
+                "attacker_template_name": "GLAVehicleTechnical",
+                "victim_template_name": "AmericaVehicleHumvee",
+            },
+        ),
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_type": "player"},
+        frame_window=(0, 300),
+        evidence=(ReportEvidenceRef("50000000-0000-4000-8000-000000000007", "derived"),),
+        details={},
+    )
+    player_document = replace(graph.selected.document, derived=(observed_kills,))
+    report = replace(graph, player_reports=(replace(graph.selected, document=player_document),))
+
+    camera = _camera(300).model_copy(update={"authority": _authority(300, report_public_id=PLAYER_REPORT_ID)})
+    plan = CommentaryPlanService().create(report, camera)
+    texts = " ".join(event.text for event in plan.events)
+
+    assert "Technical scores a confirmed kill on the Humvee" in texts
+    assert "confirmed destructions" not in texts
+
+
+def test_observed_kill_commentary_selects_at_most_five_busiest_windows() -> None:
+    graph = _player_selected_report()
+    kills = tuple(
+        {
+            "frame": 120 + index * 1_800,
+            "attacker_template_name": "GLAVehicleTechnical",
+            "victim_template_name": "AmericaVehicleHumvee",
+        }
+        for index in range(7)
+    )
+    observed_kills = ReportValue(
+        claim_id="feature:combat.observed_kill_timing:sparse",
+        section="features",
+        label="combat.observed_kill_timing",
+        raw_value=kills,
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_type": "player"},
+        frame_window=(0, 11_000),
+        evidence=(ReportEvidenceRef("50000000-0000-4000-8000-000000000007", "derived"),),
+        details={},
+    )
+    player_document = replace(graph.selected.document, derived=(observed_kills,))
+    report = replace(graph, player_reports=(replace(graph.selected, document=player_document),))
+    camera = _camera(11_000).model_copy(update={"authority": _authority(11_000, report_public_id=PLAYER_REPORT_ID)})
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    assert sum("scores a confirmed kill" in event.text for event in plan.events) <= 5

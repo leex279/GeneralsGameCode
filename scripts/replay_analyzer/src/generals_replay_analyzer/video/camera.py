@@ -31,7 +31,8 @@ _PRIORITY: dict[CameraFocusKind, int] = {
     "resource_contest": 4,
     "base_context": 5,
 }
-_COOLDOWN_FRAMES = 90
+# TheSuperHackers @feature Leex 25/08/2026 Hold native replay shots long enough to show a meaningful nearby scene instead of hopping across repeated damage samples. (#TBD)
+_COOLDOWN_SECONDS = 15
 
 
 class CameraPlanContractError(ValueError):
@@ -211,12 +212,17 @@ class CameraPlanService:
         candidates = self._candidates(payload, accepted, horizon, bounds)
         if not candidates:
             raise CameraPlanContractError("camera plan has no report-cited spatial evidence")
+        cooldown_frames = authority.logic_frames_per_second * _COOLDOWN_SECONDS
         selected: list[_Candidate] = []
         for candidate in sorted(
             candidates,
             key=lambda item: (item.frame, _PRIORITY[item.kind], item.evidence[0].evidence_public_id),
         ):
-            if selected and candidate.frame - selected[-1].frame < _COOLDOWN_FRAMES:
+            if (
+                selected
+                and selected[-1].kind != "base_context"
+                and candidate.frame - selected[-1].frame < cooldown_frames
+            ):
                 if candidate.frame == selected[-1].frame and _PRIORITY[candidate.kind] < _PRIORITY[selected[-1].kind]:
                     selected[-1] = candidate
                 continue

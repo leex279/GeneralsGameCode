@@ -268,6 +268,61 @@ def _timed_feature_claims(report: PublishedReportGraphDTO, horizon: int, logic_h
                 break
 
     combat_claims: list[_Claim] = []
+    specific_kill_claims: list[_Claim] = []
+    for value in document.derived:
+        if value.availability != "available" or value.label != "combat.observed_kill_timing":
+            continue
+        raw_kills = thaw_report_value(value.raw_value)
+        if not isinstance(raw_kills, list):
+            continue
+        for item in raw_kills:
+            if not isinstance(item, dict):
+                continue
+            frame = item.get("frame")
+            attacker = item.get("attacker_template_name")
+            victim = item.get("victim_template_name")
+            if type(frame) is not int or frame <= 0 or frame > horizon:
+                continue
+            if not isinstance(attacker, str) or not isinstance(victim, str):
+                continue
+            citations = _point_citations(value, frame, include_derived=True)
+            if not citations:
+                continue
+            specific_kill_claims.append(
+                _Claim(
+                    replace(
+                        value,
+                        claim_id=f"{value.claim_id}:commentary:{frame}:{attacker}:{victim}",
+                        section="combat",
+                        raw_value=freeze_report_value(
+                            {
+                                "frame": frame,
+                                "attacker_template_name": attacker,
+                                "victim_template_name": victim,
+                            }
+                        ),
+                        frame_window=(frame, frame),
+                    ),
+                    frame,
+                    frame,
+                    citations,
+                )
+            )
+    kill_bins: dict[int, list[_Claim]] = {}
+    for claim in specific_kill_claims:
+        kill_bins.setdefault(claim.start_frame // (logic_hz * 30), []).append(claim)
+    busiest_kill_bins = sorted(
+        kill_bins.values(),
+        key=lambda values: (-len(values), values[-1].start_frame, values[-1].value.claim_id),
+    )[:5]
+    specific_kill_claims = [
+        values[-1]
+        for values in sorted(
+            busiest_kill_bins,
+            key=lambda values: (values[-1].start_frame, values[-1].value.claim_id),
+        )
+    ]
+    combat_claims.extend(specific_kill_claims)
     destruction_bins: dict[int, list[ReportValue]] = {}
     for value in document.observed:
         if value.availability == "available" and value.label == "object_destroyed" and value.frame_window is not None:
@@ -288,7 +343,8 @@ def _timed_feature_claims(report: PublishedReportGraphDTO, horizon: int, logic_h
             source_window = source.frame_window
             assert source_window is not None
             combat_citations.extend(_point_citations(source, source_window[1]))
-        if frame in occupied_frames or not combat_citations:
+        # TheSuperHackers @bugfix Leex 25/08/2026 Prefer engine-observed attacker and victim identities over repetitive cumulative destruction narration. (#TBD)
+        if specific_kill_claims or frame in occupied_frames or not combat_citations:
             continue
         synthetic = replace(
             values[-1],
@@ -552,6 +608,15 @@ class CommentaryPlanService:
                 )
             return "play_by_play", f"{value.label} marks a key development.", (), None
         if value.section == "combat" or "engagement" in value.claim_id:
+            attacker = raw.get("attacker_template_name")
+            victim = raw.get("victim_template_name")
+            if isinstance(attacker, str) and isinstance(victim, str):
+                return (
+                    "play_by_play",
+                    f"The {_friendly_identity(attacker)} scores a confirmed kill on the {_friendly_identity(victim)}.",
+                    (),
+                    None,
+                )
             destruction_count = raw.get("destruction_count")
             if type(destruction_count) is int:
                 return (

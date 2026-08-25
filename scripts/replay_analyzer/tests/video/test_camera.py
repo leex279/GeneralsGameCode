@@ -283,6 +283,26 @@ def test_camera_plan_uses_cited_positions_and_is_byte_deterministic() -> None:
     assert first.segments[1].evidence[0].evidence_public_id == EVIDENCE_FIGHT
 
 
+def test_camera_plan_prefers_meaningful_focus_over_repeated_damage_samples() -> None:
+    scene = _scene()
+    payload = dict(scene.payload)
+    engagement = dict(payload["engagements"][0])
+    payload["engagements"] = [
+        dict(
+            engagement,
+            engagement_public_id=f"90000000-0000-4000-8000-00000000001{index + 5}",
+            frame_start=frame,
+            frame_end=frame + 20,
+        )
+        for index, frame in enumerate((120, 125, 130))
+    ]
+
+    plan = CameraPlanService().create(_authority(), _report(), MapSceneReadModel(payload))
+
+    assert [item.focus_kind for item in plan.segments] == ["base_context", "engagement"]
+    assert plan.segments[1].target_x == 700.0
+
+
 def test_player_selected_camera_uses_only_shared_frame_zero_context_before_commentary() -> None:
     report = _player_selected_report()
     scene = _scene()
