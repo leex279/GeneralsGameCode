@@ -45,7 +45,7 @@
 static const char *BIGFileIdentifier = "BIGF";
 
 #if RTS_ZEROHOUR
-#define STEAM_GENERALS_ASSET_DIRECTORY "ZH_Generals"
+#define STEAM_GENERALS_ASSET_DIRECTORY "ZH_Generals\\"
 #endif
 
 StdBIGFileSystem::StdBIGFileSystem() : ArchiveFileSystem() {

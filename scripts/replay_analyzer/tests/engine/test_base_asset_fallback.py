@@ -17,7 +17,7 @@ def test_zero_hour_uses_steam_coinstall_when_generals_registry_path_is_empty(
 ) -> None:
     source = (repository_root / relative_path).read_text(encoding="utf-8")
 
-    assert '#define STEAM_GENERALS_ASSET_DIRECTORY "ZH_Generals"' in source
+    assert '#define STEAM_GENERALS_ASSET_DIRECTORY "ZH_Generals\\\\"' in source
     assert "if (installPath.isEmpty())" in source
     assert "installPath = STEAM_GENERALS_ASSET_DIRECTORY;" in source
     assert 'loadBigFilesFromDirectory(installPath, "*.big")' in source
