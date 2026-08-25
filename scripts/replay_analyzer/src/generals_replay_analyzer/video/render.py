@@ -443,6 +443,8 @@ class VideoRenderService:
                             run_id=run_id,
                             argv=(
                                 str(engine_binding.launch_executable),
+                                # TheSuperHackers @bugfix Leex 25/08/2026 Keep native capture windowed so fullscreen minimize or device loss cannot skip a replay logic frame. (#TBD)
+                                "-win",
                                 "-replay",
                                 # TheSuperHackers @bugfix Leex 25/08/2026 Use the immutable absolute replay path because isolated user-data roots are currently reserved for headless playback. (#TBD)
                                 str(staged_replay),

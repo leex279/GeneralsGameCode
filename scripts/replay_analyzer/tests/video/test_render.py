@@ -527,6 +527,7 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     staged_replay = Path(engine_spec.argv[engine_spec.argv.index("-replay") + 1])
     assert staged_replay.is_absolute()
     assert "-replay-user-data-root" not in engine_spec.argv
+    assert "-win" in engine_spec.argv
     assert staged_replay.read_bytes() == request.replay_path.read_bytes()
     assert result.run_directory.joinpath("replay.rep").read_bytes() == request.replay_path.read_bytes()
     assert engine_spec.argv[engine_spec.argv.index("-videoRes") + 1] == "640x360"
