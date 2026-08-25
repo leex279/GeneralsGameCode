@@ -273,7 +273,7 @@ class FeatureExtractionService:
                 session.scalars(
                     select(TelemetryRun)
                     .where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
-                    .order_by(TelemetryRun.run_id)
+                    .order_by(TelemetryRun.id)
                 )
             )
             if parser is not None:
@@ -286,9 +286,8 @@ class FeatureExtractionService:
                     raise FeatureExtractionError(
                         "telemetry player mapping does not select one parser and telemetry branch"
                     )
-                if len(matching_telemetry) > 1:
-                    raise FeatureExtractionError("parser and telemetry branch is ambiguous")
-                telemetry = None if not matching_telemetry else matching_telemetry[0]
+                # TheSuperHackers @fix Leex 26/08/2026 Prefer the latest committed matching telemetry branch so partial replay recovery keeps supported opening evidence. (#TBD)
+                telemetry = None if not matching_telemetry else matching_telemetry[-1]
             else:
                 if len(telemetry_rows) > 1:
                     raise FeatureExtractionError("parser and telemetry branch is ambiguous")

@@ -282,6 +282,38 @@ def _request(replay: str, player: str, *extractors: str, settings: object = ()) 
     return ExtractFeaturesRequest(replay, player, tuple(extractors), settings)  # type: ignore[arg-type]
 
 
+def test_context_uses_latest_matching_partial_telemetry_branch(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    replay, player, _ = _seed_replay(feature_factory)
+    with feature_factory.begin() as session:
+        replay_row = session.scalar(select(Replay).where(Replay.public_id == replay))
+        assert replay_row is not None
+        original = session.scalar(select(TelemetryRun).where(TelemetryRun.replay_id == replay_row.id))
+        assert original is not None
+        latest = TelemetryRun(
+            run_id="00000000-0000-4000-8000-000000000909",
+            replay_id=replay_row.id,
+            schema_version=original.schema_version,
+            engine_build=original.engine_build,
+            settings_json=original.settings_json,
+            status="succeeded",
+            runner_status=original.runner_status,
+            strategy_analysis_scope=original.strategy_analysis_scope,
+            process_exit_code=original.process_exit_code,
+            final_frame=original.final_frame,
+            command_count=original.command_count,
+            trace_sha256="f" * 64,
+            diagnostics_json=original.diagnostics_json,
+            started_at=original.started_at,
+            completed_at=original.completed_at,
+        )
+        session.add(latest)
+    context = FeatureExtractionService(feature_factory)._build_context(_request(replay, player, "build"))
+
+    assert context.telemetry_run_public_id == latest.run_id
+
+
 def test_extract_prepares_cache_identity_once_for_each_distinct_observation_context(
     feature_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
