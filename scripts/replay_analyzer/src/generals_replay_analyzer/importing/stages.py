@@ -45,8 +45,8 @@ TELEMETRY_VERSION = "1"
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue observation imports after allowing parser reuse with downstream citations. (#TBD)
 IMPORT_OBSERVATIONS_VERSION = "2"
 RECONCILE_IDENTITIES_VERSION = "1"
-# TheSuperHackers @bugfix Leex 25/08/2026 Regenerate durable feature graphs with projected legacy combat template identities. (#TBD)
-DERIVE_FEATURES_VERSION = "2"
+# TheSuperHackers @bugfix Leex 26/08/2026 Requeue feature graphs against the latest matching telemetry recovery branch. (#TBD)
+DERIVE_FEATURES_VERSION = "3"
 # TheSuperHackers @fix Leex 25/08/2026 Requeue assessment after preserving feature cache identities across optimized extraction. (#TBD)
 ASSESS_STRATEGIES_VERSION = "2"
 ANALYZE_LLM_VERSION = "1"
