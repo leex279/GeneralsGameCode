@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict
 
+from generals_replay_analyzer.presentation.vocabulary import map_label
 from generals_replay_analyzer.web.ports import (
     MapOptionDTO,
     MapRasterDescriptorDTO,
@@ -186,8 +187,12 @@ def map_detail_view(scene: MapSceneDTO, option_scene: MapSceneDTO | None = None)
         MapOptionDTO(public_id=value, label=f"Entity {index}")
         for index, value in enumerate(sorted(entity_ids), 1)
     )
+    # TheSuperHackers @fix Leex 25/08/2026 Keep immutable map identity paths out of player-facing headings. (#TBD)
+    display_scene = scene.model_copy(
+        update={"map_display_name": map_label(scene.map_display_name) or scene.map_display_name}
+    )
     return MapDetailViewModel(
-        scene=scene,
+        scene=display_scene,
         scene_url=map_scene_url(scene),
         fixed_report_href=f"/replays/{scene.replay_public_id}/reports/{scene.report_public_id}",
         rasters=rasters,

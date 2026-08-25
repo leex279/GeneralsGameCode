@@ -204,8 +204,9 @@ def fixed_map(
                 code="map_scene_identity_mismatch",
                 detail="Map option scene identity is inconsistent",
             )
+    map_view = map_detail_view(scene, option_scene)
     shell = feature_shell(
-        page_title=f"{scene.map_display_name} | Generals Replay Analyzer",
+        page_title=f"{map_view.scene.map_display_name} | Generals Replay Analyzer",
         current_path="/maps",
         availability=scene.availability,
         terminal_quality=scene.terminal_quality,
@@ -214,7 +215,7 @@ def fixed_map(
         request,
         "maps/detail.html",
         shell,
-        context={"map_view": map_detail_view(scene, option_scene)},
+        context={"map_view": map_view},
     )
 
 

@@ -600,6 +600,23 @@ def test_fixed_page_resolves_its_default_to_the_accepted_available_window() -> N
     assert tuple((item.frame_start, item.frame_end) for item in port.scene_queries) == ((0, 0), (0, 1800))
 
 
+class _StoredMapIdentityPort(_ScenePort):
+    def get_scene(self, query: MapSceneQueryDTO) -> MapSceneDTO:
+        return super().get_scene(query).model_copy(
+            update={"map_display_name": "userdata/maps/[rank] sand scorpion"}
+        )
+
+
+def test_fixed_page_presents_a_readable_map_name_without_leaking_storage_identity() -> None:
+    response = _scene_client(_StoredMapIdentityPort()).get(
+        f"/replays/{REPLAY_ID}/reports/{REPORT_ID}/map"
+    )
+
+    assert response.status_code == 200
+    assert "<h1>Sand Scorpion</h1>" in response.text
+    assert "userdata/maps" not in response.text.casefold()
+
+
 def test_production_factory_wires_fixed_page_to_the_same_report_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
