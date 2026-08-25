@@ -40,8 +40,14 @@ def map_index_url(page: MapSceneIndexPageDTO, target_page: int) -> str:
 # TheSuperHackers @feature Leex 23/08/2026 Preserve fixed map pagination without resolving mutable reports. (#TBD)
 def map_index_view(page: MapSceneIndexPageDTO) -> MapIndexViewModel:
     total_pages = max(1, (page.total_items + page.page_size - 1) // page.page_size)
+    # TheSuperHackers @fix Leex 25/08/2026 Keep storage paths and rank tags out of player-facing map index labels. (#TBD)
+    display_items = tuple(
+        item.model_copy(update={"map_display_name": map_label(item.map_display_name) or item.map_display_name})
+        for item in page.items
+    )
+    display_page = page.model_copy(update={"items": display_items})
     return MapIndexViewModel(
-        page=page,
+        page=display_page,
         canonical_url=map_index_url(page, page.page),
         previous_url=map_index_url(page, page.page - 1) if page.page > 1 else None,
         next_url=map_index_url(page, page.page + 1) if page.page < total_pages else None,

@@ -20,6 +20,7 @@ from generals_replay_analyzer.web.ports import (
     MapSceneSummaryDTO,
 )
 from generals_replay_analyzer.web.routes.maps import router
+from generals_replay_analyzer.web.viewmodels.map import map_index_view
 
 REPLAY_ID = "10000000-0000-4000-8000-000000000001"
 REPORT_ID = "20000000-0000-4000-8000-000000000001"
@@ -30,6 +31,34 @@ PLAYER_ID = "30000000-0000-4000-8000-000000000001"
 def test_maps_router_is_available_for_serialized_registration() -> None:
     """Removing the Task 6 router must break its explicit registration seam."""
     assert router.routes
+
+
+def test_map_index_view_normalizes_display_name_without_changing_stable_ids() -> None:
+    page = MapSceneIndexPageDTO(
+        query=MapSceneIndexQueryDTO(page=1, page_size=25),
+        items=(
+            MapSceneSummaryDTO(
+                replay_public_id=REPLAY_ID,
+                report_public_id=REPORT_ID,
+                map_public_id=MAP_ID,
+                map_display_name="userdata/maps/[rank] sand scorpion",
+                report_version="report-v1",
+                frame_window=FrameWindowDTO(frame_start=0, frame_end=1800),
+                players=(MapOptionDTO(public_id=PLAYER_ID, label="Player X"),),
+                availability=AvailabilityDTO(state="available"),
+            ),
+        ),
+        page=1,
+        page_size=25,
+        total_items=1,
+        availability=AvailabilityDTO(state="available"),
+    )
+
+    view = map_index_view(page)
+
+    assert view.page.items[0].map_display_name == "Sand Scorpion"
+    assert view.page.items[0].map_public_id == MAP_ID
+    assert view.page.items[0].replay_public_id == REPLAY_ID
 
 
 class _IndexPort:
