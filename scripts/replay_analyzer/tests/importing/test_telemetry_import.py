@@ -58,7 +58,7 @@ from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.map_import import normalize_map_asset
 from generals_replay_analyzer.importing.parser_import import ParserImportResult, ParserObservationImporter
 from generals_replay_analyzer.importing.service import StageDependencyOutput, StageExecutionContext
-from generals_replay_analyzer.importing.stages import canonical_json
+from generals_replay_analyzer.importing.stages import IMPORT_OBSERVATIONS_VERSION, canonical_json
 from generals_replay_analyzer.importing.telemetry_import import (
     ManagedTelemetryArtifact,
     ObservationImportHandler,
@@ -1754,7 +1754,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         (parse_dependency,),
     )
@@ -1796,7 +1796,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         (parse_dependency, telemetry_dependency),
     )
@@ -1826,7 +1826,14 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
     assert telemetry.idempotency_keys == ["import_observations:1:key"]
 
     missing_parse = StageExecutionContext(
-        "import-job", "key", "replay-public-id", "a" * 64, "import_observations", "1", {}, ()
+        "import-job",
+        "key",
+        "replay-public-id",
+        "a" * 64,
+        "import_observations",
+        IMPORT_OBSERVATIONS_VERSION,
+        {},
+        (),
     )
     with pytest.raises(StageFailure, match="parser dependency output is missing"):
         handler(missing_parse)
@@ -1836,7 +1843,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         (
             StageDependencyOutput(
@@ -1855,7 +1862,7 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         (
             parse_dependency,
@@ -1958,7 +1965,7 @@ def test_succeeded_telemetry_dependency_contract_damage_is_typed_and_nonretryabl
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         (
             StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output()),
@@ -1981,7 +1988,14 @@ def test_dependency_stage_collision_is_rejected_before_any_importer_call() -> No
     handler = ObservationImportHandler(ImporterStub(), ImporterStub())  # type: ignore[arg-type]
     parse = StageDependencyOutput(PARSE_JOB_PUBLIC_ID, "parse", "1", _parse_dependency_output())
     context = StageExecutionContext(
-        "import-job", "key", "replay", "a" * 64, "import_observations", "1", {}, (parse, replace(parse, job_public_id="other"))
+        "import-job",
+        "key",
+        "replay",
+        "a" * 64,
+        "import_observations",
+        IMPORT_OBSERVATIONS_VERSION,
+        {},
+        (parse, replace(parse, job_public_id="other")),
     )
     with pytest.raises(StageFailure) as failure:
         handler(context)
@@ -2053,7 +2067,7 @@ def test_handler_rejects_malformed_dependency_identity_and_terminal_shape_before
         "replay-public-id",
         "a" * 64,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {},
         cast(Any, dependencies),
     )
@@ -2291,7 +2305,7 @@ def test_real_dag_post_copy_registration_failure_is_typed_and_links_only_verifie
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse", "telemetry"})),
             ),
@@ -2392,7 +2406,7 @@ def test_real_dag_producer_rejects_and_redacts_residual_pathlike_diagnostics(
         telemetry_acquirer_version=f"unsafe-metadata-{len(path_text)}",
         stage_handlers=(
             StageHandlerRegistration(
-                "import_observations", "1", handler,
+                "import_observations", IMPORT_OBSERVATIONS_VERSION, handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse", "telemetry"})),
             ),
         ),
@@ -2479,7 +2493,7 @@ def test_real_dag_failed_telemetry_persists_attempt_assets_issues_and_zero_child
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})
@@ -2604,7 +2618,7 @@ def test_real_dag_artifact_validation_failure_retains_typed_attempt_and_zero_chi
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})
@@ -2745,7 +2759,7 @@ def test_real_dag_mid_copy_failure_links_only_completed_asset_and_zero_children(
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})
@@ -2851,7 +2865,7 @@ def test_real_dag_failed_parser_persists_failure_shell_and_zero_parser_children(
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 handler,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})
@@ -2963,7 +2977,7 @@ def test_handler_failed_parser_and_succeeded_telemetry_imports_with_null_player_
         "00000000-0000-0000-0000-000000000104",
         replay_sha256,
         "import_observations",
-        "1",
+        IMPORT_OBSERVATIONS_VERSION,
         {
             "branch_recipe": {
                 "parse": {"parser_version": "test-parser-1"},
@@ -3063,7 +3077,7 @@ def test_parser_failure_handler_replay_after_lease_expiry_reuses_exact_attempt(
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 capture,
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
             ),
@@ -3213,7 +3227,7 @@ def test_telemetry_failure_handler_replay_after_lease_expiry_reuses_exact_attemp
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                IMPORT_OBSERVATIONS_VERSION,
                 capture,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})

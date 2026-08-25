@@ -46,7 +46,7 @@ from .identity_import import (
 from .jobs import StageFailure
 from .map_import import NormalizedMap, normalize_map_asset, persist_normalized_map
 from .service import FrozenJSONValue, StageDependencyOutput, StageExecutionContext
-from .stages import canonical_json
+from .stages import IMPORT_OBSERVATIONS_VERSION, canonical_json
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _PRODUCTION_TYPES = {
@@ -1532,7 +1532,7 @@ class ObservationImportHandler:
         self._telemetry_importer = telemetry_importer
 
     def __call__(self, context: StageExecutionContext) -> Mapping[str, Any]:
-        if context.stage != "import_observations" or context.component_version != "1":
+        if context.stage != "import_observations" or context.component_version != IMPORT_OBSERVATIONS_VERSION:
             raise StageFailure(
                 "dependency_contract_invalid",
                 "observation import execution context is invalid",

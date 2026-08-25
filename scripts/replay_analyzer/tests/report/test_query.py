@@ -1072,6 +1072,7 @@ def _add_legacy_report_claimant(
         replay_id=original.replay_id,  # type: ignore[arg-type]
         replay_sha256=cast(str, replay_input["replay_sha256"]),
         stage=IMPORT_OBSERVATIONS,
+        component_version=IMPORT_OBSERVATIONS_VERSION,
         input_json={
             **replay_input,
             "branch_recipe": branch_recipe,

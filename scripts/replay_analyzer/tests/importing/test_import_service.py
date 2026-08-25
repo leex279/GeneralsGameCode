@@ -255,7 +255,13 @@ def test_registered_import_observations_runs_after_frozen_dependency_context(
         artifact_store,
         clock,
         acquirer=_FakeAcquirer(_artifact(tmp_path)),
-        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
+                import_observations,
+            ),
+        ),
     )
     service.submit(ImportRequest(replay_file, request_telemetry=True))
     completed = service.run_available("task-4-worker", limit=10)
@@ -271,7 +277,7 @@ def test_registered_import_observations_runs_after_frozen_dependency_context(
     context = contexts[0]
     assert context.job_public_id == completed[-1].public_id
     assert context.stage == "import_observations"
-    assert context.component_version == "1"
+    assert context.component_version == importing_service.IMPORT_OBSERVATIONS_VERSION
     assert context.replay_public_id == completed[-1].replay_public_id
     assert context.replay_sha256 == hashlib.sha256(replay_file.read_bytes()).hexdigest()
 
@@ -311,7 +317,13 @@ def test_registered_stage_never_receives_failed_dependency_output(
         artifact_store,
         clock,
         parser=failing_parser,
-        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
+                import_observations,
+            ),
+        ),
     )
     service.submit(ImportRequest(replay_file))
     completed = service.run_available("task-4-worker", limit=10)
@@ -380,7 +392,7 @@ def test_opted_in_terminal_parse_dependency_is_frozen_redacted_evidence(
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
                 import_observations,
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
             ),
@@ -439,7 +451,7 @@ def test_exhausted_retryable_parse_materializes_stable_terminal_context_and_iden
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
                 import_observations,
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
             ),
@@ -497,7 +509,7 @@ def test_retryable_failed_dependency_cannot_materialize_or_enter_direct_context(
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
                 lambda _context: {"status": "imported"},
                 terminal_dependency_policy=TerminalDependencyPolicy(failed_stages=frozenset({"parse"})),
             ),
@@ -581,7 +593,7 @@ def test_opted_in_terminal_telemetry_dependency_keeps_mixed_success_failure_cont
         stage_handlers=(
             StageHandlerRegistration(
                 "import_observations",
-                "1",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
                 import_observations,
                 terminal_dependency_policy=TerminalDependencyPolicy(
                     failed_stages=frozenset({"parse", "telemetry"})
@@ -646,7 +658,7 @@ def test_terminal_failure_evidence_changes_materialized_identity_deterministical
                 stage_handlers=(
                     StageHandlerRegistration(
                         "import_observations",
-                        "1",
+                        importing_service.IMPORT_OBSERVATIONS_VERSION,
                         lambda _context: {"status": "imported"},
                         terminal_dependency_policy=TerminalDependencyPolicy(
                             failed_stages=frozenset({"parse"})
@@ -690,7 +702,13 @@ def test_registered_stage_uses_existing_typed_failure_and_retry_semantics(
         replay_store,
         artifact_store,
         clock,
-        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
+                import_observations,
+            ),
+        ),
     )
     service.submit(ImportRequest(replay_file))
     completed = service.run_available("task-4-worker", limit=10)
@@ -718,7 +736,13 @@ def test_registered_stage_omits_absent_optional_dependency_and_copies_configurat
         received.append(context)
         return {"status": "imported"}
 
-    registrations = [StageHandlerRegistration("import_observations", "1", import_observations)]
+    registrations = [
+        StageHandlerRegistration(
+            "import_observations",
+            importing_service.IMPORT_OBSERVATIONS_VERSION,
+            import_observations,
+        )
+    ]
     service = _service(
         session_factory,
         settings,
@@ -777,7 +801,11 @@ def test_logical_topology_materializes_distinct_observation_branch_identity(
                 clock,
                 acquirer=_FakeAcquirer(artifact),
                     stage_handlers=(
-                        StageHandlerRegistration("import_observations", "1", recording_handler(contexts)),
+                        StageHandlerRegistration(
+                            "import_observations",
+                            importing_service.IMPORT_OBSERVATIONS_VERSION,
+                            recording_handler(contexts),
+                        ),
                     ),
             )
             service.submit(ImportRequest(replay, request_telemetry=True))
@@ -811,6 +839,53 @@ def test_logical_topology_materializes_distinct_observation_branch_identity(
     assert keys[0] == keys[2]
 
 
+def test_new_observation_version_requeues_without_mutating_exhausted_history(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    replay_store: ContentAddressedStore,
+    artifact_store: ContentAddressedStore,
+    replay_file: Path,
+    tmp_path: Path,
+    clock: MutableClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch an observation importer fix that cannot create a fresh durable job after v1 exhausted."""
+    current_version = importing_service.IMPORT_OBSERVATIONS_VERSION
+    monkeypatch.setattr(importing_service, "IMPORT_OBSERVATIONS_VERSION", "1")
+    original_service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    original_service.submit(ImportRequest(replay_file))
+    _drain(original_service, worker="observation-v1")
+
+    with session_factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == "import_observations"))
+        assert original is not None
+        original.status = "failed"
+        original.attempt_count = original.max_attempts
+        original.completed_at = clock()
+        original.error_code = "import_failed"
+        original.error_message = "legacy observation importer exhausted"
+        original.error_details_json = {}
+        original.retryable = False
+        original_identity = (original.public_id, original.idempotency_key)
+
+    monkeypatch.setattr(importing_service, "IMPORT_OBSERVATIONS_VERSION", current_version)
+    repeated_source = tmp_path / "same-replay-new-observation-version.rep"
+    shutil.copyfile(replay_file, repeated_source)
+    recovery_service = _service(session_factory, settings, replay_store, artifact_store, clock)
+    recovery_service.submit(ImportRequest(repeated_source))
+    _drain(recovery_service, worker="observation-current")
+
+    with session_factory() as session:
+        imports = list(
+            session.scalars(select(Job).where(Job.stage == "import_observations").order_by(Job.id))
+        )
+        assert [(job.component_version, job.status) for job in imports] == [
+            ("1", "failed"),
+            ("2", "pending"),
+        ]
+        assert (imports[0].public_id, imports[0].idempotency_key) == original_identity
+
+
 def test_converged_materialized_jobs_coalesce_without_losing_downstream_edges(
     session_factory: sessionmaker[Session],
     settings: AnalyzerSettings,
@@ -831,7 +906,7 @@ def test_converged_materialized_jobs_coalesce_without_losing_downstream_edges(
             replay_id=original.replay_id,
             stage=original.stage,
             component_version=original.component_version,
-            idempotency_key=f"import_observations:1:{cast(Replay, session.get(Replay, original.replay_id)).sha256}:{'f' * 64}",
+            idempotency_key=f"import_observations:{original.component_version}:{cast(Replay, session.get(Replay, original.replay_id)).sha256}:{'f' * 64}",
             status="pending",
             priority=original.priority,
             attempt_count=0,
@@ -873,7 +948,13 @@ def test_converged_materialized_jobs_coalesce_without_losing_downstream_edges(
         replay_store,
         artifact_store,
         clock,
-        stage_handlers=(StageHandlerRegistration("import_observations", "1", import_observations),),
+        stage_handlers=(
+            StageHandlerRegistration(
+                "import_observations",
+                importing_service.IMPORT_OBSERVATIONS_VERSION,
+                import_observations,
+            ),
+        ),
     )
     completed = resumed.run_available("materializer", limit=2)
     assert tuple(job.stage for job in completed) == ("import_observations",)
@@ -910,7 +991,7 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
             (
                 StageHandlerRegistration(
                     "import_observations",
-                    "1",
+                    importing_service.IMPORT_OBSERVATIONS_VERSION,
                     handler,
                     terminal_dependency_policy=TerminalDependencyPolicy(
                         failed_stages=frozenset({"*"})
@@ -923,7 +1004,7 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
             (
                 StageHandlerRegistration(
                     "import_observations",
-                    "1",
+                    importing_service.IMPORT_OBSERVATIONS_VERSION,
                     handler,
                     terminal_dependency_policy=TerminalDependencyPolicy(
                         failed_stages=frozenset({"manage_copy"})
@@ -934,8 +1015,16 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
         ),
         (
             (
-                StageHandlerRegistration("import_observations", "1", handler),
-                StageHandlerRegistration("import_observations", "1", handler),
+                StageHandlerRegistration(
+                    "import_observations",
+                    importing_service.IMPORT_OBSERVATIONS_VERSION,
+                    handler,
+                ),
+                StageHandlerRegistration(
+                    "import_observations",
+                    importing_service.IMPORT_OBSERVATIONS_VERSION,
+                    handler,
+                ),
             ),
             "duplicate_stage",
         ),
@@ -960,7 +1049,7 @@ def test_stage_handler_registration_rejects_invalid_or_ambiguous_contracts(
             stage_handlers=(
                 StageHandlerRegistration(
                     "import_observations",
-                    "1",
+                    importing_service.IMPORT_OBSERVATIONS_VERSION,
                     handler,
                     terminal_dependency_policy=cast(Any, frozenset({"parse"})),
                 ),
