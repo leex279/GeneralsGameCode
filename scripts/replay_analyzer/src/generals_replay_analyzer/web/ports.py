@@ -845,6 +845,7 @@ class ReportClaimDTO(WebDTO):
     frame_window: tuple[int, int] | None = None
     confidence: float | None = None
     evidence: tuple[ReportEvidenceReferenceDTO, ...] = ()
+    evidence_total_count: int = Field(default=0, ge=0)
     details: object
 
     @field_validator("raw_value", "scope", "details", mode="before")
@@ -873,6 +874,11 @@ class ReportClaimDTO(WebDTO):
         identities = tuple((item.public_id, item.tier) for item in self.evidence)
         if len(identities) != len(set(identities)):
             raise ValueError("report claim evidence must be unique")
+        # TheSuperHackers @performance Leex 25/08/2026 Preserve exhaustive provenance cardinality while Web projections carry a bounded evidence preview. (#TBD)
+        if self.evidence_total_count == 0 and self.evidence:
+            object.__setattr__(self, "evidence_total_count", len(self.evidence))
+        elif self.evidence_total_count < len(self.evidence):
+            raise ValueError("report claim evidence total cannot be smaller than its preview")
         if self.availability == "available":
             if self.raw_value is None or self.display_value is None or self.unavailable_reason is not None:
                 raise ValueError("available report claim requires raw and display values without a reason")

@@ -634,7 +634,13 @@ def test_fixed_report_bounds_inline_evidence_links_and_reports_the_full_count() 
         first.model_copy(
             update={
                 "claims": (
-                    first.claims[0].model_copy(update={"evidence": evidence}),
+                    ReportClaimDTO(
+                        **{
+                            **first.claims[0].model_dump(),
+                            "evidence": evidence,
+                            "evidence_total_count": len(evidence),
+                        }
+                    ),
                 )
             }
         ),

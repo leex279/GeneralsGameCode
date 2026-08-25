@@ -107,6 +107,7 @@ _SECTION_TITLES: dict[ReportSectionKey, str] = {
     "longitudinal_context": "Longitudinal context",
     "llm_interpretation": "Ollama interpretation",
 }
+_CLAIM_EVIDENCE_PREVIEW_LIMIT = 5
 
 
 def _availability(
@@ -173,6 +174,8 @@ def _report_section(value: ReportValue, tier: str) -> ReportSectionKey:
 
 def _claim(value: ReportValue, tier: str) -> ReportClaimDTO:
     raw = None if value.raw_value is None else thaw_report_value(value.raw_value)
+    # TheSuperHackers @performance Leex 25/08/2026 Materialize only the direct evidence links the initial report can display. (#TBD)
+    evidence_preview = value.evidence[:_CLAIM_EVIDENCE_PREVIEW_LIMIT]
     return ReportClaimDTO(
         claim_id=value.claim_id,
         section=_report_section(value, tier),
@@ -185,7 +188,11 @@ def _claim(value: ReportValue, tier: str) -> ReportClaimDTO:
         scope=thaw_report_value(value.scope),
         frame_window=value.frame_window,
         confidence=None,
-        evidence=tuple(ReportEvidenceReferenceDTO(public_id=item.public_id, tier=item.tier) for item in value.evidence),
+        evidence=tuple(
+            ReportEvidenceReferenceDTO(public_id=item.public_id, tier=item.tier)
+            for item in evidence_preview
+        ),
+        evidence_total_count=len(value.evidence),
         details=thaw_report_value(value.details),
     )
 
