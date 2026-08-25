@@ -49,8 +49,8 @@ DERIVE_FEATURES_VERSION = "2"
 # TheSuperHackers @fix Leex 25/08/2026 Requeue assessment after preserving feature cache identities across optimized extraction. (#TBD)
 ASSESS_STRATEGIES_VERSION = "2"
 ANALYZE_LLM_VERSION = "1"
-# TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
-RENDER_REPORT_VERSION = "2"
+# TheSuperHackers @feature Leex 25/08/2026 Rebuild replay-wide reports with exact two-sided combat camera anchors. (#TBD)
+RENDER_REPORT_VERSION = "3"
 # TheSuperHackers @bugfix Leex 25/08/2026 Invalidate failed casts after production-scale scene authority resolution fixes. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Keep camera render jobs valid for engine-validated airspace targets above terrain bounds. (#TBD)
 # TheSuperHackers @feature Leex 25/08/2026 Render sparse strategy, build, production, and battle commentary from full-match evidence. (#TBD)
@@ -60,7 +60,8 @@ RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @feature Leex 25/08/2026 Requeue casts with calmer camera pacing and sparse identity-specific combat calls. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts after making equal-frame commentary anchors totally ordered. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Invalidate casts that predate terminal commentary coverage enforcement. (#TBD)
-RENDER_VIDEO_VERSION = "25"
+# TheSuperHackers @feature Leex 25/08/2026 Requeue casts with midpoint battle framing and a wider combat overview. (#TBD)
+RENDER_VIDEO_VERSION = "26"
 
 
 def canonical_json(value: Any) -> str:
