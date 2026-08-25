@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from generals_replay_analyzer.web.app import create_app
 from generals_replay_analyzer.web.dependencies import application_port
 from generals_replay_analyzer.web.ports import (
+    AvailabilityDTO,
     DerivedLongitudinalEvidenceDTO,
     EvidenceDetailDTO,
     EvidenceQueryDTO,
@@ -138,6 +139,44 @@ def test_selected_opponent_leads_with_recurring_opening_threat_and_counter_plan(
     assert "Threat" in response.text and "Counter-plan" in response.text
     assert "Confirm the opening" in response.text and "Prepare before the timing" in response.text
     assert f'/evidence/derived/{EVIDENCE_ID}?report_id={REPORT_ID}' in response.text
+
+
+def test_unavailable_recurring_opening_does_not_probe_evidence_across_reports() -> None:
+    """Unavailable insights must not enter the bounded evidence lookup loop."""
+    profile = _full_profile()
+    second_report = profile.version.fixed_reports[0].model_copy(
+        update={"report_public_id": "123e4567-e89b-42d3-a456-426614174349"}
+    )
+    unavailable_opening = profile.insights[0].model_copy(
+        update={
+            "raw_value": None,
+            "sample_count": 0,
+            "availability": AvailabilityDTO(state="unavailable", reason_codes=("insufficient_samples",)),
+        }
+    )
+    profile = profile.model_copy(
+        update={
+            "insights": (unavailable_opening, *profile.insights[1:]),
+            "query": profile.query.model_copy(update={"report_public_ids": (REPORT_ID, second_report.report_public_id)}),
+            "version": profile.version.model_copy(update={"fixed_reports": (*profile.version.fixed_reports, second_report)}),
+        }
+    )
+
+    class ScoutingPort(_PlayerPort):
+        def __init__(self) -> None:
+            super().__init__(profile)
+            self.evidence_queries: list[EvidenceQueryDTO] = []
+
+        def get_evidence(self, query: EvidenceQueryDTO) -> EvidenceDetailDTO:
+            self.evidence_queries.append(query)
+            raise AssertionError("unavailable recurring opening must not request evidence")
+
+    port = ScoutingPort()
+    with _profile_client(port) as client:
+        response = client.get(f"/scouting?player={PLAYER_ID}", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert port.evidence_queries == []
 
 
 def test_scouting_query_rejects_unknown_or_noncanonical_player_ids() -> None:

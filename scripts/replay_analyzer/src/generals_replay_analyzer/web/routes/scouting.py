@@ -102,6 +102,13 @@ def scouting_workspace(
                 for insight in profile.insights:
                     if insight.insight_kind != "recurring_opening":
                         continue
+                    # TheSuperHackers @bugfix Leex 25/08/2026 Skip unavailable or empty recurring-opening evidence lookups to prevent scouting request timeouts. (#TBD)
+                    if (
+                        insight.availability.state not in {"available", "partial"}
+                        or insight.raw_value is None
+                        or insight.sample_count <= 0
+                    ):
+                        continue
                     for evidence in insight.evidence:
                         for report in profile.version.fixed_reports:
                             try:
