@@ -1456,12 +1456,13 @@ def test_runner_rejects_a_hardlinked_trace_even_when_trace_bytes_validate(tmp_pa
     assert (result.run_dir / "trace.ndjson").stat().st_nlink == 2
 
 
-def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
+def test_engine_runner_cross_binds_forced_crc_trace_outcome_and_assets(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
-    """Prove the public runner against the real Steam-runtime hardlink and natural CRC boundary."""
+    """Prove the public runner cross-binds validated partial evidence at a deliberate CRC stop."""
     replay_hash = hashlib.sha256(pinned_replay.read_bytes()).hexdigest()
     user_replay_directory = Path.home() / "Documents" / "Command and Conquer Generals Zero Hour Data" / "Replays"
     before_user_replays = (
@@ -1474,7 +1475,7 @@ def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
     data_root = (tmp_path.parents[1] / f"g9-real-{short_token}").resolve()
 
     result = export_telemetry(
-        pinned_replay,
+        forced_crc_mismatch_replay,
         _config(zero_hour_runtime_executable, data_root, timeout_seconds=120),
         run_id_factory=lambda: "713e4567-e89b-42d3-a456-426614174000",
     )
@@ -1511,11 +1512,11 @@ def test_real_pinned_engine_runner_cross_binds_crc_trace_outcome_and_assets(
     assert after_user_replays == before_user_replays
 
 
-def test_real_pinned_engine_runner_stages_build_into_installed_runtime(
+def test_engine_runner_stages_build_into_installed_runtime(
     tmp_path: Path,
     zero_hour_executable: Path,
     zero_hour_runtime_directory: Path,
-    pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
     """Prove the public runner itself owns and cleans the runtime-local build binding."""
     short_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:8]
@@ -1523,7 +1524,7 @@ def test_real_pinned_engine_runner_stages_build_into_installed_runtime(
     before = set(zero_hour_runtime_directory.glob("generalszh_replay_analyzer_*.exe"))
 
     result = export_telemetry(
-        pinned_replay,
+        forced_crc_mismatch_replay,
         _config(
             zero_hour_executable,
             data_root,

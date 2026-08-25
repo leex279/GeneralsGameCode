@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from generals_replay_analyzer.importing.telemetry_import import bridge_v2_damage_victim_template_name
 from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.telemetry.model import (
     CashChangedPayload,
@@ -68,7 +69,7 @@ def _run(
             env=_environment(repository_root),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=900,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
@@ -86,6 +87,12 @@ def _write_crc_stripped_derivative(source: Path, destination: Path) -> None:
         if command.message_name != "MSG_LOGIC_CRC"
     )
     destination.write_bytes(b"".join(pieces))
+
+
+def _load_engine_trace(trace: Path) -> tuple[TelemetryRecord, ...]:
+    """Apply the one supported producer bridge before strict trace validation."""
+    bridge_v2_damage_victim_template_name(trace)
+    return tuple(iter_validated_trace(trace))
 
 
 def _assert_cash_fold(records: tuple[TelemetryRecord, ...]) -> None:
@@ -114,7 +121,15 @@ def _assert_income_rate_evidence(records: tuple[TelemetryRecord, ...]) -> None:
         if slot.occupied and slot.player_index is not None
     )
     samples = [record for record in records if isinstance(record, CashPerMinuteSnapshotRecord)]
-    expected_frames = sorted({*range(30, complete.payload.final_frame + 1, 30), complete.payload.final_frame})
+    assert samples
+    sample_interval_frames = samples[0].payload.sample_interval_frames
+    assert all(record.payload.sample_interval_frames == sample_interval_frames for record in samples)
+    expected_frames = sorted(
+        {
+            *range(sample_interval_frames, complete.payload.final_frame + 1, sample_interval_frames),
+            complete.payload.final_frame,
+        }
+    )
 
     assert [record.frame for record in samples] == expected_frames
     assert all(
@@ -137,18 +152,19 @@ def _assert_income_rate_evidence(records: tuple[TelemetryRecord, ...]) -> None:
     )
 
 
-def test_natural_crc_stopping_replay_exposes_engine_cash_chain_and_final_balances(
+def test_natural_replay_exposes_full_engine_cash_chain_and_final_balances(
     tmp_path: Path,
     repository_root: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
 ) -> None:
-    """Use the unmodified replay only for observations reached before its frame-108 CRC stop."""
+    """Use the unmodified replay as authoritative full-match economy evidence."""
     trace = (tmp_path / "natural-economy.ndjson").resolve()
     completed = _run(zero_hour_runtime_executable, pinned_replay, trace, repository_root)
 
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
     assert trace.is_file(), completed.stdout[-2000:] + completed.stderr[-2000:]
-    records = tuple(iter_validated_trace(trace))
+    records = _load_engine_trace(trace)
     players = next(record for record in records if isinstance(record, PlayersInitializedRecord))
     complete = records[-1]
     assert isinstance(complete, CompleteRecord)
@@ -164,18 +180,38 @@ def test_natural_crc_stopping_replay_exposes_engine_cash_chain_and_final_balance
     assert resolved_slots < set(players.payload.engine_player_indices)
     cash = [record for record in records if record.event_type == "cash_changed"]
     counts = Counter(record.event_type for record in records)
-    expected = {"production_queued": 1, "cash_changed": 6}
+    expected = {
+        "production_queued": 209,
+        "production_cancelled": 20,
+        "production_completed": 189,
+        "upgrade_queued": 55,
+        "upgrade_cancelled": 1,
+        "upgrade_completed": 54,
+        "science_purchased": 4,
+        "special_power_used": 24,
+        "cash_changed": 1538,
+        "supply_collected": 682,
+    }
     assert {event_type: counts[event_type] for event_type in TASK5_EVENT_TYPES} == {
         event_type: expected.get(event_type, 0) for event_type in TASK5_EVENT_TYPES
     }
     assert Counter(record.payload.reason for record in cash) == {
         "starting_cash": 4,
-        "unit_cost": 1,
-        "construction_cost": 1,
+        "supply_income": 682,
+        "unknown": 524,
+        "unit_cost": 209,
+        "upgrade_cost": 55,
+        "construction_cost": 42,
+        "unit_refund": 20,
+        "sell_refund": 1,
+        "upgrade_refund": 1,
     }
     assert all(record.payload.before + record.payload.delta == record.payload.after for record in cash)
     _assert_cash_fold(records)
     _assert_income_rate_evidence(records)
+    assert complete.payload.final_frame == 56004
+    assert complete.payload.crc_mismatch is False
+    assert complete.payload.clean_shutdown is True
 
 
 def test_crc_stripped_derivative_reaches_economy_and_queue_mechanics_without_strategy_claims(
@@ -194,7 +230,7 @@ def test_crc_stripped_derivative_reaches_economy_and_queue_mechanics_without_str
 
     assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
     assert pinned_replay.read_bytes() == original
-    records = tuple(iter_validated_trace(trace))
+    records = _load_engine_trace(trace)
     counts = Counter(record.event_type for record in records)
     expected = {
         "production_queued": 23,

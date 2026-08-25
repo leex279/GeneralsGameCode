@@ -7,6 +7,8 @@ from uuid import uuid4
 
 import pytest
 
+from generals_replay_analyzer.parser import parse_replay
+
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Register and apply the engine marker even when pytest starts above the analyzer pyproject."""
@@ -84,3 +86,19 @@ def pinned_replay(repository_root: Path) -> Path:
     if not replay.is_file():
         pytest.fail(f"pinned replay fixture is missing: {replay}")
     return replay.resolve()
+
+
+@pytest.fixture
+def forced_crc_mismatch_replay(tmp_path: Path, pinned_replay: Path) -> Path:
+    """Keep the real initialized match but stop focused contracts at the first CRC boundary."""
+    parsed = parse_replay(pinned_replay)
+    crc_command = next(command for command in parsed.commands if command.message_name == "MSG_LOGIC_CRC")
+    crc_bytes = crc_command.arguments[0].raw_bytes
+    source_bytes = pinned_replay.read_bytes()
+    command_bytes = source_bytes[crc_command.start_offset : crc_command.end_offset]
+    crc_offset = command_bytes.index(crc_bytes)
+    mutated = bytearray(source_bytes)
+    mutated[crc_command.start_offset + crc_offset] ^= 1
+    destination = tmp_path / "forced-crc-mismatch.rep"
+    destination.write_bytes(mutated)
+    return destination.resolve()

@@ -201,25 +201,26 @@ def test_trace_and_independent_outcome_count_the_same_preinitialization_command_
     assert "s_initialized" not in observer
 
 
-def test_natural_pinned_replay_retains_frame_108_crc_boundary(
+def test_forced_crc_mismatch_preserves_order_trace_and_outcome_contract(
     tmp_path: Path,
     repository_root: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
-    """Use the natural replay only for its checksum boundary, never strategy or outcome claims."""
+    """Use a deliberate early CRC mismatch to verify telemetry is passive and cross-bound."""
     original_hash = hashlib.sha256(pinned_replay.read_bytes()).hexdigest()
     trace = tmp_path / "natural-order-movement.ndjson"
     baseline_outcome = tmp_path / "natural-baseline-outcome.json"
     telemetry_outcome = tmp_path / "natural-telemetry-outcome.json"
     baseline = _run_engine(
-        _outcome_command(_base_command(zero_hour_runtime_executable, pinned_replay), baseline_outcome),
+        _outcome_command(_base_command(zero_hour_runtime_executable, forced_crc_mismatch_replay), baseline_outcome),
         zero_hour_runtime_executable.parent,
         repository_root,
     )
     completed = _run_engine(
         _outcome_command(
-            _telemetry_command(zero_hour_runtime_executable, pinned_replay, trace, 15), telemetry_outcome
+            _telemetry_command(zero_hour_runtime_executable, forced_crc_mismatch_replay, trace, 15), telemetry_outcome
         ),
         zero_hour_runtime_executable.parent,
         repository_root,

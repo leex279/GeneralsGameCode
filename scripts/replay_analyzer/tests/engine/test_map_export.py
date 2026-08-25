@@ -944,6 +944,7 @@ def test_pinned_replay_exports_strict_deterministic_map_asset(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
     """A real initialized map must export once and reuse validated bytes without touching them."""
     replay_hash = hashlib.sha256(pinned_replay.read_bytes()).hexdigest()
@@ -954,7 +955,7 @@ def test_pinned_replay_exports_strict_deterministic_map_asset(
         trace = tmp_path / f"natural-{index}.ndjson"
         completed = subprocess.run(
             [
-                str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay),
+                str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay),
                 "-telemetry", str(trace), "-telemetry-run-id", str(UUID(int=index + 1)),
                 "-telemetry-movement-frames", "15",
             ],
@@ -964,7 +965,7 @@ def test_pinned_replay_exports_strict_deterministic_map_asset(
             timeout=60,
             check=False,
         )
-        assert completed.returncode != 0  # pinned fixture's established CRC mismatch
+        assert completed.returncode != 0  # The disposable derivative deliberately fails its first CRC check.
         records = tuple(iter_validated_trace(trace))
         reference = records[0].payload.map_asset
         assert reference is not None
@@ -990,7 +991,7 @@ def test_pinned_replay_exports_strict_deterministic_map_asset(
 def test_telemetry_disabled_replay_creates_no_map_asset(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
-    pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
     existing_asset_cache = zero_hour_runtime_executable.parent / "map-assets-v2"
     before = (
@@ -999,7 +1000,7 @@ def test_telemetry_disabled_replay_creates_no_map_asset(
         else None
     )
     completed = subprocess.run(
-        [str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay)],
+        [str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay)],
         cwd=zero_hour_runtime_executable.parent,
         capture_output=True,
         text=True,
@@ -1022,11 +1023,12 @@ def test_map_export_failure_discards_only_owned_trace_and_temporaries(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
     pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
     failure: str,
 ) -> None:
     replay_hash = hashlib.sha256(pinned_replay.read_bytes()).hexdigest()
     baseline = subprocess.run(
-        [str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay)],
+        [str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay)],
         cwd=zero_hour_runtime_executable.parent,
         capture_output=True,
         text=True,
@@ -1040,7 +1042,7 @@ def test_map_export_failure_discards_only_owned_trace_and_temporaries(
     environment["GENERALS_REPLAY_MAP_EXPORT_TEST_FAIL"] = failure
     completed = subprocess.run(
         [
-            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay),
+            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay),
             "-telemetry", str(trace), "-telemetry-run-id", RUN_ID,
         ],
         cwd=zero_hour_runtime_executable.parent,
@@ -1061,13 +1063,13 @@ def test_map_export_failure_discards_only_owned_trace_and_temporaries(
 def test_corrupt_or_partial_map_cache_fails_closed_without_rewrite(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
-    pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
     mutation: str,
 ) -> None:
     first_trace = tmp_path / "first.ndjson"
     first = subprocess.run(
         [
-            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay),
+            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay),
             "-telemetry", str(first_trace), "-telemetry-run-id", RUN_ID,
         ],
         cwd=zero_hour_runtime_executable.parent,
@@ -1091,7 +1093,7 @@ def test_corrupt_or_partial_map_cache_fails_closed_without_rewrite(
     second_trace = tmp_path / "second.ndjson"
     second = subprocess.run(
         [
-            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay),
+            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay),
             "-telemetry", str(second_trace), "-telemetry-run-id", "22345678-1234-4234-8234-123456789abc",
         ],
         cwd=zero_hour_runtime_executable.parent,
@@ -1112,14 +1114,14 @@ def test_corrupt_or_partial_map_cache_fails_closed_without_rewrite(
 def test_writer_failure_discards_trace_but_preserves_valid_published_map_cache(
     tmp_path: Path,
     zero_hour_runtime_executable: Path,
-    pinned_replay: Path,
+    forced_crc_mismatch_replay: Path,
 ) -> None:
     trace = tmp_path / "writer-failed.ndjson"
     environment = os.environ.copy()
     environment["GENERALS_REPLAY_TELEMETRY_TEST_FAIL_AFTER_COMPLETE_WRITE"] = "1"
     completed = subprocess.run(
         [
-            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(pinned_replay),
+            str(zero_hour_runtime_executable), "-headless", "-noaudio", "-replay", str(forced_crc_mismatch_replay),
             "-telemetry", str(trace), "-telemetry-run-id", RUN_ID,
         ],
         cwd=zero_hour_runtime_executable.parent,
