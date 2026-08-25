@@ -121,6 +121,9 @@ def player_centric_transform(
     if squared_distance <= 0:
         return SpatialUnavailable("unresolved_player_transform")
     angle = -math.atan2(dy, dx)
+    # TheSuperHackers @bugfix Leex 25/08/2026 Normalize derived signed zero angles before immutable scene canonicalization. (#TBD)
+    if angle == 0.0:
+        angle = 0.0
     cosine = math.cos(angle)
     sine = math.sin(angle)
     if not all(math.isfinite(value) for value in (angle, cosine, sine)):

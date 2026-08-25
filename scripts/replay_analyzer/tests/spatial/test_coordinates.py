@@ -1,5 +1,6 @@
 """Coordinate conversion and player-centric transform tests."""
 
+import math
 from dataclasses import replace
 
 import pytest
@@ -87,6 +88,18 @@ def test_player_transform_is_mirror_invariant_and_uses_deterministic_tie_order(e
     assert selected.apply(Position3(4.0, 3.0, 0.0)).x == pytest.approx(
         mirror_transform.apply(Position3(-4.0, -3.0, 0.0)).x
     )
+
+
+def test_player_transform_canonicalizes_east_facing_zero_angle(evidence_ref) -> None:
+    """A signed zero angle would make an otherwise valid map scene fail its canonical boundary."""
+    own = StartPosition("own", 1, (0,), Position3(0.0, 0.0, 0.0), evidence_ref(1))
+    east = StartPosition("east", 2, (1,), Position3(10.0, 0.0, 0.0), evidence_ref(2))
+
+    transform = player_centric_transform(own, (east,))
+
+    assert not isinstance(transform, SpatialUnavailable)
+    assert transform.angle_radians == 0.0
+    assert math.copysign(1.0, transform.angle_radians) == 1.0
 
 
 def test_player_transform_rejects_missing_or_coincident_enemy(evidence_ref) -> None:
