@@ -190,20 +190,22 @@ def _timed_feature_claims(report: PublishedReportGraphDTO, horizon: int, logic_h
         template_token, occurrence, source_kind = anchor
         anchor_matches: list[tuple[int, str, ReportValue]]
         if source_kind == "build":
-            anchor_matches = sorted(
+            anchor_matches = [
                 (frame, template, source)
                 for template, candidates in build_templates.items()
                 if template_token in template
                 for frame, source in candidates
-            )
+            ]
         else:
-            anchor_matches = sorted(
+            anchor_matches = [
                 (candidate.frame_window[0], template, candidate)
                 for template, candidates in observed_templates.items()
                 if template_token in template
                 for candidate in candidates
                 if candidate.frame_window is not None and candidate.frame_window[0] <= horizon
-            )
+            ]
+        # TheSuperHackers @bugfix Leex 25/08/2026 Break equal strategy anchors by stable claim identity instead of comparing report objects. (#TBD)
+        anchor_matches.sort(key=lambda item: (item[0], item[1], item[2].claim_id))
         if len(anchor_matches) < occurrence:
             continue
         frame, matched_template, matched = anchor_matches[occurrence - 1]

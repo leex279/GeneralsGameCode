@@ -457,6 +457,92 @@ def test_full_match_player_features_create_timed_strategy_build_and_production_c
     assert len(plan.events) >= 4
 
 
+def test_strategy_anchor_order_is_deterministic_for_duplicate_frame_and_template_claims() -> None:
+    graph = _player_selected_report()
+    build_sequence = ReportValue(
+        claim_id="feature:build.completed_sequence:a",
+        section="features",
+        label="build.completed_sequence",
+        raw_value=({"frame": 180, "template_name": "GLAPalace"},),
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_key": PLAYER_ONE_ID, "scope_type": "player"},
+        frame_window=(0, 300),
+        evidence=(
+            ReportEvidenceRef(BOUNDARY_EVIDENCE, "observed"),
+            ReportEvidenceRef(STRATEGY_EVIDENCE, "derived"),
+        ),
+        details={},
+    )
+    strategy = ReportValue(
+        claim_id="strategy:gla_fast_palace:duplicate-anchor",
+        section="strategy",
+        label="gla_fast_palace",
+        raw_value={"confidence": 1.0, "phase": "mid", "strategy_label": "gla_fast_palace"},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_type": "player"},
+        frame_window=(0, 300),
+        evidence=(ReportEvidenceRef(STRATEGY_EVIDENCE, "derived"),),
+        details={},
+    )
+    document = replace(
+        graph.selected.document,
+        observed=(),
+        derived=(build_sequence, replace(build_sequence, claim_id="feature:build.completed_sequence:b"), strategy),
+    )
+    report = replace(graph, player_reports=(replace(graph.selected, document=document),))
+    camera = _camera(300).model_copy(update={"authority": _authority(300, report_public_id=PLAYER_REPORT_ID)})
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    assert any("fast Palace" in event.text for event in plan.events)
+
+
+def test_observed_strategy_anchor_uses_claim_identity_to_break_equal_frame_and_template_ties() -> None:
+    graph = _player_selected_report()
+    technical_a = _value(
+        "observed:technical:a",
+        "timeline",
+        "production_completed",
+        (120, 120),
+        MILESTONE_EVIDENCE,
+        {"player_index": 1, "template_name": "GLAVehicleTechnical"},
+    )
+    technical_b = _value(
+        "observed:technical:b",
+        "timeline",
+        "production_completed",
+        (120, 120),
+        BOUNDARY_EVIDENCE,
+        {"player_index": 1, "template_name": "GLAVehicleTechnical"},
+    )
+    strategy = ReportValue(
+        claim_id="strategy:gla_technical_aggression:duplicate-anchor",
+        section="strategy",
+        label="gla_technical_aggression",
+        raw_value={"confidence": 1.0, "phase": "opening", "strategy_label": "gla_technical_aggression"},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_type": "player"},
+        frame_window=(0, 300),
+        evidence=(ReportEvidenceRef(STRATEGY_EVIDENCE, "derived"),),
+        details={},
+    )
+    document = replace(graph.selected.document, observed=(technical_b, technical_a), derived=(strategy,))
+    report = replace(graph, player_reports=(replace(graph.selected, document=document),))
+    camera = _camera(300).model_copy(update={"authority": _authority(300, report_public_id=PLAYER_REPORT_ID)})
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    event = next(item for item in plan.events if "Technical aggression" in item.text)
+    assert MILESTONE_EVIDENCE in {citation.evidence_public_id for citation in event.evidence}
+    assert BOUNDARY_EVIDENCE not in {citation.evidence_public_id for citation in event.evidence}
+
+
 def test_observed_kill_timing_gets_specific_commentary_and_replaces_cluster() -> None:
     graph = _player_selected_report()
     observed_kills = ReportValue(
