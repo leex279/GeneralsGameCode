@@ -384,6 +384,48 @@ def test_reader_accepts_structurally_distinct_authoritative_economy_and_producti
     assert records[-1].payload.final_cash_balances[0].balance == 4700
 
 
+def test_reader_preserves_income_cash_event_for_initialized_neutral_player(tmp_path: Path) -> None:
+    trace = _valid_trace(tmp_path, "neutral-income.ndjson")
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]
+    records = [record for record in records if record["event_type"] != "match_outcome"]
+    players = next(record for record in records if record["event_type"] == "players_initialized")
+    players["payload"]["engine_player_indices"] = [0, 1]
+    neutral_frame = max(int(record["frame"]) for record in records)
+    records.append(
+        _record(
+            len(records),
+            "cash_changed",
+            {
+                "player_index": 1,
+                "before": 0,
+                "delta": 100,
+                "after": 100,
+                "track_income": True,
+                "reason": "script",
+                "tracked_income_amount": 100,
+                "income_bucket_index": 0,
+            },
+            frame=neutral_frame,
+        )
+    )
+    neutral_trace = _finish(
+        tmp_path / "neutral-income.ndjson",
+        records,
+        [
+            {"player_index": 0, "has_money": True, "balance": 4700},
+            {"player_index": 1, "has_money": True, "balance": 100},
+        ],
+    )
+
+    validated = tuple(iter_validated_trace(neutral_trace))
+    neutral_event = next(
+        record
+        for record in validated
+        if record.event_type == "cash_changed" and record.payload.player_index == 1
+    )
+    assert neutral_event.payload.tracked_income_amount == 100
+
+
 def test_reader_preserves_full_player_domain_with_zero_cash_and_no_money_entries(tmp_path: Path) -> None:
     trace = _valid_trace(tmp_path, "source.ndjson")
     records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()][:-1]

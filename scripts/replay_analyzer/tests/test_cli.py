@@ -378,7 +378,7 @@ def test_import_composition_matches_the_configured_telemetry_policy(
         registered = service.worker_control_port().registered_stages()
         assert ("telemetry" in registered) is configured
         assert service._telemetry_acquirer_version == (
-            "engine-telemetry-v2" if configured else "none"
+            "engine-telemetry-v3" if configured else "none"
         )
     finally:
         engine.dispose()

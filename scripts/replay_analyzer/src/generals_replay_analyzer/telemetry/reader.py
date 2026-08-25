@@ -1795,8 +1795,11 @@ def _validate_v2_engine_native_trace(
                 missing_income_provenance = True
                 continue
             player_index = cast(int, payload["player_index"])
-            if player_index not in resolved_occupied_player_indices:
+            if player_index not in engine_player_indices:
                 fail(index, "cash_changed income provenance player is outside initialized domain")
+            # TheSuperHackers @fix Leex 26/08/2026 Preserve initialized neutral income events without folding them into occupied-player CPM. (#TBD)
+            if player_index not in resolved_occupied_player_indices:
+                continue
             require_nondecreasing_income_frame(record.frame)
             target_bucket = (record.frame // cash_sample_interval) % 60
             if bucket == target_bucket and current_income_bucket[player_index] != target_bucket:

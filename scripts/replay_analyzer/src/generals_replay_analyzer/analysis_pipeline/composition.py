@@ -62,8 +62,8 @@ from .handlers import (
     RenderReportHandler,
 )
 
-# TheSuperHackers @bugfix Leex 25/08/2026 Requeue telemetry after current-engine trace validation changed. (#TBD)
-ENGINE_TELEMETRY_ACQUIRER_VERSION = "engine-telemetry-v2"
+# TheSuperHackers @bugfix Leex 26/08/2026 Requeue telemetry after initialized neutral-player validation changed. (#TBD)
+ENGINE_TELEMETRY_ACQUIRER_VERSION = "engine-telemetry-v3"
 
 
 # TheSuperHackers @feature Leex 23/08/2026 Enable engine telemetry only in explicitly configured launch-capable processes. (#TBD)
