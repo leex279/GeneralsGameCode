@@ -136,6 +136,34 @@ def test_writer_uses_owned_argv_only_win32_child(repository_root: Path) -> None:
     )
 
 
+def test_writer_converts_rgb_capture_to_tagged_limited_range_bt709(
+    repository_root: Path,
+) -> None:
+    """Catch implicit RGB-to-YUV conversion or missing playback color metadata."""
+    source = _source(
+        repository_root,
+        "Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DVideoWriter.cpp",
+    )
+    open_section = source.split("bool W3DVideoWriter::open(", maxsplit=1)[1].split(
+        "bool W3DVideoWriter::captureFrame", maxsplit=1
+    )[0]
+
+    assert (
+        'L":flags=bicubic:in_range=full:out_range=limited:'
+        'out_color_matrix=bt709,format=yuv420p"'
+    ) in open_section
+    for option, value in (
+        ("-color_range", "tv"),
+        ("-colorspace", "bt709"),
+        ("-color_primaries", "bt709"),
+        ("-color_trc", "bt709"),
+    ):
+        assert (
+            f'arguments.push_back(L"{option}");\n\targuments.push_back(L"{value}");'
+            in open_section
+        )
+
+
 def test_pixel_and_argv_helpers_execute_exact_contract(
     repository_root: Path, tmp_path: Path
 ) -> None:

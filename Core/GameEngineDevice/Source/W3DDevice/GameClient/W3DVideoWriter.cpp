@@ -204,7 +204,9 @@ bool W3DVideoWriter::open(IDirect3DDevice8 *device, unsigned int width, unsigned
 	std::wostringstream inputSize;
 	inputSize << width << L"x" << height;
 	std::wostringstream scale;
-	scale << L"scale=" << m_requestedWidth << L":" << m_requestedHeight << L":flags=bicubic";
+	// TheSuperHackers @bugfix Leex 25/08/2026 Convert full-range RGB capture to tagged limited-range BT.709 for consistent replay colors. (#TBD)
+	scale << L"scale=" << m_requestedWidth << L":" << m_requestedHeight
+		<< L":flags=bicubic:in_range=full:out_range=limited:out_color_matrix=bt709,format=yuv420p";
 	std::wostringstream fps;
 	fps << m_fps;
 	std::vector<std::wstring> arguments;
@@ -229,6 +231,14 @@ bool W3DVideoWriter::open(IDirect3DDevice8 *device, unsigned int width, unsigned
 	arguments.push_back(L"libx264");
 	arguments.push_back(L"-pix_fmt");
 	arguments.push_back(L"yuv420p");
+	arguments.push_back(L"-color_range");
+	arguments.push_back(L"tv");
+	arguments.push_back(L"-colorspace");
+	arguments.push_back(L"bt709");
+	arguments.push_back(L"-color_primaries");
+	arguments.push_back(L"bt709");
+	arguments.push_back(L"-color_trc");
+	arguments.push_back(L"bt709");
 	arguments.push_back(L"-fps_mode");
 	arguments.push_back(L"cfr");
 	arguments.push_back(L"-n");
