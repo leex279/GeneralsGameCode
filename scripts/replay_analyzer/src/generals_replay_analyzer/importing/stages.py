@@ -59,7 +59,8 @@ RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with bounded terminal settlement-frame padding. (#TBD)
 # TheSuperHackers @feature Leex 25/08/2026 Requeue casts with calmer camera pacing and sparse identity-specific combat calls. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts after making equal-frame commentary anchors totally ordered. (#TBD)
-RENDER_VIDEO_VERSION = "24"
+# TheSuperHackers @bugfix Leex 25/08/2026 Invalidate casts that predate terminal commentary coverage enforcement. (#TBD)
+RENDER_VIDEO_VERSION = "25"
 
 
 def canonical_json(value: Any) -> str:

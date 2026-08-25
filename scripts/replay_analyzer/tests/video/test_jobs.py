@@ -13,6 +13,10 @@ def _id() -> str:
     return str(uuid4())
 
 
+def test_render_video_version_invalidates_artifacts_without_terminal_commentary_coverage() -> None:
+    assert RENDER_VIDEO_VERSION == "25"
+
+
 def test_complete_evidence_creates_worker_owned_render_job() -> None:
     planner = VideoJobPlanner(clock=lambda: datetime(2026, 8, 24, tzinfo=UTC))
 
