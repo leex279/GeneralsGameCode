@@ -1081,7 +1081,7 @@ def test_configured_worker_registers_engine_telemetry_with_the_production_versio
     service, engine, _composed_settings = worker_module._worker_service()
     try:
         assert "telemetry" in service.worker_control_port().registered_stages()
-        assert service._telemetry_acquirer_version == "engine-telemetry-v1"
+        assert service._telemetry_acquirer_version == "engine-telemetry-v2"
     finally:
         engine.dispose()
 
