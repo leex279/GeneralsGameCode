@@ -420,6 +420,11 @@ def test_report_surfaces_timestamped_tactical_review_moments_before_the_raw_time
     assert "Humvee over War Factory" in response.text
     assert "War Factory destroyed" not in response.text
     assert f'/evidence/observed/{EVIDENCE_ID}?report_id={REPORT_ID}' in response.text
+    assert (
+        f'/replays/{REPLAY_ID}/reports/{REPORT_ID}/map?frame_start=0&amp;frame_end=600'
+        in response.text
+    )
+    assert "Open on battlefield" in response.text
 
 
 class _ReportPort:

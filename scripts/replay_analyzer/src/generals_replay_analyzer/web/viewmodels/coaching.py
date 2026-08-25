@@ -125,6 +125,8 @@ class SignalReadView(_FrozenView):
 
 class KeyMomentView(_FrozenView):
     frame: int
+    map_frame_start: int
+    map_frame_end: int
     time_label: str
     category_label: str
     title: str
@@ -465,8 +467,23 @@ def _event_rows(report: ReplayReportDTO, label: str) -> tuple[tuple[dict[str, ob
     return tuple(rows)
 
 
+# TheSuperHackers @feature Leex 25/08/2026 Bind each tactical checkpoint to a fifteen-second battlefield review window. (#TBD)
+def _moment_map_window(
+    frame: int,
+    horizon: EvidenceHorizonView,
+    frames_per_second: int,
+) -> tuple[int, int]:
+    assert horizon.frame_end is not None
+    radius = 15 * frames_per_second
+    return max(0, frame - radius), min(horizon.frame_end, frame + radius)
+
+
 # TheSuperHackers @feature Leex 24/08/2026 Turn observed tactical events into a bounded chronological review queue. (#TBD)
-def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[KeyMomentView, ...]:
+def _key_moments(
+    report: ReplayReportDTO,
+    horizon: EvidenceHorizonView,
+    frames_per_second: int,
+) -> tuple[KeyMomentView, ...]:
     if horizon.frame_end is None:
         return ()
     moments: list[KeyMomentView] = []
@@ -475,9 +492,12 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
     for row, claim in _event_rows(report, "scouting.first_observed_clear_timing"):
         frame, template_name = row.get("frame"), row.get("template_name")
         if type(frame) is int and 0 <= frame <= horizon.frame_end and type(template_name) is str:
+            map_frame_start, map_frame_end = _moment_map_window(frame, horizon, frames_per_second)
             moments.append(
                 KeyMomentView(
                     frame=frame,
+                    map_frame_start=map_frame_start,
+                    map_frame_end=map_frame_end,
                     time_label=f"Frame {frame:,}",
                     category_label="Scouting",
                     title=f"{game_label(template_name)} first observed",
@@ -489,9 +509,12 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
     for row, claim in _event_rows(report, "production.special_power_timing"):
         frame, item_name = row.get("frame"), row.get("item_name")
         if type(frame) is int and 0 <= frame <= horizon.frame_end and type(item_name) is str:
+            map_frame_start, map_frame_end = _moment_map_window(frame, horizon, frames_per_second)
             moments.append(
                 KeyMomentView(
                     frame=frame,
+                    map_frame_start=map_frame_start,
+                    map_frame_end=map_frame_end,
                     time_label=f"Frame {frame:,}",
                     category_label="Power use",
                     title=f"{game_label(item_name)} used",
@@ -511,9 +534,12 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
             and type(victim) is str
         ):
             swing_keys.add((frame, victim))
+            map_frame_start, map_frame_end = _moment_map_window(frame, horizon, frames_per_second)
             moments.append(
                 KeyMomentView(
                     frame=frame,
+                    map_frame_start=map_frame_start,
+                    map_frame_end=map_frame_end,
                     time_label=f"Frame {frame:,}",
                     category_label="Engagement",
                     title=f"{game_label(attacker)} over {game_label(victim)}",
@@ -532,9 +558,12 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
             and type(victim) is str
             and (frame, victim) not in swing_keys
         ):
+            map_frame_start, map_frame_end = _moment_map_window(frame, horizon, frames_per_second)
             moments.append(
                 KeyMomentView(
                     frame=frame,
+                    map_frame_start=map_frame_start,
+                    map_frame_end=map_frame_end,
                     time_label=f"Frame {frame:,}",
                     category_label="Combat",
                     title=f"{game_label(victim)} destroyed",
@@ -670,7 +699,7 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
     strategies = _strategies(report, horizon)
     build_order = _build_order(report, horizon, frames_per_second)
     highlights = _highlights(report, horizon, frames_per_second)
-    key_moments = _key_moments(report, horizon)
+    key_moments = _key_moments(report, horizon, frames_per_second)
     return CoachingViewModel(
         horizon=horizon,
         summary=_summary(report, horizon, strategies, build_order, highlights, frames_per_second),

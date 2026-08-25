@@ -411,10 +411,18 @@ def test_key_moments_turn_event_evidence_into_a_chronological_review_queue() -> 
         "Review what changed after this information became visible."
     )
     assert coaching.key_moments[0].evidence[0].public_id == SCOUTING_EVIDENCE
+    assert (
+        coaching.key_moments[0].map_frame_start,
+        coaching.key_moments[0].map_frame_end,
+    ) == (0, 600)
     assert coaching.key_moments[-1].review_prompt == (
         "Review the positioning, trade, and follow-up around this evidence-backed swing candidate."
     )
     assert coaching.key_moments[-1].evidence[0].public_id == TURNING_EVIDENCE
+    assert (
+        coaching.key_moments[-1].map_frame_start,
+        coaching.key_moments[-1].map_frame_end,
+    ) == (0, 750)
 
 
 def test_opening_lanes_align_build_scouting_combat_and_power_evidence() -> None:

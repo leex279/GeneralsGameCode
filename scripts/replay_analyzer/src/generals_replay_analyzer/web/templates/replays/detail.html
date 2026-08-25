@@ -128,7 +128,8 @@
           <li>
             <div class="key-moment-time"><time>{{ moment.time_label }}</time><span>{{ moment.category_label }}</span></div>
             <div class="key-moment-content"><h3>{{ moment.title }}</h3><p>{{ moment.review_prompt }}</p></div>
-            <div class="evidence-links">{% for evidence in moment.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
+            <!-- TheSuperHackers @feature Leex 25/08/2026 Deep-link each coaching checkpoint into its bounded battlefield evidence window. (#TBD) -->
+            <div class="evidence-links"><a href="/replays/{{ report.fixed_report.replay_public_id }}/reports/{{ report.fixed_report.report_public_id }}/map?frame_start={{ moment.map_frame_start }}&amp;frame_end={{ moment.map_frame_end }}">Open on battlefield</a>{% for evidence in moment.evidence %}<a href="/evidence/{{ evidence.tier }}/{{ evidence.public_id }}?report_id={{ report.fixed_report.report_public_id }}">Review {{ evidence.tier }} evidence</a>{% endfor %}</div>
           </li>
         {% endfor %}
       </ol>
