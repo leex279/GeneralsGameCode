@@ -46,13 +46,16 @@ class CancellationSignal(Protocol):
 @dataclass(frozen=True)
 class TransportTimeout:
     connect: float = 30.0
-    read: float = 30.0
+    read: float = 180.0
     write: float = 30.0
     pool: float = 30.0
 
     def __post_init__(self) -> None:
-        if (self.connect, self.read, self.write, self.pool) != (30.0, 30.0, 30.0, 30.0):
-            raise ValueError("provider timeout policy is fixed")
+        if (self.connect, self.write, self.pool) != (30.0, 30.0, 30.0):
+            raise ValueError("provider connection timeout policy is fixed")
+        # TheSuperHackers @fix Leex 25/08/2026 Give bounded local inference enough read time while retaining strict connection policy. (#TBD)
+        if type(self.read) is not float or not 30.0 <= self.read <= 600.0:
+            raise ValueError("provider read timeout must be between 30 and 600 seconds")
 
 
 @dataclass(frozen=True)

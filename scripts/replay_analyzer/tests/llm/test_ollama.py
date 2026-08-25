@@ -207,7 +207,7 @@ def test_literal_loopback_endpoints_expose_safe_fixed_client_policy(endpoint: st
     assert provider.client_config.trust_env is False
     assert provider.client_config.follow_redirects is False
     assert provider.client_config.timeout.connect == 30.0
-    assert provider.client_config.timeout.read == 30.0
+    assert provider.client_config.timeout.read == 180.0
     assert provider.client_config.timeout.write == 30.0
     assert provider.client_config.timeout.pool == 30.0
 
@@ -385,6 +385,7 @@ async def test_location_header_is_rejected_even_on_success(public_ids: tuple[str
     "construct",
     [
         lambda: TransportTimeout(read=29.0),
+        lambda: TransportTimeout(read=601.0),
         lambda: OllamaClientConfig("http://127.0.0.1:1", trust_env=True),
         lambda: OllamaClientConfig("http://127.0.0.1:1", follow_redirects=True),
         lambda: TransportHeaders(cast(str, 7), 2),
