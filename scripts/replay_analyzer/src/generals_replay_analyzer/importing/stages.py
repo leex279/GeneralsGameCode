@@ -42,8 +42,8 @@ HASH_VERSION = "1"
 MANAGE_COPY_VERSION = "1"
 PARSE_VERSION = "1"
 TELEMETRY_VERSION = "1"
-# TheSuperHackers @bugfix Leex 25/08/2026 Requeue observation imports after allowing parser reuse with downstream citations. (#TBD)
-IMPORT_OBSERVATIONS_VERSION = "2"
+# TheSuperHackers @performance Leex 26/08/2026 Requeue observation imports through bounded streaming publication. (#TBD)
+IMPORT_OBSERVATIONS_VERSION = "3"
 RECONCILE_IDENTITIES_VERSION = "1"
 # TheSuperHackers @bugfix Leex 26/08/2026 Requeue feature graphs against the latest matching telemetry recovery branch. (#TBD)
 DERIVE_FEATURES_VERSION = "3"
