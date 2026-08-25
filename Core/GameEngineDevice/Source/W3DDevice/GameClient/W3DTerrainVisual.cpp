@@ -563,6 +563,12 @@ Bool W3DTerrainVisual::load( AsciiString filename )
   REF_PTR_RELEASE( m_logicHeightMap );
 	m_logicHeightMap = NEW WorldHeightMap(pStrm);
 
+	// TheSuperHackers @bugfix Leex 25/08/2026 Apply map lighting after the visual height map has parsed it and before terrain vertices are built. (#TBD)
+	if (TheWritableGlobalData->setTimeOfDay(TheGlobalData->m_timeOfDay) && TheDisplay != nullptr)
+	{
+		TheDisplay->setTimeOfDay(TheGlobalData->m_timeOfDay);
+	}
+
 #ifdef DO_SEISMIC_SIMULATIONS
 
   fileStrm.close();

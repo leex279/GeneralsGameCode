@@ -328,6 +328,11 @@ def test_top_level_build_wiring_preserves_protected_device_cmake(repository_root
     assert "W3DVideoWriter.cpp" in root_cmake
     assert "target_sources(z_gameenginedevice PRIVATE" in root_cmake
     assert "if(RTS_BUILD_ZEROHOUR AND NOT IS_VS6_BUILD)" in root_cmake
+    device_wiring = root_cmake.split(
+        "if(RTS_BUILD_ZEROHOUR AND NOT IS_VS6_BUILD)", maxsplit=1
+    )[1].split("if(RTS_BUILD_GENERALS)", maxsplit=1)[0]
+    assert "target_compile_definitions(z_gameenginedevice PRIVATE RTS_REPLAY_ANALYZER=1)" in device_wiring
+    assert device_wiring.count("RTS_REPLAY_ANALYZER=1") == 1
     assert "W3DVideoWriter" not in protected_cmake
 
 
