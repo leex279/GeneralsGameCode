@@ -536,6 +536,18 @@ dialog::backdrop { background: rgb(4 9 13 / 88%); }
 
 @media (max-width: 479px) {
   h1 { font-size: 2.15rem; }
+  /* TheSuperHackers @fix Leex 25/08/2026 Keep the report identity, primary action, and evidence horizon together in the first mobile viewport. (#TBD) */
+  .report-heading { gap: var(--cc-space-2); margin-bottom: var(--cc-space-3); padding-bottom: var(--cc-space-3); }
+  .report-heading h1 { font-size: 2rem; }
+  .report-heading .page-actions { display: flex; flex-wrap: wrap; gap: var(--cc-space-1); }
+  .report-heading .page-actions .button,
+  .report-heading .page-actions button { font-size: 0.72rem; min-height: 38px; padding: 0.45rem 0.6rem; width: auto; }
+  .report-heading .inline-form { display: flex; }
+  .report-hero > p { margin: var(--cc-space-3); }
+  .report-hero .versus-grid { display: grid; gap: var(--cc-space-2); grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .report-hero .player-match-card { padding: var(--cc-space-2); }
+  .report-hero .player-match-card > strong { font-size: 1.2rem; }
+  .report-hero .player-match-card > a { font-size: 0.72rem; }
   .brand small { display: none; }
   .brand-mark { height: 38px; width: 42px; }
   .utility-actions { gap: 0; }

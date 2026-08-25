@@ -373,8 +373,9 @@ def test_map_filters_and_semantic_evidence_are_keyboard_operable(
     assert coordinate.input_value() in {"map_normalized", "player_centric"}
 
     player_group = page.get_by_role("group", name="Players")
-    expect(player_group).to_contain_text("No accepted player options")
-    assert player_group.locator('input[type="checkbox"]').count() == 0
+    expect(player_group).to_contain_text("Player 1")
+    expect(player_group).to_contain_text("Player 2")
+    assert player_group.locator('input[type="checkbox"]').count() == 2
 
     family_toggle = page.get_by_role("group", name="Event overlays").locator('input[type="checkbox"]').first
     _tab_to(page, family_toggle)

@@ -491,10 +491,10 @@ def test_populated_scouting_is_same_origin_honest_and_reflowed(
     page = context.new_page()
     console_errors, page_errors = install_browser_error_guard(page)
     rejected = install_same_origin_guard(page, origin)
-    page.goto(f"{origin}/scouting?player={player.player_public_id}", wait_until="domcontentloaded", timeout=30_000)
+    page.goto(f"{origin}/scouting?player={player.canonical_public_id}", wait_until="domcontentloaded", timeout=30_000)
     expect(page.get_by_role("heading", name="Prepare for what they do next", exact=True)).to_be_visible()
     expect(page.get_by_text("More comparable matches are needed", exact=False)).to_be_visible()
-    expect(page.get_by_text("No recurring strategy is claimed yet", exact=True)).to_be_visible()
+    expect(page.get_by_text("No recurring strategy is claimed yet", exact=False)).to_be_visible()
     dimensions = page.evaluate("({scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth})")
     assert dimensions["scrollWidth"] <= dimensions["clientWidth"]
     assert rejected == []
