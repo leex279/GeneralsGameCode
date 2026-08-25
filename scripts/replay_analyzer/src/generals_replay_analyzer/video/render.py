@@ -299,18 +299,19 @@ def _load_capture_result(
         raise VideoRenderError("native capture result is not a valid successful closed record") from error
     if type(logic_frames_per_second) is not int or logic_frames_per_second not in (30, 60):
         raise ValueError("logic_frames_per_second must be 30 or 60")
-    expected_logic_frames = final_frame + 1
-    presentation_numerator = expected_logic_frames * settings.fps
+    presentation_numerator = result.logic_frames * settings.fps
     expected_presentation_frames = (
         presentation_numerator + logic_frames_per_second - 1
     ) // logic_frames_per_second
     # TheSuperHackers @bugfix Leex 24/08/2026 Treat actual dimensions as the bounded source backbuffer; requested dimensions plus ffprobe verify the scaled output. (#TBD)
-    # TheSuperHackers @bugfix Leex 25/08/2026 Validate the absolute captured frame range because rendered replay startup can precede the first client callback. (#TBD)
+    # TheSuperHackers @bugfix Leex 25/08/2026 Validate the absolute captured frame range while allowing only the bounded terminal engine-settlement tail. (#TBD)
     if (
         (result.requested_width, result.requested_height) != (settings.width, settings.height)
         or result.fps != settings.fps
         or result.first_logic_frame > logic_frames_per_second
-        or result.last_logic_frame != final_frame
+        or result.first_logic_frame != 0
+        or result.last_logic_frame > final_frame
+        or final_frame - result.last_logic_frame > logic_frames_per_second
         or result.logic_frames != result.last_logic_frame - result.first_logic_frame + 1
         or result.presentation_frames != expected_presentation_frames
     ):
@@ -472,7 +473,7 @@ class VideoRenderService:
             gameplay_path.with_name(f"{gameplay_path.name}.capture-result.json"),
             "native capture result",
         )
-        _load_capture_result(
+        capture_result = _load_capture_result(
             capture_result_path,
             settings,
             request.authority.evidence_horizon.frame_end,
@@ -495,6 +496,7 @@ class VideoRenderService:
                     settings,
                     request.authority.evidence_horizon.frame_end,
                     request.authority.logic_frames_per_second,
+                    capture_result,
                 ),
                 cwd=ffmpeg.parent,
                 stdout_path=run_directory / "mux.stdout.log",
@@ -682,13 +684,14 @@ class VideoRenderService:
         settings: VideoSettingsV1,
         final_frame: int,
         logic_frames_per_second: int,
+        capture_result: NativeCaptureResultV1,
     ) -> tuple[str, ...]:
         if logic_frames_per_second not in (30, 60):
             raise ValueError("logic_frames_per_second must be 30 or 60")
         numerator = (final_frame + 1) * 1_000_000_000
         scaled = (numerator + logic_frames_per_second // 2) // logic_frames_per_second
         duration = f"{scaled // 1_000_000_000}.{scaled % 1_000_000_000:09d}"
-        common = (
+        common: tuple[str, ...] = (
             str(ffmpeg),
             "-nostdin",
             "-n",
@@ -698,9 +701,14 @@ class VideoRenderService:
             str(narration),
         )
         if settings.subtitle_mode == "track":
+            common += ("-i", str(subtitles))
+        target_presentation_frames = (
+            (final_frame + 1) * settings.fps + logic_frames_per_second - 1
+        ) // logic_frames_per_second
+        padding_frames = target_presentation_frames - capture_result.presentation_frames
+        needs_padding = padding_frames > 0
+        if settings.subtitle_mode == "track" and not needs_padding:
             return common + (
-                "-i",
-                str(subtitles),
                 "-map",
                 "0:v:0",
                 "-map",
@@ -725,19 +733,26 @@ class VideoRenderService:
                 "+faststart",
                 str(destination),
             )
+        filters = []
+        if needs_padding:
+            filters.append(f"tpad=stop_mode=clone:stop={padding_frames}")
+        if settings.subtitle_mode != "track":
+            filters.append(f"subtitles=filename='{_ffmpeg_filter_path(subtitles)}'")
         return common + (
             "-map",
             "0:v:0",
             "-map",
             "1:a:0",
+            *( ("-map", "2:0") if settings.subtitle_mode == "track" else () ),
             "-vf",
-            f"subtitles=filename='{_ffmpeg_filter_path(subtitles)}'",
+            ",".join(filters),
             "-c:v",
             "libx264",
             "-c:a",
             "aac",
             "-ac",
             "1",
+            *( ("-c:s", "mov_text") if settings.subtitle_mode == "track" else () ),
             "-t",
             duration,
             "-r",

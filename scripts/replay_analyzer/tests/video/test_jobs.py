@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from generals_replay_analyzer.importing.stages import RENDER_VIDEO_VERSION
 from generals_replay_analyzer.video.jobs import VideoJobPlanner, VideoJobRequestError, VideoRenderStageHandler
 
 
@@ -26,7 +27,7 @@ def test_complete_evidence_creates_worker_owned_render_job() -> None:
     )
 
     assert job.stage == "render_video"
-    assert job.component_version == "21"
+    assert job.component_version == RENDER_VIDEO_VERSION
     assert job.input_json["evidence_horizon"] == "complete"
     assert job.input_json["diagnostic_preview"] is False
     assert job.input_json["replay_sha256"] == "a" * 64

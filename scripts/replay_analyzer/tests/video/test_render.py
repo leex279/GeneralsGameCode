@@ -30,6 +30,7 @@ from generals_replay_analyzer.video.contracts import (
 from generals_replay_analyzer.video.process import VideoProcessError, VideoProcessResult, VideoProcessSpec
 from generals_replay_analyzer.video.render import (
     MediaVerifier,
+    NativeCaptureResultV1,
     RenderManifestInput,
     VideoRenderCancelled,
     VideoRenderError,
@@ -75,9 +76,9 @@ def test_native_capture_accepts_absolute_replay_range_and_rounded_presentation_h
                 "actual_height": 720,
                 "fps": 30,
                 "logic_frames": 55_996,
-                "presentation_frames": 28_002,
-                "first_logic_frame": 7,
-                "last_logic_frame": 56_002,
+                "presentation_frames": 27_998,
+                "first_logic_frame": 0,
+                "last_logic_frame": 55_995,
                 "process_exit_code": 0,
             }
         ),
@@ -91,8 +92,54 @@ def test_native_capture_accepts_absolute_replay_range_and_rounded_presentation_h
         60,
     )
 
-    assert result.presentation_frames == 28_002
-    assert result.first_logic_frame == 7
+    assert result.presentation_frames == 27_998
+    assert result.first_logic_frame == 0
+
+
+def test_native_capture_accepts_bounded_terminal_settlement_gap(tmp_path: Path) -> None:
+    sidecar = tmp_path / "gameplay.mp4.capture-result.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1, "status": "success", "failure_code": "ok", "failure_detail": 0,
+                "requested_width": 1280, "requested_height": 720, "actual_width": 1280, "actual_height": 720,
+                "fps": 30, "logic_frames": 55_996, "presentation_frames": 27_998,
+                "first_logic_frame": 0, "last_logic_frame": 55_995, "process_exit_code": 0,
+            }
+        ), encoding="utf-8"
+    )
+    result = _load_capture_result(sidecar, VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="track"), 56_002, 60)
+    assert result.last_logic_frame == 55_995
+
+
+def test_mux_pads_bounded_terminal_gap_and_reencodes_track_subtitles(tmp_path: Path) -> None:
+    result = NativeCaptureResultV1(
+        schema_version=1, status="success", failure_code="ok", failure_detail=0,
+        requested_width=1280, requested_height=720, actual_width=1280, actual_height=720,
+        fps=30, logic_frames=55_996, presentation_frames=27_998, first_logic_frame=0,
+        last_logic_frame=55_995, process_exit_code=0,
+    )
+    argv = VideoRenderService._mux_argv(
+        Path("ffmpeg"), tmp_path / "gameplay.mp4", tmp_path / "narration.wav", tmp_path / "subtitles.vtt",
+        tmp_path / "out.mp4", VideoSettingsV1(width=1280, height=720, fps=30, subtitle_mode="track"), 56_002, 60, result,
+    )
+    assert "tpad=stop_mode=clone:stop=4" in argv
+    assert argv[argv.index("-c:v") + 1] == "libx264"
+    assert "2:0" in argv
+
+
+def test_mux_rejects_capture_gap_beyond_logic_second(tmp_path: Path) -> None:
+    sidecar = tmp_path / "capture.json"
+    sidecar.write_text(json.dumps({
+        "schema_version": 1, "status": "success", "failure_code": "ok", "failure_detail": 0,
+        "requested_width": 640, "requested_height": 360, "actual_width": 640, "actual_height": 360,
+        "fps": 30, "logic_frames": 1, "presentation_frames": 1, "first_logic_frame": 0,
+        "last_logic_frame": 0, "process_exit_code": 0,
+    }), encoding="utf-8")
+    with pytest.raises(VideoRenderError):
+        _load_capture_result(
+            sidecar, VideoSettingsV1(width=640, height=360, fps=30, subtitle_mode="track"), 62, 30
+        )
 
 
 def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
@@ -707,7 +754,7 @@ def test_render_rejects_verifier_auxiliary_hashes_that_do_not_match_frozen_input
         {"status": "failed", "failure_code": "pipe_write_failed"},
         {"logic_frames": 59},
         {"presentation_frames": 61},
-        {"last_logic_frame": 58},
+        {"last_logic_frame": 0},
         {"requested_width": 320},
         {"process_exit_code": 1},
     ],

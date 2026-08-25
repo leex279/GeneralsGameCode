@@ -55,7 +55,8 @@ RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @feature Leex 25/08/2026 Render sparse strategy, build, production, and battle commentary from full-match evidence. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with the rendered absolute replay launch contract. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with logic-timebase video sampling and absolute capture horizons. (#TBD)
-RENDER_VIDEO_VERSION = "21"
+# TheSuperHackers @bugfix Leex 25/08/2026 Requeue casts with bounded terminal settlement-frame padding. (#TBD)
+RENDER_VIDEO_VERSION = "22"
 
 
 def canonical_json(value: Any) -> str:
