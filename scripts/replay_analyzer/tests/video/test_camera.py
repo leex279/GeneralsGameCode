@@ -471,8 +471,10 @@ def test_camera_damage_focus_frames_both_sides_and_zooms_out_for_their_spread() 
     damage = plan.segments[1]
     assert damage.focus_kind == "damage"
     assert (damage.target_x, damage.target_y, damage.target_z) == (600.0, 600.0, 15.0)
-    assert damage.zoom == pytest.approx(1.0835410197)
-    assert damage.zoom > 1.0
+    # A 224-unit split needs a 31% wider view: the prior 8% margin left the
+    # opposing force and nearby context at the edge of a 45-degree cast shot.
+    assert damage.zoom == pytest.approx(1.3118033989)
+    assert damage.zoom >= 1.25
 
 
 @pytest.mark.parametrize(

@@ -437,8 +437,8 @@ class CameraPlanService:
                         (position[2] + opposing[2]) / 2.0,
                     )
                     map_span = max(bounds[3] - bounds[0], bounds[4] - bounds[1])
-                    # TheSuperHackers @bugfix Leex 25/08/2026 Increase W3D height-based zoom to show both combat sides instead of zooming further in. (#TBD)
-                    zoom = 1.05 + min(0.10, max(0.0, span / map_span * 0.15))
+                    # TheSuperHackers @bugfix Leex 25/08/2026 Reserve cast-safe context around both verified combat sides so an oblique native camera does not crop either force. (#TBD)
+                    zoom = 1.20 + min(0.25, max(0.0, span / map_span * 0.50))
                 if not _inside_planar_map(position, bounds):
                     raise CameraPlanContractError("cited camera position is outside authoritative map bounds")
                 output.append(
