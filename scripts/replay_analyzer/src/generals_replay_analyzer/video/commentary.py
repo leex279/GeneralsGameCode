@@ -313,10 +313,21 @@ def _timed_feature_claims(report: PublishedReportGraphDTO, horizon: int, logic_h
     kill_bins: dict[int, list[_Claim]] = {}
     for claim in specific_kill_claims:
         kill_bins.setdefault(claim.start_frame // (logic_hz * 30), []).append(claim)
-    busiest_kill_bins = sorted(
+    for kill_values in kill_bins.values():
+        kill_values.sort(key=lambda claim: (claim.start_frame, claim.value.claim_id))
+    ranked_kill_bins = sorted(
         kill_bins.values(),
         key=lambda values: (-len(values), values[-1].start_frame, values[-1].value.claim_id),
-    )[:5]
+    )
+    busiest_kill_bins = ranked_kill_bins[:5]
+    # TheSuperHackers @bugfix Leex 25/08/2026 Reserve one sparse commentary slot for the latest supported combat fact. (#TBD)
+    if ranked_kill_bins:
+        latest_kill_bin = max(
+            ranked_kill_bins,
+            key=lambda values: (values[-1].start_frame, values[-1].value.claim_id),
+        )
+        if busiest_kill_bins and all(values is not latest_kill_bin for values in busiest_kill_bins):
+            busiest_kill_bins[-1] = latest_kill_bin
     specific_kill_claims = [
         values[-1]
         for values in sorted(

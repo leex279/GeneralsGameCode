@@ -575,15 +575,22 @@ def test_observed_kill_timing_gets_specific_commentary_and_replaces_cluster() ->
     assert "confirmed destructions" not in texts
 
 
-def test_observed_kill_commentary_selects_at_most_five_busiest_windows() -> None:
+def test_observed_kill_commentary_reserves_one_of_five_windows_for_the_latest_supported_kill() -> None:
     graph = _player_selected_report()
-    kills = tuple(
+    kills = (
         {
-            "frame": 120 + index * 1_800,
+            "frame": 11_000,
             "attacker_template_name": "GLAVehicleTechnical",
             "victim_template_name": "AmericaVehicleHumvee",
-        }
-        for index in range(7)
+        },
+        *(
+            {
+                "frame": 120 + index * 1_800,
+                "attacker_template_name": "GLAVehicleTechnical",
+                "victim_template_name": "AmericaVehicleHumvee",
+            }
+            for index in range(7)
+        ),
     )
     observed_kills = ReportValue(
         claim_id="feature:combat.observed_kill_timing:sparse",
@@ -594,14 +601,19 @@ def test_observed_kill_commentary_selects_at_most_five_busiest_windows() -> None
         availability="available",
         unavailable_reason=None,
         scope={"scope_type": "player"},
-        frame_window=(0, 11_000),
+        frame_window=(0, 11_700),
         evidence=(ReportEvidenceRef("50000000-0000-4000-8000-000000000007", "derived"),),
         details={},
     )
     player_document = replace(graph.selected.document, derived=(observed_kills,))
     report = replace(graph, player_reports=(replace(graph.selected, document=player_document),))
-    camera = _camera(11_000).model_copy(update={"authority": _authority(11_000, report_public_id=PLAYER_REPORT_ID)})
+    camera = _camera(11_700).model_copy(
+        update={"authority": _authority(11_700, report_public_id=PLAYER_REPORT_ID)}
+    )
 
     plan = CommentaryPlanService().create(report, camera)
+    kill_events = [event for event in plan.events if "scores a confirmed kill" in event.text]
 
-    assert sum("scores a confirmed kill" in event.text for event in plan.events) <= 5
+    assert len(kill_events) <= 5
+    assert kill_events[-1].start_frame == 11_000
+    assert plan.evidence_horizon.frame_end - kill_events[-1].start_frame <= plan.logic_hz * 30
