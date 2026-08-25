@@ -33,6 +33,7 @@ _PRIORITY: dict[CameraFocusKind, int] = {
 }
 # TheSuperHackers @feature Leex 25/08/2026 Hold native replay shots long enough to show a meaningful nearby scene instead of hopping across repeated damage samples. (#TBD)
 _COOLDOWN_SECONDS = 15
+_SAFE_COMBAT_INSET = 0.20
 
 
 class CameraPlanContractError(ValueError):
@@ -220,6 +221,21 @@ def _inside_planar_map(position: tuple[float, float, float], bounds: tuple[float
     min_x, min_y, _min_z, max_x, max_y, _max_z = bounds
     # TheSuperHackers @bugfix Leex 25/08/2026 Preserve engine-validated airspace targets while enforcing the authoritative planar map extent. (#TBD)
     return min_x <= x <= max_x and min_y <= y <= max_y
+
+
+def _inset_combat_target(
+    position: tuple[float, float, float],
+    bounds: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float]:
+    min_x, min_y, _min_z, max_x, max_y, _max_z = bounds
+    margin_x = (max_x - min_x) * _SAFE_COMBAT_INSET
+    margin_y = (max_y - min_y) * _SAFE_COMBAT_INSET
+    # TheSuperHackers @bugfix Leex 25/08/2026 Keep widened oblique battle shots inside the terrain while retaining the cited opposing midpoint as their subject. (#TBD)
+    return (
+        min(max(position[0], min_x + margin_x), max_x - margin_x),
+        min(max(position[1], min_y + margin_y), max_y - margin_y),
+        position[2],
+    )
 
 
 # TheSuperHackers @feature Leex 24/08/2026 Generate a gapless native camera plan only from report-accepted spatial evidence. (#TBD)
@@ -439,6 +455,7 @@ class CameraPlanService:
                     map_span = max(bounds[3] - bounds[0], bounds[4] - bounds[1])
                     # TheSuperHackers @bugfix Leex 25/08/2026 Reserve cast-safe context around both verified combat sides so an oblique native camera does not crop either force. (#TBD)
                     zoom = 1.20 + min(0.25, max(0.0, span / map_span * 0.50))
+                    position = _inset_combat_target(position, bounds)
                 if not _inside_planar_map(position, bounds):
                     raise CameraPlanContractError("cited camera position is outside authoritative map bounds")
                 output.append(

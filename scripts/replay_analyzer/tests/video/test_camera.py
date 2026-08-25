@@ -477,6 +477,62 @@ def test_camera_damage_focus_frames_both_sides_and_zooms_out_for_their_spread() 
     assert damage.zoom >= 1.25
 
 
+def test_camera_damage_focus_insets_corner_battle_to_avoid_map_void() -> None:
+    # Break caught: a widened 45-degree shot centered near two map edges rendered black void around the battle.
+    graph = _report()
+    attacker_position = ReportValue(
+        claim_id="combat.attacker_position",
+        section="combat",
+        label="Attacker position",
+        raw_value={"x": 120.0, "y": 960.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(115, 115),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, attacker_position),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000016",
+            "frame": 120,
+            "victim_replay_player_public_id": PLAYER_ID,
+            "attacker_replay_player_public_id": None,
+            "position": _position(80.0, 920.0, 20.0),
+            "opposing_position": _position(120.0, 960.0, 10.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": 115,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 120,
+                },
+            ],
+        }
+    ]
+
+    plan = CameraPlanService().create(_authority(), graph, MapSceneReadModel(payload))
+
+    damage = plan.segments[1]
+    assert damage.focus_kind == "damage"
+    assert (damage.target_x, damage.target_y, damage.target_z) == (200.0, 800.0, 15.0)
+    assert damage.zoom > 1.20
+
+
 @pytest.mark.parametrize(
     ("position_frame", "timing_frame"),
     ((121, 120), (115, 119)),
