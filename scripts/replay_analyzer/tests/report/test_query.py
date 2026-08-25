@@ -44,6 +44,7 @@ from generals_replay_analyzer.db.models import (
     TelemetryRun,
 )
 from generals_replay_analyzer.identity.audit import identity_cache_digest
+from generals_replay_analyzer.importing.evidence_identity import telemetry_event_evidence_identity
 from generals_replay_analyzer.importing.stages import (
     ANALYZE_LLM,
     ANALYZE_LLM_VERSION,
@@ -85,6 +86,8 @@ from generals_replay_analyzer.report.query import (
     ReportGraphNotFoundError,
     ReportQueryService,
     TimelineChartQuery,
+    _project_verified_player_identities,
+    _SubjectSelection,
 )
 from generals_replay_analyzer.report.read_model import (
     DerivedAssessmentEvidenceDTO,
@@ -1735,6 +1738,218 @@ def test_report_identity_excludes_closed_slots_outside_the_exact_parser_subjects
         report_database.replay_player_public_id
     }
     assert "Fabricated Closed Slot" not in graph.identity.label
+
+
+def test_verified_player_identity_projection_uses_engine_mapping_without_mutating_parser_evidence() -> None:
+    """Catch engine factions and outcomes following replay slot order or leaking from an unclean terminal state."""
+    players = (
+        ReplayPlayer(public_id=stable_uuid("identity-slot-0"), slot_index=0),
+        ReplayPlayer(public_id=stable_uuid("identity-slot-1"), slot_index=1),
+    )
+    initialization = {
+        "engine_player_indices": [3, 7],
+        "slots": [
+            {
+                "slot_index": 1,
+                "resolution_status": "resolved",
+                "player_index": 7,
+                "faction_template_name": "FactionGLA",
+            },
+            {
+                "slot_index": 0,
+                "resolution_status": "resolved",
+                "player_index": 3,
+                "faction_template_name": "FactionAmerica",
+            },
+        ],
+    }
+    outcome = {
+        "status": "decided",
+        "source": "victory_conditions",
+        "winner_player_indices": [7],
+        "loser_player_indices": [3],
+        "engine_player_indices": [3, 7],
+        "terminal_reason": "clean_completion",
+        "crc_mismatch": False,
+        "clean_shutdown": True,
+    }
+    complete = {
+        "terminal_reason": "clean_completion",
+        "crc_mismatch": False,
+        "replay_truncated": False,
+        "clean_shutdown": True,
+    }
+
+    projected = _project_verified_player_identities(players, initialization, outcome, complete)
+
+    assert projected == {
+        players[0].public_id: ("FactionAmerica", "lost"),
+        players[1].public_id: ("FactionGLA", "won"),
+    }
+    degraded = _project_verified_player_identities(
+        players,
+        initialization,
+        outcome,
+        {**complete, "crc_mismatch": True},
+    )
+    assert degraded == {
+        players[0].public_id: ("FactionAmerica", None),
+        players[1].public_id: ("FactionGLA", None),
+    }
+
+
+def test_report_identity_projects_only_the_exact_selected_telemetry_run(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    """Catch a newer or unrelated successful engine run overriding the report's selected authority."""
+    factory = report_database.session_factory  # type: ignore[assignment]
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+    def add_identity_events(
+        session: Session,
+        replay: Replay,
+        run: TelemetryRun,
+        *,
+        sequence_start: int,
+        faction: str,
+        result: str,
+    ) -> None:
+        is_winner = result == "won"
+        payloads = (
+            (
+                "players_initialized",
+                {
+                    "engine_player_indices": [0],
+                    "slots": [
+                        {
+                            "slot_index": 0,
+                            "resolution_status": "resolved",
+                            "player_index": 0,
+                            "faction_template_name": faction,
+                        }
+                    ],
+                },
+            ),
+            (
+                "match_outcome",
+                {
+                    "status": "decided",
+                    "source": "victory_conditions",
+                    "winner_player_indices": [0] if is_winner else [],
+                    "loser_player_indices": [] if is_winner else [0],
+                    "engine_player_indices": [0],
+                    "terminal_reason": "clean_completion",
+                    "crc_mismatch": False,
+                    "clean_shutdown": True,
+                },
+            ),
+            (
+                "complete",
+                {
+                    "terminal_reason": "clean_completion",
+                    "crc_mismatch": False,
+                    "replay_truncated": False,
+                    "clean_shutdown": True,
+                },
+            ),
+        )
+        for offset, (event_type, payload) in enumerate(payloads):
+            sequence = sequence_start + offset
+            evidence_identity = telemetry_event_evidence_identity(run.run_id, sequence)
+            evidence = EvidenceItem(
+                public_id=evidence_identity.public_id,
+                replay_id=replay.id,
+                telemetry_run_id=run.id,
+                tier="observed",
+                source_kind=evidence_identity.source_kind,
+                source_key=evidence_identity.source_key,
+                schema_version=2,
+                created_at=now,
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(
+                TelemetryEvent(
+                    telemetry_run_id=run.id,
+                    sequence=sequence,
+                    frame=1200,
+                    logic_time_seconds=40.0,
+                    schema_version=2,
+                    event_type=event_type,
+                    payload_json=payload,
+                    raw_record_json={"event_type": event_type, "payload": payload},
+                    evidence_item_id=evidence.id,
+                )
+            )
+
+    with factory.begin() as session:
+        session.execute(text("DROP TRIGGER trg_telemetry_events_succeeded_no_insert"))
+        session.execute(text("DROP TRIGGER trg_evidence_items_observed_no_insert"))
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        selected = session.scalar(
+            select(TelemetryRun).where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
+        ) if replay is not None else None
+        parser = session.scalar(select(ParserRun).where(ParserRun.replay_id == replay.id)) if replay is not None else None
+        assert replay is not None and selected is not None and parser is not None
+        add_identity_events(
+            session,
+            replay,
+            selected,
+            sequence_start=1,
+            faction="FactionGLA",
+            result="won",
+        )
+        unrelated = TelemetryRun(
+            run_id=stable_uuid("unrelated-identity-telemetry"),
+            replay_id=replay.id,
+            schema_version=2,
+            engine_build="unrelated-engine",
+            engine_executable_sha256="9" * 64,
+            settings_json={"parser_run_id": parser.run_id},
+            status="running",
+            runner_status="success",
+            strategy_analysis_scope="full",
+            process_exit_code=0,
+            final_frame=1200,
+            command_count=100,
+            trace_sha256="8" * 64,
+            diagnostics_json=[],
+            started_at=now,
+            completed_at=now,
+        )
+        session.add(unrelated)
+        session.flush()
+        add_identity_events(
+            session,
+            replay,
+            unrelated,
+            sequence_start=0,
+            faction="FactionAmerica",
+            result="lost",
+        )
+        unrelated.status = "succeeded"
+        selected_run_id = selected.run_id
+
+    with factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == published_graph.replay_public_id))
+        assert replay is not None
+        identity = published_graph.service._replay_identity(
+            session,
+            replay,
+            (
+                _SubjectSelection(
+                    report_database.replay_player_public_id,
+                    None,
+                    (),
+                    "a" * 64,
+                    None,
+                ),
+            ),
+            selected_run_id,
+        )
+
+    assert [(player.faction, player.result) for player in identity.players] == [("FactionGLA", "won")]
 
 
 def test_modern_report_rejects_cited_evidence_owned_by_a_different_parser_branch(

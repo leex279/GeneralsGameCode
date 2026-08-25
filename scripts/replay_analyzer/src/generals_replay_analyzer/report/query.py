@@ -289,6 +289,80 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _project_verified_player_identities(
+    rows: tuple[ReplayPlayer, ...],
+    initialization: Mapping[str, object],
+    outcome: Mapping[str, object] | None,
+    complete: Mapping[str, object] | None,
+) -> dict[str, tuple[str | None, str | None]]:
+    """Project engine player facts without mutating immutable parser observations."""
+
+    by_slot = {row.slot_index: row for row in rows}
+    if len(by_slot) != len(rows):
+        raise ReportGraphContractError("report player slots are ambiguous")
+    raw_slots = initialization.get("slots")
+    if type(raw_slots) is not list:
+        raise ReportGraphContractError("telemetry player initialization slots are invalid")
+    by_player_index: dict[int, ReplayPlayer] = {}
+    factions: dict[str, str | None] = {}
+    resolved_slots: set[int] = set()
+    for raw_slot in raw_slots:
+        if not isinstance(raw_slot, Mapping) or raw_slot.get("resolution_status") != "resolved":
+            continue
+        slot_index = raw_slot.get("slot_index")
+        player_index = raw_slot.get("player_index")
+        if type(slot_index) is not int or type(player_index) is not int:
+            raise ReportGraphContractError("telemetry player initialization identity is invalid")
+        row = by_slot.get(slot_index)
+        if row is None:
+            continue
+        if slot_index in resolved_slots or player_index in by_player_index:
+            raise ReportGraphContractError("telemetry player initialization identity is ambiguous")
+        resolved_slots.add(slot_index)
+        by_player_index[player_index] = row
+        faction = raw_slot.get("faction_template_name")
+        factions[row.public_id] = faction if type(faction) is str and faction else None
+
+    results: dict[str, str] = {}
+    clean_terminal = bool(
+        outcome is not None
+        and complete is not None
+        and outcome.get("status") == "decided"
+        and outcome.get("source") == "victory_conditions"
+        and outcome.get("terminal_reason") == "clean_completion"
+        and outcome.get("crc_mismatch") is False
+        and outcome.get("clean_shutdown") is True
+        and complete.get("terminal_reason") == "clean_completion"
+        and complete.get("crc_mismatch") is False
+        and complete.get("replay_truncated") is False
+        and complete.get("clean_shutdown") is True
+    )
+    if clean_terminal:
+        assert outcome is not None
+        winners = outcome.get("winner_player_indices")
+        losers = outcome.get("loser_player_indices")
+        if (
+            type(winners) is not list
+            or type(losers) is not list
+            or any(type(value) is not int for value in (*winners, *losers))
+            or set(winners) & set(losers)
+        ):
+            raise ReportGraphContractError("telemetry match outcome identity is invalid")
+        for player_index in cast(list[int], winners):
+            row = by_player_index.get(player_index)
+            if row is not None:
+                results[row.public_id] = "won"
+        for player_index in cast(list[int], losers):
+            row = by_player_index.get(player_index)
+            if row is not None:
+                results[row.public_id] = "lost"
+    return {
+        row.public_id: (factions.get(row.public_id), results.get(row.public_id))
+        for row in rows
+        if row.public_id in factions or row.public_id in results
+    }
+
+
 def _mapping(value: object, keys: set[str], label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or set(value) != keys or any(type(key) is not str for key in value):
         raise ReportGraphContractError(f"{label} does not use its exact schema")
@@ -704,7 +778,7 @@ class ReportQueryService:
                 "report-output-v1",
                 replay.public_id,
                 requested.public_id,
-                self._replay_identity(session, replay, validated.subjects),
+                self._replay_identity(session, replay, validated.subjects, validated.telemetry_run_id),
                 replay_wide[0],
                 players,
             )
@@ -715,6 +789,7 @@ class ReportQueryService:
         session: Session,
         replay: Replay,
         subjects: tuple[_SubjectSelection, ...],
+        telemetry_run_id: str | None,
     ) -> ReportReplayIdentityDTO:
         subject_ids = tuple(
             sorted(
@@ -744,18 +819,53 @@ class ReportQueryService:
             or parser.completion_status != "complete"
         ):
             raise ReportGraphContractError("report identity is outside one occupied parser authority")
+        verified: dict[str, tuple[str | None, str | None]] = {}
+        if telemetry_run_id is not None:
+            telemetry = session.scalar(
+                select(TelemetryRun).where(
+                    TelemetryRun.replay_id == replay.id,
+                    TelemetryRun.run_id == telemetry_run_id,
+                    TelemetryRun.status == "succeeded",
+                )
+            )
+            if telemetry is None:
+                raise ReportGraphContractError("report identity telemetry authority is unavailable")
+            identity_events = tuple(
+                session.scalars(
+                    select(TelemetryEvent)
+                    .where(
+                        TelemetryEvent.telemetry_run_id == telemetry.id,
+                        TelemetryEvent.event_type.in_(("players_initialized", "match_outcome", "complete")),
+                    )
+                    .order_by(TelemetryEvent.sequence)
+                )
+            )
+            initialization = tuple(item for item in identity_events if item.event_type == "players_initialized")
+            outcomes = tuple(item for item in identity_events if item.event_type == "match_outcome")
+            completions = tuple(item for item in identity_events if item.event_type == "complete")
+            if len(initialization) > 1 or len(outcomes) > 1 or len(completions) > 1:
+                raise ReportGraphContractError("report identity telemetry evidence is ambiguous")
+            if initialization:
+                # TheSuperHackers @bugfix Leex 25/08/2026 Present verified engine factions and clean outcomes without rewriting immutable parser evidence. (#TBD)
+                verified = _project_verified_player_identities(
+                    rows,
+                    cast(Mapping[str, object], initialization[0].payload_json),
+                    None if not outcomes else cast(Mapping[str, object], outcomes[0].payload_json),
+                    None if not completions else cast(Mapping[str, object], completions[0].payload_json),
+                )
         players: list[ReportPlayerIdentityDTO] = []
         for row in rows:
             observed = row.observed_json if isinstance(row.observed_json, Mapping) else {}
             faction = observed.get("faction")
             result = observed.get("result")
+            verified_faction, verified_result = verified.get(row.public_id, (None, None))
             players.append(
                 ReportPlayerIdentityDTO(
                     row.public_id,
                     row.original_name or f"Player {row.slot_index + 1}",
                     row.slot_index + 1,
-                    faction if type(faction) is str else None,
-                    result if type(result) is str else None,
+                    verified_faction if verified_faction is not None else faction if type(faction) is str else None,
+                    verified_result if verified_result is not None else result if type(result) is str else None,
                 )
             )
         if not players:
