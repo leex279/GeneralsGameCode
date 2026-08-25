@@ -1083,6 +1083,150 @@ class MapSceneQueryService:
                                 "evidence": _evidence(manifest.public_id),
                             }
                         )
+            # TheSuperHackers @feature Leex 25/08/2026 Project report-cited completed buildings at their engine-observed creation positions for early broadcast focus. (#TBD)
+            if not query.event_families or "structures" in query.event_families:
+                completion_rows = tuple(
+                    session.execute(
+                        select(TelemetryEvent, EvidenceItem)
+                        .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                        .where(
+                            TelemetryEvent.telemetry_run_id == telemetry.id,
+                            TelemetryEvent.event_type == "construction_completed",
+                            TelemetryEvent.frame >= query.frame_start,
+                            TelemetryEvent.frame <= query.frame_end,
+                        )
+                        .order_by(TelemetryEvent.frame, TelemetryEvent.sequence)
+                    )
+                )
+                creation_rows = tuple(
+                    session.execute(
+                        select(TelemetryEvent, EvidenceItem)
+                        .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
+                        .where(
+                            TelemetryEvent.telemetry_run_id == telemetry.id,
+                            TelemetryEvent.event_type == "object_created",
+                        )
+                        .order_by(TelemetryEvent.sequence)
+                    )
+                )
+                creations_by_sequence = {
+                    event.sequence: (event, evidence) for event, evidence in creation_rows
+                }
+                for completion, completion_evidence in completion_rows:
+                    payload = _mapping(
+                        completion.payload_json, "construction completed payload"
+                    )
+                    object_id = _integer(payload.get("object_id"), "construction object id")
+                    entity = entities_by_object_id.get(object_id)
+                    if entity is None or entity.creation_sequence is None:
+                        continue
+                    creation = creations_by_sequence.get(entity.creation_sequence)
+                    if (
+                        completion_evidence.tier != "observed"
+                        or creation is None
+                        or completion_evidence.public_id not in report_evidence_ids
+                    ):
+                        continue
+                    creation_event, creation_evidence = creation
+                    if (
+                        creation_evidence.tier != "observed"
+                        or creation_evidence.public_id not in report_evidence_ids
+                    ):
+                        continue
+                    owner_player_index = payload.get("owner_player_index")
+                    responsible_player_index = payload.get("responsible_player_index")
+                    if owner_player_index is not None and type(owner_player_index) is not int:
+                        raise MapSceneContractError("construction owner identity is invalid")
+                    if responsible_player_index is not None and type(responsible_player_index) is not int:
+                        raise MapSceneContractError("construction responsible identity is invalid")
+                    if (
+                        owner_player_index is not None
+                        and responsible_player_index is not None
+                        and owner_player_index != responsible_player_index
+                    ):
+                        raise MapSceneContractError("construction attribution is ambiguous")
+                    attributed_player_index = (
+                        responsible_player_index
+                        if responsible_player_index is not None
+                        else owner_player_index
+                    )
+                    player = (
+                        players.get(attributed_player_index)
+                        if attributed_player_index is not None
+                        else None
+                    )
+                    if attributed_player_index is not None and player is None:
+                        raise MapSceneContractError("construction attribution is unresolved")
+                    if query.replay_player_public_ids and (
+                        player is None
+                        or player.public_id not in query.replay_player_public_ids
+                    ):
+                        continue
+                    if query.entity_public_ids and entity.public_id not in query.entity_public_ids:
+                        continue
+                    creation_payload = _mapping(
+                        creation_event.payload_json, "object created payload"
+                    )
+                    if (
+                        creation_payload.get("object_id") != object_id
+                        or creation_event.frame != entity.creation_frame
+                    ):
+                        raise MapSceneContractError("construction creation identity is inconsistent")
+                    if creation_payload.get("position_status") != "placed":
+                        continue
+                    construction_position = creation_payload.get("position")
+                    if not isinstance(construction_position, Mapping):
+                        continue
+                    position = Position3(
+                        _number(construction_position.get("x"), "construction position x"),
+                        _number(construction_position.get("y"), "construction position y"),
+                        _number(construction_position.get("z"), "construction position z"),
+                    )
+                    if isinstance(
+                        world_to_map_normalized(position, projection.world_bounds),
+                        SpatialUnavailable,
+                    ):
+                        omitted_reasons.append("map_coordinate_out_of_bounds")
+                        continue
+                    milestone_evidence_ids = tuple(
+                        sorted(
+                            (
+                                creation_evidence.public_id,
+                                completion_evidence.public_id,
+                            )
+                        )
+                    )
+                    structures.append(
+                        {
+                            "structure_public_id": entity.public_id,
+                            "source_kind": "construction_completed",
+                            "replay_player_public_id": (
+                                None if player is None else player.public_id
+                            ),
+                            "template_name": entity.template_name,
+                            "frame": completion.frame,
+                            "position": self._position(
+                                position, projection, selected_transform
+                            ),
+                            "availability": _availability(
+                                "available", evidence=milestone_evidence_ids
+                            ),
+                            "evidence": [
+                                {
+                                    "evidence_public_id": creation_evidence.public_id,
+                                    "tier": "observed",
+                                    "support_role": "position",
+                                    "observed_frame": creation_event.frame,
+                                },
+                                {
+                                    "evidence_public_id": completion_evidence.public_id,
+                                    "tier": "observed",
+                                    "support_role": "event_timing",
+                                    "observed_frame": completion.frame,
+                                },
+                            ],
+                        }
+                    )
             combat_rows = tuple(
                 session.execute(
                     select(CombatEvent, EvidenceItem)

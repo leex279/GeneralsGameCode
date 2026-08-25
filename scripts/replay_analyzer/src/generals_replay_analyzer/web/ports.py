@@ -1441,15 +1441,41 @@ class MapOptionDTO(WebDTO):
 class SpatialEvidenceReferenceDTO(WebDTO):
     evidence_public_id: PublicId
     tier: EvidenceTier
+    support_role: Literal["event_timing", "position"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    observed_frame: int | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None
+    )
+
+    # TheSuperHackers @feature Leex 25/08/2026 Preserve explicit event-time and spatial-position provenance without changing existing scene evidence. (#TBD)
+    @model_validator(mode="after")
+    def _validate_support_role(self) -> Self:
+        if (self.support_role is None) != (self.observed_frame is None):
+            raise ValueError("role-aware spatial evidence requires its observed frame")
+        return self
 
 
 def _ordered_spatial_evidence(
     values: tuple[SpatialEvidenceReferenceDTO, ...],
 ) -> tuple[SpatialEvidenceReferenceDTO, ...]:
-    identities = tuple((item.tier, item.evidence_public_id) for item in values)
+    identities = tuple(
+        (item.tier, item.evidence_public_id, item.support_role, item.observed_frame)
+        for item in values
+    )
     if len(identities) != len(set(identities)):
         raise ValueError("spatial evidence references must be unique")
-    return tuple(sorted(values, key=lambda item: (item.tier, item.evidence_public_id)))
+    return tuple(
+        sorted(
+            values,
+            key=lambda item: (
+                item.observed_frame if item.observed_frame is not None else -1,
+                item.support_role or "",
+                item.tier,
+                item.evidence_public_id,
+            ),
+        )
+    )
 
 
 class FrameWindowDTO(WebDTO):

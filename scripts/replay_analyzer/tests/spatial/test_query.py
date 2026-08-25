@@ -222,6 +222,7 @@ def _seed_query_service(
     map_display_name: str = "Tournament Desert",
     corrupt_projection: bool = False,
     engine_native_map_events: bool = False,
+    construction_milestone: bool = False,
 ) -> tuple[MapSceneQueryService, dict[str, str]]:
     settings = AnalyzerSettings(data_root=tmp_path / "map-query-data")
     settings.ensure_directories()
@@ -239,6 +240,8 @@ def _seed_query_service(
     players_initialized_evidence_id = _uuid("players-initialized-evidence")
     visibility_summary_evidence_id = _uuid("visibility-summary-evidence")
     heuristic_evidence_id = _uuid("heuristic-evidence")
+    construction_created_evidence_id = _uuid("construction-created-evidence")
+    construction_completed_evidence_id = _uuid("construction-completed-evidence")
     manifest_asset_id = _uuid("manifest-asset")
     projection = {
         "amphibious_passable": [True, True, True, True],
@@ -421,6 +424,13 @@ def _seed_query_service(
             )
         if duplicate_manifest:
             evidence_specs.append((duplicate_manifest_evidence_id, 99))
+        if construction_milestone:
+            evidence_specs.extend(
+                (
+                    (construction_created_evidence_id, 8),
+                    (construction_completed_evidence_id, 9),
+                )
+            )
         for public_id, sequence in evidence_specs:
             evidence_rows.append(
                 EvidenceItem(
@@ -577,6 +587,51 @@ def _seed_query_service(
                     ),
                 )
             )
+        if construction_milestone:
+            events.extend(
+                (
+                    TelemetryEvent(
+                        telemetry_run_id=telemetry.id,
+                        sequence=8,
+                        frame=12,
+                        logic_time_seconds=0.4,
+                        schema_version=2,
+                        event_type="object_created",
+                        payload_json={
+                            "object_id": 84,
+                            "template_name": "GLASupplyStash",
+                            "owner_player_index": 0,
+                            "position": {"x": 7.0, "y": 8.0, "z": 0.0},
+                            "position_status": "placed",
+                        },
+                        raw_record_json={},
+                        evidence_item_id=next(
+                            item.id
+                            for item in evidence_rows
+                            if item.public_id == construction_created_evidence_id
+                        ),
+                    ),
+                    TelemetryEvent(
+                        telemetry_run_id=telemetry.id,
+                        sequence=9,
+                        frame=25,
+                        logic_time_seconds=25 / 30.0,
+                        schema_version=2,
+                        event_type="construction_completed",
+                        payload_json={
+                            "object_id": 84,
+                            "owner_player_index": 0,
+                            "responsible_player_index": 0,
+                        },
+                        raw_record_json={},
+                        evidence_item_id=next(
+                            item.id
+                            for item in evidence_rows
+                            if item.public_id == construction_completed_evidence_id
+                        ),
+                    ),
+                )
+            )
         session.add_all(events)
         session.flush()
         entity = Entity(
@@ -593,6 +648,27 @@ def _seed_query_service(
         )
         session.add(entity)
         session.flush()
+        if construction_milestone:
+            session.add(
+                Entity(
+                    public_id=_uuid("completed-structure-row"),
+                    telemetry_run_id=telemetry.id,
+                    replay_id=replay.id,
+                    object_id=84,
+                    template_name="GLASupplyStash",
+                    initial_owner_player_index=None,
+                    kind_of_flags_json=["IMMOBILE", "STRUCTURE"],
+                    creation_sequence=8,
+                    creation_frame=12,
+                    observed_json={
+                        "object_id": 84,
+                        "template_name": "GLASupplyStash",
+                        "owner_player_index": 0,
+                        "position": {"x": 7.0, "y": 8.0, "z": 0.0},
+                        "position_status": "placed",
+                    },
+                )
+            )
         session.add(
             EntitySample(
                 telemetry_run_id=telemetry.id,
@@ -692,6 +768,7 @@ def _seed_query_service(
                 oob_evidence_id,
                 *((visibility_evidence_id, visibility_summary_evidence_id, heuristic_evidence_id) if engine_native_map_events else ()),
                 *((duplicate_manifest_evidence_id,) if duplicate_manifest else ()),
+                *((construction_created_evidence_id, construction_completed_evidence_id) if construction_milestone else ()),
             ),
             ids["player:0"],
         ),
@@ -703,6 +780,8 @@ def _seed_query_service(
     ids["visibility_evidence"] = visibility_evidence_id
     ids["visibility_summary_evidence"] = visibility_summary_evidence_id
     ids["heuristic_evidence"] = heuristic_evidence_id
+    ids["construction_created_evidence"] = construction_created_evidence_id
+    ids["construction_completed_evidence"] = construction_completed_evidence_id
     return service, ids
 
 
@@ -728,6 +807,57 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert payload["engagements"] == []
     assert payload["casualties"][0]["frame"] == 40
     assert "ignored/private/manifest.json" not in repr(payload)
+
+
+def test_scene_projects_report_cited_completed_structure_at_engine_creation_position(
+    tmp_path: Path,
+) -> None:
+    # Break caught: the camera saw only static map structures until combat despite accepted early build evidence.
+    service, ids = _seed_query_service(tmp_path, construction_milestone=True)
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    dynamic = [item for item in payload["structures"] if item["source_kind"] == "construction_completed"]
+    evidence_ids = sorted(
+        (ids["construction_created_evidence"], ids["construction_completed_evidence"])
+    )
+    assert dynamic == [
+        {
+            "structure_public_id": _uuid("completed-structure-row"),
+            "source_kind": "construction_completed",
+            "replay_player_public_id": ids["player:0"],
+            "template_name": "GLASupplyStash",
+            "frame": 25,
+            "position": {
+                "raw": {"x": 7.0, "y": 8.0, "z": 0.0},
+                "map_normalized": {"u": 0.35, "v": 0.4},
+                "player_centric": None,
+            },
+            "availability": {
+                "state": "available",
+                "reason_codes": [],
+                "evidence_references": evidence_ids,
+            },
+            "evidence": [
+                {
+                    "support_role": "position",
+                    "evidence_public_id": ids["construction_created_evidence"],
+                    "tier": "observed",
+                    "observed_frame": 12,
+                },
+                {
+                    "support_role": "event_timing",
+                    "evidence_public_id": ids["construction_completed_evidence"],
+                    "tier": "observed",
+                    "observed_frame": 25,
+                }
+            ],
+        }
+    ]
 
 
 def test_scene_accepts_the_unique_manifest_from_report_bound_telemetry(tmp_path: Path) -> None:

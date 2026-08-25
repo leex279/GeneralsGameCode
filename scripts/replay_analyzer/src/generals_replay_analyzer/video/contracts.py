@@ -54,11 +54,18 @@ class EvidenceCitationV1(VideoContract):
     tier: Literal["observed", "derived"]
     frame_start: int = Field(ge=0)
     frame_end: int = Field(ge=0)
+    support_role: Literal["event_timing", "position"] | None = None
+    observed_frame: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _ordered_window(self) -> Self:
         if self.frame_end < self.frame_start:
             raise ValueError("citation frame window must be ordered")
+        # TheSuperHackers @feature Leex 25/08/2026 Carry the exact observed frame and role for fused camera event and position provenance. (#TBD)
+        if (self.support_role is None) != (self.observed_frame is None):
+            raise ValueError("role-aware camera citation requires its observed frame")
+        if self.observed_frame is not None and not self.frame_start <= self.observed_frame <= self.frame_end:
+            raise ValueError("camera citation observed frame must lie inside its accepted report window")
         return self
 
 
@@ -114,7 +121,13 @@ class CameraSegmentV1(VideoContract):
         ordered = tuple(
             sorted(
                 set(self.evidence),
-                key=lambda item: (item.frame_start, item.frame_end, item.evidence_public_id, item.tier),
+                key=lambda item: (
+                    item.observed_frame if item.observed_frame is not None else item.frame_start,
+                    item.support_role or "",
+                    item.frame_end,
+                    item.evidence_public_id,
+                    item.tier,
+                ),
             )
         )
         object.__setattr__(self, "evidence", ordered)

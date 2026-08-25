@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from generals_replay_analyzer.features.evidence import thaw_canonical
 from generals_replay_analyzer.report.model import (
     OllamaReportStatus,
     ReportDocument,
@@ -23,6 +25,7 @@ from generals_replay_analyzer.spatial.query import MapSceneReadModel
 from generals_replay_analyzer.video.camera import CameraPlanContractError, CameraPlanService, _citations
 from generals_replay_analyzer.video.commentary import CommentaryPlanService
 from generals_replay_analyzer.video.contracts import CameraPlanAuthorityV1, EvidenceHorizonV1
+from generals_replay_analyzer.web.ports import MapSceneDTO
 
 REPLAY_ID = "10000000-0000-4000-8000-000000000001"
 REPORT_ID = "20000000-0000-4000-8000-000000000001"
@@ -32,6 +35,8 @@ MAP_ID = "40000000-0000-4000-8000-000000000001"
 PLAYER_ID = "70000000-0000-4000-8000-000000000001"
 EVIDENCE_START = "50000000-0000-4000-8000-000000000001"
 EVIDENCE_FIGHT = "50000000-0000-4000-8000-000000000002"
+EVIDENCE_STRUCTURE_CREATED = "50000000-0000-4000-8000-000000000003"
+EVIDENCE_STRUCTURE_COMPLETED = "50000000-0000-4000-8000-000000000004"
 
 
 def _authority(**updates: object) -> CameraPlanAuthorityV1:
@@ -270,6 +275,70 @@ def _scene(**updates: object) -> MapSceneReadModel:
     return MapSceneReadModel(payload)
 
 
+def _milestone_inputs(*, position_frame: int = 30) -> tuple[PublishedReportGraphDTO, MapSceneReadModel]:
+    graph = _report()
+    created = ReportValue(
+        claim_id="build.created",
+        section="build_order",
+        label="Structure placement",
+        raw_value={"template_name": "GLASupplyStash"},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(position_frame, position_frame),
+        evidence=(ReportEvidenceRef(EVIDENCE_STRUCTURE_CREATED, "observed"),),
+        details={},
+    )
+    completed = replace(
+        created,
+        claim_id="build.completed",
+        label="Structure completion",
+        frame_window=(60, 60),
+        evidence=(ReportEvidenceRef(EVIDENCE_STRUCTURE_COMPLETED, "observed"),),
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, created, completed),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["structures"] = [
+        *payload["structures"],
+        {
+            "structure_public_id": "90000000-0000-4000-8000-000000000005",
+            "source_kind": "construction_completed",
+            "replay_player_public_id": PLAYER_ID,
+            "template_name": "GLASupplyStash",
+            "frame": 60,
+            "position": _position(250.0, 300.0),
+            "availability": {
+                "state": "available",
+                "reason_codes": [],
+                "evidence_references": [
+                    EVIDENCE_STRUCTURE_CREATED,
+                    EVIDENCE_STRUCTURE_COMPLETED,
+                ],
+            },
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_STRUCTURE_CREATED,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": position_frame,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_STRUCTURE_COMPLETED,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 60,
+                },
+            ],
+        },
+    ]
+    return graph, MapSceneReadModel(payload)
+
+
 def test_camera_plan_uses_cited_positions_and_is_byte_deterministic() -> None:
     service = CameraPlanService()
     first = service.create(_authority(), _report(), _scene())
@@ -281,6 +350,50 @@ def test_camera_plan_uses_cited_positions_and_is_byte_deterministic() -> None:
     assert [item.focus_kind for item in first.segments] == ["base_context", "engagement"]
     assert first.segments[1].target_x == 700.0
     assert first.segments[1].evidence[0].evidence_public_id == EVIDENCE_FIGHT
+
+
+def test_camera_milestone_preserves_distinct_timing_and_position_provenance() -> None:
+    graph, scene = _milestone_inputs()
+
+    plan = CameraPlanService().create(_authority(), graph, scene)
+
+    milestone = next(item for item in plan.segments if item.focus_kind == "milestone")
+    assert (milestone.start_frame, milestone.target_x, milestone.target_y) == (60, 250.0, 300.0)
+    assert [
+        (item.evidence_public_id, item.support_role, item.observed_frame)
+        for item in milestone.evidence
+    ] == [
+        (EVIDENCE_STRUCTURE_CREATED, "position", 30),
+        (EVIDENCE_STRUCTURE_COMPLETED, "event_timing", 60),
+    ]
+
+
+def test_camera_rejects_milestone_position_observed_after_completion() -> None:
+    graph, scene = _milestone_inputs(position_frame=70)
+
+    with pytest.raises(CameraPlanContractError, match="position.*after|future position"):
+        CameraPlanService().create(_authority(), graph, scene)
+
+
+def test_legacy_camera_segment_identity_keeps_the_original_evidence_seed() -> None:
+    plan = CameraPlanService().create(_authority(), _report(), _scene())
+    namespace = uuid5(NAMESPACE_URL, "generals-replay-analyzer:camera-plan-v1")
+    expected = str(
+        uuid5(
+            namespace,
+            f"{REPLAY_ID}:{'b' * 64}:0:119:base_context:{EVIDENCE_START}",
+        )
+    )
+
+    assert plan.segments[0].segment_id == expected
+
+
+def test_legacy_map_scene_evidence_serialization_omits_role_metadata_nulls() -> None:
+    payload = thaw_canonical(_scene().payload)
+    serialized = MapSceneDTO.model_validate(payload).model_dump_json()
+
+    assert '"support_role"' not in serialized
+    assert '"observed_frame"' not in serialized
 
 
 def test_camera_plan_prefers_meaningful_focus_over_repeated_damage_samples() -> None:

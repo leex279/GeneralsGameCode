@@ -134,6 +134,20 @@ def _citations(
         tier, windows = accepted[public_id]
         if reference.get("tier") != tier:
             raise CameraPlanContractError("camera candidate evidence tier disagrees with the fixed report")
+        support_role = reference.get("support_role")
+        observed_frame = reference.get("observed_frame")
+        if support_role is not None:
+            if support_role not in ("event_timing", "position") or type(observed_frame) is not int:
+                raise CameraPlanContractError("role-aware camera evidence is malformed")
+            if support_role == "event_timing" and not event_start <= observed_frame <= event_end:
+                raise CameraPlanContractError("camera event timing evidence disagrees with the candidate frame")
+            citation_start = observed_frame
+            citation_end = observed_frame
+        else:
+            if observed_frame is not None:
+                raise CameraPlanContractError("camera evidence frame requires an explicit support role")
+            citation_start = event_start
+            citation_end = event_end
         # The report may close an evidence window on a post-update boundary that
         # has no presentable camera frame.  Keep the event bounds strict, but
         # clip only the citation's accepted end to the last presentable frame.
@@ -141,7 +155,7 @@ def _citations(
         covering = tuple(
             (window[0], min(window[1], horizon))
             for window in windows
-            if window[0] <= event_start and event_end <= min(window[1], horizon)
+            if window[0] <= citation_start and citation_end <= min(window[1], horizon)
         )
         if not covering:
             raise CameraPlanContractError("camera candidate frame is outside its cited evidence window")
@@ -155,9 +169,21 @@ def _citations(
                 tier=cast(Literal["observed", "derived"], tier),
                 frame_start=frame_start,
                 frame_end=frame_end,
+                support_role=support_role,
+                observed_frame=observed_frame,
             )
         )
-    return tuple(sorted(set(output), key=lambda value: (value.frame_start, value.evidence_public_id)))
+    # TheSuperHackers @feature Leex 25/08/2026 Keep camera event timing separate from the earlier observation that proves its spatial target. (#TBD)
+    return tuple(
+        sorted(
+            set(output),
+            key=lambda value: (
+                value.observed_frame if value.observed_frame is not None else value.frame_start,
+                value.support_role or "",
+                value.evidence_public_id,
+            ),
+        )
+    )
 
 
 def _bounds(payload: dict[str, object]) -> tuple[float, float, float, float, float, float]:
@@ -240,7 +266,19 @@ class CameraPlanService:
             length = end - start + 1
             transition: Literal["cut", "ease"] = "cut" if index == 0 or length == 1 else "ease"
             transition_frames = 0 if transition == "cut" else min(30, length)
-            evidence_ids = ",".join(item.evidence_public_id for item in candidate.evidence)
+            if any(
+                item.support_role is not None or item.observed_frame is not None
+                for item in candidate.evidence
+            ):
+                evidence_ids = ",".join(
+                    f"{item.evidence_public_id}:{item.support_role}:{item.observed_frame}"
+                    for item in candidate.evidence
+                )
+            else:
+                # TheSuperHackers @bugfix Leex 25/08/2026 Preserve legacy segment UUID seeds when citations have no role-aware provenance. (#TBD)
+                evidence_ids = ",".join(
+                    item.evidence_public_id for item in candidate.evidence
+                )
             segment_id = str(
                 uuid5(
                     _NAMESPACE,
@@ -346,6 +384,36 @@ class CameraPlanService:
                 citations = _citations(item, accepted, horizon, frame, event_end)
                 if not citations:
                     raise CameraPlanContractError("camera candidate has no fixed-report evidence")
+                if (
+                    kind == "milestone"
+                    and item.get("source_kind") == "construction_completed"
+                    and {citation.support_role for citation in citations}
+                    != {"event_timing", "position"}
+                ):
+                    raise CameraPlanContractError(
+                        "completed construction camera focus requires timing and position provenance"
+                    )
+                if kind == "milestone" and item.get("source_kind") == "construction_completed":
+                    position_frames = tuple(
+                        citation.observed_frame
+                        for citation in citations
+                        if citation.support_role == "position"
+                        and citation.observed_frame is not None
+                    )
+                    timing_frames = tuple(
+                        citation.observed_frame
+                        for citation in citations
+                        if citation.support_role == "event_timing"
+                        and citation.observed_frame is not None
+                    )
+                    if any(
+                        position_frame > timing_frame or position_frame > frame
+                        for position_frame in position_frames
+                        for timing_frame in timing_frames
+                    ):
+                        raise CameraPlanContractError(
+                            "milestone position evidence cannot occur after event timing"
+                        )
                 position = _position(item, position_field)
                 if not _inside_planar_map(position, bounds):
                     raise CameraPlanContractError("cited camera position is outside authoritative map bounds")
