@@ -2345,6 +2345,70 @@ def test_replay_wide_damage_projection_rejects_unmapped_ambiguous_or_malformed_p
         )
 
 
+def test_replay_wide_damage_projection_enriches_legacy_template_identities_from_entities(
+    feature_factory: sessionmaker[Session],
+) -> None:
+    event = TelemetryEvent(
+        event_type="damage_applied",
+        schema_version=2,
+        payload_json={
+            "source_player_mask": 1,
+            "source_player_indices": [0],
+            "victim_player_index": 1,
+            "attacker_object_id": 10,
+            "victim_object_id": 20,
+        },
+    )
+    facts = FeatureExtractionService(feature_factory)._event_facts(
+        event,
+        {0: "00000000-0000-4000-8000-000000000302", 1: "00000000-0000-4000-8000-000000000501"},
+        {10: ("AmericaVehicleHumvee", None, None, ()), 20: ("ChinaWarFactory", None, None, ())},
+        None,
+        [],
+    )
+    assert facts["attacker_template_name"] == "AmericaVehicleHumvee"
+    assert facts["victim_template_name"] == "ChinaWarFactory"
+    assert "attacker_template_name" not in event.payload_json
+
+
+@pytest.mark.parametrize(
+    "payload, entities, match",
+    [
+        (
+            {"source_player_mask": 1, "source_player_indices": [0], "victim_player_index": 1, "victim_object_id": 99},
+            {20: ("ChinaWarFactory", None, None, ())},
+            "victim object identity is unknown",
+        ),
+        (
+            {
+                "source_player_mask": 1,
+                "source_player_indices": [0],
+                "victim_player_index": 1,
+                "victim_object_id": 20,
+                "victim_template_name": "WrongTemplate",
+            },
+            {20: ("ChinaWarFactory", None, None, ())},
+            "victim template identity contradicts entity",
+        ),
+    ],
+)
+def test_replay_wide_damage_projection_rejects_unknown_or_contradictory_template_identity(
+    feature_factory: sessionmaker[Session],
+    payload: dict[str, object],
+    entities: dict[int, tuple[str, str | None, str | None, tuple[str, ...]]],
+    match: str,
+) -> None:
+    event = TelemetryEvent(event_type="damage_applied", schema_version=2, payload_json=payload)
+    with pytest.raises(FeatureExtractionError, match=match):
+        FeatureExtractionService(feature_factory)._event_facts(
+            event,
+            {0: "00000000-0000-4000-8000-000000000302", 1: "00000000-0000-4000-8000-000000000501"},
+            entities,
+            None,
+            [],
+        )
+
+
 @pytest.mark.parametrize("source_indices", (None, []))
 def test_replay_wide_damage_projection_preserves_explicit_unknown_players(
     feature_factory: sessionmaker[Session], source_indices: object

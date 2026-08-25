@@ -34,6 +34,7 @@ from generals_replay_analyzer.importing.stages import (
     ANALYZE_LLM,
     ASSESS_STRATEGIES,
     DERIVE_FEATURES,
+    DERIVE_FEATURES_VERSION,
     IMPORT_OBSERVATIONS,
     IMPORT_OBSERVATIONS_VERSION,
     PARSE,
@@ -1140,7 +1141,7 @@ def test_exact_key_collision_with_incompatible_job_fails_and_rolls_back(
             "bindings": [],
         },
     }
-    poisoned_key = content_key(DERIVE_FEATURES, "1", replay.sha256, identity)
+    poisoned_key = content_key(DERIVE_FEATURES, DERIVE_FEATURES_VERSION, replay.sha256, identity)
     coordinator = JobCoordinator(session_factory, clock=lambda: clock)
     with session_factory.begin() as session:
         poisoned = coordinator.ensure_job(

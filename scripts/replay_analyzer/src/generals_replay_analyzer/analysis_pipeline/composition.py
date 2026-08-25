@@ -31,6 +31,10 @@ from ..importing.service import (
     TerminalDependencyPolicy,
 )
 from ..importing.stages import (
+    ANALYZE_LLM_VERSION,
+    ASSESS_STRATEGIES_VERSION,
+    DERIVE_FEATURES_VERSION,
+    IMPORT_OBSERVATIONS_VERSION,
     RECONCILE_IDENTITIES,
     RECONCILE_IDENTITIES_VERSION,
     RENDER_REPORT_VERSION,
@@ -148,10 +152,11 @@ def create_production_import_service(
                 ),
             ),
         )
+    # TheSuperHackers @bugfix Leex 25/08/2026 Bind production handlers to canonical durable stage versions so invalidations execute. (#TBD)
     registrations = (*video_registration,
         StageHandlerRegistration(
             "import_observations",
-            "1",
+            IMPORT_OBSERVATIONS_VERSION,
             observation,
             TerminalDependencyPolicy(failed_stages=frozenset({"parse", "telemetry"})),
         ),
@@ -162,12 +167,12 @@ def create_production_import_service(
         ),
         StageHandlerRegistration(
             "derive_features",
-            "1",
+            DERIVE_FEATURES_VERSION,
             DeriveFeaturesHandler(session_factory, features),
         ),
         StageHandlerRegistration(
             "assess_strategies",
-            "1",
+            ASSESS_STRATEGIES_VERSION,
             AssessStrategiesHandler(
                 session_factory,
                 settings,
@@ -178,7 +183,7 @@ def create_production_import_service(
         ),
         StageHandlerRegistration(
             "analyze_llm",
-            "1",
+            ANALYZE_LLM_VERSION,
             AnalyzeLLMHandler(settings, transport_factory, analysis_service),
         ),
         StageHandlerRegistration(

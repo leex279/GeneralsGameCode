@@ -852,6 +852,24 @@ class FeatureExtractionService:
                 projected["scoring_enabled"] = facts.get("scoring_enabled")
             facts = projected
         elif event_type == "damage_applied":
+            # TheSuperHackers @bugfix Leex 25/08/2026 Resolve legacy combat identities from validated entities without mutating telemetry. (#TBD)
+            for role, identity_key in (("attacker", "attacker_template_name"), ("victim", "victim_template_name")):
+                object_id = facts.get(f"{role}_object_id")
+                declared_name = facts.get(identity_key)
+                if object_id is None:
+                    continue
+                if projected_slots is not None and (
+                    type(object_id) is not int or object_id < 0
+                ):
+                    raise FeatureExtractionError(f"telemetry damage {role} object identity is invalid")
+                entity = entities.get(object_id) if type(object_id) is int else None
+                if projected_slots is not None and entity is None:
+                    raise FeatureExtractionError(f"telemetry damage {role} object identity is unknown")
+                if entity is not None:
+                    resolved_name = entity[0]
+                    if declared_name is not None and declared_name != resolved_name:
+                        raise FeatureExtractionError(f"telemetry damage {role} template identity contradicts entity")
+                    facts[identity_key] = resolved_name
             source_mask = facts.get("source_player_mask")
             source_indices = facts.get("source_player_indices")
             victim = facts.get("victim_player_index")

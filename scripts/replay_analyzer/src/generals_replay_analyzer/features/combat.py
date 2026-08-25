@@ -19,7 +19,7 @@ from generals_replay_analyzer.features.registry import BASE_REGISTRY
 # TheSuperHackers @feature Leex 22/08/2026 Exclude unknown damage sources instead of guessing combat attribution. (#TBD)
 class CombatExtractor:
     name = "combat"
-    version = "combat-v2"
+    version = "combat-v3"
     feature_names = (
         "combat.applied_damage_dealt",
         "combat.applied_damage_taken",
