@@ -214,6 +214,26 @@ class NarrationScheduler:
         )
 
 
+# TheSuperHackers @bugfix Leex 25/08/2026 Reject production casts whose measured narration abandons the match ending. (#TBD)
+def require_terminal_narration_coverage(
+    schedule: NarrationScheduleV1,
+    *,
+    maximum_silent_frames: int,
+) -> None:
+    if type(schedule) is not NarrationScheduleV1:
+        raise TypeError("terminal narration coverage requires a validated narration schedule")
+    if type(maximum_silent_frames) is not int:
+        raise TypeError("maximum terminal silence must be an integer frame count")
+    if maximum_silent_frames < 0:
+        raise ValueError("maximum terminal silence must be non-negative")
+    trailing_silent_frames = schedule.final_frame - schedule.events[-1].end_frame
+    if trailing_silent_frames > maximum_silent_frames:
+        maximum_seconds = maximum_silent_frames / schedule.logic_hz
+        raise NarrationScheduleError(
+            f"production narration leaves more than {maximum_seconds:g} seconds of terminal silence"
+        )
+
+
 def _temporary_path(destination: Path) -> Path:
     return destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
 

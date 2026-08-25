@@ -19,6 +19,7 @@ from generals_replay_analyzer.video.voice import (
     NarrationScheduler,
     VoiceClipV1,
     render_narration_wav,
+    require_terminal_narration_coverage,
 )
 
 REPLAY_ID = "10000000-0000-4000-8000-000000000001"
@@ -115,6 +116,36 @@ def test_scheduler_rejects_tampered_clip_bytes_and_mismatched_event_sets(tmp_pat
     other_clip = _clip(other, tmp_path / "other.wav", 8_000)
     with pytest.raises(NarrationScheduleError, match="exactly one clip"):
         NarrationScheduler().schedule(_plan(event), (other_clip,), final_frame=299)
+
+
+def test_production_narration_rejects_more_than_thirty_seconds_of_terminal_silence(tmp_path: Path) -> None:
+    event = _event("50000000-0000-4000-8000-000000000004", 0, 60, "Opening only")
+    clip = _clip(event, tmp_path / "opening-only.wav", 48_000)
+    schedule = NarrationScheduler().schedule(_plan(event, final_frame=930), (clip,), final_frame=930)
+
+    with pytest.raises(NarrationScheduleError, match="more than 30 seconds of terminal silence"):
+        require_terminal_narration_coverage(schedule, maximum_silent_frames=900)
+
+
+def test_production_narration_accepts_exactly_thirty_seconds_of_terminal_silence(tmp_path: Path) -> None:
+    event = _event("50000000-0000-4000-8000-000000000005", 0, 60, "Opening only")
+    clip = _clip(event, tmp_path / "bounded-tail.wav", 48_000)
+    schedule = NarrationScheduler().schedule(_plan(event, final_frame=929), (clip,), final_frame=929)
+
+    assert schedule.events[-1].end_frame == 29
+    assert schedule.final_frame - schedule.events[-1].end_frame == 900
+    require_terminal_narration_coverage(schedule, maximum_silent_frames=900)
+
+
+def test_terminal_narration_coverage_rejects_invalid_frame_limits(tmp_path: Path) -> None:
+    event = _event("50000000-0000-4000-8000-000000000006", 0, 60, "Opening only")
+    clip = _clip(event, tmp_path / "limit-validation.wav", 48_000)
+    schedule = NarrationScheduler().schedule(_plan(event, final_frame=929), (clip,), final_frame=929)
+
+    with pytest.raises(TypeError, match="integer frame count"):
+        require_terminal_narration_coverage(schedule, maximum_silent_frames=True)
+    with pytest.raises(ValueError, match="non-negative"):
+        require_terminal_narration_coverage(schedule, maximum_silent_frames=-1)
 
 
 def test_render_narration_wav_has_exact_authoritative_duration_and_silence_gaps(tmp_path: Path) -> None:

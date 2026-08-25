@@ -53,6 +53,7 @@ from generals_replay_analyzer.video.voice import (
     VoiceClipV1,
     VoiceProvider,
     render_narration_wav,
+    require_terminal_narration_coverage,
 )
 
 _STAGES: tuple[VideoStage, ...] = (
@@ -419,6 +420,12 @@ class VideoRenderService:
             clips,
             request.authority.evidence_horizon.frame_end,
         )
+        # TheSuperHackers @bugfix Leex 25/08/2026 Keep long diagnostic tails possible while blocking silent production endings. (#TBD)
+        if not request.diagnostic_preview:
+            require_terminal_narration_coverage(
+                schedule,
+                maximum_silent_frames=schedule.logic_hz * 30,
+            )
         narration_path = render_narration_wav(schedule, run_directory / "narration.wav")
         subtitles_path = render_webvtt(schedule, run_directory / "subtitles.vtt")
         immutable.update(self._snapshot((narration_path, subtitles_path)))

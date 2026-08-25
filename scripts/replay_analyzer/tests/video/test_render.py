@@ -39,7 +39,7 @@ from generals_replay_analyzer.video.render import (
     _load_capture_result,
 )
 from generals_replay_analyzer.video.verify import ObservedVideoV1, VerificationLandmarkV1, VerifiedMediaV1
-from generals_replay_analyzer.video.voice import VoiceClipV1
+from generals_replay_analyzer.video.voice import NarrationScheduleError, VoiceClipV1
 
 RUN_ID = UUID("10000000-0000-4000-8000-000000000001")
 REPLAY_ID = "20000000-0000-4000-8000-000000000002"
@@ -142,7 +142,7 @@ def test_mux_rejects_capture_gap_beyond_logic_second(tmp_path: Path) -> None:
         )
 
 
-def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
+def _authority(replay_sha256: str, *, final_frame: int = 59) -> CameraPlanAuthorityV1:
     return CameraPlanAuthorityV1(
         replay_public_id=REPLAY_ID,
         replay_sha256=replay_sha256,
@@ -151,7 +151,7 @@ def _authority(replay_sha256: str) -> CameraPlanAuthorityV1:
         telemetry_trace_sha256="1" * 64,
         map_public_id=MAP_ID,
         map_content_sha256="2" * 64,
-        evidence_horizon=EvidenceHorizonV1(frame_end=59),
+        evidence_horizon=EvidenceHorizonV1(frame_end=final_frame),
         logic_frames_per_second=30,
     )
 
@@ -161,7 +161,7 @@ def _camera(authority: CameraPlanAuthorityV1) -> CameraPlanV1:
         evidence_public_id=EVIDENCE_ID,
         tier="observed",
         frame_start=0,
-        frame_end=59,
+        frame_end=authority.evidence_horizon.frame_end,
     )
     return CameraPlanV1(
         authority=authority,
@@ -169,7 +169,7 @@ def _camera(authority: CameraPlanAuthorityV1) -> CameraPlanV1:
             CameraSegmentV1(
                 segment_id=SEGMENT_ID,
                 start_frame=0,
-                end_frame=59,
+                end_frame=authority.evidence_horizon.frame_end,
                 target_x=123.5,
                 target_y=456.25,
                 target_z=10.0,
@@ -455,10 +455,11 @@ def _request(
     *,
     cancellation: _Cancellation | None = None,
     diagnostic_preview: bool = False,
+    final_frame: int = 59,
 ) -> tuple[VideoRenderRequest, CameraPlanV1, CommentaryPlanV1]:
     replay = (tmp_path / "Replay & whoami; $(touch nope).rep").resolve()
     replay.write_bytes(b"retail replay")
-    authority = _authority(_sha256(replay))
+    authority = _authority(_sha256(replay), final_frame=final_frame)
     return (
         VideoRenderRequest(
             authority=authority,
@@ -554,6 +555,37 @@ def test_render_runs_closed_stage_order_with_safe_argv_exact_duration_and_verifi
     assert all(
         artifact.path is not None and _sha256(artifact.path) == artifact.sha256 for artifact in manifest.artifacts
     )
+
+
+def test_production_render_rejects_a_long_silent_tail_before_engine_capture(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path, final_frame=1_020)
+    service, _, process, _, publisher = _service(tmp_path, request, camera, commentary)
+
+    with pytest.raises(NarrationScheduleError, match="more than 30 seconds of terminal silence"):
+        service.render(request)
+
+    assert process.specs == []
+    assert publisher.manifests == []
+
+
+def test_diagnostic_preview_allows_a_long_silent_tail_for_truthful_partial_review(tmp_path: Path) -> None:
+    request, camera, commentary = _request(tmp_path, diagnostic_preview=True, final_frame=1_020)
+    stages: list[str] = []
+    process = _ProcessRunner(
+        stages,
+        capture_result={
+            "logic_frames": 1_021,
+            "presentation_frames": 1_021,
+            "last_logic_frame": 1_020,
+        },
+    )
+    service, _, _, _, publisher = _service(tmp_path, request, camera, commentary, process=process)
+
+    result = service.render(request)
+
+    assert result.final_video_path.is_file()
+    assert [spec.stage for spec in process.specs] == ["engine_capture", "mux"]
+    assert publisher.manifests
 
 
 def test_render_launches_the_absolute_staged_replay_without_the_headless_user_data_option(
