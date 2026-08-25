@@ -40,7 +40,7 @@ from generals_replay_analyzer.features.base import (
 )
 from generals_replay_analyzer.features.build_order import BuildOrderExtractor
 from generals_replay_analyzer.features.combat import CombatExtractor
-from generals_replay_analyzer.features.context import FeatureContext, cache_key_from_digest, input_digest
+from generals_replay_analyzer.features.context import FeatureContext, PreparedCacheIdentity, prepare_cache_identity
 from generals_replay_analyzer.features.economy import EconomyExtractor
 from generals_replay_analyzer.features.evidence import (
     CanonicalValue,
@@ -193,8 +193,8 @@ class FeatureExtractionService:
             raise FeatureExtractionError(f"unknown extractor: {min(unknown)}")
         receipts: list[FeatureSetReceipt] = []
         contexts: dict[ObservationPolicy, FeatureContext] = {}
-        # TheSuperHackers @performance Leex 25/08/2026 Reuse each context digest across extractors in one request. (#TBD)
-        digests: dict[ObservationPolicy, str] = {}
+        # TheSuperHackers @performance Leex 25/08/2026 Reuse each prepared context identity across extractors in one request. (#TBD)
+        cache_identities: dict[ObservationPolicy, PreparedCacheIdentity] = {}
         for extractor_name in request.extractor_names:
             extractor = self._extractors[extractor_name]
             observation_policy = self._observation_policy(extractor)
@@ -207,12 +207,13 @@ class FeatureExtractionService:
                     else self._build_context_with_policy(request, observation_policy)
                 )
                 contexts[observation_policy] = context
-            digest = digests.get(observation_policy)
-            if digest is None:
-                digest = input_digest(context)
-                digests[observation_policy] = digest
-            key = cache_key_from_digest(
-                digest, extractor.name, extractor.version, registry_schema=self._registry.schema_version
+            cache_identity = cache_identities.get(observation_policy)
+            if cache_identity is None:
+                cache_identity = prepare_cache_identity(context)
+                cache_identities[observation_policy] = cache_identity
+            digest = cache_identity.input_digest
+            key = cache_identity.cache_key(
+                extractor.name, extractor.version, registry_schema=self._registry.schema_version
             )
             hit = self._load_receipt(key, cache_hit=True)
             if hit is not None:

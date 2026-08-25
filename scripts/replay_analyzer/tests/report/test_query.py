@@ -220,7 +220,11 @@ def _empty_response() -> dict[str, object]:
     }
 
 
-def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
+def _publish_graph(
+    database: SeededReportDatabase,
+    *,
+    analysis_version: str | None = None,
+) -> PublishedGraph:
     factory = database.session_factory  # type: ignore[assignment]
     now = datetime(2026, 8, 23, 9, 0, tzinfo=UTC)
     replay_wide_analysis_id = stable_uuid("query-replay-wide-analysis")
@@ -569,15 +573,17 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
             "selected_dependency_digest": base_input["selected_dependency_digest"],
             "identity_scope": base_input["identity_scope"],
         }
+        selected_derive_version = analysis_version or DERIVE_FEATURES_VERSION
+        selected_assess_version = analysis_version or ASSESS_STRATEGIES_VERSION
         derive_job = _job(
             public_id=stable_uuid("query-derive-job"),
             replay_id=replay.id,
             replay_sha256=replay.sha256,
             stage=DERIVE_FEATURES,
-            component_version=DERIVE_FEATURES_VERSION,
+            component_version=selected_derive_version,
             idempotency_key=content_key(
                 DERIVE_FEATURES,
-                DERIVE_FEATURES_VERSION,
+                selected_derive_version,
                 replay.sha256,
                 base_identity,
             ),
@@ -591,10 +597,10 @@ def _publish_graph(database: SeededReportDatabase) -> PublishedGraph:
             replay_id=replay.id,
             replay_sha256=replay.sha256,
             stage=ASSESS_STRATEGIES,
-            component_version=ASSESS_STRATEGIES_VERSION,
+            component_version=selected_assess_version,
             idempotency_key=content_key(
                 ASSESS_STRATEGIES,
-                ASSESS_STRATEGIES_VERSION,
+                selected_assess_version,
                 replay.sha256,
                 assess_identity,
             ),
@@ -1137,19 +1143,22 @@ def _add_legacy_report_claimant(
             started_at=now,
             completed_at=now,
         )
+    # TheSuperHackers @fix Leex 25/08/2026 Keep synthetic legacy claimants internally version-consistent. (#TBD)
+    legacy_analysis_version = "1"
     legacy_derive = _job(
         public_id=stable_uuid(f"{label}-derive"),
         replay_id=original.replay_id,  # type: ignore[arg-type]
         replay_sha256=cast(str, replay_input["replay_sha256"]),
         stage=DERIVE_FEATURES,
+        component_version=legacy_analysis_version,
         input_json=replay_input,
         output_json=dict(derive.output_json),
         now=now,
         idempotency_key=content_key(
             DERIVE_FEATURES,
-            DERIVE_FEATURES_VERSION,
+            legacy_analysis_version,
             cast(str, replay_input["replay_sha256"]),
-            {"derive_features_version": DERIVE_FEATURES_VERSION, "observations": branch_recipe},
+            {"derive_features_version": legacy_analysis_version, "observations": branch_recipe},
         ),
     )
     legacy_assess = _job(
@@ -1157,14 +1166,15 @@ def _add_legacy_report_claimant(
         replay_id=original.replay_id,  # type: ignore[arg-type]
         replay_sha256=cast(str, replay_input["replay_sha256"]),
         stage=ASSESS_STRATEGIES,
+        component_version=legacy_analysis_version,
         input_json=replay_input,
         output_json=dict(assess.output_json),
         now=now,
         idempotency_key=content_key(
             ASSESS_STRATEGIES,
-            ASSESS_STRATEGIES_VERSION,
+            legacy_analysis_version,
             cast(str, replay_input["replay_sha256"]),
-            {"assess_strategies_version": ASSESS_STRATEGIES_VERSION, "observations": branch_recipe},
+            {"assess_strategies_version": legacy_analysis_version, "observations": branch_recipe},
         ),
     )
     legacy_llm = None
@@ -1302,6 +1312,24 @@ def test_fixed_query_verifies_assets_and_aggregates_replay_and_players_without_w
     with pytest.raises(FrozenInstanceError):
         graph.selected_report_public_id = published_graph.replay_wide_report_id  # type: ignore[misc]
     assert str(report_database.settings.data_root) not in repr(graph)
+
+
+def test_report_reader_accepts_only_closed_supported_analysis_stage_versions() -> None:
+    assert report_query._supported_analysis_stage_version(DERIVE_FEATURES, "1")
+    assert report_query._supported_analysis_stage_version(DERIVE_FEATURES, DERIVE_FEATURES_VERSION)
+    assert report_query._supported_analysis_stage_version(ASSESS_STRATEGIES, "1")
+    assert report_query._supported_analysis_stage_version(ASSESS_STRATEGIES, ASSESS_STRATEGIES_VERSION)
+    assert not report_query._supported_analysis_stage_version(ASSESS_STRATEGIES, "0")
+
+
+def test_fixed_query_accepts_a_supported_preupgrade_modern_analysis_graph(
+    report_database: SeededReportDatabase,
+) -> None:
+    graph = _publish_graph(report_database, analysis_version="1")
+
+    selected = graph.service.get_report(FixedReportQuery(graph.replay_public_id, graph.player_report_id))
+
+    assert selected.selected.document.report_public_id == graph.player_report_id
 
 
 def test_fixed_report_query_caches_successful_validation_and_supports_invalidation(

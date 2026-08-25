@@ -158,6 +158,15 @@ _EVIDENCE_SOURCE_KINDS: dict[str, tuple[str, ...]] = {
     "derived": ("feature", "strategy_rule", "longitudinal_corpus"),
     "inferred": ("llm",),
 }
+_SUPPORTED_ANALYSIS_STAGE_VERSIONS = {
+    DERIVE_FEATURES: frozenset({"1", DERIVE_FEATURES_VERSION}),
+    ASSESS_STRATEGIES: frozenset({"1", ASSESS_STRATEGIES_VERSION}),
+}
+
+
+# TheSuperHackers @fix Leex 25/08/2026 Keep immutable reports readable across closed assessment-stage upgrades. (#TBD)
+def _supported_analysis_stage_version(stage: str, version: str) -> bool:
+    return version in _SUPPORTED_ANALYSIS_STAGE_VERSIONS.get(stage, frozenset())
 
 
 class ReportGraphError(RuntimeError):
@@ -983,7 +992,9 @@ class ReportQueryService:
                     raise ReportGraphContractError("LLM job and immutable stage result disagree")
                 llm = decode_llm_output(llm_result.output_json)
                 assess_job = self._dependency(session, replay, direct)
-                if assess_job.stage != ASSESS_STRATEGIES or assess_job.component_version != ASSESS_STRATEGIES_VERSION:
+                if assess_job.stage != ASSESS_STRATEGIES or not _supported_analysis_stage_version(
+                    ASSESS_STRATEGIES, assess_job.component_version
+                ):
                     raise ReportGraphContractError("LLM report graph requires one assessment dependency")
                 assess_result = self._exact_result(session, assess_job)
                 assess = decode_assessment_output(assess_result.output_json)
@@ -994,7 +1005,9 @@ class ReportQueryService:
                     self._selection(by_player[item.replay_player_public_id], item.analysis_run_id) for item in llm
                 )
             else:
-                if direct.stage != ASSESS_STRATEGIES or direct.component_version != ASSESS_STRATEGIES_VERSION:
+                if direct.stage != ASSESS_STRATEGIES or not _supported_analysis_stage_version(
+                    ASSESS_STRATEGIES, direct.component_version
+                ):
                     raise ReportGraphContractError("deterministic report graph has the wrong direct dependency")
                 assess_result = self._exact_result(session, direct)
                 if direct.output_json != assess_result.output_json:
@@ -1037,10 +1050,14 @@ class ReportQueryService:
         if job.input_json != replay_input:
             raise ReportGraphContractError("legacy render report input is not bound to the exact replay")
         assess = self._dependency(session, replay, job)
-        if assess.stage != ASSESS_STRATEGIES or assess.component_version != ASSESS_STRATEGIES_VERSION:
+        if assess.stage != ASSESS_STRATEGIES or not _supported_analysis_stage_version(
+            ASSESS_STRATEGIES, assess.component_version
+        ):
             raise ReportGraphContractError("legacy report graph requires one assessment dependency")
         derive = self._dependency(session, replay, assess)
-        if derive.stage != DERIVE_FEATURES or derive.component_version != DERIVE_FEATURES_VERSION:
+        if derive.stage != DERIVE_FEATURES or not _supported_analysis_stage_version(
+            DERIVE_FEATURES, derive.component_version
+        ):
             raise ReportGraphContractError("legacy assessment is not bound to one derive-features stage")
         observation = self._dependency(session, replay, derive)
         if observation.stage != IMPORT_OBSERVATIONS or observation.component_version != IMPORT_OBSERVATIONS_VERSION:
@@ -1058,14 +1075,14 @@ class ReportQueryService:
             (
                 derive,
                 DERIVE_FEATURES,
-                DERIVE_FEATURES_VERSION,
-                {"derive_features_version": DERIVE_FEATURES_VERSION, "observations": dict(branch_recipe)},
+                derive.component_version,
+                {"derive_features_version": derive.component_version, "observations": dict(branch_recipe)},
             ),
             (
                 assess,
                 ASSESS_STRATEGIES,
-                ASSESS_STRATEGIES_VERSION,
-                {"assess_strategies_version": ASSESS_STRATEGIES_VERSION, "observations": dict(branch_recipe)},
+                assess.component_version,
+                {"assess_strategies_version": assess.component_version, "observations": dict(branch_recipe)},
             ),
             (
                 job,
@@ -1519,7 +1536,9 @@ class ReportQueryService:
         llm: Job | None,
     ) -> str | None:
         derive = self._dependency(session, replay, assess)
-        if derive.stage != DERIVE_FEATURES or derive.component_version != DERIVE_FEATURES_VERSION:
+        if derive.stage != DERIVE_FEATURES or not _supported_analysis_stage_version(
+            DERIVE_FEATURES, derive.component_version
+        ):
             raise ReportGraphContractError("assessment is not bound to one derive-features stage")
         observation = self._dependency(session, replay, derive)
         if observation.stage != IMPORT_OBSERVATIONS or observation.component_version != IMPORT_OBSERVATIONS_VERSION:
@@ -1556,10 +1575,11 @@ class ReportQueryService:
         if (
             derive.input_json != base_input
             or derive.idempotency_key
-            != content_key(DERIVE_FEATURES, DERIVE_FEATURES_VERSION, replay.sha256, derive_identity)
+            != content_key(DERIVE_FEATURES, derive.component_version, replay.sha256, derive_identity)
             or assess.input_json != {**base_input, "derive_input_digest": input_digest(assess_identity)}
+            or not _supported_analysis_stage_version(ASSESS_STRATEGIES, assess.component_version)
             or assess.idempotency_key
-            != content_key(ASSESS_STRATEGIES, ASSESS_STRATEGIES_VERSION, replay.sha256, assess_identity)
+            != content_key(ASSESS_STRATEGIES, assess.component_version, replay.sha256, assess_identity)
         ):
             raise ReportGraphContractError("deterministic analysis stage identity is invalid")
         if llm is not None:

@@ -33,6 +33,7 @@ from generals_replay_analyzer.db.models import (
     TelemetryEvent,
     TelemetryRun,
 )
+from generals_replay_analyzer.features import context as feature_context
 from generals_replay_analyzer.features.base import (
     FeatureBundle,
     FeatureScope,
@@ -281,7 +282,7 @@ def _request(replay: str, player: str, *extractors: str, settings: object = ()) 
     return ExtractFeaturesRequest(replay, player, tuple(extractors), settings)  # type: ignore[arg-type]
 
 
-def test_extract_reuses_digest_for_each_distinct_observation_context(
+def test_extract_prepares_cache_identity_once_for_each_distinct_observation_context(
     feature_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     replay, player, _ = _seed_replay(feature_factory)
@@ -305,19 +306,19 @@ def test_extract_reuses_digest_for_each_distinct_observation_context(
             return target_context if policy == "target_player" else replace(target_context, settings={"policy": policy})
 
     service = ContextService(feature_factory, extractors=extractors)  # type: ignore[arg-type]
-    original_input_digest = input_digest
-    digest_calls = 0
+    original_prepare = feature_context.prepare_cache_identity
+    prepare_calls = 0
 
-    def counted_input_digest(context: FeatureContext) -> str:
-        nonlocal digest_calls
-        digest_calls += 1
-        return original_input_digest(context)
+    def counted_prepare(context: FeatureContext) -> feature_context.PreparedCacheIdentity:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(context)
 
-    monkeypatch.setattr("generals_replay_analyzer.features.service.input_digest", counted_input_digest)
+    monkeypatch.setattr("generals_replay_analyzer.features.service.prepare_cache_identity", counted_prepare)
 
     service.extract(_request(replay, player, "target-a", "target-b", "wide"))
 
-    assert digest_calls == 2
+    assert prepare_calls == 2
 
 
 def _attach_spatial_projection(

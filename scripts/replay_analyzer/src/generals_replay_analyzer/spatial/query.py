@@ -471,9 +471,7 @@ class MapSceneQueryService:
         return replay, map_row, parser, telemetry, document, frozenset(report_evidence)
 
     @staticmethod
-    def _manifest_evidence(
-        session: Session, telemetry: TelemetryRun, report_evidence_ids: frozenset[str]
-    ) -> EvidenceItem:
+    def _manifest_evidence(session: Session, telemetry: TelemetryRun) -> EvidenceItem:
         rows = tuple(
             session.scalars(
                 select(EvidenceItem)
@@ -481,10 +479,12 @@ class MapSceneQueryService:
                 .where(TelemetryEvent.telemetry_run_id == telemetry.id, TelemetryEvent.event_type == "manifest")
             )
         )
+        # TheSuperHackers @fix Leex 25/08/2026 Accept only the unique manifest bound to the telemetry and replay already fixed by report evidence. (#TBD)
         if (
             len(rows) != 1
             or rows[0].tier != "observed"
-            or rows[0].public_id not in report_evidence_ids
+            or rows[0].telemetry_run_id != telemetry.id
+            or rows[0].replay_id != telemetry.replay_id
         ):
             raise MapSceneContractError("selected manifest evidence is ambiguous")
         return rows[0]
@@ -803,7 +803,8 @@ class MapSceneQueryService:
                 query = replace(query, frame_start=0, frame_end=available_end)
             elif query.frame_end > available_end:
                 raise ValueError("map scene query exceeds the available frame window")
-            manifest = self._manifest_evidence(session, telemetry, report_evidence_ids)
+            manifest = self._manifest_evidence(session, telemetry)
+            scene_evidence_ids = report_evidence_ids | {manifest.public_id}
             projection = self._projection(session, map_row, manifest)
             players = self._player_map(session, replay, parser, telemetry)
             available_player_ids = {item.public_id for item in players.values()}
@@ -1226,7 +1227,7 @@ class MapSceneQueryService:
                     "strategy_analysis_scope": "replay" if document.replay_player_public_id is None else "player",
                 },
             }
-            _assert_evidence_membership(payload, report_evidence_ids)
+            _assert_evidence_membership(payload, frozenset(scene_evidence_ids))
             return MapSceneReadModel(freeze_canonical(payload))
 
     # TheSuperHackers @feature Leex 23/08/2026 Regenerate only accepted persisted pathability rasters by stable public identity. (#TBD)
@@ -1264,6 +1265,7 @@ class MapSceneQueryService:
         total = 0
         if query.availability in (None, "partial"):
             with self._session_factory() as session:
+                # TheSuperHackers @fix Leex 25/08/2026 Index replay-wide map authority instead of player reports without manifest evidence. (#TBD)
                 if query.search:
                     candidates = tuple(
                         session.execute(
@@ -1276,6 +1278,7 @@ class MapSceneQueryService:
                             .select_from(Report)
                             .join(Replay, Replay.id == Report.replay_id)
                             .join(Map, Map.id == Replay.map_id)
+                            .where(Report.replay_player_id.is_(None))
                             .order_by(Replay.public_id, Report.public_id)
                             .limit(_MAP_SCENE_SEARCH_CANDIDATE_LIMIT + 1)
                         ).tuples()
@@ -1299,7 +1302,7 @@ class MapSceneQueryService:
                                 select(Report, Replay, Map)
                                 .join(Replay, Replay.id == Report.replay_id)
                                 .join(Map, Map.id == Replay.map_id)
-                                .where(Report.id.in_(selected_ids))
+                                .where(Report.id.in_(selected_ids), Report.replay_player_id.is_(None))
                                 .order_by(Replay.public_id, Report.public_id)
                             ).tuples()
                         )
@@ -1309,6 +1312,7 @@ class MapSceneQueryService:
                         .select_from(Report)
                         .join(Replay, Replay.id == Report.replay_id)
                         .join(Map, Map.id == Replay.map_id)
+                        .where(Report.replay_player_id.is_(None))
                     ) or 0
                     offset = self._bounded_page_offset(total, query.page, query.page_size)
                     if offset < total:
@@ -1317,6 +1321,7 @@ class MapSceneQueryService:
                                 select(Report, Replay, Map)
                                 .join(Replay, Replay.id == Report.replay_id)
                                 .join(Map, Map.id == Replay.map_id)
+                                .where(Report.replay_player_id.is_(None))
                                 .order_by(Replay.public_id, Report.public_id)
                                 .offset(offset)
                                 .limit(query.page_size)

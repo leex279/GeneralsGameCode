@@ -218,6 +218,7 @@ def _seed_query_service(
     out_of_bounds_sample_x: float = 25.0,
     visibility_x: float = 5.0,
     duplicate_manifest: bool = False,
+    cross_run_manifest: bool = False,
     map_display_name: str = "Tournament Desert",
     corrupt_projection: bool = False,
     engine_native_map_events: bool = False,
@@ -379,6 +380,29 @@ def _seed_query_service(
         )
         session.add(telemetry)
         session.flush()
+        manifest_telemetry_id = telemetry.id
+        if cross_run_manifest:
+            sibling = TelemetryRun(
+                run_id=_uuid("sibling-telemetry"),
+                replay_id=replay.id,
+                map_asset_id=manifest_asset.id,
+                map_id=map_row.id,
+                schema_version=2,
+                engine_build="zh-1.04-catalog",
+                engine_executable_sha256="9" * 64,
+                settings_json={},
+                status="running",
+                runner_status="success",
+                final_frame=120,
+                command_count=0,
+                trace_sha256="8" * 64,
+                diagnostics_json=[],
+                started_at=now,
+                completed_at=now,
+            )
+            session.add(sibling)
+            session.flush()
+            manifest_telemetry_id = sibling.id
         evidence_rows = []
         evidence_specs = [
             (manifest_evidence_id, 0),
@@ -402,7 +426,7 @@ def _seed_query_service(
                 EvidenceItem(
                     public_id=public_id,
                     replay_id=replay.id,
-                    telemetry_run_id=telemetry.id,
+                    telemetry_run_id=manifest_telemetry_id if sequence == 0 else telemetry.id,
                     tier="observed",
                     source_kind="telemetry_event",
                     source_key=f"telemetry:{telemetry.run_id}:sequence:{sequence}",
@@ -706,6 +730,39 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert "ignored/private/manifest.json" not in repr(payload)
 
 
+def test_scene_accepts_the_unique_manifest_from_report_bound_telemetry(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path)
+    authority = _ReportAuthority(
+        ids["replay"],
+        ids["report"],
+        (ids["sample_evidence"], ids["combat_evidence"]),
+        ids["player:0"],
+    )
+
+    scene = MapSceneQueryService(service.session_factory, authority).get_scene(
+        MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+    )
+
+    payload = thaw_canonical(scene.payload)
+    assert isinstance(payload, dict)
+    assert payload["report_public_id"] == ids["report"]
+
+
+def test_scene_rejects_a_manifest_evidence_item_bound_to_a_sibling_telemetry_run(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path, cross_run_manifest=True)
+    authority = _ReportAuthority(
+        ids["replay"],
+        ids["report"],
+        (ids["sample_evidence"], ids["combat_evidence"]),
+        ids["player:0"],
+    )
+
+    with pytest.raises(MapSceneContractError, match="selected manifest evidence is ambiguous"):
+        MapSceneQueryService(service.session_factory, authority).get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        )
+
+
 def test_evidence_authority_load_batches_large_fixed_report_without_loss(tmp_path: Path) -> None:
     service, ids = _seed_query_service(tmp_path)
     evidence_ids = tuple(_uuid(f"large-report-evidence:{index}") for index in range(1101))
@@ -844,6 +901,44 @@ def test_listed_scene_window_resolves_against_authoritative_telemetry(tmp_path: 
     assert advertised == scene["available_frame_window"] == {"frame_start": 0, "frame_end": 120}
     with pytest.raises(ValueError, match="available frame window"):
         service.get_scene(MapSceneReadQuery(ids["replay"], ids["report"], 0, 121))
+
+
+def test_scene_index_lists_only_replay_wide_map_authority_reports(tmp_path: Path) -> None:
+    service, ids = _seed_query_service(tmp_path)
+    with service.session_factory() as session:
+        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
+        player = session.scalar(select(ReplayPlayer).where(ReplayPlayer.public_id == ids["player:0"]))
+        assert replay is not None and player is not None
+        session.add_all(
+            (
+                Report(
+                    public_id=ids["report"],
+                    replay_id=replay.id,
+                    report_version="replay-report-v1",
+                    input_digest="1" * 64,
+                    cache_key="2" * 64,
+                    report_json={},
+                    created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+                ),
+                Report(
+                    public_id=_uuid("player-report-without-map-authority"),
+                    replay_id=replay.id,
+                    replay_player_id=player.id,
+                    report_version="replay-report-v1",
+                    input_digest="3" * 64,
+                    cache_key="4" * 64,
+                    report_json={},
+                    created_at=datetime(2026, 8, 23, 12, 1, tzinfo=UTC),
+                ),
+            )
+        )
+        session.commit()
+
+    page = thaw_canonical(service.list_scenes(MapSceneIndexReadQuery()).payload)
+
+    assert isinstance(page, dict)
+    assert page["total_items"] == 1
+    assert [item["report_public_id"] for item in page["items"]] == [ids["report"]]
 
 
 def test_scene_index_fails_closed_on_duplicate_report_bound_manifest(tmp_path: Path) -> None:

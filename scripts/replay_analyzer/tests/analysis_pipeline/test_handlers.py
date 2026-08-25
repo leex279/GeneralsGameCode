@@ -42,7 +42,16 @@ from generals_replay_analyzer.features.evidence import EvidenceRef
 from generals_replay_analyzer.identity.audit import identity_cache_digest
 from generals_replay_analyzer.importing.jobs import StageFailure
 from generals_replay_analyzer.importing.service import StageDependencyOutput, StageExecutionContext
-from generals_replay_analyzer.importing.stages import RENDER_REPORT, RENDER_REPORT_VERSION
+from generals_replay_analyzer.importing.stages import (
+    ANALYZE_LLM,
+    ANALYZE_LLM_VERSION,
+    ASSESS_STRATEGIES,
+    ASSESS_STRATEGIES_VERSION,
+    DERIVE_FEATURES,
+    DERIVE_FEATURES_VERSION,
+    RENDER_REPORT,
+    RENDER_REPORT_VERSION,
+)
 from generals_replay_analyzer.llm.evidence_bundle import build_evidence_bundle
 from generals_replay_analyzer.llm.provider import OllamaClientConfig
 from generals_replay_analyzer.llm.service import AnalysisOutcome, DeterministicFallback
@@ -295,19 +304,25 @@ def _context(
     *,
     input_value: dict[str, object] | None = None,
 ) -> StageExecutionContext:
+    versions = {
+        ANALYZE_LLM: ANALYZE_LLM_VERSION,
+        ASSESS_STRATEGIES: ASSESS_STRATEGIES_VERSION,
+        DERIVE_FEATURES: DERIVE_FEATURES_VERSION,
+        RENDER_REPORT: RENDER_REPORT_VERSION,
+    }
     return StageExecutionContext(
         str(uuid4()),
         "stage-idempotency-key",
         REPLAY_ID,
         REPLAY_SHA,
         stage,
-        RENDER_REPORT_VERSION if stage == RENDER_REPORT else "1",
+        versions.get(stage, "1"),
         input_value or {},
         (
             StageDependencyOutput(
                 str(uuid4()),
                 dependency_stage,
-                "1",
+                versions.get(dependency_stage, "1"),
                 output,
             ),
         ),
@@ -1731,7 +1746,7 @@ def test_render_report_rejects_unknown_and_malformed_direct_dependencies() -> No
     )
     wrong_version = replace(
         valid,
-        dependencies=(replace(valid.dependencies[0], component_version="2"),),
+        dependencies=(replace(valid.dependencies[0], component_version="999"),),
     )
     failures: list[StageFailure] = []
     no_dependencies = replace(valid, dependencies=())
@@ -1767,7 +1782,7 @@ def test_analyze_llm_preserves_direct_dependency_contract_failure(tmp_path: Path
     )
     context = replace(
         context,
-        dependencies=(replace(context.dependencies[0], component_version="2"),),
+        dependencies=(replace(context.dependencies[0], component_version="999"),),
     )
     failure = None
     try:

@@ -1,5 +1,6 @@
 """Canonical semantic context and cache identity tests."""
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,12 +67,24 @@ def test_cache_identity_changes_for_every_semantic_input_and_version() -> None:
     assert cache_key(base, "fixture", "v1", registry_schema="feature-registry-v2") != base_key
 
 
-def test_cache_key_can_reuse_an_already_computed_context_digest() -> None:
+def test_prepared_cache_identity_preserves_the_legacy_cache_key_bytes() -> None:
     item = _observation("00000000-0000-4000-8000-000000000239", "telemetry:1", 10, {"amount": 1.25})
     context = _context(observed=(item,))
-    digest = input_digest(context)
+    expected_key = hashlib.sha256(
+        canonical_json(
+            {
+                "cache_schema": "feature-cache-v1",
+                "context": context,
+                "extractor": {"name": "fixture", "version": "v1"},
+                "registry_schema": "feature-registry-v1",
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    prepared = feature_context.prepare_cache_identity(context)
 
-    assert feature_context.cache_key_from_digest(digest, "fixture", "v1") == cache_key(context, "fixture", "v1")
+    assert prepared.input_digest == input_digest(context)
+    assert prepared.cache_key("fixture", "v1") == expected_key
+    assert cache_key(context, "fixture", "v1") == expected_key
 
 
 @pytest.mark.parametrize(

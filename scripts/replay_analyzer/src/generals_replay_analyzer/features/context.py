@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime
@@ -151,21 +151,42 @@ def input_digest(context: FeatureContext) -> str:
     return hashlib.sha256(canonical_json(context).encode("utf-8")).hexdigest()
 
 
-def cache_key_from_digest(
-    context_digest: str,
-    extractor_name: str,
-    extractor_version: str,
-    *,
-    registry_schema: str = REGISTRY_SCHEMA,
-) -> str:
-    # TheSuperHackers @performance Leex 25/08/2026 Reuse the canonical context digest instead of serializing full telemetry per extractor. (#TBD)
-    identity = {
-        "cache_schema": "feature-cache-v2",
-        "context_digest": context_digest,
-        "extractor": {"name": extractor_name, "version": extractor_version},
-        "registry_schema": registry_schema,
-    }
-    return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+@dataclass(frozen=True)
+class PreparedCacheIdentity:
+    input_digest: str
+    _cache_key: Callable[[str, str, str], str]
+
+    def cache_key(
+        self,
+        extractor_name: str,
+        extractor_version: str,
+        *,
+        registry_schema: str = REGISTRY_SCHEMA,
+    ) -> str:
+        return self._cache_key(extractor_name, extractor_version, registry_schema)
+
+
+def prepare_cache_identity(context: FeatureContext) -> PreparedCacheIdentity:
+    # TheSuperHackers @performance Leex 25/08/2026 Serialize full telemetry once while preserving legacy feature cache keys byte for byte. (#TBD)
+    context_bytes = canonical_json(context).encode("utf-8")
+    digest = hashlib.sha256(context_bytes).hexdigest()
+    prefix = hashlib.sha256()
+    prefix.update(b'{"cache_schema":"feature-cache-v1","context":')
+    prefix.update(context_bytes)
+
+    def prepared_key(extractor_name: str, extractor_version: str, registry_schema: str) -> str:
+        state = prefix.copy()
+        suffix = (
+            b',"extractor":'
+            + canonical_json({"name": extractor_name, "version": extractor_version}).encode("utf-8")
+            + b',"registry_schema":'
+            + canonical_json(registry_schema).encode("utf-8")
+            + b"}"
+        )
+        state.update(suffix)
+        return state.hexdigest()
+
+    return PreparedCacheIdentity(digest, prepared_key)
 
 
 def cache_key(
@@ -175,6 +196,6 @@ def cache_key(
     *,
     registry_schema: str = REGISTRY_SCHEMA,
 ) -> str:
-    return cache_key_from_digest(
-        input_digest(context), extractor_name, extractor_version, registry_schema=registry_schema
+    return prepare_cache_identity(context).cache_key(
+        extractor_name, extractor_version, registry_schema=registry_schema
     )

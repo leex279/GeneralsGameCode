@@ -46,7 +46,8 @@ IMPORT_OBSERVATIONS_VERSION = "1"
 RECONCILE_IDENTITIES_VERSION = "1"
 # TheSuperHackers @bugfix Leex 25/08/2026 Regenerate durable feature graphs with projected legacy combat template identities. (#TBD)
 DERIVE_FEATURES_VERSION = "2"
-ASSESS_STRATEGIES_VERSION = "1"
+# TheSuperHackers @fix Leex 25/08/2026 Requeue assessment after preserving feature cache identities across optimized extraction. (#TBD)
+ASSESS_STRATEGIES_VERSION = "2"
 ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
