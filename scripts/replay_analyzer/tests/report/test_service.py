@@ -32,6 +32,7 @@ from generals_replay_analyzer.db.models import (
 )
 from generals_replay_analyzer.report.model import ReportRequest, document_to_mapping
 from generals_replay_analyzer.report.service import (
+    _CRITICAL_TELEMETRY_EVENT_TYPES,
     ReportContractError,
     ReportNotFoundError,
     ReportService,
@@ -61,6 +62,10 @@ def test_full_match_observation_sampling_is_bounded_and_spans_the_timeline() -> 
     assert selected[0] == rows[0]
     assert selected[-1] == rows[-1]
     assert selected == tuple(sorted(set(selected)))
+
+
+def test_engine_manifest_is_reserved_as_critical_report_authority() -> None:
+    assert "manifest" in _CRITICAL_TELEMETRY_EVENT_TYPES
 
 
 def test_camera_combat_anchor_buckets_are_deterministic_bounded_and_do_not_reuse_samples() -> None:

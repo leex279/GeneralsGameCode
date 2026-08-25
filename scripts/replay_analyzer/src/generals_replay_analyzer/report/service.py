@@ -83,6 +83,8 @@ _MAX_NOISY_TELEMETRY_OBSERVATIONS = 32
 _MAX_CAMERA_COMBAT_ANCHORS = 256
 _CRITICAL_TELEMETRY_EVENT_TYPES = frozenset(
     {
+        # TheSuperHackers @fix Leex 25/08/2026 Reserve engine map/timebase authority inside bounded reports used by camera planning. (#TBD)
+        "manifest",
         "construction_completed",
         "construction_started",
         "damage",
