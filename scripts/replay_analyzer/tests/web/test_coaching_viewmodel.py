@@ -499,6 +499,27 @@ def test_partial_report_suppresses_metrics_extending_past_the_terminal_horizon()
     assert coaching.signal_reads == ()
 
 
+def test_complete_report_keeps_terminal_aggregate_metrics_past_presentable_frame() -> None:
+    report = _report()
+    sections = tuple(
+        section.model_copy(
+            update={
+                "claims": tuple(
+                    claim.model_copy(update={"frame_window": (0, report.duration_frames + 1)})
+                    for claim in section.claims
+                )
+            }
+        )
+        for section in report.sections
+    )
+
+    coaching = coaching_view(report.model_copy(update={"sections": sections}), _timeline())
+
+    assert coaching.horizon.status == "complete"
+    assert coaching.highlights
+    assert any(item.signal_id == "economy.supply_collection_rate" for item in coaching.highlights)
+
+
 def test_ollama_state_cannot_change_deterministic_coaching() -> None:
     report = _report()
     offline = report.model_copy(

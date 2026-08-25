@@ -252,10 +252,10 @@ def _claim_inside_horizon(claim: ReportClaimDTO, horizon: EvidenceHorizonView) -
 
     if horizon.frame_end is None:
         return False
-    if claim.frame_window is None:
-        if horizon.status != "complete":
-            return False
-    elif claim.frame_window[1] > horizon.frame_end:
+    # TheSuperHackers @bugfix Leex 25/08/2026 Keep complete engine-verified aggregates whose terminal settlement callback follows the last presentable replay frame. (#TBD)
+    if horizon.status == "complete":
+        return True
+    if claim.frame_window is None or claim.frame_window[1] > horizon.frame_end:
         return False
     raw = _thaw(claim.raw_value)
     return not (
