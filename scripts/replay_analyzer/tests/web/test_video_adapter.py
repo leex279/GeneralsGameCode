@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
 from generals_replay_analyzer.db.models import Job, JobStageResult
-from generals_replay_analyzer.web.adapters.video import AnalyticsVideoAdapter
+from generals_replay_analyzer.web.adapters.video import AnalyticsVideoAdapter, _evidence_horizon
 from generals_replay_analyzer.web.errors import PublicProblem
 
 JOB_ID = "123e4567-e89b-42d3-a456-426614174020"
@@ -68,6 +68,20 @@ def _seed_result(factory: sessionmaker[Session], output: dict[str, object]) -> N
                 created_at=NOW,
             )
         )
+
+
+def test_video_horizon_accepts_the_persisted_successful_full_telemetry_lifecycle() -> None:
+    """Catch a clean production report being downgraded because storage says succeeded instead of complete."""
+    assert _evidence_horizon(
+        {
+            "lifecycle": {
+                "parser_completion_status": "complete",
+                "telemetry_status": "succeeded",
+                "telemetry_runner_status": "success",
+                "lifecycle_state": "engine_verified",
+            }
+        }
+    ) == "complete"
 
 
 @pytest.mark.parametrize(

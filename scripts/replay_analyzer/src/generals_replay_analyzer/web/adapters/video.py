@@ -36,7 +36,13 @@ from generals_replay_analyzer.web.ports import (
 def _evidence_horizon(report_json: dict[str, object]) -> Literal["complete", "partial"]:
     lifecycle = report_json.get("lifecycle")
     if isinstance(lifecycle, dict):
-        if lifecycle.get("parser_completion_status") == "complete" and lifecycle.get("telemetry_status") == "complete":
+        # TheSuperHackers @bugfix Leex 25/08/2026 Accept the persisted succeeded state for clean engine-verified production casts. (#TBD)
+        if (
+            lifecycle.get("parser_completion_status") == "complete"
+            and lifecycle.get("telemetry_status") in ("complete", "succeeded")
+            and lifecycle.get("telemetry_runner_status") in (None, "success", "succeeded")
+            and lifecycle.get("lifecycle_state") in (None, "engine_verified")
+        ):
             return "complete"
         return "partial"
     issues = report_json.get("quality_issues", [])
