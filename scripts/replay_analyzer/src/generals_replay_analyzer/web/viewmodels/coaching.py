@@ -207,22 +207,26 @@ def _evidence_end(report: ReplayReportDTO, timeline: TimelineChartDTO) -> int | 
 
 def _horizon(report: ReplayReportDTO, timeline: TimelineChartDTO) -> EvidenceHorizonView:
     duration = report.duration_frames
+    # TheSuperHackers @bugfix Leex 25/08/2026 Keep non-terminal projection warnings from truncating engine-verified reports and use the authoritative replay clock. (#TBD)
     complete = (
-        report.availability.state == "available"
+        report.availability.state in ("available", "partial")
         and report.lifecycle.lifecycle_state == "engine_verified"
         and report.lifecycle.parser_completion_status == "complete"
         and report.lifecycle.telemetry_status in ("complete", "succeeded")
         and report.lifecycle.telemetry_runner_status in ("success", "succeeded")
-        and not report.terminal_quality.issues
         and duration is not None
     )
+    frames_per_second = timeline.timebase_fps or 30
     if complete:
         assert duration is not None
         return EvidenceHorizonView(
             status="complete",
             title="Complete match evidence",
             frame_end=duration,
-            description=f"The report covers the complete recorded match through {format_frame(duration)}.",
+            description=(
+                "The report covers the complete recorded match through "
+                f"{format_frame(duration, frames_per_second=frames_per_second)}."
+            ),
         )
     frame_end = _evidence_end(report, timeline)
     if frame_end is None:
@@ -232,7 +236,7 @@ def _horizon(report: ReplayReportDTO, timeline: TimelineChartDTO) -> EvidenceHor
             frame_end=None,
             description="The report does not contain a verified frame horizon for player conclusions.",
         )
-    clock = format_frame(frame_end).split(" (", 1)[0]
+    clock = format_frame(frame_end, frames_per_second=frames_per_second).split(" (", 1)[0]
     return EvidenceHorizonView(
         status="partial",
         title=f"Observed opening through {clock}",
@@ -306,6 +310,7 @@ def _strategies(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
 def _build_order(
     report: ReplayReportDTO,
     horizon: EvidenceHorizonView,
+    frames_per_second: int,
 ) -> tuple[BuildOrderStepView, ...]:
     if horizon.frame_end is None:
         return ()
@@ -333,7 +338,7 @@ def _build_order(
             output.append(
                 BuildOrderStepView(
                     frame=frame,
-                    time_label=format_frame(frame),
+                    time_label=format_frame(frame, frames_per_second=frames_per_second),
                     player_label=player_label,
                     structure_label=game_label(cast(str, step["template_name"])),
                     evidence=_claim_evidence(claim),
@@ -342,7 +347,7 @@ def _build_order(
     return tuple(sorted(output, key=lambda item: (item.frame, item.player_label, item.structure_label))[:24])
 
 
-def _metric_value(claim: ReportClaimDTO) -> str:
+def _metric_value(claim: ReportClaimDTO, frames_per_second: int) -> str:
     raw = _thaw(claim.raw_value)
     if claim.label == "economy.supply_collection_rate" and type(raw) in (int, float):
         return f"{float(cast(int | float, raw)):,.0f} supplies/min"
@@ -362,19 +367,19 @@ def _metric_value(claim: ReportClaimDTO) -> str:
             return ", ".join(composition)
     if claim.label in ("production.science_purchase_timing", "production.special_power_timing") and isinstance(raw, list):
         return ", ".join(
-            f"{game_label(item['item_name'])} at {format_frame(item['frame'])}"
+            f"{game_label(item['item_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
             for item in raw
             if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("item_name")) is str
         ) or "No observed timing events"
     if claim.label == "combat.observed_kill_timing" and isinstance(raw, list):
         return ", ".join(
-            f"{game_label(item['victim_template_name'])} at {format_frame(item['frame'])}"
+            f"{game_label(item['victim_template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
             for item in raw
             if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("victim_template_name")) is str
         ) or "No observed kills"
     if claim.label == "combat.turning_point_timing" and isinstance(raw, list):
         return ", ".join(
-            f"{game_label(item['attacker_template_name'])} over {game_label(item['victim_template_name'])} at {format_frame(item['frame'])}"
+            f"{game_label(item['attacker_template_name'])} over {game_label(item['victim_template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
             for item in raw
             if (
                 isinstance(item, dict)
@@ -385,14 +390,18 @@ def _metric_value(claim: ReportClaimDTO) -> str:
         ) or "No evidence-backed engagement swing candidates"
     if claim.label == "scouting.first_observed_clear_timing" and isinstance(raw, list):
         return ", ".join(
-            f"{game_label(item['template_name'])} at {format_frame(item['frame'])}"
+            f"{game_label(item['template_name'])} at {format_frame(item['frame'], frames_per_second=frames_per_second)}"
             for item in raw
             if isinstance(item, dict) and type(item.get("frame")) is int and type(item.get("template_name")) is str
         ) or "No observed scouting clears"
     return claim.display_value or "Unavailable"
 
 
-def _highlights(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[CoachingHighlightView, ...]:
+def _highlights(
+    report: ReplayReportDTO,
+    horizon: EvidenceHorizonView,
+    frames_per_second: int,
+) -> tuple[CoachingHighlightView, ...]:
     claims = {
         claim.label: claim
         for section in report.sections
@@ -406,7 +415,7 @@ def _highlights(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple[
         CoachingHighlightView(
             signal_id=name,
             title=feature_label(name),
-            value=_metric_value(claims[name]),
+            value=_metric_value(claims[name], frames_per_second),
             explanation=_HIGHLIGHT_EXPLANATIONS[name],
             evidence=_claim_evidence(claims[name]),
         )
@@ -543,6 +552,7 @@ def _key_moments(report: ReplayReportDTO, horizon: EvidenceHorizonView) -> tuple
 def _opening_lanes(
     build_order: tuple[BuildOrderStepView, ...],
     key_moments: tuple[KeyMomentView, ...],
+    frames_per_second: int,
 ) -> tuple[OpeningLaneView, ...]:
     events: dict[str, list[OpeningLaneEventView]] = {
         "build": [],
@@ -553,7 +563,7 @@ def _opening_lanes(
     events["build"].extend(
         OpeningLaneEventView(
             frame=step.frame,
-            time_label=format_frame(step.frame),
+            time_label=format_frame(step.frame, frames_per_second=frames_per_second),
             title=f"{step.structure_label} completed",
             evidence=step.evidence,
         )
@@ -572,7 +582,7 @@ def _opening_lanes(
         events[lane_id].append(
             OpeningLaneEventView(
                 frame=moment.frame,
-                time_label=format_frame(moment.frame),
+                time_label=format_frame(moment.frame, frames_per_second=frames_per_second),
                 title=moment.title,
                 evidence=moment.evidence,
             )
@@ -601,11 +611,16 @@ def _summary(
     strategies: tuple[PlayerStrategyView, ...],
     build_order: tuple[BuildOrderStepView, ...],
     highlights: tuple[CoachingHighlightView, ...],
+    frames_per_second: int,
 ) -> str:
     player = _selected_player(report)
     player_label = "The selected player" if player is None else player.display_name
     if horizon.status == "partial":
-        clock = "an unknown time" if horizon.frame_end is None else format_frame(horizon.frame_end).split(" (", 1)[0]
+        clock = (
+            "an unknown time"
+            if horizon.frame_end is None
+            else format_frame(horizon.frame_end, frames_per_second=frames_per_second).split(" (", 1)[0]
+        )
         return (
             f"Observed opening through {clock}: {player_label} completed {len(build_order)} verified structures. "
             "The trace ends before a full-match result can be established."
@@ -651,21 +666,22 @@ def coaching_view(report: ReplayReportDTO, timeline: TimelineChartDTO) -> Coachi
         or timeline.query.report_public_id != report.fixed_report.report_public_id
     ):
         raise ValueError("timeline identity does not match the fixed report")
+    frames_per_second = timeline.timebase_fps or 30
     horizon = _horizon(report, timeline)
     strategies = _strategies(report, horizon)
-    build_order = _build_order(report, horizon)
-    highlights = _highlights(report, horizon)
+    build_order = _build_order(report, horizon, frames_per_second)
+    highlights = _highlights(report, horizon, frames_per_second)
     key_moments = _key_moments(report, horizon)
     return CoachingViewModel(
         horizon=horizon,
-        summary=_summary(report, horizon, strategies, build_order, highlights),
+        summary=_summary(report, horizon, strategies, build_order, highlights, frames_per_second),
         strategies=strategies,
         build_order=build_order,
         highlights=highlights,
         signal_reads=_signal_reads(highlights),
         prompts=_prompts(strategies),
         key_moments=key_moments,
-        opening_lanes=_opening_lanes(build_order, key_moments),
+        opening_lanes=_opening_lanes(build_order, key_moments, frames_per_second),
         limitations=_limitations(report, horizon),
         local_model_summary=_local_model_summary(report),
     )

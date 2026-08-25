@@ -295,6 +295,39 @@ def test_complete_report_projects_strategy_build_order_metrics_and_review_prompt
     assert coaching.signal_reads[0].evidence[0].public_id == METRIC_EVIDENCE
 
 
+def test_complete_engine_verified_report_uses_authoritative_timebase_despite_projection_warning() -> None:
+    report = _report().model_copy(
+        update={
+            "availability": AvailabilityDTO(state="partial", reason_codes=("projection_unavailable",)),
+            "terminal_quality": TerminalQualityDTO(
+                lifecycle="engine_verified",
+                issues=(
+                    QualityIssueDTO(
+                        code="projection_unavailable",
+                        message="Some optional projections are unavailable",
+                    ),
+                ),
+                engine_run_status="success",
+                strategy_analysis_scope="player",
+            ),
+        }
+    )
+    timeline = _timeline().model_copy(update={"timebase_fps": 60})
+
+    coaching = coaching_view(report, timeline)
+
+    assert coaching.horizon.status == "complete"
+    assert coaching.horizon.description.endswith("through 1:00.0 (frame 3600).")
+    assert [item.time_label for item in coaching.build_order] == [
+        "0:00.7 (frame 45)",
+        "0:01.5 (frame 90)",
+    ]
+    assert next(item for item in coaching.highlights if item.title == "Observed kills").value.endswith(
+        "at 0:05.0 (frame 300)"
+    )
+    assert coaching.limitations == ("Some optional projections are unavailable",)
+
+
 def test_key_moments_turn_event_evidence_into_a_chronological_review_queue() -> None:
     """Catch tactical events being buried as unordered metric text or duplicate kill records."""
     coaching = coaching_view(_report(), _timeline())
