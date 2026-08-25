@@ -287,6 +287,22 @@ def test_damage_writer_uses_raw_source_player_mask_not_attacker_current_owner(re
     assert "objectPlayerIndex(attacker" not in damage
 
 
+def test_damage_writer_emits_authoritative_attacker_and_victim_template_identities(
+    repository_root: Path,
+) -> None:
+    combat = (
+        repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"
+    ).read_text(encoding="utf-8")
+    damage = combat.split("void ReplayCombat::observeDamage", maxsplit=1)[1].split(
+        "void ReplayCombat::observeHealing", maxsplit=1
+    )[0]
+
+    assert "const ThingTemplate *victimTemplate = victim->getTemplate();" in damage
+    assert "damageInfo->in.m_sourceTemplate != nullptr" in damage
+    assert "sourceObject->getTemplate()" in damage
+    assert r'\"victim_template_name\"' in damage
+
+
 def test_combat_writer_flushes_creation_before_emitting_object_references(repository_root: Path) -> None:
     combat = (
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayCombat.cpp"

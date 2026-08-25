@@ -390,9 +390,15 @@ void ReplayCombat::observeDamage(const Object *victim, const DamageInfo *damageI
 	{
 		ReplayEntityLifecycle::ensureObjectCreated(sourceObject);
 	}
-	const ThingTemplate *attackerTemplate = damageInfo->in.m_sourceTemplate;
+	// TheSuperHackers @bugfix Leex 25/08/2026 Preserve both authoritative combat object template identities, including resolved source fallback. (#TBD)
+	const ThingTemplate *attackerTemplate = damageInfo->in.m_sourceTemplate != nullptr
+		? damageInfo->in.m_sourceTemplate
+		: (sourceObject != nullptr ? sourceObject->getTemplate() : nullptr);
+	const ThingTemplate *victimTemplate = victim->getTemplate();
 	const std::string payload = "{\"victim_object_id\":" + std::to_string(static_cast<UnsignedInt>(victim->getID()))
 		+ ",\"victim_player_index\":" + nullableInt(hasVictimPlayer, victimPlayer)
+		+ ",\"victim_template_name\":"
+		+ (victimTemplate != nullptr ? jsonString(victimTemplate->getName().str()) : "null")
 		+ ",\"attacker_object_id\":" + nullableObjectId(damageInfo->in.m_sourceID)
 		+ ",\"source_player_mask\":" + std::to_string(static_cast<UnsignedInt>(damageInfo->in.m_sourcePlayerMask))
 		+ ",\"source_player_indices\":" + intArray(sourcePlayers)
