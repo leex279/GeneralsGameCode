@@ -14,7 +14,7 @@ def _id() -> str:
 
 
 def test_render_video_version_invalidates_artifacts_without_terminal_commentary_coverage() -> None:
-    assert RENDER_VIDEO_VERSION == "25"
+    assert RENDER_VIDEO_VERSION == "29"
 
 
 def test_complete_evidence_creates_worker_owned_render_job() -> None:
@@ -75,7 +75,7 @@ def test_enqueue_adds_report_dependency_without_running_a_renderer() -> None:
     class Coordinator:
         def create_job(self, spec: object) -> object:
             self.spec = spec
-            return type("Snapshot", (), {"public_id": "created"})()
+            return type("Snapshot", (), {"public_id": "10000000-0000-4000-8000-000000000099"})()
 
         def add_dependency(self, job_public_id: str, depends_on_public_id: str) -> None:
             self.edge = (job_public_id, depends_on_public_id)
@@ -90,8 +90,25 @@ def test_enqueue_adds_report_dependency_without_running_a_renderer() -> None:
         evidence_horizon="complete", diagnostic_preview=False,
     )
 
-    assert public_id == "created"
-    assert coordinator.edge == ("created", report_job_id)
+    assert public_id == "10000000-0000-4000-8000-000000000099"
+    assert coordinator.edge == ("10000000-0000-4000-8000-000000000099", report_job_id)
+
+
+def test_enqueue_rejects_a_noncanonical_coordinator_identity() -> None:
+    class Coordinator:
+        def create_job(self, _spec: object) -> object:
+            return type("Snapshot", (), {"public_id": "created"})()
+
+        def add_dependency(self, _job_public_id: str, _depends_on_public_id: str) -> None:
+            raise AssertionError("invalid jobs must not receive dependencies")
+
+    planner = VideoJobPlanner(clock=lambda: datetime(2026, 8, 24, tzinfo=UTC))
+
+    with pytest.raises(RuntimeError, match="invalid durable identity"):
+        planner.enqueue(
+            Coordinator(), replay_public_id=_id(), replay_sha256="a" * 64, logic_frames_per_second=30,
+            report_public_id=_id(), report_job_public_id=_id(), evidence_horizon="complete", diagnostic_preview=False,
+        )
 
 
 @pytest.mark.parametrize("value", ("A" * 64, "a" * 63, "g" * 64))

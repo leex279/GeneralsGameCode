@@ -157,7 +157,13 @@ class VideoJobPlanner:
         snapshot = coordinator.create_job(spec)
         public_id = getattr(snapshot, "public_id", None)
         report_job_public_id = spec.input_json["report_job_public_id"]
-        if type(public_id) is not str or type(report_job_public_id) is not str:
+        # TheSuperHackers @bugfix Leex 25/08/2026 Reject coordinator identities that cannot be safely resumed or linked by downstream video workers. (#TBD)
+        if (
+            type(public_id) is not str
+            or not _is_canonical_public_id(public_id)
+            or type(report_job_public_id) is not str
+            or not _is_canonical_public_id(report_job_public_id)
+        ):
             raise RuntimeError("video job coordinator returned an invalid durable identity")
         coordinator.add_dependency(public_id, report_job_public_id)
         return public_id
