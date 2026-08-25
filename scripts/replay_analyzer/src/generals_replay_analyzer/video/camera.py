@@ -133,10 +133,14 @@ def _citations(
         tier, windows = accepted[public_id]
         if reference.get("tier") != tier:
             raise CameraPlanContractError("camera candidate evidence tier disagrees with the fixed report")
+        # The report may close an evidence window on a post-update boundary that
+        # has no presentable camera frame.  Keep the event bounds strict, but
+        # clip only the citation's accepted end to the last presentable frame.
+        # TheSuperHackers @bugfix Leex 25/08/2026 Clip report citation ends to the presentable camera horizon without accepting out-of-horizon events. (#TBD)
         covering = tuple(
-            window
+            (window[0], min(window[1], horizon))
             for window in windows
-            if window[0] <= event_start and event_end <= window[1] <= horizon
+            if window[0] <= event_start and event_end <= min(window[1], horizon)
         )
         if not covering:
             raise CameraPlanContractError("camera candidate frame is outside its cited evidence window")
@@ -175,10 +179,11 @@ def _bounds(payload: dict[str, object]) -> tuple[float, float, float, float, flo
     return values
 
 
-def _inside(position: tuple[float, float, float], bounds: tuple[float, float, float, float, float, float]) -> bool:
-    x, y, z = position
-    min_x, min_y, min_z, max_x, max_y, max_z = bounds
-    return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
+def _inside_planar_map(position: tuple[float, float, float], bounds: tuple[float, float, float, float, float, float]) -> bool:
+    x, y, _z = position
+    min_x, min_y, _min_z, max_x, max_y, _max_z = bounds
+    # TheSuperHackers @bugfix Leex 25/08/2026 Preserve engine-validated airspace targets while enforcing the authoritative planar map extent. (#TBD)
+    return min_x <= x <= max_x and min_y <= y <= max_y
 
 
 # TheSuperHackers @feature Leex 24/08/2026 Generate a gapless native camera plan only from report-accepted spatial evidence. (#TBD)
@@ -336,7 +341,7 @@ class CameraPlanService:
                 if not citations:
                     raise CameraPlanContractError("camera candidate has no fixed-report evidence")
                 position = _position(item, position_field)
-                if not _inside(position, bounds):
+                if not _inside_planar_map(position, bounds):
                     raise CameraPlanContractError("cited camera position is outside authoritative map bounds")
                 output.append(_Candidate(frame, kind, label, *position, citations))
         return output

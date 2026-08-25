@@ -95,7 +95,9 @@ def _report(*, partial: bool = False) -> PublishedReportGraphDTO:
     ]
     if partial:
         observed.append(
-            _value("telemetry.boundary", "quality", "Observed boundary", (100, 105), BOUNDARY_EVIDENCE, {"complete": False})
+            _value(
+                "telemetry.boundary", "quality", "Observed boundary", (100, 105), BOUNDARY_EVIDENCE, {"complete": False}
+            )
         )
     else:
         observed.append(
@@ -119,16 +121,30 @@ def _report(*, partial: bool = False) -> PublishedReportGraphDTO:
         ollama=OllamaReportStatus.not_requested(),
         warnings=(),
     )
-    asset = PublishedReportAssetDTO("80000000-0000-4000-8000-000000000001", "f" * 64, "report_structured_json", "application/json", 2)
-    presentation = PublishedReportAssetDTO("80000000-0000-4000-8000-000000000002", "1" * 64, "report_presentation_bundle", "application/json", 2)
+    asset = PublishedReportAssetDTO(
+        "80000000-0000-4000-8000-000000000001", "f" * 64, "report_structured_json", "application/json", 2
+    )
+    presentation = PublishedReportAssetDTO(
+        "80000000-0000-4000-8000-000000000002", "1" * 64, "report_presentation_bundle", "application/json", 2
+    )
     published = PublishedReportDTO(document, asset, presentation, "<p>report</p>", "report", datetime.now(UTC))
     return PublishedReportGraphDTO(
-        "replay-report-read-model-v1", "report-output-v1", REPLAY_ID, REPORT_ID,
-        ReportReplayIdentityDTO("Replay", "Tournament Desert", "1.04", 300, (
-            ReportPlayerIdentityDTO(PLAYER_ONE_ID, "Alice", 1, "USA", "won"),
-            ReportPlayerIdentityDTO(PLAYER_TWO_ID, "Bob", 2, "China", "lost"),
-        )),
-        published, (),
+        "replay-report-read-model-v1",
+        "report-output-v1",
+        REPLAY_ID,
+        REPORT_ID,
+        ReportReplayIdentityDTO(
+            "Replay",
+            "Tournament Desert",
+            "1.04",
+            300,
+            (
+                ReportPlayerIdentityDTO(PLAYER_ONE_ID, "Alice", 1, "USA", "won"),
+                ReportPlayerIdentityDTO(PLAYER_TWO_ID, "Bob", 2, "China", "lost"),
+            ),
+        ),
+        published,
+        (),
     )
 
 
@@ -162,27 +178,31 @@ def _player_selected_report() -> PublishedReportGraphDTO:
 def _camera(frame_end: int, *, replay_public_id: str = REPLAY_ID) -> CameraPlanV1:
     return CameraPlanV1(
         authority=_authority(frame_end, replay_public_id=replay_public_id),
-        segments=(CameraSegmentV1(
-            segment_id="60000000-0000-4000-8000-000000000001",
-            start_frame=0,
-            end_frame=frame_end,
-            target_x=0.0,
-            target_y=0.0,
-            target_z=0.0,
-            zoom=1.0,
-            pitch=-45.0,
-            yaw=0.0,
-            transition="cut",
-            transition_frames=0,
-            focus_kind="base_context",
-            label="Base context",
-            evidence=(EvidenceCitationV1(
-                evidence_public_id=MAP_EVIDENCE,
-                tier="observed",
-                frame_start=0,
-                frame_end=0,
-            ),),
-        ),),
+        segments=(
+            CameraSegmentV1(
+                segment_id="60000000-0000-4000-8000-000000000001",
+                start_frame=0,
+                end_frame=frame_end,
+                target_x=0.0,
+                target_y=0.0,
+                target_z=0.0,
+                zoom=1.0,
+                pitch=-45.0,
+                yaw=0.0,
+                transition="cut",
+                transition_frames=0,
+                focus_kind="base_context",
+                label="Base context",
+                evidence=(
+                    EvidenceCitationV1(
+                        evidence_public_id=MAP_EVIDENCE,
+                        tier="observed",
+                        frame_start=0,
+                        frame_end=0,
+                    ),
+                ),
+            ),
+        ),
     )
 
 
@@ -342,14 +362,96 @@ def test_commentary_may_speak_after_point_evidence_becomes_available() -> None:
         text="The opening order is now confirmed.",
         subtitle_text="The opening order is now confirmed.",
         role="analysis",
-        evidence=(EvidenceCitationV1(
-            evidence_public_id=STRATEGY_EVIDENCE,
-            tier="observed",
-            frame_start=15,
-            frame_end=15,
-        ),),
+        evidence=(
+            EvidenceCitationV1(
+                evidence_public_id=STRATEGY_EVIDENCE,
+                tier="observed",
+                frame_start=15,
+                frame_end=15,
+            ),
+        ),
         confidence_tier="observed",
         camera_segment_id="60000000-0000-4000-8000-000000000001",
     )
 
     assert event.latest_end_frame == 60
+
+
+def test_full_match_player_features_create_timed_strategy_build_and_production_commentary() -> None:
+    graph = _player_selected_report()
+    supply = _value(
+        "observed:supply",
+        "timeline",
+        "object_created",
+        (60, 60),
+        MILESTONE_EVIDENCE,
+        {"owner_player_index": 1, "template_name": "GLASupplyStash"},
+    )
+    palace = _value(
+        "observed:palace",
+        "timeline",
+        "object_created",
+        (180, 180),
+        BOUNDARY_EVIDENCE,
+        {"owner_player_index": 1, "template_name": "GLAPalace"},
+    )
+    quad = _value(
+        "observed:quad",
+        "timeline",
+        "production_completed",
+        (120, 120),
+        ENGAGEMENT_EVIDENCE,
+        {"player_index": 1, "state": "completed", "template_name": "GLAVehicleQuadCannon"},
+    )
+    build_sequence = ReportValue(
+        claim_id="feature:build.completed_sequence:test",
+        section="features",
+        label="build.completed_sequence",
+        raw_value=(
+            {"frame": 60, "template_name": "GLASupplyStash"},
+            {"frame": 180, "template_name": "GLAPalace"},
+        ),
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_key": PLAYER_ONE_ID, "scope_type": "player"},
+        frame_window=(0, 302),
+        evidence=(
+            ReportEvidenceRef(MILESTONE_EVIDENCE, "observed"),
+            ReportEvidenceRef(BOUNDARY_EVIDENCE, "observed"),
+            ReportEvidenceRef(STRATEGY_EVIDENCE, "derived"),
+        ),
+        details={},
+    )
+    strategy = ReportValue(
+        claim_id="strategy:gla_fast_palace:test",
+        section="strategy",
+        label="gla_fast_palace",
+        raw_value={"confidence": 1.0, "phase": "mid", "strategy_label": "gla_fast_palace"},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={"scope_type": "player"},
+        frame_window=(0, 301),
+        evidence=(
+            ReportEvidenceRef(BOUNDARY_EVIDENCE, "observed"),
+            ReportEvidenceRef(STRATEGY_EVIDENCE, "derived"),
+        ),
+        details={},
+    )
+    document = replace(
+        graph.selected.document,
+        observed=(supply, quad, palace),
+        derived=(build_sequence, strategy),
+    )
+    report = replace(graph, player_reports=(replace(graph.selected, document=document),))
+    camera = _camera(300).model_copy(update={"authority": _authority(300, report_public_id=PLAYER_REPORT_ID)})
+
+    plan = CommentaryPlanService().create(report, camera)
+
+    texts = " ".join(event.text for event in plan.events)
+    assert "Alice" in texts
+    assert "Supply Stash" in texts
+    assert "Quad Cannon" in texts
+    assert "fast Palace" in texts
+    assert len(plan.events) >= 4

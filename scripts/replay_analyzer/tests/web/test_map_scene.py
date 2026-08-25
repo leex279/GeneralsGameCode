@@ -143,6 +143,52 @@ def test_map_v2_types_scouting_transitions_and_engine_heuristic_labels() -> None
         ports_module.MapEngineHeuristicOverlayDTO.model_validate(payload)
 
 
+@pytest.mark.parametrize("previous_status", ["fogged", "shrouded"])
+def test_visibility_dto_allows_first_clear_after_prior_non_clear_status(previous_status: str) -> None:
+    """The first clear observation may follow an already-known fogged/shrouded state."""
+    visibility = ports_module.MapVisibilityTransitionDTO(
+        visibility_public_id="90000000-0000-4000-8000-000000000011",
+        replay_player_public_id=PLAYER_A,
+        entity_public_id=ENTITY_A,
+        frame=300,
+        template_name="AmericaCommandCenter",
+        previous_status=previous_status,
+        status="clear",
+        first_observed_clear=True,
+        position=_position(),
+        sampling_cycle_id=0,
+        evidence=(),
+    )
+
+    assert visibility.first_observed_clear is True
+
+
+@pytest.mark.parametrize(
+    "previous_status,status,first_observed_clear",
+    [
+        ("unseen", "clear", False),
+        ("unseen", "fogged", True),
+    ],
+)
+def test_visibility_dto_rejects_inconsistent_first_clear_contract(
+    previous_status: str, status: str, first_observed_clear: bool
+) -> None:
+    with pytest.raises(ValidationError):
+        ports_module.MapVisibilityTransitionDTO(
+            visibility_public_id="90000000-0000-4000-8000-000000000012",
+            replay_player_public_id=PLAYER_A,
+            entity_public_id=ENTITY_A,
+            frame=300,
+            template_name="AmericaCommandCenter",
+            previous_status=previous_status,
+            status=status,
+            first_observed_clear=first_observed_clear,
+            position=_position(),
+            sampling_cycle_id=0,
+            evidence=(),
+        )
+
+
 @pytest.mark.parametrize("frame_start, frame_end", [(-1, 0), (2, 1)])
 def test_frame_windows_reject_negative_or_reversed_bounds(frame_start: int, frame_end: int) -> None:
     """Removing the inclusive-window validation would admit impossible scene filters."""

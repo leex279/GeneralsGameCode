@@ -50,7 +50,9 @@ ANALYZE_LLM_VERSION = "1"
 # TheSuperHackers @performance Leex 23/08/2026 Rebuild reports with bounded full-match observation timelines. (#TBD)
 RENDER_REPORT_VERSION = "2"
 # TheSuperHackers @bugfix Leex 25/08/2026 Invalidate failed casts after production-scale scene authority resolution fixes. (#TBD)
-RENDER_VIDEO_VERSION = "15"
+# TheSuperHackers @bugfix Leex 25/08/2026 Keep camera render jobs valid for engine-validated airspace targets above terrain bounds. (#TBD)
+# TheSuperHackers @feature Leex 25/08/2026 Render sparse strategy, build, production, and battle commentary from full-match evidence. (#TBD)
+RENDER_VIDEO_VERSION = "19"
 
 
 def canonical_json(value: Any) -> str:

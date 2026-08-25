@@ -20,7 +20,7 @@ from generals_replay_analyzer.report.read_model import (
     ReportReplayIdentityDTO,
 )
 from generals_replay_analyzer.spatial.query import MapSceneReadModel
-from generals_replay_analyzer.video.camera import CameraPlanContractError, CameraPlanService
+from generals_replay_analyzer.video.camera import CameraPlanContractError, CameraPlanService, _citations
 from generals_replay_analyzer.video.commentary import CommentaryPlanService
 from generals_replay_analyzer.video.contracts import CameraPlanAuthorityV1, EvidenceHorizonV1
 
@@ -361,6 +361,19 @@ def test_camera_plan_rejects_broken_or_time_mismatched_evidence(damage: str) -> 
         CameraPlanService().create(_authority(), _report(), MapSceneReadModel(payload))
 
 
+def test_camera_citation_clips_post_update_report_boundary_to_presentable_horizon() -> None:
+    citations = _citations(
+        {"evidence": [{"evidence_public_id": EVIDENCE_START, "tier": "observed"}]},
+        {EVIDENCE_START: ("observed", ((0, 303),))},
+        300,
+        0,
+        0,
+    )
+
+    assert citations[0].frame_start == 0
+    assert citations[0].frame_end == 300
+
+
 def test_camera_plan_rejects_out_of_bounds_cited_position() -> None:
     scene = _scene()
     payload = dict(scene.payload)
@@ -369,3 +382,24 @@ def test_camera_plan_rejects_out_of_bounds_cited_position() -> None:
     payload["engagements"] = engagements
     with pytest.raises(CameraPlanContractError, match="replay-map-scene-v2|bounds"):
         CameraPlanService().create(_authority(), _report(), MapSceneReadModel(payload))
+
+
+def test_camera_plan_accepts_engine_validated_airspace_above_terrain_bounds() -> None:
+    scene = _scene()
+    payload = dict(scene.payload)
+    transforms = dict(payload["transforms"])
+    raw = dict(transforms["raw"])
+    raw["maximum"] = {"x": 1000.0, "y": 2000.0, "z": 159.375}
+    transforms["raw"] = raw
+    payload["transforms"] = transforms
+    engagements = [dict(item) for item in payload["engagements"]]
+    high_airspace = _position(543.0, 1598.0, 295.0)
+    high_airspace["map_normalized"] = {"u": 0.543, "v": 0.799}
+    engagements[0]["centroid"] = high_airspace
+    payload["engagements"] = engagements
+
+    plan = CameraPlanService().create(_authority(), _report(), MapSceneReadModel(payload))
+
+    assert plan.segments[1].target_x == 543.0
+    assert plan.segments[1].target_y == 1598.0
+    assert plan.segments[1].target_z == 295.0

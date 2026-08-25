@@ -1887,8 +1887,11 @@ class MapVisibilityTransitionDTO(WebDTO):
     def _normalize(self) -> Self:
         if self.previous_status == self.status:
             raise ValueError("visibility transition must change status")
-        if self.first_observed_clear != (self.previous_status == "unseen" and self.status == "clear"):
-            raise ValueError("first observed clear must identify the initial clear transition")
+        # TheSuperHackers @bugfix Leex 25/08/2026 Keep the web DTO aligned with the engine visibility contract: a first clear may follow fogged or shrouded history. (#TBD)
+        if self.first_observed_clear and self.status != "clear":
+            raise ValueError("first observed clear requires a transition to clear")
+        if self.previous_status == "unseen" and self.status == "clear" and not self.first_observed_clear:
+            raise ValueError("first observed clear must mark an initial unseen-to-clear transition")
         object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
         return self
 

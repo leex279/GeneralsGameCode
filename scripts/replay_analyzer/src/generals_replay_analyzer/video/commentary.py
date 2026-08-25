@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
-from generals_replay_analyzer.report.model import CanonicalValue, ReportValue, thaw_report_value
+from generals_replay_analyzer.report.model import CanonicalValue, ReportValue, freeze_report_value, thaw_report_value
 from generals_replay_analyzer.report.read_model import PublishedReportGraphDTO
 from generals_replay_analyzer.video.contracts import (
     CameraPlanV1,
@@ -37,7 +38,8 @@ def _claim_evidence(value: ReportValue, horizon: int) -> tuple[EvidenceCitationV
     if value.frame_window is None:
         raise CommentaryPlanContractError("commentary claims require an explicit evidence frame window")
     start, end = value.frame_window
-    if end > horizon:
+    end = min(end, horizon)
+    if start > end:
         raise CommentaryPlanContractError("commentary claim exceeds the accepted evidence horizon")
     if not value.evidence:
         raise CommentaryPlanContractError("commentary claims require accepted evidence")
@@ -62,9 +64,11 @@ def _claims(report: PublishedReportGraphDTO, horizon: int) -> tuple[_Claim, ...]
         if type(value) is not ReportValue or value.availability != "available" or value.frame_window is None:
             continue
         start, end = value.frame_window
-        if end > horizon:
+        if start > horizon:
             continue
-        output.append(_Claim(value, start, end, _claim_evidence(value, horizon)))
+        if start == 0 and end > 0:
+            continue
+        output.append(_Claim(value, start, min(end, horizon), _claim_evidence(value, horizon)))
     return tuple(sorted(output, key=lambda item: (item.start_frame, item.end_frame, item.value.claim_id)))
 
 
@@ -82,11 +86,249 @@ def _spoken_map_name(value: str) -> str:
     return leaf.title() if leaf.islower() else leaf
 
 
+def _friendly_identity(value: str) -> str:
+    cleaned = value
+    for prefix in ("AirF_America", "AFG_America", "America", "China", "GLA"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    for category in ("Infantry", "Vehicle", "Tank", "Building"):
+        if cleaned.startswith(category):
+            cleaned = cleaned[len(category) :]
+            break
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", cleaned).replace("_", " ").strip()
+    return words or value
+
+
+def _strategy_anchor(label: str) -> tuple[str, int, Literal["build", "observed"]] | None:
+    anchors: dict[str, tuple[str, int, Literal["build", "observed"]]] = {
+        "gla_forward_tunnel_pressure": ("TunnelNetwork", 1, "build"),
+        "gla_technical_aggression": ("VehicleTechnical", 1, "observed"),
+        "gla_terror_tech": ("InfantryTerrorist", 1, "observed"),
+        "gla_dual_arms_dealer_pressure": ("ArmsDealer", 2, "build"),
+        "gla_fast_palace": ("Palace", 1, "build"),
+    }
+    return anchors.get(label)
+
+
+def _strategy_text(player_name: str, label: str) -> str:
+    text = {
+        "gla_forward_tunnel_pressure": f"{player_name} establishes forward Tunnel pressure.",
+        "gla_technical_aggression": f"{player_name} reveals early Technical aggression.",
+        "gla_terror_tech": f"{player_name} assembles the Terror Tech threat.",
+        "gla_dual_arms_dealer_pressure": f"{player_name} commits to dual Arms Dealer pressure.",
+        "gla_fast_palace": f"{player_name} unlocks fast Palace tech.",
+    }
+    return text.get(label, f"{player_name} reveals {_friendly_identity(label)}.")
+
+
+def _point_citations(
+    value: ReportValue, frame: int, *, include_derived: bool = False
+) -> tuple[EvidenceCitationV1, ...]:
+    references = [
+        item
+        for item in value.evidence
+        if item.tier in ("observed", "derived") and (include_derived or item.tier == "observed")
+    ]
+    references.sort(key=lambda item: (0 if item.tier == "derived" else 1, item.public_id))
+    return tuple(
+        EvidenceCitationV1(
+            evidence_public_id=item.public_id,
+            tier=item.tier,
+            frame_start=0 if item.tier == "derived" else frame,
+            frame_end=frame,
+        )
+        for item in references[:16]
+        if item.tier in ("observed", "derived")
+    )
+
+
+def _timed_feature_claims(report: PublishedReportGraphDTO, horizon: int, logic_hz: int) -> tuple[_Claim, ...]:
+    document = report.selected.document
+    default_player_id = document.replay_player_public_id
+    observed_templates: dict[str, list[ReportValue]] = {}
+    for value in document.observed:
+        if value.availability != "available" or value.frame_window is None or value.frame_window[0] <= 0:
+            continue
+        raw = _mapping(value.raw_value)
+        template = raw.get("template_name")
+        if isinstance(template, str):
+            observed_templates.setdefault(template, []).append(value)
+    for values in observed_templates.values():
+        values.sort(key=lambda item: (item.frame_window or (horizon + 1, horizon + 1), item.claim_id))
+
+    build_sequences = [
+        value
+        for value in document.derived
+        if value.availability == "available" and value.label == "build.completed_sequence"
+    ]
+    build_templates: dict[str, list[tuple[int, ReportValue]]] = {}
+    for value in build_sequences:
+        raw_sequence = thaw_report_value(value.raw_value)
+        if not isinstance(raw_sequence, list):
+            continue
+        for item in raw_sequence:
+            if not isinstance(item, dict):
+                continue
+            frame = item.get("frame")
+            template = item.get("template_name")
+            if type(frame) is int and 0 < frame <= horizon and isinstance(template, str):
+                build_templates.setdefault(template, []).append((frame, value))
+
+    strategy_claims: list[_Claim] = []
+    occupied_frames: set[int] = set()
+    for value in document.derived:
+        if value.availability != "available" or value.section != "strategy":
+            continue
+        raw = _mapping(value.raw_value)
+        strategy = raw.get("strategy_label", value.label)
+        if not isinstance(strategy, str):
+            continue
+        anchor = _strategy_anchor(strategy)
+        if anchor is None:
+            continue
+        template_token, occurrence, source_kind = anchor
+        anchor_matches: list[tuple[int, str, ReportValue]]
+        if source_kind == "build":
+            anchor_matches = sorted(
+                (frame, template, source)
+                for template, candidates in build_templates.items()
+                if template_token in template
+                for frame, source in candidates
+            )
+        else:
+            anchor_matches = sorted(
+                (candidate.frame_window[0], template, candidate)
+                for template, candidates in observed_templates.items()
+                if template_token in template
+                for candidate in candidates
+                if candidate.frame_window is not None and candidate.frame_window[0] <= horizon
+            )
+        if len(anchor_matches) < occurrence:
+            continue
+        frame, matched_template, matched = anchor_matches[occurrence - 1]
+        observed_citations = _point_citations(matched, frame, include_derived=source_kind == "build")
+        derived_citations = _point_citations(value, frame, include_derived=True)
+        strategy_citations = tuple(dict.fromkeys((*observed_citations, *derived_citations)))[:16]
+        if not strategy_citations:
+            continue
+        synthetic = replace(
+            value,
+            claim_id=f"{value.claim_id}:commentary:{frame}",
+            frame_window=(frame, frame),
+            raw_value=freeze_report_value(
+                {
+                    "player_public_id": default_player_id,
+                    "strategy_label": strategy,
+                    "template_name": matched_template,
+                }
+            ),
+            evidence=tuple(matched.evidence),
+        )
+        strategy_claims.append(_Claim(synthetic, frame, frame, strategy_citations))
+        occupied_frames.add(frame)
+
+    build_claims: list[_Claim] = []
+    seen_templates: set[str] = set()
+    for value in build_sequences:
+        raw_sequence = thaw_report_value(value.raw_value)
+        if not isinstance(raw_sequence, list):
+            continue
+        for item in raw_sequence:
+            if not isinstance(item, dict):
+                continue
+            frame = item.get("frame")
+            template = item.get("template_name")
+            if type(frame) is not int or frame <= 0 or frame > horizon or not isinstance(template, str):
+                continue
+            if frame in occupied_frames or template in seen_templates:
+                continue
+            observed_matches = [
+                candidate
+                for candidate in observed_templates.get(template, [])
+                if candidate.frame_window == (frame, frame)
+            ]
+            citation_source = observed_matches[0] if observed_matches else value
+            build_citations = _point_citations(citation_source, frame, include_derived=not observed_matches)
+            if not build_citations:
+                continue
+            synthetic = replace(
+                value,
+                claim_id=f"{value.claim_id}:commentary:{frame}:{template}",
+                section="build_order",
+                label=_friendly_identity(template),
+                raw_value=freeze_report_value({"player_public_id": default_player_id, "template_name": template}),
+                frame_window=(frame, frame),
+                evidence=tuple(citation_source.evidence),
+            )
+            build_claims.append(_Claim(synthetic, frame, frame, build_citations))
+            seen_templates.add(template)
+            occupied_frames.add(frame)
+            if len(build_claims) >= 10:
+                break
+
+    combat_claims: list[_Claim] = []
+    destruction_bins: dict[int, list[ReportValue]] = {}
+    for value in document.observed:
+        if value.availability == "available" and value.label == "object_destroyed" and value.frame_window is not None:
+            frame = value.frame_window[0]
+            if 0 < frame <= horizon - logic_hz * 60:
+                destruction_bins.setdefault(frame // 1800, []).append(value)
+    busiest = sorted(
+        (values for values in destruction_bins.values() if len(values) >= 4),
+        key=lambda values: (-len(values), values[0].frame_window or (horizon, horizon)),
+    )[:5]
+    for values in sorted(busiest, key=lambda items: items[-1].frame_window or (horizon, horizon)):
+        values.sort(key=lambda item: (item.frame_window or (horizon, horizon), item.claim_id))
+        final_window = values[-1].frame_window
+        assert final_window is not None
+        frame = final_window[1]
+        combat_citations: list[EvidenceCitationV1] = []
+        for source in values[-16:]:
+            source_window = source.frame_window
+            assert source_window is not None
+            combat_citations.extend(_point_citations(source, source_window[1]))
+        if frame in occupied_frames or not combat_citations:
+            continue
+        synthetic = replace(
+            values[-1],
+            claim_id=f"combat:destruction_cluster:{frame}",
+            section="combat",
+            label=f"{len(values)} confirmed destructions",
+            raw_value=freeze_report_value({"destruction_count": len(values)}),
+            frame_window=(frame, frame),
+            evidence=tuple(reference for source in values[-16:] for reference in source.evidence),
+        )
+        combat_claims.append(_Claim(synthetic, frame, frame, tuple(combat_citations[:16])))
+        occupied_frames.add(frame)
+
+    return tuple(
+        sorted(
+            (*strategy_claims, *build_claims, *combat_claims), key=lambda item: (item.start_frame, item.value.claim_id)
+        )
+    )
+
+
 def _camera_segment_id(camera: CameraPlanV1, start: int, end: int) -> str:
     for segment in camera.segments:
         if segment.start_frame <= start and end <= segment.end_frame:
             return segment.segment_id
     raise CommentaryPlanContractError("commentary event is not covered by a camera segment")
+
+
+def _minimum_speech_frames(text: str, logic_hz: int) -> int:
+    return int((len(text.split()) * 0.6 + 0.8) * logic_hz)
+
+
+def _speech_anchor(camera: CameraPlanV1, claim: _Claim, text: str) -> _Claim | None:
+    if camera.authority.evidence_horizon.frame_end <= camera.authority.logic_frames_per_second * 10:
+        return claim
+    minimum_frames = _minimum_speech_frames(text, camera.authority.logic_frames_per_second)
+    for segment in camera.segments:
+        start = max(claim.end_frame, segment.start_frame)
+        if start <= segment.end_frame and segment.end_frame - start + 1 >= minimum_frames:
+            return _Claim(claim.value, start, start, claim.citations)
+    return None
 
 
 def _tier(citations: tuple[EvidenceCitationV1, ...]) -> Literal["observed", "derived"]:
@@ -106,7 +348,10 @@ class CommentaryPlanService:
             raise TypeError("commentary requires fixed report and camera plan models")
         self._validate_identity(report, camera)
         horizon = camera.authority.evidence_horizon.frame_end
-        claims = _claims(report, horizon)
+        claims = (
+            *_claims(report, horizon),
+            *_timed_feature_claims(report, horizon, camera.authority.logic_frames_per_second),
+        )
         events = self._deterministic_events(report, camera, claims, horizon)
         plan = CommentaryPlanV1(
             logic_hz=camera.authority.logic_frames_per_second,
@@ -122,9 +367,15 @@ class CommentaryPlanService:
         authority = camera.authority
         # TheSuperHackers @bugfix Leex 24/08/2026 Synchronize commentary with the same selected report as camera direction. (#TBD)
         document = report.selected.document
-        if report.replay_public_id != authority.replay_public_id or document.replay_public_id != authority.replay_public_id:
+        if (
+            report.replay_public_id != authority.replay_public_id
+            or document.replay_public_id != authority.replay_public_id
+        ):
             raise CommentaryPlanContractError("report and camera replay identities differ")
-        if document.report_public_id != authority.report_public_id or report.selected_report_public_id != authority.report_public_id:
+        if (
+            document.report_public_id != authority.report_public_id
+            or report.selected_report_public_id != authority.report_public_id
+        ):
             raise CommentaryPlanContractError("report and camera report identities differ")
         if document.replay_sha256 != authority.replay_sha256:
             raise CommentaryPlanContractError("report and camera replay hashes differ")
@@ -134,23 +385,66 @@ class CommentaryPlanService:
     ) -> list[CommentaryEventV1]:
         players = report.identity.players
         player_names = {player.public_id: player.display_name for player in players}
+        default_player_id = report.selected.document.replay_player_public_id
         events: list[CommentaryEventV1] = []
-        partial = report.identity.duration_frames is not None and horizon < report.identity.duration_frames
-        for claim in claims:
+        partial = report.identity.duration_frames is not None and horizon < report.identity.duration_frames - 2
+        occupied_frames: set[int] = set()
+        spoken_production: set[str] = set()
+        ordered_claims = sorted(
+            claims,
+            key=lambda item: (
+                item.end_frame,
+                0 if item.value.section == "strategy" else 1 if item.value.section == "build_order" else 2,
+                item.value.claim_id,
+            ),
+        )
+        for claim in ordered_claims:
             if claim.start_frame == 0:
                 continue
-            rendered = self._render_claim(claim, player_names)
+            if claim.end_frame in occupied_frames:
+                continue
+            rendered = self._render_claim(claim, player_names, default_player_id)
             if rendered is None:
                 continue
             role, text, player_ids, strategy = rendered
-            events.append(self._event(camera, claim, role, text, player_ids, strategy))
+            raw = _mapping(claim.value.raw_value)
+            if claim.value.section == "timeline" and claim.value.label == "production_completed":
+                template = raw.get("template_name")
+                if isinstance(template, str) and template in spoken_production:
+                    continue
+                if isinstance(template, str):
+                    spoken_production.add(template)
+            anchored = _speech_anchor(camera, claim, text)
+            if anchored is None or anchored.end_frame in occupied_frames:
+                continue
+            events.append(self._event(camera, anchored, role, text, player_ids, strategy))
+            occupied_frames.add(anchored.end_frame)
         events.sort(key=lambda item: (item.start_frame, item.event_id))
+        events = self._keep_speakable_events(events, camera)
         intro_latest_end = events[0].start_frame - 1 if events else horizon
         if intro_latest_end < 0:
             raise CommentaryPlanContractError("commentary has no frame window for its match introduction")
         # TheSuperHackers @bugfix Leex 24/08/2026 Cite shared camera context when a player report omits replay-wide map-start claims. (#TBD)
         events.insert(0, self._intro_event(report, camera, intro_latest_end, horizon, partial))
         return self._allocate_speech_windows(events, camera, horizon)
+
+    @staticmethod
+    def _keep_speakable_events(events: list[CommentaryEventV1], camera: CameraPlanV1) -> list[CommentaryEventV1]:
+        if camera.authority.evidence_horizon.frame_end <= camera.authority.logic_frames_per_second * 10:
+            return events
+        segments = {segment.segment_id: segment for segment in camera.segments}
+        selected: list[CommentaryEventV1] = []
+        next_start: int | None = None
+        for event in reversed(events):
+            segment = segments[event.camera_segment_id]
+            latest_end = segment.end_frame if next_start is None else min(segment.end_frame, next_start - 1)
+            # TheSuperHackers @bugfix Leex 25/08/2026 Keep evidence commentary sparse enough for measured narration to fit before camera cuts. (#TBD)
+            minimum_frames = _minimum_speech_frames(event.text, camera.authority.logic_frames_per_second)
+            if latest_end - event.start_frame + 1 < minimum_frames:
+                continue
+            selected.append(event)
+            next_start = event.start_frame
+        return list(reversed(selected))
 
     @staticmethod
     def _intro_event(
@@ -217,20 +511,55 @@ class CommentaryPlanService:
 
     @staticmethod
     def _render_claim(
-        claim: _Claim, player_names: dict[str, str]
+        claim: _Claim, player_names: dict[str, str], default_player_id: str | None
     ) -> tuple[Literal["play_by_play", "analysis", "outro"], str, tuple[str, ...], str | None] | None:
         value = claim.value
         raw = _mapping(value.raw_value)
         if value.section == "strategy" or value.claim_id.startswith("strategy:"):
-            player_id = raw.get("player_public_id")
+            player_id = raw.get("player_public_id", default_player_id)
             player_name = player_names.get(player_id, "The player") if isinstance(player_id, str) else "The player"
             strategy = raw.get("strategy_label", value.label)
             if not isinstance(strategy, str):
                 strategy = value.label
-            return "analysis", f"{player_name} opens with {strategy}.", (player_id,) if isinstance(player_id, str) else (), strategy
+            return (
+                "analysis",
+                _strategy_text(player_name, strategy),
+                (player_id,) if isinstance(player_id, str) else (),
+                strategy,
+            )
+        if value.section == "timeline" and value.label == "production_completed":
+            template = raw.get("template_name")
+            if not isinstance(template, str):
+                return None
+            player_id = default_player_id
+            player_name = player_names.get(player_id, "The player") if isinstance(player_id, str) else "The player"
+            return (
+                "play_by_play",
+                f"{player_name} fields the {_friendly_identity(template)}, expanding the army composition.",
+                (player_id,) if isinstance(player_id, str) else (),
+                None,
+            )
         if value.section in ("build_order", "production", "economy"):
+            template = raw.get("template_name")
+            if isinstance(template, str):
+                player_id = raw.get("player_public_id", default_player_id)
+                player_name = player_names.get(player_id, "The player") if isinstance(player_id, str) else "The player"
+                return (
+                    "play_by_play",
+                    f"{player_name} completes the {_friendly_identity(template)}.",
+                    (player_id,) if isinstance(player_id, str) else (),
+                    None,
+                )
             return "play_by_play", f"{value.label} marks a key development.", (), None
         if value.section == "combat" or "engagement" in value.claim_id:
+            destruction_count = raw.get("destruction_count")
+            if type(destruction_count) is int:
+                return (
+                    "play_by_play",
+                    f"Major exchange: {destruction_count} confirmed destructions in thirty seconds.",
+                    (),
+                    None,
+                )
             return "play_by_play", f"{value.label} becomes the key fight.", (), None
         if value.section == "outcome" or value.claim_id.startswith("outcome."):
             winner = raw.get("winner")
@@ -251,7 +580,12 @@ class CommentaryPlanService:
         strategy: str | None,
     ) -> CommentaryEventV1:
         evidence_ids = ",".join(item.evidence_public_id for item in claim.citations)
-        event_id = str(uuid5(_NAMESPACE, f"{camera.authority.replay_public_id}:{claim.value.claim_id}:{role}:{claim.start_frame}:{claim.end_frame}:{evidence_ids}"))
+        event_id = str(
+            uuid5(
+                _NAMESPACE,
+                f"{camera.authority.replay_public_id}:{claim.value.claim_id}:{role}:{claim.start_frame}:{claim.end_frame}:{evidence_ids}",
+            )
+        )
         return CommentaryEventV1(
             event_id=event_id,
             start_frame=claim.end_frame,
@@ -286,17 +620,25 @@ class CommentaryPlanService:
         replacements: dict[str, CommentaryEnrichmentSentenceV1] = {}
         for sentence in enrichment.sentences:
             event = by_event.get(sentence.event_id)
-            if event is None or sentence.frame_start != event.start_frame or sentence.frame_end != event.latest_end_frame:
+            if (
+                event is None
+                or sentence.frame_start != event.start_frame
+                or sentence.frame_end != event.latest_end_frame
+            ):
                 return plan
             if sentence.evidence_public_ids != tuple(item.evidence_public_id for item in event.evidence):
                 return plan
             replacements[event.event_id] = sentence
         events = tuple(
-            event.model_copy(update={
-                "text": replacements[event.event_id].text,
-                "subtitle_text": replacements[event.event_id].text,
-                "ollama_run_public_id": enrichment.ollama_run_public_id,
-            }) if event.event_id in replacements else event
+            event.model_copy(
+                update={
+                    "text": replacements[event.event_id].text,
+                    "subtitle_text": replacements[event.event_id].text,
+                    "ollama_run_public_id": enrichment.ollama_run_public_id,
+                }
+            )
+            if event.event_id in replacements
+            else event
             for event in plan.events
         )
         return plan.model_copy(update={"events": events})
