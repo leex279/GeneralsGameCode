@@ -231,6 +231,24 @@ class WorkerRuntime:
             self._watch_scanner.close()
 
 
+_PRIVATE_STDERR_TAIL_BYTES = 2048
+_PRIVATE_STDOUT_COUNT_BYTES = 1_048_576
+
+
+# TheSuperHackers @fix Leex 26/08/2026 Retain bounded private child protocol diagnostics without expanding public failure text. (#TBD)
+def _private_protocol_diagnostics(exit_code: int, stdout: str, stderr: str) -> dict[str, object]:
+    stderr_bytes = stderr.encode("utf-8", errors="replace")
+    tail = stderr_bytes[-_PRIVATE_STDERR_TAIL_BYTES:]
+    stderr_tail = tail.decode("utf-8", errors="replace")
+    while len(stderr_tail.encode("utf-8")) > _PRIVATE_STDERR_TAIL_BYTES:
+        stderr_tail = stderr_tail[1:]
+    return {
+        "exit_code": exit_code,
+        "stdout_bytes": min(len(stdout.encode("utf-8", errors="replace")), _PRIVATE_STDOUT_COUNT_BYTES),
+        "stderr_tail": stderr_tail,
+    }
+
+
 class SubprocessSupervisor:
     """Own exactly one private stage subprocess and its process group."""
 
@@ -246,7 +264,7 @@ class SubprocessSupervisor:
         exit_code = self._process.poll()
         if exit_code is None:
             return None
-        stdout, _stderr = self._process.communicate()
+        stdout, stderr = self._process.communicate()
         try:
             # TheSuperHackers @fix Leex 22/08/2026 Reject crashed supervisors even when stdout resembles a valid result. (#TBD)
             if exit_code != 0:
@@ -262,6 +280,7 @@ class SubprocessSupervisor:
                 "supervisor_protocol_failed",
                 "owned stage supervisor returned no valid outcome",
                 True,
+                _private_protocol_diagnostics(exit_code, stdout, stderr),
             )
         return self._outcome
 
@@ -315,7 +334,7 @@ class SubprocessSupervisorFactory:
             [sys.executable, "-m", "generals_replay_analyzer.worker", "_execute", job_public_id, execution_public_id],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             creationflags=creation_flags,

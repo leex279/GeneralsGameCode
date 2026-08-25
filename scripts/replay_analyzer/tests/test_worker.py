@@ -556,12 +556,14 @@ class _Process:
         *,
         running: bool,
         stdout: str = "",
+        stderr: str = "",
         wait_failures: int = 0,
         return_code: int = 0,
     ) -> None:
         self.pid = 1234
         self.running = running
         self.stdout = stdout
+        self.stderr = stderr
         self.wait_failures = wait_failures
         self.return_code = return_code
         self.kills = 0
@@ -570,7 +572,7 @@ class _Process:
         return None if self.running else self.return_code
 
     def communicate(self) -> tuple[str, str]:
-        return self.stdout, ""
+        return self.stdout, self.stderr
 
     def wait(self, timeout: int) -> int:
         assert timeout in {5, 10, 15}
@@ -623,6 +625,38 @@ def test_subprocess_supervisor_rejects_nonzero_child_even_with_valid_stdout() ->
 
     assert outcome is not None and outcome.error_code == "supervisor_protocol_failed"
     assert supervisor.terminate() == OwnedExecutionSettlementDTO(EXECUTION, False)
+
+
+def test_subprocess_supervisor_keeps_bounded_private_child_diagnostics() -> None:
+    supervisor = SubprocessSupervisor(
+        _Process(running=False, stdout="partial", stderr="C:\\private\\secret\nboom", return_code=9),  # type: ignore[arg-type]
+        EXECUTION,
+    )
+
+    outcome = supervisor.poll()
+
+    assert outcome is not None
+    assert outcome.error_details == {
+        "exit_code": 9,
+        "stdout_bytes": len(b"partial"),
+        "stderr_tail": "C:\\private\\secret\nboom",
+    }
+
+
+def test_subprocess_supervisor_caps_utf8_safe_stderr_tail() -> None:
+    text = "prefix\n" + (chr(0x00E4) * 10_000)
+    supervisor = SubprocessSupervisor(
+        _Process(running=False, stdout="", stderr=text, return_code=9),  # type: ignore[arg-type]
+        EXECUTION,
+    )
+
+    outcome = supervisor.poll()
+
+    assert outcome is not None and outcome.error_details is not None
+    tail = outcome.error_details["stderr_tail"]
+    assert isinstance(tail, str)
+    assert len(tail.encode("utf-8")) <= 2048
+    assert tail.endswith(chr(0x00E4))
 
 
 def test_windows_supervisor_requires_successful_taskkill_tree_result(monkeypatch: pytest.MonkeyPatch) -> None:
