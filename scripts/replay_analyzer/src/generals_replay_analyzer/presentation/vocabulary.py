@@ -29,6 +29,7 @@ _GAME_LABELS = MappingProxyType(
         "AmericaVehicleHumvee": "Humvee",
         # TheSuperHackers @feature Leex 25/08/2026 Expand display-only Zero Hour template vocabulary for observed replay identities. (#TBD)
         "AirFAmericaFireBase": "Firebase",
+        "AirFAmericaInfantryRanger": "Ranger",
         "AirFAmericaInfantryMissileDefender": "Missile Defender",
         "AirFAmericaVehicleHumvee": "Humvee",
         "AirF_AmericaVehicleMedic": "Ambulance",

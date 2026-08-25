@@ -45,6 +45,7 @@ def test_known_split_report_aliases_remain_normal_player_vocabulary() -> None:
     expected = {
         "GLA": "GLA",
         "Air F America Fire Base": "Firebase",
+        "Air F America Infantry Ranger": "Ranger",
         "Air F America Infantry Missile Defender": "Missile Defender",
         "Air F America Vehicle Humvee": "Humvee",
         "Air F America Vehicle Medic": "Ambulance",

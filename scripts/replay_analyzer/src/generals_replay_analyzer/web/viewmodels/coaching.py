@@ -389,6 +389,8 @@ def _build_order(
 
 # TheSuperHackers @bugfix Leex 25/08/2026 Keep dense event summaries useful without rendering the full match log. (#TBD)
 def _event_summary(events: list[str], empty_label: str) -> str:
+    # TheSuperHackers @bugfix Leex 25/08/2026 Keep repeated feature rows from duplicating one player-facing event summary. (#TBD)
+    events = list(dict.fromkeys(events))
     if not events:
         return empty_label
     if len(events) <= 5:
@@ -644,8 +646,16 @@ def _key_moments(
                 )
             )
 
+    # TheSuperHackers @bugfix Leex 25/08/2026 Merge repeated projections of the same tactical fact while retaining all citations. (#TBD)
+    unique: dict[tuple[int, str, str], KeyMomentView] = {}
+    for moment in moments:
+        key = (moment.frame, moment.category_label, moment.title)
+        prior = unique.get(key)
+        unique[key] = moment if prior is None else prior.model_copy(
+            update={"evidence": _merge_evidence(prior.evidence, moment.evidence)}
+        )
     return tuple(
-        sorted(moments, key=lambda item: (item.frame, item.category_label, item.title))[:8]
+        sorted(unique.values(), key=lambda item: (item.frame, item.category_label, item.title))[:8]
     )
 
 

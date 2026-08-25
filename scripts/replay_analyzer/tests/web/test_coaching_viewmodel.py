@@ -338,7 +338,7 @@ def test_dense_timed_highlight_keeps_early_and_late_evidence_without_dumping_eve
         label="combat.observed_kill_timing",
         raw_value=[
             {"frame": frame, "victim_template_name": "AmericaVehicleHumvee"}
-            for frame in (30, 60, 90, 120, 150, 180, 210)
+            for frame in (30, 60, 90, 120, 150, 180, 210, 210)
         ],
         display_value="7 observed kills",
         evidence_id=TURNING_EVIDENCE,
@@ -367,6 +367,40 @@ def test_dense_timed_highlight_keeps_early_and_late_evidence_without_dumping_eve
         "Humvee at 0:01.0 (frame 30), Humvee at 0:02.0 (frame 60), Humvee at 0:03.0 (frame 90); "
         "2 additional observed events; latest: Humvee at 0:06.0 (frame 180), Humvee at 0:07.0 (frame 210)"
     )
+
+
+def test_key_moments_merge_exact_duplicate_events_and_union_evidence() -> None:
+    """Keep repeated report projections from duplicating the same tactical checkpoint."""
+    report = _report()
+    activity = next(section for section in report.sections if section.key == "activity")
+    scouting = activity.claims[0]
+    duplicate = scouting.model_copy(
+        update={
+            "claim_id": "feature:scouting.first_observed_clear_timing:duplicate",
+            "evidence": (ReportEvidenceReferenceDTO(public_id=METRIC_EVIDENCE, tier="observed"),),
+        }
+    )
+    report = report.model_copy(
+        update={
+            "sections": tuple(
+                section.model_copy(update={"claims": (scouting, duplicate)})
+                if section.key == "activity"
+                else section
+                for section in report.sections
+            )
+        }
+    )
+
+    coaching = coaching_view(report, _timeline())
+    scouting_moments = [item for item in coaching.key_moments if item.category_label == "Scouting"]
+
+    assert len(scouting_moments) == 1
+    assert {item.public_id for item in scouting_moments[0].evidence} == {
+        METRIC_EVIDENCE,
+        SCOUTING_EVIDENCE,
+    }
+    scouting_lane = next(lane for lane in coaching.opening_lanes if lane.lane_id == "scouting")
+    assert len(scouting_lane.events) == 1
 
 
 def test_strategy_claim_projects_when_its_contract_is_valid_without_derived_tier() -> None:
