@@ -158,6 +158,7 @@ class _ObservationAuthority:
     selected_dependency_digest: str
     parser_run_id: str
     parser_version: str
+    has_telemetry: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +382,14 @@ class AnalysisPlanner:
         if not candidates:
             return None
         authorities = tuple(self._validate_authority(session, replay, candidate) for candidate in candidates)
+        telemetry_authorities = tuple(
+            authority
+            for authority in authorities
+            if authority.has_telemetry
+        )
+        # TheSuperHackers @bugfix Leex 25/08/2026 Prefer the engine telemetry branch when a parser-only observation is a stale sibling, while retaining fail-closed behavior for competing telemetry graphs. (#TBD)
+        if len(telemetry_authorities) == 1:
+            return telemetry_authorities[0]
         if len(authorities) != 1:
             raise AnalysisPlanningError(
                 "ambiguous_observation_graph",
@@ -533,6 +542,7 @@ class AnalysisPlanner:
             cast(str, selected_digest),
             parser_run_id_value,
             cast(str, selected_branch.parse_identity["parser_version"]),
+            selected_branch.telemetry_identity is not None,
         )
 
     def _selected_branch(self, branch_recipe: Mapping[str, Any]) -> _SelectedBranch:

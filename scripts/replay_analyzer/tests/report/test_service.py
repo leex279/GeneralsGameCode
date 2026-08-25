@@ -240,6 +240,7 @@ def test_report_ignores_stale_parser_only_features_after_telemetry_upgrade(
 ) -> None:
     """Catch historical parser-only feature sets poisoning the selected telemetry report generation."""
     now = datetime(2026, 8, 25, 21, 45, tzinfo=UTC)
+    stale_set_ids: dict[str, str] = {}
     with report_database.session_factory.begin() as session:  # type: ignore[union-attr]
         replay = session.scalar(select(Replay).where(Replay.public_id == report_database.replay_public_id))
         player = session.scalar(
@@ -278,6 +279,7 @@ def test_report_ignores_stale_parser_only_features_after_telemetry_upgrade(
                 completed_at=now,
                 created_at=now,
             )
+            stale_set_ids[scope] = feature_set.public_id
             session.add_all((evidence, feature_set))
             session.flush()
             session.add(
@@ -313,6 +315,27 @@ def test_report_ignores_stale_parser_only_features_after_telemetry_upgrade(
 
     assert all(value.label != "stale_parser_only.replay" for value in replay_document.derived)
     assert all(value.label != "stale_parser_only.player" for value in player_document.derived)
+
+    parser_replay_document = service.create(
+        ReportRequest(
+            report_database.replay_public_id,
+            publish=False,
+            feature_set_public_ids=(stale_set_ids["replay"],),
+        )
+    ).document
+    parser_player_document = service.create(
+        ReportRequest(
+            report_database.replay_public_id,
+            report_database.replay_player_public_id,
+            publish=False,
+            feature_set_public_ids=(stale_set_ids["player"],),
+        )
+    ).document
+
+    assert parser_replay_document.lifecycle.telemetry_status is None
+    assert parser_player_document.lifecycle.telemetry_status is None
+    assert any(value.label == "stale_parser_only.replay" for value in parser_replay_document.derived)
+    assert any(value.label == "stale_parser_only.player" for value in parser_player_document.derived)
 
 
 def test_report_ignores_stale_parser_only_strategies_after_telemetry_upgrade(

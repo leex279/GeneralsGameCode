@@ -729,8 +729,9 @@ class RenderReportHandler:
                             "identity_scope_changed",
                             "assessment subjects do not match the planned identity scope",
                         )
-                selected: tuple[tuple[str | None, str | None], ...] = tuple(
-                    (item.replay_player_public_id, None) for item in deterministic
+                selected: tuple[tuple[str | None, str | None, tuple[str, ...]], ...] = tuple(
+                    (item.replay_player_public_id, None, item.feature_set_public_ids)
+                    for item in deterministic
                 )
             elif dependency.stage == ANALYZE_LLM:
                 inferred = decode_llm_output(_dependency(context, stage=ANALYZE_LLM, version=ANALYZE_LLM_VERSION))
@@ -749,11 +750,13 @@ class RenderReportHandler:
                             "identity_scope_changed",
                             "LLM subjects do not match the planned identity scope",
                         )
-                selected = tuple((item.replay_player_public_id, item.analysis_run_id) for item in inferred)
+                selected = tuple(
+                    (item.replay_player_public_id, item.analysis_run_id, ()) for item in inferred
+                )
             else:
                 raise PipelineCodecError("report dependency stage is invalid")
             reports = []
-            for replay_player_public_id, analysis_run_id in selected:
+            for replay_player_public_id, analysis_run_id, feature_set_public_ids in selected:
                 receipt = self._reports.create(
                     ReportRequest(
                         context.replay_public_id,
@@ -761,6 +764,7 @@ class RenderReportHandler:
                         include_validated_ollama=analysis_run_id is not None,
                         publish=True,
                         analysis_run_id=analysis_run_id,
+                        feature_set_public_ids=feature_set_public_ids,
                     )
                 )
                 reports.append(

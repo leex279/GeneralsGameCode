@@ -896,12 +896,12 @@ def test_new_report_version_requeues_without_mutating_exhausted_history(
     clock: MutableClock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catch a report-authority fix that cannot create a fresh durable job after v4 exhausted."""
+    """Catch a report-authority fix that cannot create a fresh durable job after v5 exhausted."""
     current_version = importing_service.RENDER_REPORT_VERSION
-    monkeypatch.setattr(importing_service, "RENDER_REPORT_VERSION", "4")
+    monkeypatch.setattr(importing_service, "RENDER_REPORT_VERSION", "5")
     original_service = _service(session_factory, settings, replay_store, artifact_store, clock)
     original_service.submit(ImportRequest(replay_file))
-    _drain(original_service, worker="report-v4")
+    _drain(original_service, worker="report-v5")
 
     with session_factory.begin() as session:
         original = session.scalar(select(Job).where(Job.stage == "render_report"))
@@ -925,8 +925,8 @@ def test_new_report_version_requeues_without_mutating_exhausted_history(
     with session_factory() as session:
         reports = list(session.scalars(select(Job).where(Job.stage == "render_report").order_by(Job.id)))
         assert [(job.component_version, job.status) for job in reports] == [
-            ("4", "failed"),
-            ("5", "pending"),
+            ("5", "failed"),
+            ("6", "pending"),
         ]
         assert (reports[0].public_id, reports[0].idempotency_key) == original_identity
 

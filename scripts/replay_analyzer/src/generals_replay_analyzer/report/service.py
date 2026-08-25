@@ -304,7 +304,13 @@ class ReportService:
                     raise ReportNotFoundError("requested replay player public ID was not found")
 
             parser = self._select_parser(session, replay, replay_player)
-            telemetry = self._select_telemetry(session, replay, replay_player, parser)
+            telemetry = self._select_telemetry(
+                session,
+                replay,
+                replay_player,
+                parser,
+                request.feature_set_public_ids,
+            )
             player_authority = self._player_evidence_authority(
                 session, replay_player, parser, telemetry
             )
@@ -346,7 +352,13 @@ class ReportService:
             )
             derived = (
                 *self._feature_values(
-                    session, replay.id, replay_player, parser, telemetry, player_authority
+                    session,
+                    replay.id,
+                    replay_player,
+                    parser,
+                    telemetry,
+                    player_authority,
+                    request.feature_set_public_ids,
                 ),
                 *self._strategy_values(
                     session, replay.id, replay_player, parser, telemetry, player_authority
@@ -445,6 +457,7 @@ class ReportService:
         replay: Replay,
         replay_player: ReplayPlayer | None,
         parser: ParserRun | None,
+        feature_set_public_ids: tuple[str, ...] = (),
     ) -> TelemetryRun | None:
         own_query = (
             select(EvidenceItem.telemetry_run_id)
@@ -465,6 +478,9 @@ class ReportService:
         else:
             own_query = own_query.where(FeatureSet.replay_player_id == replay_player.id)
             linked_query = linked_query.where(FeatureSet.replay_player_id == replay_player.id)
+        if feature_set_public_ids:
+            own_query = own_query.where(FeatureSet.public_id.in_(feature_set_public_ids))
+            linked_query = linked_query.where(FeatureSet.public_id.in_(feature_set_public_ids))
         telemetry_ids = {
             telemetry_id
             for telemetry_id in (*session.scalars(own_query), *session.scalars(linked_query))
@@ -486,6 +502,9 @@ class ReportService:
                     "successful feature graph telemetry does not match its authoritative parser"
                 )
             return telemetry
+        # TheSuperHackers @bugfix Leex 26/08/2026 Keep a report bound to its exact parser-only feature selection instead of falling back to historical telemetry. (#TBD)
+        if feature_set_public_ids:
+            return None
         candidates = tuple(
             session.scalars(
                 select(TelemetryRun).where(TelemetryRun.replay_id == replay.id, TelemetryRun.status == "succeeded")
@@ -976,6 +995,7 @@ class ReportService:
         parser: ParserRun | None,
         telemetry: TelemetryRun | None,
         player_authority: frozenset[int] | None,
+        feature_set_public_ids: tuple[str, ...] = (),
     ) -> tuple[ReportValue, ...]:
         query = (
             select(Feature, FeatureSet, EvidenceItem)
@@ -988,6 +1008,8 @@ class ReportService:
             query = query.where(FeatureSet.replay_player_id == replay_player.id)
         else:
             query = query.where(FeatureSet.replay_player_id.is_(None))
+        if feature_set_public_ids:
+            query = query.where(FeatureSet.public_id.in_(feature_set_public_ids))
         # TheSuperHackers @bugfix Leex 25/08/2026 Select features from the report's current telemetry authority instead of stale parser-only generations. (#TBD)
         if telemetry is None:
             query = query.where(EvidenceItem.telemetry_run_id.is_(None))

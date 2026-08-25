@@ -1365,6 +1365,7 @@ def test_render_report_supports_direct_deterministic_assessment_without_ollama()
 
     assert len(requests) == 1
     assert requests[0].analysis_run_id is None  # type: ignore[attr-defined]
+    assert requests[0].feature_set_public_ids == assessment.feature_set_public_ids  # type: ignore[attr-defined]
 
 
 def test_render_report_rejects_stale_identity_revision_before_publication(

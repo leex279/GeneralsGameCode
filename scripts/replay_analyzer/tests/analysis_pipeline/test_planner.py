@@ -883,6 +883,19 @@ def test_exact_production_telemetry_branch_is_authoritative(
     assert len(_planned_jobs(session_factory, replay.id)) == 3
 
 
+def test_telemetry_branch_wins_over_succeeded_parser_only_sibling(
+    session_factory: sessionmaker[Session], clock: datetime
+) -> None:
+    replay = _replay(session_factory, clock)
+    _telemetry_observation_authority(session_factory, clock, replay, cross_branch=False)
+    _observation_authority(session_factory, clock, replay, branch="a")
+
+    plan = _planner(session_factory, clock).ensure_analysis_plan(replay.public_id, False)
+
+    assert plan.status == "planned"
+    assert len(_planned_jobs(session_factory, replay.id)) == 3
+
+
 def test_opt_in_reuses_deterministic_jobs_and_changes_report_identity_and_dependencies(
     session_factory: sessionmaker[Session], clock: datetime
 ) -> None:

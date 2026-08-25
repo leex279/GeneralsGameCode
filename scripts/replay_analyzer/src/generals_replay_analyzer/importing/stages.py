@@ -50,8 +50,8 @@ DERIVE_FEATURES_VERSION = "2"
 # TheSuperHackers @fix Leex 25/08/2026 Requeue assessment after preserving feature cache identities across optimized extraction. (#TBD)
 ASSESS_STRATEGIES_VERSION = "2"
 ANALYZE_LLM_VERSION = "1"
-# TheSuperHackers @bugfix Leex 25/08/2026 Requeue reports after selecting only the current parser or telemetry analysis authority. (#TBD)
-RENDER_REPORT_VERSION = "5"
+# TheSuperHackers @bugfix Leex 26/08/2026 Requeue reports with exact feature-branch authority binding after preserving contradictory v5 history. (#TBD)
+RENDER_REPORT_VERSION = "6"
 # TheSuperHackers @bugfix Leex 25/08/2026 Invalidate failed casts after production-scale scene authority resolution fixes. (#TBD)
 # TheSuperHackers @bugfix Leex 25/08/2026 Keep camera render jobs valid for engine-validated airspace targets above terrain bounds. (#TBD)
 # TheSuperHackers @feature Leex 25/08/2026 Render sparse strategy, build, production, and battle commentary from full-match evidence. (#TBD)
