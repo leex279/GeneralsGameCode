@@ -241,9 +241,10 @@ def test_configured_production_import_persists_complete_replay_telemetry_and_rep
             "report_public_id": report.public_id,
             "evidence_horizon": "complete",
             "diagnostic_preview": False,
-            "logic_frames_per_second": 30,
+            "logic_frames_per_second": 60,
         }
     )
+    assert video_request.authority.logic_frames_per_second == 60
     assert video_request.authority.evidence_horizon.frame_end == telemetry.final_frame
     for value in _report_values(video_request.report.selected.document):
         frame_window = value.frame_window
