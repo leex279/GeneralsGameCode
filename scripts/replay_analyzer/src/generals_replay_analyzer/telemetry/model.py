@@ -816,6 +816,7 @@ class EntitySamplePayload(OpenPayload):
         "exempt_locomotor_air_surface",
         "exempt_map_loaded_unclassified_immobile",
         "exempt_trusted_visual_debris",
+        "exempt_catalog_railroad_behavior",
     ] | None = None
     speed_status: Literal["measured_physics_velocity", "unavailable_no_physics"] | None = None
     speed: NonNegativeFloat | None

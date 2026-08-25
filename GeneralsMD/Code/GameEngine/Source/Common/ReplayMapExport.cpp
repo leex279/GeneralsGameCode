@@ -811,12 +811,13 @@ namespace
 			+ positionJson({ minimumX, minimumY, minimumZ }) + ",\"minimum_inclusive\":true},"
 			"\"entity_sample_policy\":{\"bounded_layer_statuses\":[\"stable\",\"dynamic_bridge_layer\",\"unknown_engine_value\"],"
 			"\"bounded_position_policies\":[\"pathfinder_xy_closed\"],"
-			// TheSuperHackers @bugfix Leex 24/08/2026 Declare the bounded trusted visual-debris policy with the map asset that authorizes it. (#TBD)
+			// TheSuperHackers @bugfix Leex 25/08/2026 Declare bounded trusted-debris and catalog-backed railroad policies with the authorizing map asset. (#TBD)
 			"\"exempt_position_policies\":[\"exempt_kindof_aircraft\",\"exempt_kindof_bridge\","
 			"\"exempt_kindof_projectile\",\"exempt_kindof_parachutable\",\"exempt_locomotor_air_surface\","
-			"\"exempt_map_loaded_unclassified_immobile\",\"exempt_trusted_visual_debris\"],"
+			"\"exempt_map_loaded_unclassified_immobile\",\"exempt_trusted_visual_debris\","
+			"\"exempt_catalog_railroad_behavior\"],"
 			"\"policy\":\"pathfinder_xy_closed_except_explicit_engine_category\","
-			"\"policy_source\":\"ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface\"},"
+			"\"policy_source\":\"ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, catalog-bound RailroadBehavior, or catalog-bound current locomotor AIR surface\"},"
 			"\"float_encoding\":\"IEEE-754-binary32\",\"units\":\"engine_world_unit\"},"
 			"\"engine_data_identity\":" + jsonString(ReplayTelemetry::getEngineDataIdentity())
 			+ ",\"features\":{\"bridges\":" + bridges + ",\"start_positions\":" + starts

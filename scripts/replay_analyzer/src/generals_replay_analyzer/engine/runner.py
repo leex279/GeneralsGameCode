@@ -5,9 +5,11 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -35,8 +37,9 @@ from generals_replay_analyzer.engine.result import (
     StrategyAnalysisScope,
 )
 from generals_replay_analyzer.engine.runtime import bind_runtime_executable
+from generals_replay_analyzer.telemetry.compatibility import bridge_v2_damage_victim_template_name
 from generals_replay_analyzer.telemetry.map_asset import ASSET_NAMES
-from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord
+from generals_replay_analyzer.telemetry.model import CompleteRecord, ManifestRecord, TelemetryRecord
 from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 ANSI_MAX_PATH = 260
@@ -491,6 +494,23 @@ def _cross_bind_outcome(outcome: ReplayOutcome, complete: CompleteRecord) -> str
     return None
 
 
+def _validated_trace_records(trace_path: Path) -> tuple[TelemetryRecord, ...]:
+    """Validate a disposable compatibility view while preserving the engine's original evidence bytes."""
+    with tempfile.NamedTemporaryFile(
+        dir=trace_path.parent,
+        prefix=".trace-validation-",
+        suffix=".ndjson",
+        delete=False,
+    ) as temporary:
+        validation_trace = Path(temporary.name)
+    try:
+        shutil.copyfile(trace_path, validation_trace)
+        bridge_v2_damage_victim_template_name(validation_trace)
+        return tuple(iter_validated_trace(validation_trace))
+    finally:
+        validation_trace.unlink(missing_ok=True)
+
+
 def _validated_asset_paths(run_dir: Path, manifest: ManifestRecord) -> tuple[Path, tuple[Path, ...]]:
     catalog_reference = manifest.payload.game_data_catalog
     map_reference = manifest.payload.map_asset
@@ -800,7 +820,7 @@ def _export_telemetry_bound(
         )
     try:
         _require_plain_output_file(trace_path, "telemetry trace")
-        records = tuple(iter_validated_trace(trace_path))
+        records = _validated_trace_records(trace_path)
     except (TelemetryTraceValidationError, OSError, ValueError) as error:
         message = str(error)
         asset_markers = ("catalog", "map_asset", "map asset", "game-data")

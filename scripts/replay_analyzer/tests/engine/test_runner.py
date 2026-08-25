@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import BinaryIO, NoReturn
 
 import pytest
+from telemetry.test_combat_outcome_contract import _valid_trace as _valid_combat_trace
 from telemetry.test_telemetry_v2_contract import _write_catalog, _write_v2_trace
 
 from generals_replay_analyzer.engine import runner as runner_module
@@ -26,7 +27,7 @@ from generals_replay_analyzer.engine.runner import (
 )
 from generals_replay_analyzer.engine.runtime import bind_runtime_executable
 from generals_replay_analyzer.telemetry.model import CompleteRecord
-from generals_replay_analyzer.telemetry.reader import iter_validated_trace
+from generals_replay_analyzer.telemetry.reader import TelemetryTraceValidationError, iter_validated_trace
 
 
 class FakeLauncher:
@@ -209,7 +210,7 @@ def _rewrite_trace_terminal(
     complete = records[-1]
     for record in (outcome, complete):
         record["frame"] = final_frame
-        record["logic_time_seconds"] = final_frame / 30.0
+        record["logic_time_seconds"] = final_frame / 60.0
         record["payload"]["terminal_reason"] = terminal_reason
         record["payload"]["crc_mismatch"] = crc_mismatch_frame is not None
         record["payload"]["crc_mismatch_frame"] = crc_mismatch_frame
@@ -224,6 +225,39 @@ def _rewrite_trace_terminal(
     )
     complete["payload"]["trace_sha256"] = hashlib.sha256(prior).hexdigest()
     trace.write_bytes(prior + json.dumps(complete, separators=(",", ":")).encode("utf-8") + b"\n")
+
+
+def _add_damage_extension(trace: Path, field_name: str, value: object) -> None:
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    damage = next(record for record in records if record["event_type"] == "damage_applied")
+    damage["payload"][field_name] = value
+    prior = b"".join(
+        json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n"
+        for record in records[:-1]
+    )
+    records[-1]["payload"]["trace_sha256"] = hashlib.sha256(prior).hexdigest()
+    trace.write_bytes(
+        prior + json.dumps(records[-1], separators=(",", ":")).encode("utf-8") + b"\n"
+    )
+
+
+def test_runner_validates_known_damage_producer_extension_without_mutating_evidence(tmp_path: Path) -> None:
+    trace = _valid_combat_trace(tmp_path)
+    _add_damage_extension(trace, "victim_template_name", "ChinaTankBattleMaster")
+    original = trace.read_bytes()
+
+    records = runner_module._validated_trace_records(trace)
+
+    assert any(record.event_type == "damage_applied" for record in records)
+    assert trace.read_bytes() == original
+
+
+def test_runner_does_not_bridge_unknown_damage_extensions(tmp_path: Path) -> None:
+    trace = _valid_combat_trace(tmp_path)
+    _add_damage_extension(trace, "unrecognized_combat_payload_extension", "not-supported")
+
+    with pytest.raises(TelemetryTraceValidationError, match="unrecognized_combat_payload_extension.*unexpected"):
+        runner_module._validated_trace_records(trace)
 
 
 def _publish_outcome(

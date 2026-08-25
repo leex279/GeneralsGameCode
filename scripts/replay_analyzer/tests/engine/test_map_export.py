@@ -133,10 +133,11 @@ def _write_asset(root: Path, *, schema_version: int = 2) -> tuple[Path, dict[str
                     "exempt_locomotor_air_surface",
                     *(["exempt_map_loaded_unclassified_immobile"] if schema_version == 2 else []),
                     *(["exempt_trusted_visual_debris"] if schema_version == 2 else []),
+                    *(["exempt_catalog_railroad_behavior"] if schema_version == 2 else []),
                 ],
                 "policy": "pathfinder_xy_closed_except_explicit_engine_category",
                 "policy_source": (
-                    "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface"
+                    "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, catalog-bound RailroadBehavior, or catalog-bound current locomotor AIR surface"
                     if schema_version == 2
                     else "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
                 ),
@@ -867,6 +868,8 @@ def test_map_export_sources_remain_modern_zero_hour_read_only(repository_root: P
     assert 'getTemplate()->getName().compare("GenericDebris")' in trusted_policy
     assert "KINDOF_UNATTACKABLE" in trusted_policy
     assert "exempt_trusted_visual_debris" in bounds_policy
+    assert 'NAMEKEY("RailroadBehavior")' in bounds_policy
+    assert "exempt_catalog_railroad_behavior" in bounds_policy
     telemetry = (repository_root / "GeneralsMD/Code/GameEngine/Source/Common/ReplayTelemetry.cpp").read_text(
         encoding="utf-8"
     )

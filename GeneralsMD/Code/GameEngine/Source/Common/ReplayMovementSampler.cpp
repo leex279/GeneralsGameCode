@@ -572,6 +572,10 @@ namespace
 			// TheSuperHackers @feature Leex 21/08/2026 Mark map-loaded immobile samples for independent classified-static exclusion before any bounds exemption. (#TBD)
 			return "exempt_map_loaded_unclassified_immobile";
 		}
+		static const NameKeyType railroadBehaviorKey = NAMEKEY("RailroadBehavior");
+		// TheSuperHackers @bugfix Leex 25/08/2026 Exempt catalog-identifiable railroad movement whose waypoint track legitimately leaves pathfinder bounds. (#TBD)
+		if (object->findUpdateModule(railroadBehaviorKey) != nullptr)
+			return "exempt_catalog_railroad_behavior";
 		const AIUpdateInterface *ai = object->getAI();
 		const Locomotor *locomotor = ai != nullptr ? ai->getCurLocomotor() : nullptr;
 		if (locomotor != nullptr && (locomotor->getLegalSurfaces() & LOCOMOTORSURFACE_AIR) != 0)

@@ -43,6 +43,7 @@ POSITION_POLICIES = frozenset(
         "exempt_locomotor_air_surface",
         "exempt_map_loaded_unclassified_immobile",
         "exempt_trusted_visual_debris",
+        "exempt_catalog_railroad_behavior",
     }
 )
 CELL_TYPES = (
@@ -359,6 +360,7 @@ class EntitySamplePolicy(StrictModel):
         "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface",
         "ReplayMovementSampler KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
         "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, or catalog-bound current locomotor AIR surface",
+        "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, catalog-bound RailroadBehavior, or catalog-bound current locomotor AIR surface",
     ]
 
     @model_validator(mode="after")
@@ -376,15 +378,23 @@ class EntitySamplePolicy(StrictModel):
         ]
         v2_exemptions = [*v1_exemptions, "exempt_map_loaded_unclassified_immobile"]
         v2_visual_debris_exemptions = [*v2_exemptions, "exempt_trusted_visual_debris"]
+        v2_railroad_exemptions = [*v2_visual_debris_exemptions, "exempt_catalog_railroad_behavior"]
         expected = v1_exemptions if self.policy_source == (
             "ReplayMovementSampler KindOf or catalog-bound current locomotor AIR surface"
         ) else (
-            v2_visual_debris_exemptions
+            v2_railroad_exemptions
             if self.policy_source == (
                 "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, "
-                "or catalog-bound current locomotor AIR surface"
+                "catalog-bound RailroadBehavior, or catalog-bound current locomotor AIR surface"
             )
-            else v2_exemptions
+            else (
+                v2_visual_debris_exemptions
+                if self.policy_source == (
+                    "ReplayMovementSampler trusted visual-debris KindOf, map-loaded lifecycle KindOf, "
+                    "or catalog-bound current locomotor AIR surface"
+                )
+                else v2_exemptions
+            )
         )
         if self.exempt_position_policies != expected:
             raise ValueError("exempt position policies must equal the closed source-grounded policy")
@@ -786,6 +796,12 @@ class MapAsset(StrictModel):
                     "trusted visual debris exemption lacks catalog, lifecycle, and physics provenance"
                 )
             self._require_visual_debris_xy(payload.position)
+            return
+        if policy == "exempt_catalog_railroad_behavior":
+            if "RailroadBehavior" not in catalog_behavior_modules:
+                raise MapAssetValidationError(
+                    "railroad bounds exemption lacks catalog-bound RailroadBehavior"
+                )
             return
         if policy != "pathfinder_xy_closed":
             raise MapAssetValidationError("entity sample has unknown position bounds policy")

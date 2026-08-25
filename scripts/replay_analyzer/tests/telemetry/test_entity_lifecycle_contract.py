@@ -148,6 +148,7 @@ def _write_catalog(directory: Path, *, debris_catalog_tamper: str | None = None)
                     ("RocksG14", ["IMMOBILE"], []),
                     ("StaticRock", ["IMMOBILE", "OBSTACLE"], []),
                     ("GenericDebris", ["UNATTACKABLE"], ["InactiveBody", "PhysicsBehavior", "SlowDeathBehavior"]),
+                    ("TrainEngine", ["SELECTABLE", "VEHICLE", "TRANSPORT"], ["RailroadBehavior"]),
                 ]
             )
         ],
@@ -1010,6 +1011,52 @@ def test_v2_accepts_oob_map_loaded_unclassified_immobile_decoration(
     records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
 
     assert records[-1].event_type == "complete"
+
+
+def test_v2_accepts_oob_catalog_bound_railroad_track_movement(tmp_path: Path) -> None:
+    creation = _creation(369, "TrainEngine")
+    creation.update(
+        {
+            "kind_of_flags": ["SELECTABLE", "VEHICLE", "TRANSPORT"],
+            "creation_source": "unknown",
+            "creation_context": {
+                "registration_frame": 0,
+                "producer_object_id": None,
+                "producer_player_index": None,
+            },
+        }
+    )
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "object_id": 369,
+            "template_name": "TrainEngine",
+            "position": {"x": 2301.77808, "y": 2159.23535, "z": 56.25},
+            "position_bounds_policy": "exempt_catalog_railroad_behavior",
+            "speed_status": "unavailable_no_physics",
+            "speed": None,
+            "locomotor_set_id": -1,
+            "locomotor_set_name": "LOCOMOTORSET_INVALID",
+        }
+    )
+
+    records = tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
+
+    assert records[-1].event_type == "complete"
+
+
+def test_v2_rejects_forged_railroad_bounds_exemption_without_catalog_behavior(tmp_path: Path) -> None:
+    creation = _creation()
+    sample = _task7_sample_payload()
+    sample.update(
+        {
+            "position": {"x": 0.0, "y": -1_000_001.0, "z": 0.0},
+            "position_bounds_policy": "exempt_catalog_railroad_behavior",
+        }
+    )
+
+    with pytest.raises(TelemetryTraceValidationError, match="RailroadBehavior"):
+        tuple(iter_validated_trace(_trace(tmp_path, [("object_created", creation), ("entity_sample", sample)])))
 
 
 def test_v2_accepts_trusted_physics_visual_debris_within_two_terrain_cells(tmp_path: Path) -> None:
