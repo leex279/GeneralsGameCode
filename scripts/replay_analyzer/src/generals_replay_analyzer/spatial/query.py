@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from generals_replay_analyzer.db.models import (
     CombatEvent,
@@ -1641,6 +1641,14 @@ class MapSceneQueryService:
         total = 0
         if query.availability in (None, "partial"):
             with self._session_factory() as session:
+                # TheSuperHackers @bugfix Leex 25/08/2026 Select only the newest replay-wide report so superseded invalid reports cannot poison the map index. (#TBD)
+                newer_report = aliased(Report)
+                latest_report = ~select(newer_report.id).where(
+                    newer_report.replay_id == Report.replay_id,
+                    newer_report.replay_player_id.is_(None),
+                    (newer_report.created_at > Report.created_at)
+                    | ((newer_report.created_at == Report.created_at) & (newer_report.public_id > Report.public_id)),
+                ).exists()
                 # TheSuperHackers @fix Leex 25/08/2026 Index replay-wide map authority instead of player reports without manifest evidence. (#TBD)
                 if query.search:
                     candidates = tuple(
@@ -1654,7 +1662,7 @@ class MapSceneQueryService:
                             .select_from(Report)
                             .join(Replay, Replay.id == Report.replay_id)
                             .join(Map, Map.id == Replay.map_id)
-                            .where(Report.replay_player_id.is_(None))
+                            .where(Report.replay_player_id.is_(None), latest_report)
                             .order_by(Replay.public_id, Report.public_id)
                             .limit(_MAP_SCENE_SEARCH_CANDIDATE_LIMIT + 1)
                         ).tuples()
@@ -1678,7 +1686,7 @@ class MapSceneQueryService:
                                 select(Report, Replay, Map)
                                 .join(Replay, Replay.id == Report.replay_id)
                                 .join(Map, Map.id == Replay.map_id)
-                                .where(Report.id.in_(selected_ids), Report.replay_player_id.is_(None))
+                                .where(Report.id.in_(selected_ids), Report.replay_player_id.is_(None), latest_report)
                                 .order_by(Replay.public_id, Report.public_id)
                             ).tuples()
                         )
@@ -1688,7 +1696,7 @@ class MapSceneQueryService:
                         .select_from(Report)
                         .join(Replay, Replay.id == Report.replay_id)
                         .join(Map, Map.id == Replay.map_id)
-                        .where(Report.replay_player_id.is_(None))
+                        .where(Report.replay_player_id.is_(None), latest_report)
                     ) or 0
                     offset = self._bounded_page_offset(total, query.page, query.page_size)
                     if offset < total:
@@ -1697,7 +1705,7 @@ class MapSceneQueryService:
                                 select(Report, Replay, Map)
                                 .join(Replay, Replay.id == Report.replay_id)
                                 .join(Map, Map.id == Replay.map_id)
-                                .where(Report.replay_player_id.is_(None))
+                                .where(Report.replay_player_id.is_(None), latest_report)
                                 .order_by(Replay.public_id, Report.public_id)
                                 .offset(offset)
                                 .limit(query.page_size)

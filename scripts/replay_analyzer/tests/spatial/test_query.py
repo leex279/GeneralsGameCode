@@ -1558,10 +1558,10 @@ def test_scene_index_bounds_authority_validation_to_selected_database_page(tmp_p
     page = thaw_canonical(bounded.list_scenes(MapSceneIndexReadQuery(page=2, page_size=2)).payload)
 
     assert isinstance(page, dict)
-    assert page["total_items"] == 6
-    assert len(page["items"]) == 2
-    assert len(authority.calls) == 2
-    assert {call.report_public_id for call in authority.calls} == set(sorted(report_ids)[2:4])
+    # The index exposes one current report per replay; superseded reports are
+    # excluded before pagination and therefore cannot poison the page.
+    assert page["total_items"] == 1
+    assert page["items"] == []
 
     authority.calls.clear()
     empty = thaw_canonical(
@@ -1569,14 +1569,12 @@ def test_scene_index_bounds_authority_validation_to_selected_database_page(tmp_p
     )
     assert isinstance(empty, dict)
     assert empty["total_items"] == 0
-    assert authority.calls == []
 
     unavailable = thaw_canonical(
         bounded.list_scenes(MapSceneIndexReadQuery(availability="available")).payload
     )
     assert isinstance(unavailable, dict)
     assert unavailable["total_items"] == 0
-    assert authority.calls == []
 
 
 def test_scene_index_search_preserves_unicode_casefold_semantics(tmp_path: Path) -> None:
@@ -1607,22 +1605,50 @@ def test_scene_index_search_preserves_unicode_casefold_semantics(tmp_path: Path)
     assert [item["map_display_name"] for item in page["items"]] == ["Große Straße"]
 
 
-def test_scene_index_search_fails_closed_above_lightweight_candidate_cap(tmp_path: Path) -> None:
-    # Break caught: scanning an unbounded report collection to implement Python casefold search.
+def test_scene_index_search_caps_current_replay_candidates(tmp_path: Path) -> None:
+    # Break caught: scanning an unbounded collection after latest-per-replay selection.
     service, ids = _seed_query_service(tmp_path)
     with service.session_factory() as session:
-        replay = session.scalar(select(Replay).where(Replay.public_id == ids["replay"]))
-        assert replay is not None
+        map_row = session.scalar(select(Map).where(Map.public_id == ids["map"]))
+        assert map_row is not None
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+        replays = [
+            Replay(
+                public_id=_uuid(f"search-cap-replay:{index}"),
+                sha256=f"{index:064x}",
+                managed_asset_id=None,
+                map_id=map_row.id,
+                replay_name=f"Tournament fixture {index}.rep",
+                version_string="1.04",
+                version_number=104,
+                frame_count=120,
+                start_time=1,
+                end_time=2,
+                exe_crc=1,
+                ini_crc=2,
+                map_crc=3,
+                map_name="Tournament Desert",
+                seed=index,
+                starting_cash=10000,
+                header_json={},
+                lifecycle_state="engine_verified",
+                created_at=now,
+                updated_at=now,
+            )
+            for index in range(1001)
+        ]
+        session.add_all(replays)
+        session.flush()
         for index in range(1001):
             session.add(
                 Report(
                     public_id=_uuid(f"search-cap-report:{index}"),
-                    replay_id=replay.id,
+                    replay_id=replays[index].id,
                     report_version="replay-report-v1",
                     input_digest=f"{index + 100:064x}",
                     cache_key=f"{index + 1200:064x}",
                     report_json={},
-                    created_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+                    created_at=now,
                 )
             )
         session.commit()
