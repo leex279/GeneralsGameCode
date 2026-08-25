@@ -40,6 +40,10 @@ class FfprobeStreamV1(VideoContract):
     sample_rate: str | None = None
     channels: int | None = Field(default=None, ge=1)
     duration: str | None = None
+    color_range: str | None = None
+    color_space: str | None = None
+    color_transfer: str | None = None
+    color_primaries: str | None = None
 
 
 class FfprobeDocumentV1(VideoContract):
@@ -60,6 +64,10 @@ class ObservedVideoV1(VideoContract):
     audio_sample_rate: int = Field(ge=1)
     audio_channels: int = Field(ge=1)
     subtitle_codec_name: str | None = None
+    color_range: str | None = None
+    color_space: str | None = None
+    color_transfer: str | None = None
+    color_primaries: str | None = None
 
 
 class VerificationLandmarkV1(VideoContract):
@@ -147,6 +155,7 @@ _STREAM_FIELDS = frozenset(
     (
         "codec_type", "codec_name", "pix_fmt", "width", "height", "avg_frame_rate",
         "r_frame_rate", "nb_frames", "sample_rate", "channels", "duration",
+        "color_range", "color_space", "color_transfer", "color_primaries",
     )
 )
 
@@ -290,6 +299,23 @@ class MediaVerifier:
         numerator, denominator = _ratio(video.avg_frame_rate or video.r_frame_rate, "video frame rate")
         if video.width is None or video.height is None or video.pix_fmt is None or video.nb_frames is None:
             raise MediaVerificationError("ffprobe video stream is incomplete")
+        color_metadata = {
+            "color_range": video.color_range,
+            "color_space": video.color_space,
+            "color_transfer": video.color_transfer,
+            "color_primaries": video.color_primaries,
+        }
+        for label, value in color_metadata.items():
+            if value is None:
+                raise MediaVerificationError(f"ffprobe video {label} is missing")
+        color_range = video.color_range
+        color_space = video.color_space
+        color_transfer = video.color_transfer
+        color_primaries = video.color_primaries
+        assert color_range is not None
+        assert color_space is not None
+        assert color_transfer is not None
+        assert color_primaries is not None
         try:
             frames = int(video.nb_frames)
             sample_rate = int(audio.sample_rate or "")
@@ -310,6 +336,10 @@ class MediaVerifier:
             audio_sample_rate=sample_rate,
             audio_channels=audio.channels or 0,
             subtitle_codec_name=subtitle.codec_name if subtitle is not None else None,
+            color_range=color_range,
+            color_space=color_space,
+            color_transfer=color_transfer,
+            color_primaries=color_primaries,
         )
 
     @staticmethod
@@ -325,6 +355,15 @@ class MediaVerifier:
             raise MediaVerificationError("final video must use H.264")
         if observed.pixel_format != "yuv420p":
             raise MediaVerificationError("final video must use yuv420p")
+        # TheSuperHackers @bugfix Leex 25/08/2026 Require authoritative H.264 color metadata before publication. (#TBD)
+        if observed.color_range != "tv":
+            raise MediaVerificationError("final video color_range must be tv")
+        if observed.color_space != "bt709":
+            raise MediaVerificationError("final video color_space must be bt709")
+        if observed.color_transfer != "bt709":
+            raise MediaVerificationError("final video color_transfer must be bt709")
+        if observed.color_primaries != "bt709":
+            raise MediaVerificationError("final video color_primaries must be bt709")
         if (observed.width, observed.height) != (settings.width, settings.height):
             raise MediaVerificationError("final video dimensions differ from fixed settings")
         if observed.fps_numerator != settings.fps * observed.fps_denominator:

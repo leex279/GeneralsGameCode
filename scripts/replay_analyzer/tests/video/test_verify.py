@@ -32,6 +32,10 @@ def _probe(
     fps: str = "30/1",
     duration: str = "2.0",
     sample_rate: str = "30000",
+    color_range: str | None = "tv",
+    color_space: str | None = "bt709",
+    color_transfer: str | None = "bt709",
+    color_primaries: str | None = "bt709",
 ) -> str:
     return json.dumps(
         {
@@ -47,6 +51,10 @@ def _probe(
                     "r_frame_rate": fps,
                     "nb_frames": "60",
                     "duration": duration,
+                    "color_range": color_range,
+                    "color_space": color_space,
+                    "color_transfer": color_transfer,
+                    "color_primaries": color_primaries,
                 },
                 {
                     "codec_type": "audio",
@@ -128,6 +136,26 @@ def test_verifier_ignores_documented_ffprobe_metadata_extras_but_requires_author
     ],
 )
 def test_verifier_rejects_wrong_media_properties(tmp_path: Path, kwargs: dict[str, str], message: str) -> None:
+    with pytest.raises(MediaVerificationError, match=message):
+        _verify(tmp_path, _probe(**kwargs))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"color_range": None}, "color_range"),
+        ({"color_range": "pc"}, "color_range"),
+        ({"color_space": None}, "color_space"),
+        ({"color_space": "smpte170m"}, "color_space"),
+        ({"color_transfer": None}, "color_transfer"),
+        ({"color_transfer": "smpte170m"}, "color_transfer"),
+        ({"color_primaries": None}, "color_primaries"),
+        ({"color_primaries": "smpte170m"}, "color_primaries"),
+    ],
+)
+def test_verifier_rejects_missing_or_non_bt709_color_metadata(
+    tmp_path: Path, kwargs: dict[str, str | None], message: str
+) -> None:
     with pytest.raises(MediaVerificationError, match=message):
         _verify(tmp_path, _probe(**kwargs))
 
