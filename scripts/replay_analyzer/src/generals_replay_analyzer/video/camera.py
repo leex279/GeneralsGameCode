@@ -48,6 +48,15 @@ class _Candidate:
     y: float
     z: float
     evidence: tuple[EvidenceCitationV1, ...]
+    zoom: float = 1.0
+    two_sided_damage: bool = False
+
+
+def _wins_cooldown(candidate: _Candidate, current: _Candidate) -> bool:
+    # TheSuperHackers @feature Leex 25/08/2026 Prefer a two-sided battle view only inside its local camera cooldown conflict set. (#TBD)
+    if candidate.two_sided_damage != current.two_sided_damage:
+        return candidate.two_sided_damage
+    return candidate.frame == current.frame and _PRIORITY[candidate.kind] < _PRIORITY[current.kind]
 
 
 def _mapping(value: object, label: str) -> dict[str, object]:
@@ -249,7 +258,7 @@ class CameraPlanService:
                 and selected[-1].kind != "base_context"
                 and candidate.frame - selected[-1].frame < cooldown_frames
             ):
-                if candidate.frame == selected[-1].frame and _PRIORITY[candidate.kind] < _PRIORITY[selected[-1].kind]:
+                if _wins_cooldown(candidate, selected[-1]):
                     selected[-1] = candidate
                 continue
             selected.append(candidate)
@@ -293,7 +302,7 @@ class CameraPlanService:
                     target_x=candidate.x,
                     target_y=candidate.y,
                     target_z=candidate.z,
-                    zoom=1.0,
+                    zoom=candidate.zoom,
                     pitch=-45.0,
                     yaw=0.0,
                     transition=transition,
@@ -415,7 +424,32 @@ class CameraPlanService:
                             "milestone position evidence cannot occur after event timing"
                         )
                 position = _position(item, position_field)
+                zoom = 1.0
+                two_sided_damage = False
+                # TheSuperHackers @feature Leex 25/08/2026 Frame opposing combat sides by their accepted spatial bounds and widen modestly for spread. (#TBD)
+                if kind == "damage" and item.get("opposing_position") is not None:
+                    two_sided_damage = True
+                    opposing = _position(item, "opposing_position")
+                    span = math.hypot(opposing[0] - position[0], opposing[1] - position[1])
+                    position = (
+                        (position[0] + opposing[0]) / 2.0,
+                        (position[1] + opposing[1]) / 2.0,
+                        (position[2] + opposing[2]) / 2.0,
+                    )
+                    map_span = max(bounds[3] - bounds[0], bounds[4] - bounds[1])
+                    # TheSuperHackers @bugfix Leex 25/08/2026 Increase W3D height-based zoom to show both combat sides instead of zooming further in. (#TBD)
+                    zoom = 1.05 + min(0.10, max(0.0, span / map_span * 0.15))
                 if not _inside_planar_map(position, bounds):
                     raise CameraPlanContractError("cited camera position is outside authoritative map bounds")
-                output.append(_Candidate(frame, kind, label, *position, citations))
+                output.append(
+                    _Candidate(
+                        frame,
+                        kind,
+                        label,
+                        *position,
+                        citations,
+                        zoom,
+                        two_sided_damage,
+                    )
+                )
         return output

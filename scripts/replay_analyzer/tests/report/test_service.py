@@ -35,6 +35,8 @@ from generals_replay_analyzer.report.service import (
     ReportContractError,
     ReportNotFoundError,
     ReportService,
+    _bucket_camera_combat_anchors,
+    _CameraCombatAnchor,
     _evenly_sample,
 )
 from generals_replay_analyzer.storage import ContentAddressedStore
@@ -59,6 +61,35 @@ def test_full_match_observation_sampling_is_bounded_and_spans_the_timeline() -> 
     assert selected[0] == rows[0]
     assert selected[-1] == rows[-1]
     assert selected == tuple(sorted(set(selected)))
+
+
+def test_camera_combat_anchor_buckets_are_deterministic_bounded_and_do_not_reuse_samples() -> None:
+    anchors = tuple(
+        _CameraCombatAnchor(
+            stable_uuid(f"combat-anchor:{index}"),
+            index * 100,
+            stable_uuid(f"combat-sample:{index}"),
+            max(0, index * 100 - 15),
+        )
+        for index in range(10_000)
+    )
+
+    selected = _bucket_camera_combat_anchors(
+        anchors,
+        final_frame=1_000_000,
+        logic_frames_per_second=30,
+    )
+    reversed_selected = _bucket_camera_combat_anchors(
+        tuple(reversed(anchors)),
+        final_frame=1_000_000,
+        logic_frames_per_second=30,
+    )
+
+    assert selected == reversed_selected
+    assert len(selected) == 256
+    assert len({item.attacker_sample_evidence_public_id for item in selected}) == 256
+    bucket_width = max(30 * 15, (1_000_000 + 1 + 255) // 256)
+    assert len({item.combat_frame // bucket_width for item in selected}) == 256
 
 
 def test_report_omits_bulk_partition_diagnostics_from_public_observed_values(

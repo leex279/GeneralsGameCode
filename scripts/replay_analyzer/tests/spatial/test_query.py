@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db import create_database_engine, create_session_factory, upgrade_database
@@ -34,7 +34,16 @@ from generals_replay_analyzer.db.models import (
     TelemetryRun,
 )
 from generals_replay_analyzer.features.evidence import thaw_canonical
+from generals_replay_analyzer.report.model import ReportRequest
 from generals_replay_analyzer.report.query import FixedReportQuery, ReportGraphNotFoundError
+from generals_replay_analyzer.report.read_model import (
+    PublishedReportAssetDTO,
+    PublishedReportDTO,
+    PublishedReportGraphDTO,
+    ReportPlayerIdentityDTO,
+    ReportReplayIdentityDTO,
+)
+from generals_replay_analyzer.report.service import ReportService
 from generals_replay_analyzer.spatial.query import (
     MapRasterReadQuery,
     MapSceneContractError,
@@ -44,6 +53,11 @@ from generals_replay_analyzer.spatial.query import (
     RasterUnavailableError,
     SceneSample,
     downsample_samples,
+)
+from generals_replay_analyzer.video.camera import CameraPlanService
+from generals_replay_analyzer.video.contracts import (
+    CameraPlanAuthorityV1,
+    EvidenceHorizonV1,
 )
 
 
@@ -163,9 +177,36 @@ class _FakeDocument:
 
 
 class _ReportAuthority:
-    def __init__(self, replay_id: str, report_id: str, evidence_ids: tuple[str, ...], player_id: str) -> None:
+    def __init__(
+        self,
+        replay_id: str,
+        report_id: str,
+        evidence_ids: tuple[str, ...],
+        player_id: str,
+        camera_anchor: dict[str, object] | None = None,
+    ) -> None:
         references = tuple(SimpleNamespace(public_id=value, tier="observed") for value in evidence_ids)
         value = SimpleNamespace(evidence=references)
+        availability = [value]
+        if camera_anchor is not None:
+            anchor_ids = {
+                camera_anchor["combat_evidence_public_id"],
+                camera_anchor["attacker_sample_evidence_public_id"],
+            }
+            availability.append(
+                SimpleNamespace(
+                    claim_id="availability:camera_combat_anchors",
+                    raw_value={
+                        "schema_version": "camera-combat-anchors-v1",
+                        "bucket_width_frames": 450,
+                        "pairs": [camera_anchor],
+                    },
+                    evidence=tuple(
+                        SimpleNamespace(public_id=public_id, tier="observed")
+                        for public_id in sorted(anchor_ids)
+                    ),
+                )
+            )
         document = _FakeDocument(
             report_id,
             "replay-report-v1",
@@ -173,7 +214,7 @@ class _ReportAuthority:
             None,
             SimpleNamespace(lifecycle_state="engine_verified", telemetry_runner_status="success"),
             (),
-            (value,),
+            tuple(availability),
             (),
             (),
             (),
@@ -211,11 +252,31 @@ class _CountingReportAuthority:
         ).graph
 
 
+class _PublishedGraphAuthority:
+    def __init__(self, graph: PublishedReportGraphDTO) -> None:
+        self.graph = graph
+
+    def get_report(self, query: FixedReportQuery) -> object:
+        if (query.replay_public_id, query.report_public_id) != (
+            self.graph.replay_public_id,
+            self.graph.selected_report_public_id,
+        ):
+            raise ReportGraphNotFoundError("missing")
+        return self.graph
+
+
 def _seed_query_service(
     tmp_path: Path,
     *,
     combat_x: float = 10.0,
     out_of_bounds_sample_x: float = 25.0,
+    first_sample_frame: int = 30,
+    latest_sample_frame: int = 35,
+    movement_sample_frames: int = 15,
+    sample_is_engine_moving: bool = True,
+    attacker_destruction_frame: int | None = None,
+    include_latest_sample_evidence: bool = True,
+    noisy_decoy_count: int = 0,
     visibility_x: float = 5.0,
     duplicate_manifest: bool = False,
     cross_run_manifest: bool = False,
@@ -453,7 +514,11 @@ def _seed_query_service(
             logic_time_seconds=0.0,
             schema_version=2,
             event_type="manifest",
-            payload_json={"engine_build": telemetry.engine_build},
+            payload_json={
+                "engine_build": telemetry.engine_build,
+                "logic_frames_per_second": 30,
+                "exporter_settings": {"movement_sample_frames": movement_sample_frames},
+            },
             raw_record_json={},
             evidence_item_id=evidence_rows[0].id,
         )
@@ -473,8 +538,8 @@ def _seed_query_service(
         sample_event = TelemetryEvent(
             telemetry_run_id=telemetry.id,
             sequence=1,
-            frame=30,
-            logic_time_seconds=1.0,
+            frame=first_sample_frame,
+            logic_time_seconds=first_sample_frame / 30.0,
             schema_version=2,
             event_type="entity_sample",
             payload_json={},
@@ -495,8 +560,8 @@ def _seed_query_service(
         oob_event = TelemetryEvent(
             telemetry_run_id=telemetry.id,
             sequence=3,
-            frame=35,
-            logic_time_seconds=1.16,
+            frame=latest_sample_frame,
+            logic_time_seconds=latest_sample_frame / 30.0,
             schema_version=2,
             event_type="entity_sample",
             payload_json={},
@@ -632,6 +697,37 @@ def _seed_query_service(
                     ),
                 )
             )
+        for index in range(noisy_decoy_count):
+            decoy_evidence = EvidenceItem(
+                public_id=_uuid(f"noisy-decoy-evidence:{index}"),
+                replay_id=replay.id,
+                telemetry_run_id=telemetry.id,
+                tier="observed",
+                source_kind="telemetry_event",
+                source_key=f"telemetry:{telemetry.run_id}:sequence:{1000 + index}",
+                schema_version=2,
+                created_at=now,
+            )
+            session.add(decoy_evidence)
+            session.flush()
+            events.append(
+                TelemetryEvent(
+                    telemetry_run_id=telemetry.id,
+                    sequence=1000 + index,
+                    frame=34 if index < noisy_decoy_count // 3 else 36,
+                    logic_time_seconds=(34 if index < noisy_decoy_count // 3 else 36)
+                    / 30.0,
+                    schema_version=2,
+                    event_type="entity_state_changed",
+                    payload_json={
+                        "object_id": 1000 + index,
+                        "previous_is_engine_moving": False,
+                        "current_is_engine_moving": False,
+                    },
+                    raw_record_json={},
+                    evidence_item_id=decoy_evidence.id,
+                )
+            )
         session.add_all(events)
         session.flush()
         entity = Entity(
@@ -644,6 +740,7 @@ def _seed_query_service(
             kind_of_flags_json=["MOBILE"],
             creation_sequence=1,
             creation_frame=10,
+            destruction_frame=attacker_destruction_frame,
             observed_json={},
         )
         session.add(entity)
@@ -675,7 +772,7 @@ def _seed_query_service(
                 entity_id=entity.id,
                 telemetry_event_id=sample_event.id,
                 sequence=1,
-                frame=30,
+                frame=first_sample_frame,
                 x=5.0,
                 y=10.0,
                 z=0.0,
@@ -683,7 +780,7 @@ def _seed_query_service(
                 current_state="MOVING",
                 source="engine",
                 sample_reason="order_forced",
-                payload_json={},
+                payload_json={"is_engine_moving": sample_is_engine_moving},
             )
         )
         session.add(
@@ -692,7 +789,7 @@ def _seed_query_service(
                 entity_id=entity.id,
                 telemetry_event_id=oob_event.id,
                 sequence=3,
-                frame=35,
+                frame=latest_sample_frame,
                 x=out_of_bounds_sample_x,
                 y=10.0,
                 z=0.0,
@@ -700,7 +797,7 @@ def _seed_query_service(
                 current_state="MOVING",
                 source="engine",
                 sample_reason="state_forced",
-                payload_json={},
+                payload_json={"is_engine_moving": sample_is_engine_moving},
             )
         )
         session.add(
@@ -765,17 +862,26 @@ def _seed_query_service(
                 manifest_evidence_id,
                 sample_evidence_id,
                 combat_evidence_id,
-                oob_evidence_id,
+                *((oob_evidence_id,) if include_latest_sample_evidence else ()),
                 *((visibility_evidence_id, visibility_summary_evidence_id, heuristic_evidence_id) if engine_native_map_events else ()),
                 *((duplicate_manifest_evidence_id,) if duplicate_manifest else ()),
                 *((construction_created_evidence_id, construction_completed_evidence_id) if construction_milestone else ()),
             ),
             ids["player:0"],
+            None
+            if not include_latest_sample_evidence
+            else {
+                "combat_evidence_public_id": combat_evidence_id,
+                "combat_frame": 40,
+                "attacker_sample_evidence_public_id": oob_evidence_id,
+                "attacker_sample_frame": latest_sample_frame,
+            },
         ),
     )
     ids["manifest_evidence"] = manifest_evidence_id
     ids["sample_evidence"] = sample_evidence_id
     ids["combat_evidence"] = combat_evidence_id
+    ids["oob_evidence"] = oob_evidence_id
     ids["duplicate_manifest_evidence"] = duplicate_manifest_evidence_id
     ids["visibility_evidence"] = visibility_evidence_id
     ids["visibility_summary_evidence"] = visibility_summary_evidence_id
@@ -807,6 +913,278 @@ def test_service_reads_only_report_bound_normalized_spatial_evidence(tmp_path: P
     assert payload["engagements"] == []
     assert payload["casualties"][0]["frame"] == 40
     assert "ignored/private/manifest.json" not in repr(payload)
+
+
+def test_casualty_projects_only_a_fresh_causal_report_cited_attacker_position(
+    tmp_path: Path,
+) -> None:
+    # Break caught: combat camera framing had only the victim location even when the engine recorded both sides.
+    service, ids = _seed_query_service(tmp_path, combat_x=15.0, out_of_bounds_sample_x=5.0)
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    casualty = payload["casualties"][0]
+    assert casualty["opposing_position"]["raw"] == {"x": 5.0, "y": 10.0, "z": 0.0}
+    assert casualty["evidence"] == [
+        {
+            "support_role": "position",
+            "evidence_public_id": ids["oob_evidence"],
+            "tier": "observed",
+            "observed_frame": 35,
+        },
+        {
+            "support_role": "event_timing",
+            "evidence_public_id": ids["combat_evidence"],
+            "tier": "observed",
+            "observed_frame": 40,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_sample_frame", "latest_sample_frame"),
+    ((10, 20), (10, 41)),
+)
+def test_casualty_does_not_project_stale_or_future_attacker_positions(
+    tmp_path: Path,
+    first_sample_frame: int,
+    latest_sample_frame: int,
+) -> None:
+    # Break caught: a visually plausible midpoint was fabricated from stale or future telemetry.
+    service, ids = _seed_query_service(
+        tmp_path,
+        out_of_bounds_sample_x=5.0,
+        first_sample_frame=first_sample_frame,
+        latest_sample_frame=latest_sample_frame,
+        movement_sample_frames=15,
+    )
+
+    with pytest.raises(MapSceneContractError, match="causal"):
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        )
+
+
+def test_casualty_accepts_an_old_sample_only_when_engine_state_marks_attacker_stationary(
+    tmp_path: Path,
+) -> None:
+    # Break caught: stationary attackers lost truthful framing solely because no movement heartbeat was due.
+    service, ids = _seed_query_service(
+        tmp_path,
+        out_of_bounds_sample_x=5.0,
+        first_sample_frame=10,
+        latest_sample_frame=20,
+        movement_sample_frames=15,
+        sample_is_engine_moving=False,
+    )
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    assert payload["casualties"][0]["opposing_position"]["raw"] == {
+        "x": 5.0,
+        "y": 10.0,
+        "z": 0.0,
+    }
+
+
+def test_casualty_rejects_attacker_position_after_attacker_was_destroyed(tmp_path: Path) -> None:
+    # Break caught: a dead attacker remained an apparent opposing side in later combat framing.
+    service, ids = _seed_query_service(
+        tmp_path,
+        out_of_bounds_sample_x=5.0,
+        sample_is_engine_moving=False,
+        attacker_destruction_frame=39,
+    )
+
+    with pytest.raises(MapSceneContractError, match="causal"):
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        )
+
+
+def test_casualty_does_not_use_an_attacker_sample_outside_fixed_report_evidence(
+    tmp_path: Path,
+) -> None:
+    # Break caught: spatial geometry could bypass the immutable report evidence membership.
+    service, ids = _seed_query_service(
+        tmp_path,
+        out_of_bounds_sample_x=5.0,
+        include_latest_sample_evidence=False,
+    )
+
+    payload = thaw_canonical(
+        service.get_scene(
+            MapSceneReadQuery(ids["replay"], ids["report"], 0, 120, sample_budget=100)
+        ).payload
+    )
+
+    casualty = payload["casualties"][0]
+    assert casualty["opposing_position"] is None
+    assert casualty["evidence"] == [
+        {"evidence_public_id": ids["combat_evidence"], "tier": "observed"}
+    ]
+
+
+def test_real_report_materializes_the_exact_causal_sample_used_by_map_casualty(
+    tmp_path: Path,
+) -> None:
+    # Break caught: the generic 32-row noisy sample omitted the attacker's exact pre-kill position.
+    seeded, ids = _seed_query_service(
+        tmp_path,
+        combat_x=15.0,
+        out_of_bounds_sample_x=5.0,
+        noisy_decoy_count=99,
+    )
+    settings = AnalyzerSettings(data_root=tmp_path / "map-query-data")
+    anchor_queries: list[str] = []
+
+    def capture_anchor_query(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "entity_samples" in statement.lower():
+            anchor_queries.append(statement.lower())
+
+    with seeded.session_factory() as session:
+        engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture_anchor_query)
+    try:
+        receipt = ReportService(
+            seeded.session_factory,
+            settings=settings,
+        ).create(ReportRequest(ids["replay"], publish=False))
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_anchor_query)
+
+    assert len(anchor_queries) == 1
+    assert "row_number() over" in anchor_queries[0]
+    assert "limit" in anchor_queries[0]
+    anchor_queries.clear()
+    event.listen(engine, "before_cursor_execute", capture_anchor_query)
+    try:
+        player_receipt = ReportService(
+            seeded.session_factory,
+            settings=settings,
+        ).create(
+            ReportRequest(
+                ids["replay"],
+                replay_player_public_id=ids["player:0"],
+                publish=False,
+            )
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_anchor_query)
+    assert anchor_queries == []
+    assert all(
+        value.claim_id != "availability:camera_combat_anchors"
+        for value in player_receipt.document.evidence_availability
+    )
+    observed_evidence = {
+        reference.public_id
+        for value in receipt.document.observed
+        for reference in value.evidence
+    }
+    anchor_value = next(
+        value
+        for value in receipt.document.evidence_availability
+        if value.claim_id == "availability:camera_combat_anchors"
+    )
+    anchor_evidence = {reference.public_id for reference in anchor_value.evidence}
+
+    assert ids["combat_evidence"] in observed_evidence
+    assert ids["oob_evidence"] not in observed_evidence
+    assert {ids["combat_evidence"], ids["oob_evidence"]}.issubset(anchor_evidence)
+    structured_asset = PublishedReportAssetDTO(
+        _uuid("camera-report-structured"),
+        "1" * 64,
+        "report_structured_json",
+        "application/json",
+        2,
+    )
+    presentation_asset = PublishedReportAssetDTO(
+        _uuid("camera-report-presentation"),
+        "2" * 64,
+        "report_presentation_bundle",
+        "application/json",
+        2,
+    )
+    published = PublishedReportDTO(
+        receipt.document,
+        structured_asset,
+        presentation_asset,
+        "<p>report</p>",
+        "report",
+        datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+    )
+    graph = PublishedReportGraphDTO(
+        "replay-report-read-model-v1",
+        "report-output-v1",
+        ids["replay"],
+        receipt.document.report_public_id,
+        ReportReplayIdentityDTO(
+            "fixture.rep",
+            "Tournament Desert",
+            "1.04",
+            120,
+            (
+                    ReportPlayerIdentityDTO(
+                        ids["player:0"], "Alice", 1, None, None
+                    ),
+            ),
+        ),
+        published,
+        (),
+    )
+    service = MapSceneQueryService(
+        seeded.session_factory,
+        _PublishedGraphAuthority(graph),
+    )
+    scene = service.get_scene(
+        MapSceneReadQuery(
+            ids["replay"],
+            receipt.document.report_public_id,
+            0,
+            120,
+            sample_budget=100,
+        )
+    )
+    payload = thaw_canonical(scene.payload)
+
+    assert payload["casualties"][0]["opposing_position"]["raw"] == {
+        "x": 5.0,
+        "y": 10.0,
+        "z": 0.0,
+    }
+    camera = CameraPlanService().create(
+        CameraPlanAuthorityV1(
+            replay_public_id=ids["replay"],
+            replay_sha256="a" * 64,
+            report_public_id=receipt.document.report_public_id,
+            telemetry_run_public_id=ids["telemetry"],
+            telemetry_trace_sha256="f" * 64,
+            map_public_id=ids["map"],
+            map_content_sha256="d" * 64,
+            evidence_horizon=EvidenceHorizonV1(frame_start=0, frame_end=120),
+            logic_frames_per_second=30,
+        ),
+        graph,
+        scene,
+    )
+    damage = next(segment for segment in camera.segments if segment.focus_kind == "damage")
+    assert (damage.target_x, damage.target_y) == (10.0, 10.0)
+    assert damage.zoom > 1.0
 
 
 def test_scene_projects_report_cited_completed_structure_at_engine_creation_position(

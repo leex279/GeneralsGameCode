@@ -37,6 +37,8 @@ EVIDENCE_START = "50000000-0000-4000-8000-000000000001"
 EVIDENCE_FIGHT = "50000000-0000-4000-8000-000000000002"
 EVIDENCE_STRUCTURE_CREATED = "50000000-0000-4000-8000-000000000003"
 EVIDENCE_STRUCTURE_COMPLETED = "50000000-0000-4000-8000-000000000004"
+EVIDENCE_ATTACKER_POSITION = "50000000-0000-4000-8000-000000000005"
+EVIDENCE_LATE_DAMAGE = "50000000-0000-4000-8000-000000000006"
 
 
 def _authority(**updates: object) -> CameraPlanAuthorityV1:
@@ -414,6 +416,318 @@ def test_camera_plan_prefers_meaningful_focus_over_repeated_damage_samples() -> 
 
     assert [item.focus_kind for item in plan.segments] == ["base_context", "engagement"]
     assert plan.segments[1].target_x == 700.0
+
+
+def test_camera_damage_focus_frames_both_sides_and_zooms_out_for_their_spread() -> None:
+    # Break caught: casualty shots centered only the victim and hid the attacking force off-screen.
+    graph = _report()
+    attacker_position = ReportValue(
+        claim_id="combat.attacker_position",
+        section="combat",
+        label="Attacker position",
+        raw_value={"x": 500.0, "y": 550.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(115, 115),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, attacker_position),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000006",
+            "frame": 120,
+            "victim_replay_player_public_id": PLAYER_ID,
+            "attacker_replay_player_public_id": None,
+            "position": _position(700.0, 650.0, 20.0),
+            "opposing_position": _position(500.0, 550.0, 10.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": 115,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 120,
+                },
+            ],
+        }
+    ]
+
+    plan = CameraPlanService().create(_authority(), graph, MapSceneReadModel(payload))
+
+    damage = plan.segments[1]
+    assert damage.focus_kind == "damage"
+    assert (damage.target_x, damage.target_y, damage.target_z) == (600.0, 600.0, 15.0)
+    assert damage.zoom == pytest.approx(1.0835410197)
+    assert damage.zoom > 1.0
+
+
+@pytest.mark.parametrize(
+    ("position_frame", "timing_frame"),
+    ((121, 120), (115, 119)),
+)
+def test_camera_rejects_opposing_damage_position_with_noncausal_provenance(
+    position_frame: int,
+    timing_frame: int,
+) -> None:
+    graph = _report()
+    attacker_position = ReportValue(
+        claim_id="combat.attacker_position",
+        section="combat",
+        label="Attacker position",
+        raw_value={"x": 500.0, "y": 550.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(position_frame, position_frame),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, attacker_position),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000007",
+            "frame": 120,
+            "position": _position(700.0, 650.0),
+            "opposing_position": _position(500.0, 550.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": position_frame,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": timing_frame,
+                },
+            ],
+        }
+    ]
+
+    with pytest.raises(CameraPlanContractError, match="replay-map-scene-v2|provenance"):
+        CameraPlanService().create(_authority(), graph, MapSceneReadModel(payload))
+
+
+def test_camera_prefers_paired_damage_over_an_earlier_one_sided_kill() -> None:
+    graph = _report()
+    attacker_position = ReportValue(
+        claim_id="combat.paired_attacker_position",
+        section="combat",
+        label="Paired attacker position",
+        raw_value={"x": 500.0, "y": 550.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(145, 145),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, attacker_position),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000008",
+            "frame": 120,
+            "position": _position(300.0, 300.0),
+            "evidence": [
+                {"evidence_public_id": EVIDENCE_FIGHT, "tier": "observed"}
+            ],
+        },
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000009",
+            "frame": 150,
+            "position": _position(700.0, 650.0),
+            "opposing_position": _position(500.0, 550.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": 145,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 150,
+                },
+            ],
+        },
+    ]
+
+    plan = CameraPlanService().create(_authority(), graph, MapSceneReadModel(payload))
+
+    damage = next(segment for segment in plan.segments if segment.focus_kind == "damage")
+    assert damage.start_frame == 150
+    assert (damage.target_x, damage.target_y) == (600.0, 600.0)
+
+
+def test_camera_keeps_one_sided_damage_after_a_paired_damage_cooldown() -> None:
+    graph = _report()
+    attacker_position = ReportValue(
+        claim_id="combat.paired_attacker_position",
+        section="combat",
+        label="Paired attacker position",
+        raw_value={"x": 500.0, "y": 550.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(145, 145),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    late_damage = ReportValue(
+        claim_id="combat.late_damage",
+        section="combat",
+        label="Late damage",
+        raw_value={"damage": 100},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(650, 650),
+        evidence=(ReportEvidenceRef(EVIDENCE_LATE_DAMAGE, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(
+            *graph.replay_wide.document.observed,
+            attacker_position,
+            late_damage,
+        ),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(_scene().payload)
+    payload["available_frame_window"] = {"frame_start": 0, "frame_end": 900}
+    query = dict(payload["query"])
+    query["frame_end"] = 900
+    payload["query"] = query
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000009",
+            "frame": 150,
+            "position": _position(700.0, 650.0),
+            "opposing_position": _position(500.0, 550.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": 145,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 150,
+                },
+            ],
+        },
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000010",
+            "frame": 650,
+            "position": _position(350.0, 300.0),
+            "evidence": [
+                {"evidence_public_id": EVIDENCE_LATE_DAMAGE, "tier": "observed"}
+            ],
+        },
+    ]
+
+    plan = CameraPlanService().create(
+        _authority(evidence_horizon=EvidenceHorizonV1(frame_start=0, frame_end=900)),
+        graph,
+        MapSceneReadModel(payload),
+    )
+
+    damage = [segment for segment in plan.segments if segment.focus_kind == "damage"]
+    assert [(item.start_frame, item.target_x) for item in damage] == [
+        (150, 600.0),
+        (650, 350.0),
+    ]
+
+
+def test_camera_paired_damage_replaces_a_nearby_milestone() -> None:
+    graph, scene = _milestone_inputs()
+    attacker_position = ReportValue(
+        claim_id="combat.paired_attacker_position",
+        section="combat",
+        label="Paired attacker position",
+        raw_value={"x": 500.0, "y": 550.0},
+        unit=None,
+        availability="available",
+        unavailable_reason=None,
+        scope={},
+        frame_window=(145, 145),
+        evidence=(ReportEvidenceRef(EVIDENCE_ATTACKER_POSITION, "observed"),),
+        details={},
+    )
+    document = replace(
+        graph.replay_wide.document,
+        observed=(*graph.replay_wide.document.observed, attacker_position),
+    )
+    graph = replace(graph, replay_wide=replace(graph.replay_wide, document=document))
+    payload = dict(scene.payload)
+    payload["engagements"] = []
+    payload["casualties"] = [
+        {
+            "casualty_public_id": "90000000-0000-4000-8000-000000000011",
+            "frame": 150,
+            "position": _position(700.0, 650.0),
+            "opposing_position": _position(500.0, 550.0),
+            "evidence": [
+                {
+                    "evidence_public_id": EVIDENCE_ATTACKER_POSITION,
+                    "tier": "observed",
+                    "support_role": "position",
+                    "observed_frame": 145,
+                },
+                {
+                    "evidence_public_id": EVIDENCE_FIGHT,
+                    "tier": "observed",
+                    "support_role": "event_timing",
+                    "observed_frame": 150,
+                },
+            ],
+        }
+    ]
+
+    plan = CameraPlanService().create(_authority(), graph, MapSceneReadModel(payload))
+
+    assert not any(segment.focus_kind == "milestone" for segment in plan.segments)
+    damage = next(segment for segment in plan.segments if segment.focus_kind == "damage")
+    assert (damage.start_frame, damage.target_x, damage.target_y) == (150, 600.0, 600.0)
 
 
 def test_player_selected_camera_uses_only_shared_frame_zero_context_before_commentary() -> None:

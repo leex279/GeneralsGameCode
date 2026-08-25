@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import TypeVar, cast
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from generals_replay_analyzer.config import AnalyzerSettings
 from generals_replay_analyzer.db.models import (
@@ -19,6 +19,8 @@ from generals_replay_analyzer.db.models import (
     AssessmentEvidence,
     CombatEvent,
     EconomyEvent,
+    Entity,
+    EntitySample,
     EvidenceItem,
     Feature,
     FeatureEvidence,
@@ -78,6 +80,7 @@ _ASSET_NAMESPACE = uuid5(NAMESPACE_URL, "replay-report-managed-asset-v1")
 _MAX_PARSER_OBSERVATIONS = 256
 _MAX_TELEMETRY_OBSERVATIONS = 512
 _MAX_NOISY_TELEMETRY_OBSERVATIONS = 32
+_MAX_CAMERA_COMBAT_ANCHORS = 256
 _CRITICAL_TELEMETRY_EVENT_TYPES = frozenset(
     {
         "construction_completed",
@@ -108,6 +111,49 @@ class _SelectedEvidenceBundle:
     """The structural citation view consumed by Task 10 domain validation."""
 
     claims: tuple[_SelectedEvidenceClaim, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CameraCombatAnchor:
+    combat_evidence_public_id: str
+    combat_frame: int
+    attacker_sample_evidence_public_id: str
+    attacker_sample_frame: int
+
+
+# TheSuperHackers @feature Leex 25/08/2026 Bound exact two-sided combat anchors by deterministic broadcast-time buckets. (#TBD)
+def _bucket_camera_combat_anchors(
+    anchors: Sequence[_CameraCombatAnchor],
+    *,
+    final_frame: int,
+    logic_frames_per_second: int,
+) -> tuple[_CameraCombatAnchor, ...]:
+    if final_frame < 0 or logic_frames_per_second not in (30, 60):
+        raise ValueError("camera combat anchor timebase is invalid")
+    bucket_width = max(
+        logic_frames_per_second * 15,
+        (final_frame + 1 + _MAX_CAMERA_COMBAT_ANCHORS - 1)
+        // _MAX_CAMERA_COMBAT_ANCHORS,
+    )
+    selected: list[_CameraCombatAnchor] = []
+    used_buckets: set[int] = set()
+    used_samples: set[str] = set()
+    for anchor in sorted(
+        anchors,
+        key=lambda item: (
+            item.combat_frame,
+            item.combat_evidence_public_id,
+            item.attacker_sample_frame,
+            item.attacker_sample_evidence_public_id,
+        ),
+    ):
+        bucket = anchor.combat_frame // bucket_width
+        if bucket in used_buckets or anchor.attacker_sample_evidence_public_id in used_samples:
+            continue
+        used_buckets.add(bucket)
+        used_samples.add(anchor.attacker_sample_evidence_public_id)
+        selected.append(anchor)
+    return tuple(selected[:_MAX_CAMERA_COMBAT_ANCHORS])
 
 
 class ReportServiceError(RuntimeError):
@@ -260,16 +306,26 @@ class ReportService:
             player_authority = self._player_evidence_authority(
                 session, replay_player, parser, telemetry
             )
-            observed, parser_evidence, telemetry_evidence, parser_total, telemetry_total = self._observed_values(
-                session, replay, replay_player, parser, telemetry, player_authority
-            )
-            availability = self._availability_values(
-                parser,
-                telemetry,
+            (
+                observed,
                 parser_evidence,
                 telemetry_evidence,
                 parser_total,
                 telemetry_total,
+                camera_combat_anchors,
+            ) = self._observed_values(
+                session, replay, replay_player, parser, telemetry, player_authority
+            )
+            availability = (
+                *self._availability_values(
+                    parser,
+                    telemetry,
+                    parser_evidence,
+                    telemetry_evidence,
+                    parser_total,
+                    telemetry_total,
+                ),
+                *((camera_combat_anchors,) if camera_combat_anchors is not None else ()),
             )
             issues = tuple(
                 ReportQualityIssue(
@@ -444,6 +500,243 @@ class ReportService:
         return None if not candidates else candidates[0]
 
     @staticmethod
+    def _telemetry_sampling_contract(
+        all_event_rows: tuple[tuple[TelemetryEvent, EvidenceItem], ...],
+        telemetry: TelemetryRun,
+    ) -> tuple[int, int] | None:
+        manifests = tuple(
+            event for event, _ in all_event_rows if event.event_type == "manifest"
+        )
+        if len(manifests) != 1:
+            return None
+        payload = _mapping(manifests[0].payload_json, label="manifest payload")
+        exporter = _mapping(
+            payload.get("exporter_settings"), label="manifest exporter settings"
+        )
+        movement_sample_frames = exporter.get("movement_sample_frames")
+        settings = _mapping(telemetry.settings_json, label="telemetry settings")
+        logic_frames_per_second = settings.get(
+            "logic_frames_per_second", payload.get("logic_frames_per_second")
+        )
+        if (
+            type(movement_sample_frames) is not int
+            or not 1 <= movement_sample_frames <= 3600
+            or logic_frames_per_second not in (30, 60)
+        ):
+            return None
+        return movement_sample_frames, logic_frames_per_second
+
+    @staticmethod
+    def _camera_combat_anchor_value(
+        session: Session,
+        replay: Replay,
+        telemetry: TelemetryRun | None,
+        all_event_rows: tuple[tuple[TelemetryEvent, EvidenceItem], ...],
+    ) -> ReportValue | None:
+        if telemetry is None or telemetry.final_frame is None:
+            return None
+        sampling = ReportService._telemetry_sampling_contract(
+            all_event_rows, telemetry
+        )
+        if sampling is None:
+            return None
+        movement_sample_frames, logic_frames_per_second = sampling
+        event_rows_by_id = {event.id: (event, evidence) for event, evidence in all_event_rows}
+        bucket_width = max(
+            logic_frames_per_second * 15,
+            (telemetry.final_frame + 1 + _MAX_CAMERA_COMBAT_ANCHORS - 1)
+            // _MAX_CAMERA_COMBAT_ANCHORS,
+        )
+        latest_sample = aliased(EntitySample)
+        latest_sample_id = (
+            select(latest_sample.id)
+            .where(
+                latest_sample.telemetry_run_id == telemetry.id,
+                latest_sample.entity_id == CombatEvent.attacker_entity_id,
+                latest_sample.frame <= CombatEvent.frame,
+            )
+            .order_by(latest_sample.frame.desc(), latest_sample.sequence.desc())
+            .limit(1)
+            .correlate(CombatEvent)
+            .scalar_subquery()
+        )
+        # TheSuperHackers @performance Leex 25/08/2026 Rank valid causal combat anchors in SQL before hydrating at most one exact pair per bounded camera bucket. (#TBD)
+        valid_pairs = (
+            select(
+                CombatEvent.id.label("combat_id"),
+                EntitySample.id.label("sample_id"),
+                (CombatEvent.frame // bucket_width).label("combat_bucket"),
+                CombatEvent.frame.label("combat_frame"),
+            )
+            .join(Entity, Entity.id == CombatEvent.attacker_entity_id)
+            .join(EntitySample, EntitySample.id == latest_sample_id)
+            .where(
+                CombatEvent.telemetry_run_id == telemetry.id,
+                CombatEvent.killing_blow.is_(True),
+                CombatEvent.attacker_entity_id.is_not(None),
+                Entity.telemetry_run_id == telemetry.id,
+                or_(
+                    Entity.destruction_frame.is_(None),
+                    Entity.destruction_frame >= CombatEvent.frame,
+                ),
+                or_(
+                    func.json_extract(
+                        EntitySample.payload_json, "$.is_engine_moving"
+                    )
+                    == 0,
+                    CombatEvent.frame - EntitySample.frame <= movement_sample_frames,
+                ),
+            )
+            .subquery()
+        )
+        sample_ranked_pairs = (
+            select(
+                valid_pairs.c.combat_id,
+                valid_pairs.c.sample_id,
+                valid_pairs.c.combat_bucket,
+                valid_pairs.c.combat_frame,
+                func.row_number()
+                .over(
+                    partition_by=valid_pairs.c.sample_id,
+                    order_by=(valid_pairs.c.combat_frame, valid_pairs.c.combat_id),
+                )
+                .label("sample_rank"),
+            )
+            .subquery()
+        )
+        ranked_pairs = (
+            select(
+                sample_ranked_pairs.c.combat_id,
+                sample_ranked_pairs.c.sample_id,
+                sample_ranked_pairs.c.combat_frame,
+                func.row_number()
+                .over(
+                    partition_by=sample_ranked_pairs.c.combat_bucket,
+                    order_by=(
+                        sample_ranked_pairs.c.combat_frame,
+                        sample_ranked_pairs.c.combat_id,
+                    ),
+                )
+                .label("bucket_rank"),
+            )
+            .where(sample_ranked_pairs.c.sample_rank == 1)
+            .subquery()
+        )
+        combat_sample_rows = tuple(
+            session.execute(
+                select(CombatEvent, EntitySample, Entity)
+                .join(ranked_pairs, ranked_pairs.c.combat_id == CombatEvent.id)
+                .join(EntitySample, EntitySample.id == ranked_pairs.c.sample_id)
+                .join(Entity, Entity.id == CombatEvent.attacker_entity_id)
+                .where(ranked_pairs.c.bucket_rank == 1)
+                .order_by(ranked_pairs.c.combat_frame, ranked_pairs.c.combat_id)
+                .limit(_MAX_CAMERA_COMBAT_ANCHORS)
+            )
+        )
+        candidates: list[_CameraCombatAnchor] = []
+        for combat, sample, entity in combat_sample_rows:
+            combat_row = event_rows_by_id.get(combat.telemetry_event_id)
+            if (
+                combat_row is None
+                or (
+                    entity.destruction_frame is not None
+                    and entity.destruction_frame < combat.frame
+                )
+            ):
+                continue
+            sample_row = event_rows_by_id.get(sample.telemetry_event_id)
+            if sample_row is None:
+                continue
+            combat_event, combat_evidence = combat_row
+            sample_event, sample_evidence = sample_row
+            sample_payload = _mapping(
+                sample.payload_json, label="attacker sample payload"
+            )
+            is_engine_moving = sample_payload.get("is_engine_moving")
+            if is_engine_moving is not False and (
+                combat.frame - sample.frame > movement_sample_frames
+            ):
+                continue
+            if (
+                combat_event.frame != combat.frame
+                or sample_event.frame != sample.frame
+                or combat_evidence.replay_id != replay.id
+                or sample_evidence.replay_id != replay.id
+                or combat_evidence.telemetry_run_id != telemetry.id
+                or sample_evidence.telemetry_run_id != telemetry.id
+                or combat_evidence.tier != "observed"
+                or sample_evidence.tier != "observed"
+                or combat_evidence.source_kind != "telemetry_event"
+                or sample_evidence.source_kind != "telemetry_event"
+            ):
+                raise ReportContractError(
+                    "camera combat anchor evidence does not match telemetry authority"
+                )
+            candidates.append(
+                _CameraCombatAnchor(
+                    combat_evidence.public_id,
+                    combat.frame,
+                    sample_evidence.public_id,
+                    sample.frame,
+                )
+            )
+        selected = _bucket_camera_combat_anchors(
+            candidates,
+            final_frame=telemetry.final_frame,
+            logic_frames_per_second=logic_frames_per_second,
+        )
+        if not selected:
+            return None
+        evidence = tuple(
+            ReportEvidenceRef(public_id, "observed")
+            for public_id in sorted(
+                {
+                    public_id
+                    for anchor in selected
+                    for public_id in (
+                        anchor.combat_evidence_public_id,
+                        anchor.attacker_sample_evidence_public_id,
+                    )
+                }
+            )
+        )
+        return ReportValue(
+            "availability:camera_combat_anchors",
+            "availability",
+            "Camera combat anchors",
+            _canonical(
+                {
+                    "schema_version": "camera-combat-anchors-v1",
+                    "bucket_width_frames": bucket_width,
+                    "pairs": [
+                        {
+                            "combat_evidence_public_id": anchor.combat_evidence_public_id,
+                            "combat_frame": anchor.combat_frame,
+                            "attacker_sample_evidence_public_id": anchor.attacker_sample_evidence_public_id,
+                            "attacker_sample_frame": anchor.attacker_sample_frame,
+                        }
+                        for anchor in selected
+                    ],
+                }
+            ),
+            None,
+            "available",
+            None,
+            _canonical({"scope_type": "replay"}),
+            (
+                min(anchor.attacker_sample_frame for anchor in selected),
+                max(anchor.combat_frame for anchor in selected),
+            ),
+            evidence,
+            _canonical(
+                {
+                    "maximum_pair_count": _MAX_CAMERA_COMBAT_ANCHORS,
+                    "selected_pair_count": len(selected),
+                }
+            ),
+        )
+
+    @staticmethod
     def _observed_values(
         session: Session,
         replay: Replay,
@@ -457,12 +750,14 @@ class ReportService:
         tuple[ReportEvidenceRef, ...],
         int,
         int,
+        ReportValue | None,
     ]:
         values: list[ReportValue] = []
         parser_refs: list[ReportEvidenceRef] = []
         telemetry_refs: list[ReportEvidenceRef] = []
         parser_total = 0
         telemetry_total = 0
+        camera_combat_anchors: ReportValue | None = None
         if parser is not None:
             all_command_rows = tuple(
                 session.execute(
@@ -517,7 +812,8 @@ class ReportService:
                 )
         if telemetry is not None:
             all_event_rows = tuple(
-                session.execute(
+                (row[0], row[1])
+                for row in session.execute(
                     select(TelemetryEvent, EvidenceItem)
                     .join(EvidenceItem, EvidenceItem.id == TelemetryEvent.evidence_item_id)
                     .where(TelemetryEvent.telemetry_run_id == telemetry.id)
@@ -529,6 +825,11 @@ class ReportService:
                     row
                     for row in all_event_rows
                     if player_authority is not None and row[1].id in player_authority
+                )
+            # TheSuperHackers @fix Leex 25/08/2026 Keep opposing-side camera anchors replay-wide because player reports cannot authorize an opponent's position evidence. (#TBD)
+            if replay_player is None:
+                camera_combat_anchors = ReportService._camera_combat_anchor_value(
+                    session, replay, telemetry, all_event_rows
                 )
             telemetry_total = len(all_event_rows)
             reportable_event_rows = tuple(
@@ -591,7 +892,14 @@ class ReportService:
                         _canonical({"source_kind": evidence.source_kind, "schema_version": evidence.schema_version}),
                     )
                 )
-        return tuple(values), tuple(parser_refs), tuple(telemetry_refs), parser_total, telemetry_total
+        return (
+            tuple(values),
+            tuple(parser_refs),
+            tuple(telemetry_refs),
+            parser_total,
+            telemetry_total,
+            camera_combat_anchors,
+        )
 
     @staticmethod
     def _availability_values(

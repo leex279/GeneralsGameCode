@@ -1848,10 +1848,34 @@ class MapCasualtyDTO(WebDTO):
     victim_replay_player_public_id: PublicId | None = None
     attacker_replay_player_public_id: PublicId | None = None
     position: SpatialPositionDTO
+    # TheSuperHackers @feature Leex 25/08/2026 Expose a causal opposing-side position without changing legacy casualty JSON when unavailable. (#TBD)
+    opposing_position: SpatialPositionDTO | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     evidence: tuple[SpatialEvidenceReferenceDTO, ...]
 
     @model_validator(mode="after")
     def _normalize(self) -> Self:
+        if self.opposing_position is not None:
+            roles = {item.support_role: item for item in self.evidence}
+            position = roles.get("position")
+            timing = roles.get("event_timing")
+            if (
+                len(self.evidence) != 2
+                or set(roles) != {"position", "event_timing"}
+                or position is None
+                or timing is None
+                or position.tier != "observed"
+                or timing.tier != "observed"
+                or position.evidence_public_id == timing.evidence_public_id
+                or position.observed_frame is None
+                or timing.observed_frame is None
+                or position.observed_frame > self.frame
+                or timing.observed_frame != self.frame
+            ):
+                raise ValueError(
+                    "opposing casualty positions require exact causal position and event timing provenance"
+                )
         object.__setattr__(self, "evidence", _ordered_spatial_evidence(self.evidence))
         return self
 

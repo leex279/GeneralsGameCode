@@ -34,6 +34,7 @@ from generals_replay_analyzer.features.evidence import (
     EvidenceRef,
     freeze_canonical,
 )
+from generals_replay_analyzer.report.model import thaw_report_value
 from generals_replay_analyzer.report.query import (
     FixedReportQuery,
     ReportGraphAmbiguousError,
@@ -390,6 +391,82 @@ class MapSceneQueryService:
         return tiers
 
     @staticmethod
+    def _camera_combat_anchors(
+        document: object,
+    ) -> dict[str, tuple[int, str, int]]:
+        values = tuple(
+            value
+            for value in getattr(document, "evidence_availability", ())
+            if getattr(value, "claim_id", None)
+            == "availability:camera_combat_anchors"
+        )
+        if not values:
+            return {}
+        if len(values) != 1:
+            raise MapSceneContractError("camera combat anchor authority is ambiguous")
+        value = values[0]
+        raw = thaw_report_value(getattr(value, "raw_value", None))
+        payload = _mapping(raw, "camera combat anchor payload")
+        if payload.get("schema_version") != "camera-combat-anchors-v1":
+            raise MapSceneContractError("camera combat anchor schema is unsupported")
+        pairs = payload.get("pairs")
+        if not isinstance(pairs, list) or not pairs or len(pairs) > 256:
+            raise MapSceneContractError("camera combat anchor pairs are not bounded")
+        output: dict[str, tuple[int, str, int]] = {}
+        used_samples: set[str] = set()
+        ordered_keys: list[tuple[int, str, int, str]] = []
+        referenced_ids: set[str] = set()
+        for raw_pair in pairs:
+            pair = _mapping(raw_pair, "camera combat anchor pair")
+            combat_evidence_id = _string(
+                pair.get("combat_evidence_public_id"),
+                "camera combat evidence identity",
+            )
+            combat_frame = _integer(
+                pair.get("combat_frame"), "camera combat frame"
+            )
+            sample_evidence_id = _string(
+                pair.get("attacker_sample_evidence_public_id"),
+                "camera attacker sample evidence identity",
+            )
+            sample_frame = _integer(
+                pair.get("attacker_sample_frame"), "camera attacker sample frame"
+            )
+            if (
+                sample_frame > combat_frame
+                or combat_evidence_id in output
+                or sample_evidence_id in used_samples
+            ):
+                raise MapSceneContractError("camera combat anchor causality is invalid")
+            output[combat_evidence_id] = (
+                combat_frame,
+                sample_evidence_id,
+                sample_frame,
+            )
+            used_samples.add(sample_evidence_id)
+            referenced_ids.update((combat_evidence_id, sample_evidence_id))
+            ordered_keys.append(
+                (
+                    combat_frame,
+                    combat_evidence_id,
+                    sample_frame,
+                    sample_evidence_id,
+                )
+            )
+        if ordered_keys != sorted(ordered_keys):
+            raise MapSceneContractError("camera combat anchors are not deterministic")
+        evidence = tuple(getattr(value, "evidence", ()))
+        if (
+            {getattr(reference, "public_id", None) for reference in evidence}
+            != referenced_ids
+            or any(getattr(reference, "tier", None) != "observed" for reference in evidence)
+        ):
+            raise MapSceneContractError(
+                "camera combat anchor evidence membership is inconsistent"
+            )
+        return output
+
+    @staticmethod
     def _available_frame_end(replay: Replay, telemetry: TelemetryRun) -> int:
         return min(
             replay.frame_count,
@@ -498,6 +575,33 @@ class MapSceneQueryService:
         ):
             raise MapSceneContractError("selected manifest evidence is ambiguous")
         return rows[0]
+
+    @staticmethod
+    def _movement_sample_frames(
+        session: Session,
+        telemetry: TelemetryRun,
+        manifest: EvidenceItem,
+    ) -> int:
+        event = session.scalar(
+            select(TelemetryEvent).where(
+                TelemetryEvent.telemetry_run_id == telemetry.id,
+                TelemetryEvent.event_type == "manifest",
+                TelemetryEvent.evidence_item_id == manifest.id,
+            )
+        )
+        if event is None:
+            raise MapSceneContractError("selected manifest event is unavailable")
+        exporter_settings = _mapping(
+            _mapping(event.payload_json, "manifest payload").get("exporter_settings"),
+            "manifest exporter settings",
+        )
+        interval = _integer(
+            exporter_settings.get("movement_sample_frames"),
+            "movement sample interval",
+        )
+        if not 1 <= interval <= 3600:
+            raise MapSceneContractError("movement sample interval is outside the accepted domain")
+        return interval
 
     def _projection(self, session: Session, map_row: Map, manifest: EvidenceItem) -> SpatialMapProjection:
         metadata = _mapping(map_row.metadata_json, "map metadata")
@@ -808,12 +912,16 @@ class MapSceneQueryService:
             replay, map_row, parser, telemetry, document, report_evidence_ids = self._authority(
                 session, query, graph
             )
+            camera_combat_anchors = self._camera_combat_anchors(document)
             available_end = self._available_frame_end(replay, telemetry)
             if canonical_index_window:
                 query = replace(query, frame_start=0, frame_end=available_end)
             elif query.frame_end > available_end:
                 raise ValueError("map scene query exceeds the available frame window")
             manifest = self._manifest_evidence(session, telemetry)
+            movement_sample_frames = self._movement_sample_frames(
+                session, telemetry, manifest
+            )
             scene_evidence_ids = report_evidence_ids | {manifest.public_id}
             projection = self._projection(session, map_row, manifest)
             players = self._player_map(session, replay, parser, telemetry)
@@ -833,6 +941,7 @@ class MapSceneQueryService:
                 session.scalars(select(Entity).where(Entity.telemetry_run_id == telemetry.id))
             )
             entity_ids_by_public = {item.public_id: item.id for item in entity_rows}
+            entities_by_id = {item.id: item for item in entity_rows}
             entities_by_object_id = {item.object_id: item for item in entity_rows}
             if not set(query.entity_public_ids).issubset(entity_ids_by_public):
                 raise MapSceneNotFoundError("entity filter is outside the fixed scene")
@@ -1237,8 +1346,48 @@ class MapSceneQueryService:
                         CombatEvent.frame >= query.frame_start,
                         CombatEvent.frame <= query.frame_end,
                     )
+                    .order_by(CombatEvent.frame, CombatEvent.id)
                 )
             )
+            authorized_sample_evidence_ids = {
+                sample_evidence_id
+                for _, sample_evidence_id, _ in camera_combat_anchors.values()
+            }
+            attacker_sample_rows = (
+                tuple(
+                    session.execute(
+                        select(EntitySample, EvidenceItem)
+                        .join(
+                            TelemetryEvent,
+                            TelemetryEvent.id == EntitySample.telemetry_event_id,
+                        )
+                        .join(
+                            EvidenceItem,
+                            EvidenceItem.id == TelemetryEvent.evidence_item_id,
+                        )
+                        .where(
+                            EntitySample.telemetry_run_id == telemetry.id,
+                            EvidenceItem.public_id.in_(authorized_sample_evidence_ids),
+                        )
+                    )
+                )
+                if authorized_sample_evidence_ids
+                else ()
+            )
+            attacker_samples: dict[str, tuple[EntitySample, EvidenceItem]] = {}
+            for sample, sample_evidence in attacker_sample_rows:
+                if sample_evidence.public_id in attacker_samples:
+                    raise MapSceneContractError(
+                        "camera attacker sample evidence is ambiguous"
+                    )
+                attacker_samples[sample_evidence.public_id] = (
+                    sample,
+                    sample_evidence,
+                )
+            if set(attacker_samples) != authorized_sample_evidence_ids:
+                raise MapSceneContractError(
+                    "camera attacker sample evidence is unresolved"
+                )
             casualties = []
             player_by_id = {item.id: item for item in players.values()}
             include_casualties = not query.event_families or "casualties" in query.event_families
@@ -1275,6 +1424,78 @@ class MapSceneQueryService:
                     ):
                         omitted_reasons.append("map_coordinate_out_of_bounds")
                         continue
+                    opposing_position = None
+                    casualty_evidence: list[dict[str, object]] = [
+                        dict(item) for item in _evidence(evidence.public_id)
+                    ]
+                    anchor = camera_combat_anchors.get(evidence.public_id)
+                    if anchor is not None:
+                        anchor_frame, sample_evidence_id, anchor_sample_frame = anchor
+                        sample, sample_evidence = attacker_samples[sample_evidence_id]
+                        attacker_entity = (
+                            None
+                            if combat.attacker_entity_id is None
+                            else entities_by_id.get(combat.attacker_entity_id)
+                        )
+                        if (
+                            anchor_frame != combat.frame
+                            or sample.frame != anchor_sample_frame
+                            or sample.frame > combat.frame
+                            or sample.entity_id != combat.attacker_entity_id
+                            or attacker_entity is None
+                            or (
+                                attacker_entity.destruction_frame is not None
+                                and attacker_entity.destruction_frame < combat.frame
+                            )
+                        ):
+                            raise MapSceneContractError(
+                                "camera combat anchor no longer matches causal telemetry"
+                            )
+                        sample_payload = _mapping(
+                            sample.payload_json, "attacker sample payload"
+                        )
+                        sample_is_moving = sample_payload.get("is_engine_moving")
+                        sample_is_current = sample_is_moving is False or (
+                            combat.frame - sample.frame <= movement_sample_frames
+                        )
+                        if (
+                            sample_evidence.tier != "observed"
+                            or sample_evidence.public_id not in report_evidence_ids
+                        ):
+                            raise MapSceneContractError(
+                                "camera attacker sample is outside fixed report evidence"
+                            )
+                        if not sample_is_current:
+                            raise MapSceneContractError(
+                                "camera attacker sample is no longer causally current"
+                            )
+                        raw_opposing = Position3(sample.x, sample.y, sample.z)
+                        if (
+                            not isinstance(
+                                world_to_map_normalized(
+                                    raw_opposing, projection.world_bounds
+                                ),
+                                SpatialUnavailable,
+                            )
+                        ):
+                            opposing_position = self._position(
+                                raw_opposing, projection, selected_transform
+                            )
+                            # TheSuperHackers @feature Leex 25/08/2026 Cite the causal attacker sample separately from the killing-blow timing used for two-sided combat framing. (#TBD)
+                            casualty_evidence = [
+                                {
+                                    "evidence_public_id": sample_evidence.public_id,
+                                    "tier": "observed",
+                                    "support_role": "position",
+                                    "observed_frame": sample.frame,
+                                },
+                                {
+                                    "evidence_public_id": evidence.public_id,
+                                    "tier": "observed",
+                                    "support_role": "event_timing",
+                                    "observed_frame": combat.frame,
+                                },
+                            ]
                     casualties.append(
                         {
                             "casualty_public_id": _public_id("casualty", telemetry.run_id, evidence.public_id),
@@ -1282,7 +1503,8 @@ class MapSceneQueryService:
                             "victim_replay_player_public_id": None if victim is None else victim.public_id,
                             "attacker_replay_player_public_id": None if attacker is None else attacker.public_id,
                             "position": self._position(location, projection, selected_transform),
-                            "evidence": _evidence(evidence.public_id),
+                            "opposing_position": opposing_position,
+                            "evidence": casualty_evidence,
                         }
                     )
             engagements: list[dict[str, object]] = []

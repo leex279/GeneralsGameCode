@@ -25,6 +25,7 @@ from generals_replay_analyzer.web.ports import (
     CoordinateTransformsDTO,
     DownsamplingDTO,
     FrameWindowDTO,
+    MapCasualtyDTO,
     MapNormalizedTransformDTO,
     MapRasterDescriptorDTO,
     MapRasterQueryDTO,
@@ -207,6 +208,60 @@ def test_spatial_evidence_requires_a_stable_public_identity() -> None:
     """Dropping public-ID validation would leak internal evidence locators into map URLs."""
     with pytest.raises(ValidationError):
         SpatialEvidenceReferenceDTO(evidence_public_id="row-42", tier="observed")
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        (
+            SpatialEvidenceReferenceDTO(
+                evidence_public_id=EVIDENCE_ID,
+                tier="observed",
+                support_role="event_timing",
+                observed_frame=40,
+            ),
+        ),
+        (
+            SpatialEvidenceReferenceDTO(
+                evidence_public_id=EVIDENCE_ID,
+                tier="observed",
+                support_role="position",
+                observed_frame=41,
+            ),
+            SpatialEvidenceReferenceDTO(
+                evidence_public_id="80000000-0000-4000-8000-000000000002",
+                tier="observed",
+                support_role="event_timing",
+                observed_frame=40,
+            ),
+        ),
+        (
+            SpatialEvidenceReferenceDTO(
+                evidence_public_id=EVIDENCE_ID,
+                tier="observed",
+                support_role="position",
+                observed_frame=35,
+            ),
+            SpatialEvidenceReferenceDTO(
+                evidence_public_id="80000000-0000-4000-8000-000000000002",
+                tier="observed",
+                support_role="event_timing",
+                observed_frame=39,
+            ),
+        ),
+    ],
+)
+def test_opposing_casualty_position_requires_exact_causal_role_provenance(
+    evidence: tuple[SpatialEvidenceReferenceDTO, ...],
+) -> None:
+    with pytest.raises(ValidationError):
+        MapCasualtyDTO(
+            casualty_public_id="90000000-0000-4000-8000-000000000010",
+            frame=40,
+            position=_position(70.0, 60.0),
+            opposing_position=_position(50.0, 50.0),
+            evidence=evidence,
+        )
 
 
 def test_availability_remains_the_shared_truthful_state_contract() -> None:
