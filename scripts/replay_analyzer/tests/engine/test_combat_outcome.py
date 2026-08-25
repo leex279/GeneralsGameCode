@@ -152,19 +152,31 @@ def test_crc_stripped_derivative_exercises_combat_mechanics_without_outcome_clai
     records, _, _ = _load_engine_trace(trace)
     counts = Counter(record.event_type for record in records)
     assert counts["damage_applied"] > 0
-    # This disposable derivative contains no authoritative healing or veterancy
-    # transition, so it cannot provide real-engine evidence for those events.
-    assert counts["healing_applied"] == 0
-    assert counts["veterancy_changed"] == 0
+    # TheSuperHackers @fix Leex 25/08/2026 Keep the CRC-stripped derivative scoped to
+    # mechanics reachability while requiring the healing and veterancy telemetry now
+    # exercised by complete playback; it remains invalid as match-history evidence. (#TBD)
+    assert counts["healing_applied"] > 0
+    assert counts["veterancy_changed"] > 0
+    paired_killing_blows = 0
     for index, record in enumerate(records):
         if record.event_type != "damage_applied" or not record.payload.killing_blow:
             continue
         destruction = next(
-            later
-            for later in records[index + 1 :]
-            if later.event_type == "object_destroyed" and later.payload.object_id == record.payload.victim_object_id
+            (
+                later
+                for later in records[index + 1 :]
+                if later.event_type == "object_destroyed"
+                and later.payload.object_id == record.payload.victim_object_id
+            ),
+            None,
         )
+        # TheSuperHackers @info Leex 25/08/2026 A killing blow can leave map rubble or
+        # reset a capturable structure to neutral without removing the engine object. (#TBD)
+        if destruction is None:
+            continue
+        paired_killing_blows += 1
         assert record.sequence < destruction.sequence
+    assert paired_killing_blows > 0
     # The derivative is mechanics-only: the test validates writer reachability, not the winner or player strategy.
 
 
