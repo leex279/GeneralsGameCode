@@ -34,19 +34,23 @@ def test_object_crc_logging_exposes_exact_transform_bits(repository_root: Path) 
     ) in object_source
 
 
-def test_zero_hour_orientation_preserves_historical_cross_product_signed_zero(repository_root: Path) -> None:
-    """Keep the historical cross products that reproduce the recorder's signed-zero matrix bits."""
+def test_zero_hour_orientation_preserves_historical_cross_product_signed_zero_in_compatibility_mode(
+    repository_root: Path,
+) -> None:
+    """Keep the opt-in historical basis without changing the default Generals Online transform path."""
     thing_source = (
         repository_root / "GeneralsMD/Code/GameEngine/Source/Common/Thing/Thing.cpp"
     ).read_text(encoding="utf-8")
 
     assert (
-        "// TheSuperHackers @bugfix Leex 24/08/2026 Restore the historical cross products so replay transforms retain their signed-zero bits. (#TBD)\n"
-        "\t\tCoord3D::crossProduct(z, u, y);\n"
-        "\t\tCoord3D::crossProduct(y, z, x);"
+        "\t\t#if defined(GENERALS_ONLINE_HIGH_FPS_SERVER)\n"
+        "\t\t// TheSuperHackers @fix Leex 24/08/2026 Preserve the historical cross-product basis and signed-zero transform layout for opt-in replay compatibility. (#TBD)\n"
+        "\t\ty.crossProduct( z, u, y );\n"
+        "\t\tx.crossProduct( y, z, x );\n"
+        "\t\t#else"
     ) in thing_source
-    assert "x.x = u.x;" not in thing_source
-    assert "y.z = 0.0f;" not in thing_source
+    assert "\t\tx.x = u.x;" in thing_source
+    assert "\t\ty.z = 0.0f;" in thing_source
 
 
 @pytest.mark.parametrize(
