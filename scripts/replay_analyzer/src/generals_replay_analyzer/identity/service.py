@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
 from uuid import uuid4
-from urllib.parse import urlparse
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -25,6 +24,7 @@ from generals_replay_analyzer.db.models import (
 )
 from generals_replay_analyzer.identity.audit import identity_cache_digest
 from generals_replay_analyzer.identity.dto import IdentityDecision, IdentityOperationReceipt, IdentityResolutionBatch
+from generals_replay_analyzer.identity.external_profile import normalize_external_profile
 from generals_replay_analyzer.identity.normalize import (
     EMBEDDED_REPLAY_NAME_NAMESPACE,
     EXTERNAL_NAMESPACE_PREFIX,
@@ -119,22 +119,18 @@ class PlayerIdentityService:
 
     @staticmethod
     def validate_external_profile(url: str | None, source: str | None) -> None:
-        if url is None and source is None:
-            return
-        if not isinstance(url, str) or not url.strip():
-            raise ValueError("external profile URL is required when source is supplied")
-        parsed = urlparse(url.strip())
-        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("external profile URL must be an HTTPS public URL")
-        if not isinstance(source, str) or not source.strip():
-            raise ValueError("external profile source is required")
+        normalize_external_profile(url, source)
 
     def update_external_profile(self, player_public_id: str, url: str | None, source: str | None) -> None:
-        self.validate_external_profile(url, source)
+        normalized_url, normalized_source = normalize_external_profile(url, source)
         with self._writer() as session:
             player = self._player(session, player_public_id)
-            player.external_profile_url = url.strip() if url else None
-            player.external_profile_source = source.strip() if source else None
+            if (player.external_profile_url, player.external_profile_source) == (normalized_url, normalized_source):
+                return
+            player.external_profile_url = normalized_url
+            player.external_profile_source = normalized_source
+            # TheSuperHackers @fix Leex 25/08/2026 Invalidate fixed profile and ETag inputs when canonical metadata changes. (#TBD)
+            player.identity_revision += 1
             player.updated_at = self._now_factory()
 
     def _revisions(self, players: list[Player]) -> tuple[tuple[str, int], ...]:

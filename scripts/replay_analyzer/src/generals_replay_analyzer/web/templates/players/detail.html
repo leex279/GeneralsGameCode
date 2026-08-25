@@ -2,8 +2,7 @@
 {% block content %}
 {% set profile = view.profile %}
 <header class="page-heading">
-  {% if profile.player.external_profile_url %}<p><a href="{{ profile.player.external_profile_url }}" rel="noopener noreferrer">{{ profile.player.external_profile_source or 'External' }} profile</a></p>{% endif %}
-  <div><span class="eyebrow">Player analysis</span><h1>{{ profile.player.display_name }}</h1><p>{{ profile.history_total_items }} analyzed match{% if profile.history_total_items != 1 %}es{% endif %} in this fixed profile.</p></div>
+  <div><span class="eyebrow">Player analysis</span><h1>{{ profile.player.display_name }}</h1><p>{{ profile.history_total_items }} analyzed match{% if profile.history_total_items != 1 %}es{% endif %} in this fixed profile.</p>{% if profile.player.external_profile_url %}<p><a href="{{ profile.player.external_profile_url }}" target="_blank" rel="noopener noreferrer">View {{ profile.player.external_profile_source or 'external' }} player profile</a></p>{% endif %}</div>
   <div class="page-actions"><a class="button" href="/players/{{ profile.player.player_public_id }}/identity">Manage identity</a><a class="button" href="/players">All players</a></div>
 </header>
 

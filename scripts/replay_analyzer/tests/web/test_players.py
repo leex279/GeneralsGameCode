@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from starlette.responses import Response
@@ -323,7 +324,7 @@ def test_player_index_maps_native_filters_and_preserves_port_order() -> None:
 def test_player_profile_renders_safe_external_profile_link_and_played_as_label() -> None:
     profile = _full_profile()
     player = profile.player.model_copy(update={"external_profile_url": "https://profiles.example.test/leex279", "external_profile_source": "Community"})
-    history = profile.replay_history[0].model_copy(update={"original_name": "old-leex"})
+    history = profile.replay_history[0].model_copy(update={"observed_name": "old-leex"})
     port = _PlayerPort(profile.model_copy(update={"player": player, "replay_history": (history,)}))
 
     with _client(port) as client:
@@ -332,9 +333,19 @@ def test_player_profile_renders_safe_external_profile_link_and_played_as_label()
 
     assert fixed.status_code == 200
     assert 'href="https://profiles.example.test/leex279"' in fixed.text
+    assert 'target="_blank"' in fixed.text
     assert 'rel="noopener noreferrer"' in fixed.text
-    assert "Community profile" in fixed.text
+    assert "View Community player profile" in fixed.text
     assert "Played as" in fixed.text and "old-leex" in fixed.text
+
+
+@pytest.mark.parametrize("url", ["http://example.com/player", "https://user:secret@example.com/player", "https://localhost/player"])
+def test_player_summary_rejects_unsafe_external_profile_links(url: str) -> None:
+    profile = _full_profile()
+    with pytest.raises(ValueError):
+        profile.player.__class__.model_validate(
+            {**profile.player.model_dump(), "external_profile_url": url, "external_profile_source": "Community"}
+        )
 
 
 def test_profile_selection_redirects_once_then_fixed_request_renders_all_evidence_families() -> None:

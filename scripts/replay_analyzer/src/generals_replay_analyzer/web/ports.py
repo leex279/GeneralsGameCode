@@ -18,6 +18,7 @@ from generals_replay_analyzer.configuration import (
     normalize_ollama_endpoint,
     validate_ollama_model_name,
 )
+from generals_replay_analyzer.identity.external_profile import normalize_external_profile
 from generals_replay_analyzer.ingress_contract import validate_replay_relative_name, validate_root_public_id
 from generals_replay_analyzer.report.model import freeze_report_value
 
@@ -2286,17 +2287,12 @@ class PlayerSummaryDTO(WebDTO):
     availability: AvailabilityDTO
     # TheSuperHackers @feature Leex 25/08/2026 Carry optional canonical external profile references to web views. (#TBD)
     external_profile_url: str | None = Field(default=None, max_length=2048)
-    external_profile_source: str | None = Field(default=None, min_length=1, max_length=128)
+    external_profile_source: str | None = Field(default=None, min_length=1, max_length=64)
 
-    @field_validator("external_profile_url")
-    @classmethod
-    def _safe_external_profile_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("external profile URL must use http or https")
-        return value
+    @model_validator(mode="after")
+    def _safe_external_profile(self) -> Self:
+        normalize_external_profile(self.external_profile_url, self.external_profile_source)
+        return self
 
     @field_validator("latest_match_at_utc")
     @classmethod

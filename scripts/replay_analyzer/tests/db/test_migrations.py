@@ -160,7 +160,7 @@ def test_packaged_baseline_has_one_head_and_exact_independent_schema(database_pa
     """Compare every table, named index/check/FK, predicate, action, and trigger to a frozen oracle."""
     config = make_alembic_config(database_path)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0005_llm_graph_immutability"]
+    assert scripts.get_heads() == ["0006_player_external_profile"]
 
     upgrade_database(database_path, "0001_replay_analyzer_v2")
     engine = create_database_engine(database_path)
@@ -215,6 +215,39 @@ def test_downgrade_and_reupgrade_restore_identical_schema(database_path: Path) -
 
     upgrade_database(database_path)
     assert _schema_fingerprint(database_path) == first
+
+
+# TheSuperHackers @test Leex 25/08/2026 Prove canonical profile columns preserve existing player identities during upgrade. (#TBD)
+def test_player_external_profile_migration_preserves_existing_players(database_path: Path) -> None:
+    upgrade_database(database_path, "0005_llm_graph_immutability")
+    engine = create_database_engine(database_path)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO players (public_id, display_name, identity_revision, created_at, updated_at) "
+                    "VALUES ('00000000-0000-4000-8000-000000000201', '-DoMiNaToR-', 4, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("players")}
+        assert {"external_profile_url", "external_profile_source"} <= columns
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT display_name, identity_revision, external_profile_url, external_profile_source "
+                    "FROM players WHERE public_id = '00000000-0000-4000-8000-000000000201'"
+                )
+            ).one()
+        assert tuple(row) == ("-DoMiNaToR-", 4, None, None)
+    finally:
+        engine.dispose()
 
 
 def test_feature_partial_quality_migration_preserves_rows_and_enforces_states(database_path: Path) -> None:
