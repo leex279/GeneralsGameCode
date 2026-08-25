@@ -698,10 +698,10 @@ def test_fixed_report_route_keeps_all_sections_inside_collapsed_provenance_and_u
     assert port.report_queries == [FixedReportQueryDTO(replay_public_id=REPLAY_ID, report_public_id=REPORT_ID)]
     assert port.timeline_queries == [
         TimelineChartQueryDTO(
-            replay_public_id=REPLAY_ID,
-            report_public_id=REPORT_ID,
-            families=("strategy",),
-        )
+                replay_public_id=REPLAY_ID,
+                report_public_id=REPORT_ID,
+                families=("strategy", "quality"),
+            )
     ]
     assert response.text.index("What happened") < response.text.index("Technical evidence and provenance")
     for key in SECTION_KEYS:

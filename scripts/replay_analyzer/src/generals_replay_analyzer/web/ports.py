@@ -1024,7 +1024,8 @@ class TimelinePointDTO(WebDTO):
     frame: int = Field(ge=0)
     value: int | float | str | None
     label: str = Field(min_length=1, max_length=256)
-    evidence: tuple[ReportEvidenceReferenceDTO, ...] = Field(min_length=1)
+    # TheSuperHackers @fix Leex 25/08/2026 Permit exact integrity markers that are sourced by replay quality records rather than gameplay claim links. (#TBD)
+    evidence: tuple[ReportEvidenceReferenceDTO, ...] = ()
 
     @field_validator("value", mode="before")
     @classmethod

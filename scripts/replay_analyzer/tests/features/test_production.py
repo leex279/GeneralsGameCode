@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from generals_replay_analyzer.features.base import FeatureWindow
 from generals_replay_analyzer.features.context import FeatureContext
 from generals_replay_analyzer.features.evidence import ObservedEvidence, thaw_canonical
 from generals_replay_analyzer.features.production import ProductionExtractor
@@ -43,6 +44,8 @@ def test_production_counts_observed_states_composition_and_matched_durations(
     assert values["production.completed_count"].raw_value == 2  # type: ignore[attr-defined]
     assert values["production.cancelled_count"].raw_value == 1  # type: ignore[attr-defined]
     assert thaw_canonical(values["production.completed_composition"].raw_value) == {"Armor": 1, "Tank": 1}  # type: ignore[attr-defined]
+    assert values["production.completed_composition"].window == FeatureWindow(50, 75)  # type: ignore[attr-defined]
+    assert values["production.completed_count"].window == FeatureWindow(50, 75)  # type: ignore[attr-defined]
     assert thaw_canonical(values["production.observed_duration_frames"].raw_value) == [  # type: ignore[attr-defined]
         {"duration_frames": 40, "identity": "unit:1", "item_name": "Tank"},
         {"duration_frames": 10, "identity": "unit:2", "item_name": "Dozer"},

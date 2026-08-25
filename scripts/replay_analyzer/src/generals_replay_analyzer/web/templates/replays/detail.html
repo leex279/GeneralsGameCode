@@ -73,7 +73,14 @@
           </article>
         {% endfor %}
       </div>
-    {% else %}<p>No supported headline metrics are available inside this report's evidence horizon.</p>{% endif %}
+    {% else %}
+      {# TheSuperHackers @fix Leex 25/08/2026 Keep the expected army-composition question visible while clearly marking an evidence-limited answer. (#TBD) #}
+      <div class="insight-grid" aria-label="Evidence-limited player highlights">
+        <article class="insight-card insight-card-wide" data-signal-id="army-composition-unavailable">
+          <span>Army composition</span><strong class="report-claim-value">Not established</strong><small>No verified completed units are available inside this report's evidence horizon.</small>
+        </article>
+      </div>
+    {% endif %}
     {% if coaching.signal_reads %}
       <!-- TheSuperHackers @feature Leex 24/08/2026 Add a plainly bounded interpretation beside measured report signals. (#TBD) -->
       <div class="signal-read-list" aria-label="Evidence-bounded signal interpretation">

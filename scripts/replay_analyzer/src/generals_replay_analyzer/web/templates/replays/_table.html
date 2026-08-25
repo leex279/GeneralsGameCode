@@ -17,7 +17,8 @@
           <td data-label="Replay"><strong>{{ replay.display_filename or replay.replay_public_id }}</strong>{% if replay.patch %}<small>Patch {{ replay.patch }}</small>{% endif %}</td>
           <td data-label="Players">{% for player in replay.players %}<span class="player-line"><b>{{ player.display_name }}</b><small>Slot {{ player.slot }}</small></span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
           <td data-label="Result">{{ replay.result or 'unavailable' }}</td>
-          <td data-label="Faction">{% for player in replay.players %}<span>{{ player.faction or 'unavailable' }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          {# TheSuperHackers @fix Leex 25/08/2026 Give missing faction values a distinct accessible label instead of duplicating the match-result state. (#TBD) #}
+          <td data-label="Faction">{% for player in replay.players %}<span>{{ player.faction or 'Faction unavailable' }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
           <td data-label="Map">{{ replay.map_display_name or replay.map_public_id or 'unavailable' }}</td>
           <td data-label="Evidence">Evidence tier: {{ replay.provenance.evidence_tier or 'unavailable' }}</td>
           <td data-label="Status"><div class="status-compact"><span>Lifecycle: {{ replay.lifecycle_state }}</span><span>Pipeline: {% if replay.pipeline %}{{ replay.pipeline.stage }} / {{ replay.pipeline.state }}{% else %}unavailable{% endif %}</span></div></td>

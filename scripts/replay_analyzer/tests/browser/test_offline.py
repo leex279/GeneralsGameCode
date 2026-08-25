@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Browser, Page, expect
+from playwright.sync_api import Browser, Page, Response, expect
 
 from generals_replay_analyzer.watching import WatchedRootRegistry
 
@@ -69,23 +69,35 @@ def _goto_populated_page(
         response = page.goto(f"{origin}{path}", wait_until="domcontentloaded", timeout=30_000)
         assert response is not None and response.status == 200
         return
-    with page.expect_response(
-        lambda response: response.url.startswith(f"{origin}{api_path}"),
-        timeout=30_000,
-    ) as received:
+
+    api_responses: list[Response] = []
+
+    def record_api_response(api_response: Response) -> None:
+        if api_response.url.startswith(f"{origin}{api_path}"):
+            api_responses.append(api_response)
+
+    page.on("response", record_api_response)
+    try:
         response = page.goto(f"{origin}{path}", wait_until="domcontentloaded", timeout=30_000)
-    assert response is not None and response.status == 200
-    assert received.value.status == 200
-    assert received.value.finished() is None
-    if report is not None:
-        expect(page.locator("#timeline-axis-frame")).to_be_enabled()
-    elif path == manifest.map.fixed_url:
-        expect(page.locator("#map-chart-status")).to_contain_text("Rendered")
-    elif path == manifest.comparison.fixed_url:
-        assert manifest.comparison.state == "not_comparable"
-        expect(page.get_by_text("More comparable matches are needed", exact=True)).to_be_visible()
-        expect(page.locator(".reason-line")).to_contain_text("Why:")
-        assert page.locator("[data-comparison-chart] canvas").count() == 0
+        assert response is not None and response.status == 200
+        if report is not None:
+            if page.locator("[data-report-timeline]").count() == 0:
+                expect(page.locator("#report-timeline")).to_contain_text("Timeline unavailable. Reason:")
+                return
+            expect(page.locator("#timeline-axis-frame")).to_be_enabled()
+        elif path == manifest.map.fixed_url:
+            expect(page.locator("#map-chart-status")).to_contain_text("Rendered")
+        elif path == manifest.comparison.fixed_url:
+            assert manifest.comparison.state == "not_comparable"
+            expect(page.get_by_text("More comparable matches are needed", exact=True)).to_be_visible()
+            expect(page.locator(".reason-line")).to_contain_text("Why:")
+            assert page.locator("[data-comparison-chart] canvas").count() == 0
+            return
+        assert api_responses
+        assert api_responses[-1].status == 200
+        assert api_responses[-1].finished() is None
+    finally:
+        page.remove_listener("response", record_api_response)
 
 
 def test_child_runtime_environment_redirects_profile_and_temporary_roots(

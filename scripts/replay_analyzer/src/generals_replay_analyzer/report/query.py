@@ -542,6 +542,29 @@ class ReportQueryService:
         }
         series: list[TimelineSeriesDTO] = []
         for document in documents:
+            for issue in document.quality_issues:
+                details = thaw_report_value(issue.details)
+                frame = details.get("crc_mismatch_frame") if isinstance(details, Mapping) else None
+                if issue.issue_code != "crc_mismatch" or type(frame) is not int or frame < 0:
+                    continue
+                if "quality" not in selected_families:
+                    continue
+                label = f"CRC mismatch at frame {frame}"
+                # TheSuperHackers @fix Leex 25/08/2026 Preserve exact terminal CRC evidence on replay-wide timelines without inventing gameplay claims. (#TBD)
+                series.append(
+                    TimelineSeriesDTO(
+                        f"quality:{issue.public_id}",
+                        "marker",
+                        "quality",
+                        None,
+                        label,
+                        None,
+                        "partial",
+                        "crc_mismatch",
+                        (TimelinePointDTO(frame, None, label, ()),),
+                        (),
+                    )
+                )
             for value in (
                 *document.evidence_availability,
                 *document.observed,

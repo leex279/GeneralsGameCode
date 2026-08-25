@@ -31,7 +31,7 @@ _EVENTS = {
 # TheSuperHackers @feature Leex 22/08/2026 Pair production durations only across observed queue and terminal identities. (#TBD)
 class ProductionExtractor:
     name = "production"
-    version = "production-v1"
+    version = "production-v2"
     feature_names = (
         "production.cancelled_count",
         "production.completed_composition",
@@ -57,6 +57,9 @@ class ProductionExtractor:
         queued = tuple(item for item in events if item.event_type.endswith("_queued"))
         completed = tuple(item for item in events if item.event_type.endswith("_completed"))
         cancelled = tuple(item for item in events if item.event_type.endswith("_cancelled"))
+        # TheSuperHackers @fix Leex 25/08/2026 Bound completion aggregates to their exact observed frames so pre-desync facts remain reviewable. (#TBD)
+        completed_window = self._event_window(completed, window)
+        completed_refs = tuple(item.ref for item in completed) or refs
         composition = Counter(
             cast(str, fact(item, "item_name"))
             for item in completed
@@ -68,11 +71,18 @@ class ProductionExtractor:
                 "production.completed_composition",
                 dict(sorted(composition.items())),
                 context.scope,
-                window,
-                refs,
+                completed_window,
+                completed_refs,
                 BASE_REGISTRY,
             ),
-            complete_value("production.completed_count", len(completed), context.scope, window, refs, BASE_REGISTRY),
+            complete_value(
+                "production.completed_count",
+                len(completed),
+                context.scope,
+                completed_window,
+                completed_refs,
+                BASE_REGISTRY,
+            ),
             complete_value("production.queued_count", len(queued), context.scope, window, refs, BASE_REGISTRY),
         ]
         # TheSuperHackers @feature Leex 24/08/2026 Surface observed science and special-power timing without inventing unresolved game labels. (#TBD)
@@ -128,6 +138,11 @@ class ProductionExtractor:
                 )
             )
         return FeatureBundle(self.name, self.version, tuple(sorted(values, key=lambda value: value.name)))
+
+    @staticmethod
+    def _event_window(events: tuple[ObservedEvidence, ...], fallback: FeatureWindow) -> FeatureWindow:
+        frames = tuple(item.frame for item in events if item.frame is not None)
+        return fallback if not frames else FeatureWindow(min(frames), max(frames))
 
     def _durations(
         self,
