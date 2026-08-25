@@ -421,6 +421,39 @@ def test_public_import_persists_the_configured_telemetry_intent(
         query_engine.dispose()
 
 
+# TheSuperHackers @test Leex 25/08/2026 Keep large corpus ingestion explicitly parser-only when requested. (#TBD)
+def test_public_import_parser_only_overrides_configured_engine_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: object,
+) -> None:
+    from sqlalchemy import select
+
+    from generals_replay_analyzer.config import AnalyzerSettings
+    from generals_replay_analyzer.db import create_database_engine, create_session_factory
+    from generals_replay_analyzer.db.models import Job
+
+    data_root = tmp_path / "product"
+    replay = tmp_path / "corpus.rep"
+    executable = tmp_path / "generalszh.exe"
+    replay.write_bytes(b"replay bytes")
+    executable.write_bytes(b"engine")
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("GENERALS_REPLAY_ANALYZER_ENGINE_EXECUTABLE", str(executable))
+
+    assert main(["import", str(replay), "--parser-only", "--json"]) == 0
+    _json_output(capsys)
+    settings = AnalyzerSettings.model_validate({})
+    query_engine = create_database_engine(settings.database_path)
+    try:
+        with create_session_factory(query_engine)() as session:
+            discovery = session.scalar(select(Job).where(Job.stage == "discover"))
+            assert discovery is not None
+            assert discovery.input_json["request_telemetry"] is False
+    finally:
+        query_engine.dispose()
+
+
 def test_worker_command_uses_external_runtime_defaults_without_uvicorn_or_migration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

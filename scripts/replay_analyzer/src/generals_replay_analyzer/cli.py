@@ -60,6 +60,11 @@ def _parser() -> argparse.ArgumentParser:
     import_command.add_argument("path", type=Path)
     import_command.add_argument("--recursive", action="store_true")
     import_command.add_argument("--reference-only", action="store_true")
+    import_command.add_argument(
+        "--parser-only",
+        action="store_true",
+        help="import replay metadata without scheduling engine telemetry",
+    )
     import_command.add_argument("--json", action="store_true", dest="json_output")
     jobs = subcommands.add_parser("jobs", help="manage durable replay-analysis jobs")
     job_commands = jobs.add_subparsers(dest="jobs_command", required=True)
@@ -297,7 +302,8 @@ def _run_import(arguments: argparse.Namespace) -> int:
                 _absolute_cli_path(arguments.path),
                 recursive=arguments.recursive,
                 reference_only=True if arguments.reference_only else None,
-                request_telemetry=request_telemetry,
+                # TheSuperHackers @feature Leex 25/08/2026 Let large replay corpora ingest immediately before selective engine analysis. (#TBD)
+                request_telemetry=request_telemetry and not arguments.parser_only,
             )
         )
         if arguments.json_output:
