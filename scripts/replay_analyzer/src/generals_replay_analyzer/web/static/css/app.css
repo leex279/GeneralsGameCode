@@ -476,7 +476,8 @@ dialog::backdrop { background: rgb(4 9 13 / 88%); }
   .mode-label { border: 0; padding: 0; }
   .utility-row { align-items: flex-start; gap: var(--cc-space-3); padding: var(--cc-space-3); }
   .local-only, .command-trigger kbd { display: none; }
-  .primary-row { display: none; }
+  /* TheSuperHackers @bugfix Leex 25/08/2026 Match the desktop shell selector so the wide tactical tabs cannot override the mobile hide rule. (#TBD) */
+  .primary-row.tab-strip { display: none; }
   main { padding: var(--cc-space-4) 1rem; }
   footer { align-items: flex-start; flex-direction: column; gap: var(--cc-space-1); padding-inline: var(--cc-space-3); }
   .page-heading { align-items: flex-start; flex-direction: column; }
