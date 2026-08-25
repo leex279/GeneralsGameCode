@@ -1,7 +1,7 @@
 """Persist optional canonical player external profile metadata."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0006_player_external_profile"
 down_revision = "0005_llm_graph_immutability"
