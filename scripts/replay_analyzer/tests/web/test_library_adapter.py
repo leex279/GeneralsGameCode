@@ -497,6 +497,25 @@ def test_dashboard_projects_available_players_map_and_detected_opening_without_c
     assert recent.observed_horizon is None
 
 
+def test_dashboard_player_profiles_preserve_slot_order_and_verified_external_metadata(
+    library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
+) -> None:
+    _settings, factory = library_database
+    with factory.begin() as session:
+        player = session.scalar(select(Player).where(Player.public_id == PLAYER_LEEX))
+        assert player is not None
+        player.external_profile_url = "https://profiles.example.test/leex"
+        player.external_profile_source = "verified tracker"
+
+    recent = _adapter(library_database).dashboard().recent_replays[0]
+
+    assert [profile.display_name for profile in recent.player_profiles] == ["leex279", "FOX27"]
+    assert recent.player_profiles[0].player_public_id == PLAYER_LEEX
+    assert recent.player_profiles[0].external_profile_url == "https://profiles.example.test/leex"
+    assert recent.player_profiles[0].external_profile_source == "verified tracker"
+    assert recent.player_profiles[1].external_profile_url is None
+
+
 def test_library_and_dashboard_do_not_present_unresolved_numeric_faction_codes(
     library_database: tuple[AnalyzerSettings, sessionmaker[Session]],
 ) -> None:

@@ -247,6 +247,7 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
         AvailabilityDTO,
         DashboardDTO,
         DashboardNoticeDTO,
+        DashboardPlayerProfileDTO,
         DashboardReplayDTO,
         DashboardTrendDTO,
     )
@@ -264,6 +265,15 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
                         label="command-center.rep",
                         players=("leex279", "FOX27"),
                         player_factions=("leex279 (USA)", "FOX27 (GLA)"),
+                        player_profiles=(
+                            DashboardPlayerProfileDTO(
+                                display_name="leex279",
+                                player_public_id="123e4567-e89b-42d3-a456-426614174011",
+                                external_profile_url="https://profiles.example.test/leex",
+                                external_profile_source="verified tracker",
+                            ),
+                            DashboardPlayerProfileDTO(display_name="FOX27"),
+                        ),
                         result="win",
                         map_name="Tournament Desert",
                         observed_horizon="Observed evidence through 0:03.5 (frame 105)",
@@ -312,6 +322,9 @@ def test_dashboard_can_render_adapter_supplied_operational_sections_without_inve
     assert response.status_code == 200
     assert action_response.status_code == 200
     assert "Recent matches" in response.text and "leex279 (USA)" in response.text
+    assert 'href="/players/123e4567-e89b-42d3-a456-426614174011">leex279</a>' in response.text
+    assert 'href="https://profiles.example.test/leex" target="_blank" rel="noopener noreferrer">External profile (verified tracker)</a>' in response.text
+    assert "C:\\" not in response.text
     assert "Tournament Desert" in response.text
     assert "Observed evidence through 0:03.5 (frame 105)" in response.text
     assert "Humvee pressure" in response.text
