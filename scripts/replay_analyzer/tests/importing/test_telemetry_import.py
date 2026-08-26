@@ -3949,6 +3949,68 @@ def test_validation_parent_cancellation_cleans_helper_process_tree(
             _terminate_test_process(process_id)
 
 
+def test_posix_validator_inherits_outer_worker_process_group() -> None:
+    """Catch a nested POSIX session escaping the worker's process-group cancellation."""
+    creation_flags, start_new_session = telemetry_import_module._validation_process_ownership("linux")
+    windows_flags, windows_start_new_session = telemetry_import_module._validation_process_ownership("win32")
+
+    assert creation_flags == 0
+    assert start_new_session is False
+    assert windows_flags == subprocess.CREATE_NEW_PROCESS_GROUP
+    assert windows_start_new_session is False
+
+
+def test_validation_descendant_metadata_excludes_parent_and_siblings() -> None:
+    """Catch explicit cleanup broadening from the validator subtree into worker siblings."""
+    parent_by_process = {
+        101: 100,
+        102: 101,
+        103: 102,
+        201: 1000,
+        202: 201,
+        100: 99,
+    }
+
+    assert telemetry_import_module._descendant_process_ids(100, parent_by_process) == (101, 102, 103)
+
+
+def test_exited_validation_leader_cleans_descendant_holding_protocol_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch reader-thread cleanup waiting for an orphan after taskkill loses the exited leader PID."""
+    trace = tmp_path / "trace.ndjson"
+    trace.touch()
+    pid_file = tmp_path / "exited-validator-pids"
+    grandchild_code = "import time; time.sleep(3)"
+    helper_code = (
+        "import os,pathlib,subprocess,sys,time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid)); "
+        "time.sleep(0.2)"
+    )
+    monkeypatch.setattr(telemetry_import_module, "_VALIDATION_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [sys.executable, "-c", helper_code],
+    )
+
+    process_ids: tuple[int, ...] = ()
+    started = time.monotonic()
+    try:
+        with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="invalid JSON"):
+            telemetry_import_module._isolated_validation(tmp_path, trace)
+        elapsed = time.monotonic() - started
+        process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        assert elapsed < 1.5
+        assert all(not _process_exists(process_id) for process_id in process_ids)
+    finally:
+        if pid_file.exists() and not process_ids:
+            process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        for process_id in process_ids:
+            _terminate_test_process(process_id)
+
+
 def test_oversized_map_asset_sidecar_is_rejected_before_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

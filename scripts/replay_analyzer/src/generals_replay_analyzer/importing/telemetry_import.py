@@ -117,6 +117,7 @@ _MAX_BRIDGE_SIDECAR_BYTES = 16 * 1024 * 1024
 _MAX_MAP_ASSET_SIDECAR_BYTES = 64 * 1024 * 1024
 _VALIDATION_TIMEOUT_SECONDS = 10 * 60.0
 _VALIDATION_PIPE_CHUNK_BYTES = 64 * 1024
+_VALIDATION_PROCESS_SCAN_SECONDS = 0.01
 _ENTITY_ID_CACHE_SIZE = 8 * 1024
 
 
@@ -305,28 +306,161 @@ def _read_validation_sidecar(path: Path, maximum_bytes: int, label: str) -> obje
         raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar is invalid") from error
 
 
-def _terminate_validation_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Terminate the owned validator process group without escaping worker tree ownership."""
+def _validation_process_ownership(platform: str) -> tuple[int, bool]:
+    if platform == "win32":
+        return subprocess.CREATE_NEW_PROCESS_GROUP, False
+    return 0, False
+
+
+def _descendant_process_ids(root_process_id: int, parent_by_process: Mapping[int, int]) -> tuple[int, ...]:
+    children_by_parent: dict[int, list[int]] = {}
+    for process_id, parent_id in parent_by_process.items():
+        children_by_parent.setdefault(parent_id, []).append(process_id)
+    descendants: list[int] = []
+    pending = sorted(children_by_parent.get(root_process_id, ()), reverse=True)
+    while pending:
+        process_id = pending.pop()
+        descendants.append(process_id)
+        pending.extend(sorted(children_by_parent.get(process_id, ()), reverse=True))
+    return tuple(descendants)
+
+
+def _windows_process_parents() -> dict[int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        return {}
+    parents: dict[int, int] = {}
+    try:
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return parents
+        while True:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                return parents
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def _linux_process_parents() -> dict[int, int]:
+    parents: dict[int, int] = {}
+    try:
+        process_paths = tuple(Path("/proc").iterdir())
+    except OSError:
+        return parents
+    for process_path in process_paths:
+        if not process_path.name.isdecimal():
+            continue
+        try:
+            stat_fields = (process_path / "stat").read_text(encoding="utf-8").rsplit(")", maxsplit=1)[1].split()
+            parents[int(process_path.name)] = int(stat_fields[1])
+        except (IndexError, OSError, ValueError):
+            continue
+    return parents
+
+
+def _linux_descendant_process_ids(root_process_id: int) -> tuple[int, ...]:
+    descendants: list[int] = []
+    pending = [root_process_id]
+    visited = {root_process_id}
+    while pending:
+        parent_id = pending.pop()
+        try:
+            child_text = Path(f"/proc/{parent_id}/task/{parent_id}/children").read_text(encoding="ascii")
+        except OSError:
+            continue
+        for value in child_text.split():
+            try:
+                child_id = int(value)
+            except ValueError:
+                continue
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            descendants.append(child_id)
+            pending.append(child_id)
+    return tuple(descendants)
+
+
+def _process_parents() -> dict[int, int]:
+    if sys.platform == "win32":
+        return _windows_process_parents()
+    if sys.platform.startswith("linux"):
+        return _linux_process_parents()
+    return {}
+
+
+def _validation_descendants(process_id: int) -> tuple[int, ...]:
+    if sys.platform.startswith("linux"):
+        return _linux_descendant_process_ids(process_id)
+    return _descendant_process_ids(process_id, _process_parents())
+
+
+def _terminate_process_id(process_id: int) -> bool:
     if sys.platform == "win32":
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/T", "/F"],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
             )
+            return completed.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            return False
     else:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.kill(process_id, signal.SIGKILL)
+            return True
         except ProcessLookupError:
-            pass
+            return False
         except OSError:
-            if process.poll() is None:
-                process.kill()
+            return False
+
+
+def _terminate_validation_process_tree(
+    process: subprocess.Popen[bytes], known_descendants: set[int] | None = None
+) -> None:
+    """Terminate only validator ancestry, preserving the worker and its siblings."""
+    # TheSuperHackers @bugfix Leex 26/08/2026 Retain validator descendant PIDs before an exited leader loses ancestry metadata. (#TBD)
+    descendants = set(known_descendants or ())
+    descendants.update(_validation_descendants(process.pid))
+    leader_running = process.poll() is None
+    tree_terminated = sys.platform == "win32" and leader_running and _terminate_process_id(process.pid)
+    if not tree_terminated:
+        live_processes = _process_parents()
+        for process_id in sorted(descendants, reverse=True):
+            if process_id in live_processes:
+                _terminate_process_id(process_id)
     if process.poll() is None:
         process.kill()
     try:
@@ -338,24 +472,17 @@ def _terminate_validation_process_tree(process: subprocess.Popen[bytes]) -> None
 
 def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
     # TheSuperHackers @performance Leex 26/08/2026 Bound validator lifetime and both protocol pipes while retaining worker-owned ancestry. (#TBD)
-    if sys.platform == "win32":
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-    else:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            start_new_session=True,
-        )
+    creation_flags, start_new_session = _validation_process_ownership(sys.platform)
+    # TheSuperHackers @bugfix Leex 26/08/2026 Keep POSIX validation inside the worker group so outer cancellation owns every stage process. (#TBD)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        creationflags=creation_flags,
+        start_new_session=start_new_session,
+    )
     assert process.stdout is not None and process.stderr is not None
     protocol_capture = _BoundedPipeCapture(_MAX_VALIDATION_PROTOCOL_BYTES)
     error_capture = _BoundedPipeCapture(_MAX_VALIDATION_ERROR_BYTES)
@@ -372,6 +499,7 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
         daemon=True,
     )
     started_threads: list[threading.Thread] = []
+    known_descendants: set[int] = set()
     failure: str | None = None
     try:
         protocol_thread.start()
@@ -379,7 +507,10 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
         error_thread.start()
         started_threads.append(error_thread)
         deadline = time.monotonic() + _VALIDATION_TIMEOUT_SECONDS
-        while process.poll() is None:
+        while True:
+            known_descendants.update(_validation_descendants(process.pid))
+            if process.poll() is not None:
+                break
             if protocol_capture.oversized.is_set():
                 failure = "telemetry validator protocol is oversized"
                 break
@@ -389,19 +520,23 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
             if time.monotonic() >= deadline:
                 failure = "telemetry validator timed out"
                 break
-            time.sleep(0.01)
+            time.sleep(_VALIDATION_PROCESS_SCAN_SECONDS)
         if failure is not None:
-            _terminate_validation_process_tree(process)
+            _terminate_validation_process_tree(process, known_descendants)
         else:
+            # A completed validator must not leave a pipe-holding descendant behind.
+            known_descendants.update(_validation_descendants(process.pid))
+            if known_descendants:
+                _terminate_validation_process_tree(process, known_descendants)
             process.wait()
     except BaseException:
-        _terminate_validation_process_tree(process)
+        _terminate_validation_process_tree(process, known_descendants)
         raise
     finally:
         for thread in started_threads:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in started_threads):
-            _terminate_validation_process_tree(process)
+            _terminate_validation_process_tree(process, known_descendants)
             raise _TelemetryValidationProcessError("telemetry validator pipe cleanup timed out")
     if failure is None and protocol_capture.oversized.is_set():
         failure = "telemetry validator protocol is oversized"
