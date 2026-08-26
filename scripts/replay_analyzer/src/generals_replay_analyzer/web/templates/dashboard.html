@@ -41,7 +41,7 @@
             {% for replay in dashboard.recent_replays %}
               <tr><td class="recent-match-analysis">
                   <span>{% if replay.analysis_state == "engine_verified" %}Full match analyzed{% elif replay.analysis_state == "desynced" %}Opening-only analysis{% else %}Analysis {{ replay.analysis_state|replace("_", " ") }}{% endif %}</span>
-                  <h4>{{ replay.players|join(" vs ") }}</h4>
+                  <h4>{% if replay.player_profiles %}{% for player in replay.player_profiles %}{% if player.player_public_id %}<a href="/players/{{ player.player_public_id }}">{{ player.display_name }}</a>{% else %}{{ player.display_name }}{% endif %}{% if player.external_profile_url %} <a href="{{ player.external_profile_url }}" target="_blank" rel="noopener noreferrer">External profile{% if player.external_profile_source %} ({{ player.external_profile_source }}){% endif %}</a>{% endif %}{% if not loop.last %} vs {% endif %}{% endfor %}{% else %}{{ replay.players|join(" vs ") }}{% endif %}</h4>
                   <dl>
                     <div><dt>Players</dt><dd>{{ replay.player_factions|join(" vs ") if replay.player_factions else replay.players|join(" vs ") }}</dd></div>
                     <div><dt>Map</dt><dd>{{ replay.map_name or "Map unavailable" }}</dd></div>

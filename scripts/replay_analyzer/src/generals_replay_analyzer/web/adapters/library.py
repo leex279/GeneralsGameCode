@@ -36,6 +36,7 @@ from generals_replay_analyzer.web.errors import PublicProblem
 from generals_replay_analyzer.web.ports import (
     AvailabilityDTO,
     DashboardDTO,
+    DashboardPlayerProfileDTO,
     DashboardReplayDTO,
     ImportRootDTO,
     ImportSubmissionDTO,
@@ -259,6 +260,15 @@ class AnalyticsLibraryAdapter:
                 # TheSuperHackers @feature Leex 24/08/2026 Keep recent cards player-first using only parser factions and persisted rule assessments. (#0)
                 player_factions=tuple(
                     f"{player.display_name} ({player.faction})" if player.faction is not None else player.display_name
+                    for player in value.players
+                ),
+                player_profiles=tuple(
+                    DashboardPlayerProfileDTO(
+                        display_name=player.display_name,
+                        player_public_id=player.player_public_id,
+                        external_profile_url=player.external_profile_url,
+                        external_profile_source=player.external_profile_source,
+                    )
                     for player in value.players
                 ),
                 result=value.result,
@@ -559,7 +569,7 @@ class AnalyticsLibraryAdapter:
         reports_by_public_id: dict[str, Report] = {}
         if parser_ids:
             player_rows = tuple(session.execute(
-                select(ReplayPlayer, Player.display_name)
+                select(ReplayPlayer, Player.display_name, Player.public_id, Player.external_profile_url, Player.external_profile_source)
                 .outerjoin(Player, Player.id == ReplayPlayer.player_id)
                 .where(
                     ReplayPlayer.parser_run_id.in_(parser_ids),
@@ -567,7 +577,7 @@ class AnalyticsLibraryAdapter:
                 )
                 .order_by(ReplayPlayer.replay_id, ReplayPlayer.slot_index, ReplayPlayer.public_id)
             ))
-            replay_player_ids = tuple(replay_player.id for replay_player, _canonical_name in player_rows)
+            replay_player_ids = tuple(row[0].id for row in player_rows)
             report_ranked = (
                 select(
                     Report.id.label("report_id"),
@@ -592,7 +602,7 @@ class AnalyticsLibraryAdapter:
                 )
             }
             reports_by_public_id.update({report.public_id: report for report in reports_by_player.values()})
-            for replay_player, canonical_name in player_rows:
+            for replay_player, canonical_name, canonical_public_id, external_profile_url, external_profile_source in player_rows:
                 label = canonical_name or replay_player.original_name or f"Player slot {replay_player.slot_index + 1}"
                 player_report = reports_by_player.get(replay_player.id)
                 players_by_replay[replay_player.replay_id].append(
@@ -603,6 +613,9 @@ class AnalyticsLibraryAdapter:
                         slot=replay_player.slot_index + 1,
                         faction=faction_label(replay_player.faction),
                         result=replay_player.result,
+                        player_public_id=canonical_public_id,
+                        external_profile_url=external_profile_url,
+                        external_profile_source=external_profile_source,
                     )
                 )
 

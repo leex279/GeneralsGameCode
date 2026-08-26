@@ -325,6 +325,7 @@ class DashboardReplayDTO(WebDTO):
     analysis_state: str = Field(min_length=1, max_length=64)
     evidence_tier: Literal["observed", "derived", "inferred"] | None = None
     observed_at: AwareDatetime | None = None
+    player_profiles: tuple[DashboardPlayerProfileDTO, ...] = Field(default=(), max_length=16)
 
     @field_validator("players")
     @classmethod
@@ -346,6 +347,22 @@ class DashboardReplayDTO(WebDTO):
         if value is not None and value.utcoffset() != timedelta(0):
             raise ValueError("dashboard observed time must use UTC")
         return value
+
+
+# TheSuperHackers @feature Leex 26/08/2026 Link verified dashboard players through immutable, path-free profile projections. (#TBD)
+class DashboardPlayerProfileDTO(WebDTO):
+    display_name: str = Field(min_length=1, max_length=256)
+    player_public_id: PublicId | None = None
+    external_profile_url: str | None = Field(default=None, max_length=2048)
+    external_profile_source: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _safe_external_profile(self) -> Self:
+        normalize_external_profile(self.external_profile_url, self.external_profile_source)
+        return self
+
+
+DashboardReplayDTO.model_rebuild()
 
 
 class DashboardTrendDTO(WebDTO):
@@ -396,6 +413,9 @@ class ReplayPlayerDisplayDTO(WebDTO):
     slot: int = Field(ge=1, le=16)
     faction: str | None = Field(default=None, min_length=1, max_length=64)
     result: str | None = Field(default=None, min_length=1, max_length=64)
+    player_public_id: PublicId | None = None
+    external_profile_url: str | None = Field(default=None, max_length=2048)
+    external_profile_source: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def _validate_report_link(self) -> Self:

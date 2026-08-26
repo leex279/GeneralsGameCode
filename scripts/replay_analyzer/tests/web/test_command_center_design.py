@@ -343,6 +343,13 @@ def test_dashboard_recent_match_card_leads_with_fixed_report_analysis_facts() ->
     assert 'class="dashboard-system-link"' in template
 
 
+def test_dashboard_recent_matches_link_verified_player_profiles_and_safe_external_profiles() -> None:
+    template = (Path(__file__).parents[2] / "src/generals_replay_analyzer/web/templates/dashboard.html").read_text(encoding="utf-8")
+    assert "replay.player_profiles" in template
+    assert 'target="_blank" rel="noopener noreferrer"' in template
+    assert "External profile" in template
+
+
 def test_library_uses_a_desktop_filter_rail_and_preserves_mobile_labelled_rows() -> None:
     source_root = Path(__file__).parents[2] / "src/generals_replay_analyzer/web"
     template = (source_root / "templates/replays/index.html").read_text(encoding="utf-8")
