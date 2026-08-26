@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -27,6 +29,7 @@ from generals_replay_analyzer.db.models import (
     EntitySample,
     EvidenceItem,
     Job,
+    JobDependency,
     ManagedAsset,
     Map,
     MapRegion,
@@ -643,6 +646,96 @@ def _importer(
     )
 
 
+def _bind_prior_observation_to_telemetry_job(
+    session_factory: sessionmaker[Session],
+    replay_sha256: str,
+    *,
+    observation_key: str,
+    current_observation_key: str,
+    telemetry_job_public_id: str,
+) -> None:
+    with session_factory.begin() as session:
+        replay = session.scalar(select(Replay).where(Replay.sha256 == replay_sha256))
+        assert replay is not None
+        telemetry = Job(
+            public_id=telemetry_job_public_id,
+            replay_id=replay.id,
+            stage="telemetry",
+            component_version="1",
+            idempotency_key=f"telemetry:1:{replay_sha256}:{telemetry_job_public_id}",
+            status="succeeded",
+            priority=100,
+            attempt_count=1,
+            max_attempts=3,
+            available_at=NOW,
+            started_at=NOW,
+            completed_at=NOW,
+            input_json={},
+            output_json={},
+            error_code=None,
+            error_message=None,
+            error_details_json=None,
+            retryable=False,
+            created_at=NOW,
+        )
+        owner = Job(
+            public_id=str(UUID(int=UUID(telemetry_job_public_id).int + 1)),
+            replay_id=replay.id,
+            stage="import_observations",
+            component_version="2",
+            idempotency_key=observation_key,
+            status="succeeded",
+            priority=100,
+            attempt_count=1,
+            max_attempts=3,
+            available_at=NOW,
+            started_at=NOW,
+            completed_at=NOW,
+            input_json={},
+            output_json={},
+            error_code=None,
+            error_message=None,
+            error_details_json=None,
+            retryable=False,
+            created_at=NOW,
+        )
+        current = Job(
+            public_id=str(UUID(int=UUID(telemetry_job_public_id).int + 2)),
+            replay_id=replay.id,
+            stage="import_observations",
+            component_version="3",
+            idempotency_key=current_observation_key,
+            status="pending",
+            priority=100,
+            attempt_count=1,
+            max_attempts=3,
+            available_at=NOW,
+            started_at=None,
+            completed_at=None,
+            input_json={},
+            output_json=None,
+            error_code=None,
+            error_message=None,
+            error_details_json=None,
+            retryable=False,
+            created_at=NOW,
+        )
+        session.add_all((telemetry, owner, current))
+        session.flush()
+        session.add_all(
+            (
+                JobDependency(job_id=owner.id, depends_on_job_id=telemetry.id, created_at=NOW),
+                JobDependency(job_id=current.id, depends_on_job_id=telemetry.id, created_at=NOW),
+            )
+        )
+
+
+def _attempt_with_telemetry_dependency(
+    attempt: TelemetryAttempt, telemetry_job_public_id: str
+) -> TelemetryAttempt:
+    return replace(attempt, telemetry_dependency_public_id=telemetry_job_public_id)
+
+
 def _refresh_registered_artifact(
     session_factory: sessionmaker[Session], attempt: TelemetryAttempt, path: Path
 ) -> TelemetryAttempt:
@@ -986,6 +1079,115 @@ def test_successful_uuid_cache_distinguishes_exact_nullable_engine_build(
     with session_factory() as session:
         run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
         assert run is not None and run.settings_json["attempt_engine_build"] is None
+
+
+def test_versioned_observation_reuses_the_same_provenanced_partial_telemetry_run(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    replay_sha256 = _replay(session_factory, settings, "versioned-partial-telemetry")
+    run_id = "253e4567-e89b-12d3-a456-426614174100"
+    telemetry_job_public_id = "00000000-0000-0000-0000-000000002531"
+    trace = _write_v1_bundle(settings.data_root / "versioned-partial" / run_id, run_id, crc_mismatch=True)
+    attempt = replace(
+        _attempt(session_factory, settings, trace, run_id),
+        replay_quality="partial",
+        strategy_analysis_scope="observed_boundary_only",
+    )
+    v2_key = f"import_observations:2:{replay_sha256}:prior"
+    v3_key = f"import_observations:3:{replay_sha256}:current"
+    _bind_prior_observation_to_telemetry_job(
+        session_factory,
+        replay_sha256,
+        observation_key=v2_key,
+        current_observation_key=v3_key,
+        telemetry_job_public_id=telemetry_job_public_id,
+    )
+    importer = _importer(session_factory, settings)
+
+    first = importer.import_replay(replay_sha256, attempt, idempotency_key=v2_key)
+    reused = importer.import_replay(
+        replay_sha256,
+        _attempt_with_telemetry_dependency(attempt, telemetry_job_public_id),
+        idempotency_key=v3_key,
+    )
+
+    assert first.status == reused.status == "succeeded"
+    assert reused.cache_hit is True and reused.event_count == first.event_count
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        importer.import_replay(replay_sha256, attempt, idempotency_key=f"{v3_key}:arbitrary")
+    with session_factory() as session:
+        runs = list(session.scalars(select(TelemetryRun).where(TelemetryRun.run_id == run_id)))
+        assert len(runs) == 1 and runs[0].settings_json["import_observations_idempotency_key"] == v2_key
+
+
+def test_versioned_observation_reuses_the_same_provenanced_missing_trace_run(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    replay_sha256 = _replay(session_factory, settings, "versioned-missing-trace")
+    run_id = "253e4567-e89b-12d3-a456-426614174101"
+    telemetry_job_public_id = "00000000-0000-0000-0000-000000002532"
+    attempt = TelemetryAttempt(
+        run_id=run_id,
+        runner_status="missing_trace",
+        replay_quality="failed",
+        strategy_analysis_scope="none",
+        process_exit_code=1,
+        engine_build=ENGINE_IDENTITY,
+        engine_executable_sha256="b" * 64,
+        diagnostics=({"code": "missing_trace", "message": "trace unavailable"},),
+        artifacts=(),
+    )
+    v2_key = f"import_observations:2:{replay_sha256}:prior"
+    v3_key = f"import_observations:3:{replay_sha256}:current"
+    _bind_prior_observation_to_telemetry_job(
+        session_factory,
+        replay_sha256,
+        observation_key=v2_key,
+        current_observation_key=v3_key,
+        telemetry_job_public_id=telemetry_job_public_id,
+    )
+    importer = _importer(session_factory, settings)
+
+    first = importer.import_replay(replay_sha256, attempt, idempotency_key=v2_key)
+    reused = importer.import_replay(
+        replay_sha256,
+        _attempt_with_telemetry_dependency(attempt, telemetry_job_public_id),
+        idempotency_key=v3_key,
+    )
+
+    assert first.status == reused.status == "failed"
+    assert reused.cache_hit is True and reused.event_count == 0
+    with session_factory() as session:
+        runs = list(session.scalars(select(TelemetryRun).where(TelemetryRun.run_id == run_id)))
+        assert len(runs) == 1 and runs[0].settings_json["import_observations_idempotency_key"] == v2_key
+
+
+def test_versioned_observation_provenance_does_not_recover_a_running_shell(
+    session_factory: sessionmaker[Session], settings: AnalyzerSettings
+) -> None:
+    replay_sha256 = _replay(session_factory, settings, "versioned-running-shell")
+    run_id = "253e4567-e89b-12d3-a456-426614174102"
+    telemetry_job_public_id = "00000000-0000-0000-0000-000000002533"
+    trace = _write_v1_bundle(settings.data_root / "versioned-running" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    v2_key = f"import_observations:2:{replay_sha256}:prior"
+    v3_key = f"import_observations:3:{replay_sha256}:current"
+    _bind_prior_observation_to_telemetry_job(
+        session_factory,
+        replay_sha256,
+        observation_key=v2_key,
+        current_observation_key=v3_key,
+        telemetry_job_public_id=telemetry_job_public_id,
+    )
+    importer = _importer(session_factory, settings)
+    importer._create_attempt(replay_sha256, attempt, NOW, v2_key)
+
+    with pytest.raises(ValueError, match="collides with another immutable attempt"):
+        importer.import_replay(
+            replay_sha256,
+            _attempt_with_telemetry_dependency(attempt, telemetry_job_public_id),
+            idempotency_key=v3_key,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1819,10 +2021,11 @@ def test_public_handler_consumes_frozen_task3_outputs_and_keeps_parser_only_dist
                     "b" * 64,
                     123,
                 ),
-            ),
-            parser_run_id="parser-run",
-        )
-    ]
+                ),
+                parser_run_id="parser-run",
+                telemetry_dependency_public_id=TELEMETRY_JOB_PUBLIC_ID,
+            )
+        ]
     assert telemetry.idempotency_keys == ["import_observations:1:key"]
 
     missing_parse = StageExecutionContext(
@@ -3443,6 +3646,134 @@ def test_large_valid_trace_is_persisted_in_bounded_batches(
 
     assert result.status == "succeeded" and result.event_count == 1_252
     assert batch_sizes == [500, 500, 252]
+
+
+def test_validation_subprocess_protocol_returns_bounded_metadata(tmp_path: Path) -> None:
+    """Catch isolated validation returning the trace-sized record graph to its parent."""
+    run_id = "b33e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v1_bundle(tmp_path, run_id)
+
+    completed = subprocess.run(
+        telemetry_import_module._validation_command(tmp_path, trace),
+        check=False,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    protocol = json.loads(completed.stdout)
+    assert set(protocol) == {
+        "bridge_relative_path",
+        "catalog_relative_path",
+        "complete",
+        "logic_frames_per_second",
+        "manifest",
+        "map_asset_relative_path",
+        "map_manifest_relative_path",
+        "map_member_relative_paths",
+        "source_trace_sha256",
+    }
+    assert "records" not in protocol
+    assert protocol["manifest"]["run_id"] == run_id
+    assert protocol["complete"]["event_type"] == "complete"
+
+
+def test_validation_subprocess_rejects_trace_path_escape(tmp_path: Path) -> None:
+    """Catch the private helper reading an artifact outside its importer-owned staging root."""
+    root = tmp_path / "staging"
+    root.mkdir()
+    outside_trace = _write_v1_bundle(tmp_path, "b43e4567-e89b-12d3-a456-426614174000")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "generals_replay_analyzer.telemetry.validation_process",
+            str(root),
+            f"../{outside_trace.name}",
+        ],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode == 1 and completed.stdout == ""
+    assert json.loads(completed.stderr)["error_message"] == "telemetry validation trace path is unsafe"
+
+
+def test_validation_protocol_limit_is_checked_before_parent_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch an abnormal helper rebuilding an unbounded stdout allocation in the importer heap."""
+    trace = tmp_path / "trace.ndjson"
+    trace.touch()
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write('x' * {telemetry_import_module._MAX_VALIDATION_PROTOCOL_BYTES + 1})",
+        ],
+    )
+
+    with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="protocol is oversized"):
+        telemetry_import_module._isolated_validation(tmp_path, trace)
+
+
+def test_validation_process_does_not_swallow_parent_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch the phase boundary converting worker cancellation into a durable validation failure."""
+    trace = tmp_path / "trace.ndjson"
+    trace.touch()
+
+    def cancelled(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(telemetry_import_module.subprocess, "run", cancelled)
+
+    with pytest.raises(KeyboardInterrupt):
+        telemetry_import_module._isolated_validation(tmp_path, trace)
+
+
+@pytest.mark.parametrize(
+    ("helper_code", "expected_exit"),
+    [
+        ("raise SystemExit(73)", 73),
+        ("print('{}')", 0),
+    ],
+)
+def test_crashed_or_invalid_validation_helper_cannot_publish_observations(
+    helper_code: str,
+    expected_exit: int,
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch helper failure bypassing the complete-validation barrier and entering publication."""
+    replay_sha256 = _replay(session_factory, settings, f"validator-helper-{expected_exit}")
+    run_id = str(UUID(int=70_000 + expected_exit))
+    trace = _write_v1_bundle(settings.data_root / "validator-helper" / run_id, run_id)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [sys.executable, "-c", helper_code],
+    )
+
+    result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
+
+    assert result.status == "failed" and result.event_count == 0
+    with session_factory() as session:
+        run = session.scalar(select(TelemetryRun).where(TelemetryRun.run_id == run_id))
+        assert run is not None and run.status == "failed"
+        for model in (TelemetryEvent, Entity, EntitySample, ProductionEvent, EconomyEvent, CombatEvent, EvidenceItem):
+            assert session.scalar(select(func.count()).select_from(model).where(model.telemetry_run_id == run.id)) == 0
 
 
 def test_seeded_map_feature_permutations_are_semantically_canonical_and_duplicates_fail(

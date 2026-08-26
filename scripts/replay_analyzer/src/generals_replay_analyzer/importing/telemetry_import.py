@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -16,7 +19,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from ..db.models import (
     CombatEvent,
@@ -24,6 +27,8 @@ from ..db.models import (
     Entity,
     EntitySample,
     EvidenceItem,
+    Job,
+    JobDependency,
     ManagedAsset,
     ParserRun,
     ProductionEvent,
@@ -34,9 +39,10 @@ from ..db.models import (
     TelemetryRun,
 )
 from ..identity.service import IdentityError
-from ..telemetry import ValidatedTelemetryBundle, iter_bundle_records, load_validated_telemetry_bundle
-from ..telemetry.compatibility import bridge_v2_damage_victim_template_name
-from ..telemetry.model import TelemetryRecord
+from ..telemetry import ValidatedTelemetryBundle, iter_bundle_records
+from ..telemetry.map_asset import MapAsset
+from ..telemetry.model import CompleteRecord, ManifestRecord, TelemetryRecord
+from ..telemetry.reader import TelemetryTraceValidationError
 from .evidence_identity import (
     telemetry_event_evidence_identities,
     validate_observed_evidence_identity,
@@ -87,6 +93,22 @@ _FAILURE_ARTIFACT_KINDS = frozenset(
         "telemetry_trace",
     }
 )
+_VALIDATION_PROTOCOL_KEYS = frozenset(
+    {
+        "manifest",
+        "complete",
+        "logic_frames_per_second",
+        "catalog_relative_path",
+        "map_manifest_relative_path",
+        "map_member_relative_paths",
+        "map_asset_relative_path",
+        "bridge_relative_path",
+        "source_trace_sha256",
+    }
+)
+_MAX_VALIDATION_PROTOCOL_BYTES = 4 * 1024 * 1024
+_MAX_VALIDATION_ERROR_BYTES = 64 * 1024
+_MAX_BRIDGE_SIDECAR_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -110,6 +132,7 @@ class TelemetryAttempt:
     diagnostics: tuple[Mapping[str, object], ...]
     artifacts: tuple[ManagedTelemetryArtifact, ...]
     parser_run_id: str | None = None
+    telemetry_dependency_public_id: str | None = None
     upstream_failure_code: str | None = None
     upstream_quality_issue_code: str | None = None
     upstream_failure_message: str | None = None
@@ -136,6 +159,10 @@ class _ClassifiedValidationError(ValueError):
         self.issue_code = issue_code
 
 
+class _TelemetryValidationProcessError(ValueError):
+    """The private validation heap exited without a valid complete-bundle protocol."""
+
+
 @dataclass(frozen=True)
 class _VerifiedArtifact:
     descriptor: ManagedTelemetryArtifact
@@ -153,6 +180,178 @@ class _NormalizedTelemetry:
     source_trace_sha256: str | None
     victim_templates: Mapping[int, str | None]
     working_root: Path
+
+
+def _validation_command(root: Path, trace_path: Path) -> list[str]:
+    logical_trace = trace_path.relative_to(root).as_posix()
+    return [
+        sys.executable,
+        "-m",
+        "generals_replay_analyzer.telemetry.validation_process",
+        str(root),
+        logical_trace,
+    ]
+
+
+def _validated_protocol_path(root: Path, value: object, label: str) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _TelemetryValidationProcessError(f"telemetry validator {label} path is invalid")
+    logical = _safe_logical_path(value)
+    path = root / Path(*logical.split("/"))
+    try:
+        info = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar is unreadable") from error
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or path.is_symlink()
+        or _is_reparse(info)
+        or resolved != path
+        or root not in resolved.parents
+    ):
+        raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar path is unsafe")
+    return path
+
+
+def _read_validation_sidecar(path: Path, maximum_bytes: int, label: str) -> object:
+    if path.stat().st_size > maximum_bytes:
+        raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar is oversized")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar is invalid") from error
+
+
+def _isolated_validation(
+    root: Path,
+    trace_path: Path,
+) -> tuple[ValidatedTelemetryBundle, str | None, dict[int, str | None]]:
+    # TheSuperHackers @performance Leex 26/08/2026 Release the strict validator heap before database publication. (#TBD)
+    # TheSuperHackers @performance Leex 26/08/2026 Spool helper output outside the importer heap and read it only after size checks. (#TBD)
+    with tempfile.TemporaryFile() as protocol_stream, tempfile.TemporaryFile() as error_stream:
+        completed = subprocess.run(
+            _validation_command(root, trace_path),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=protocol_stream,
+            stderr=error_stream,
+            close_fds=True,
+        )
+        protocol_size = protocol_stream.tell()
+        error_size = error_stream.tell()
+        if protocol_size > _MAX_VALIDATION_PROTOCOL_BYTES:
+            raise _TelemetryValidationProcessError("telemetry validator protocol is oversized")
+        protocol_stream.seek(0)
+        protocol_text = protocol_stream.read().decode("utf-8", errors="replace")
+        error_text = ""
+        if error_size <= _MAX_VALIDATION_ERROR_BYTES:
+            error_stream.seek(0)
+            error_text = error_stream.read().decode("utf-8", errors="replace")
+    if completed.returncode != 0:
+        detail = ""
+        validation_error: TelemetryTraceValidationError | None = None
+        try:
+            error_protocol = json.loads(error_text)
+            if (
+                isinstance(error_protocol, dict)
+                and set(error_protocol) == {"error_message", "error_type"}
+                and isinstance(error_protocol["error_message"], str)
+                and isinstance(error_protocol["error_type"], str)
+            ):
+                detail = f": {error_protocol['error_message']}"
+                if error_protocol["error_type"] == "TelemetryTraceValidationError":
+                    validation_error = TelemetryTraceValidationError(error_protocol["error_message"])
+        except json.JSONDecodeError:
+            pass
+        if validation_error is not None:
+            raise validation_error
+        raise _TelemetryValidationProcessError(
+            f"telemetry validator exited unsuccessfully with code {completed.returncode}{detail}"
+        )
+    try:
+        protocol = json.loads(protocol_text)
+    except json.JSONDecodeError as error:
+        raise _TelemetryValidationProcessError("telemetry validator protocol is invalid JSON") from error
+    if not isinstance(protocol, dict) or set(protocol) != _VALIDATION_PROTOCOL_KEYS:
+        raise _TelemetryValidationProcessError("telemetry validator protocol has unknown or missing fields")
+    try:
+        manifest = ManifestRecord.model_validate(
+            protocol["manifest"],
+            context={"schema_version": cast(dict[str, object], protocol["manifest"])["schema_version"]},
+        )
+        complete = CompleteRecord.model_validate(
+            protocol["complete"],
+            context={"schema_version": cast(dict[str, object], protocol["complete"])["schema_version"]},
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise _TelemetryValidationProcessError("telemetry validator record metadata is invalid") from error
+    logic_frames_per_second = protocol["logic_frames_per_second"]
+    if type(logic_frames_per_second) is not int or logic_frames_per_second not in {30, 60}:
+        raise _TelemetryValidationProcessError("telemetry validator logic timebase is invalid")
+    if manifest.run_id != complete.run_id or manifest.schema_version != complete.schema_version:
+        raise _TelemetryValidationProcessError("telemetry validator terminal identity is inconsistent")
+    catalog_path = _validated_protocol_path(root, protocol["catalog_relative_path"], "catalog")
+    map_manifest_path = _validated_protocol_path(root, protocol["map_manifest_relative_path"], "map manifest")
+    member_values = protocol["map_member_relative_paths"]
+    if not isinstance(member_values, list):
+        raise _TelemetryValidationProcessError("telemetry validator map member paths are invalid")
+    map_member_paths_list: list[Path] = []
+    for value in member_values:
+        member_path = _validated_protocol_path(root, value, "map member")
+        if member_path is None:
+            raise _TelemetryValidationProcessError("telemetry validator map member path is invalid")
+        map_member_paths_list.append(member_path)
+    map_member_paths = tuple(map_member_paths_list)
+    if len(map_member_paths) != len(set(map_member_paths)):
+        raise _TelemetryValidationProcessError("telemetry validator map member paths are duplicated")
+    map_asset_path = _validated_protocol_path(root, protocol["map_asset_relative_path"], "map asset")
+    map_asset = None
+    if map_asset_path is not None:
+        try:
+            map_asset = MapAsset.model_validate(json.loads(map_asset_path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise _TelemetryValidationProcessError("telemetry validator map asset sidecar is invalid") from error
+    bridge_path = _validated_protocol_path(root, protocol["bridge_relative_path"], "compatibility bridge")
+    victim_templates: dict[int, str | None] = {}
+    if bridge_path is not None:
+        bridge_document = _read_validation_sidecar(
+            bridge_path,
+            _MAX_BRIDGE_SIDECAR_BYTES,
+            "compatibility bridge",
+        )
+        if not isinstance(bridge_document, dict):
+            raise _TelemetryValidationProcessError("telemetry validator compatibility bridge is invalid")
+        for raw_sequence, value in bridge_document.items():
+            try:
+                sequence = int(raw_sequence)
+            except (TypeError, ValueError) as error:
+                raise _TelemetryValidationProcessError("telemetry validator bridge sequence is invalid") from error
+            if str(sequence) != raw_sequence or sequence < 0 or (value is not None and not isinstance(value, str)):
+                raise _TelemetryValidationProcessError("telemetry validator bridge value is invalid")
+            victim_templates[sequence] = value
+    source_trace_sha256 = protocol["source_trace_sha256"]
+    if source_trace_sha256 is not None:
+        if not isinstance(source_trace_sha256, str):
+            raise _TelemetryValidationProcessError("telemetry validator source digest is invalid")
+        _require_sha256(source_trace_sha256, "telemetry validator source digest")
+    return (
+        ValidatedTelemetryBundle(
+            trace_path,
+            (),
+            manifest,
+            complete,
+            logic_frames_per_second,
+            catalog_path,
+            map_manifest_path,
+            map_member_paths,
+            map_asset,
+        ),
+        cast(str | None, source_trace_sha256),
+        victim_templates,
+    )
 
 
 def _normalized_record_json(record: TelemetryRecord) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -407,6 +606,8 @@ class TelemetryObservationImporter:
                 raise ValueError(f"telemetry {label} is invalid")
         if attempt.parser_run_id is not None:
             _require_run_id(attempt.parser_run_id)
+        if attempt.telemetry_dependency_public_id is not None:
+            _require_run_id(attempt.telemetry_dependency_public_id)
         if attempt.engine_build is not None and _contains_pathlike_text(attempt.engine_build):
             raise ValueError("telemetry engine build contains path provenance")
         for failure_value in (
@@ -443,7 +644,14 @@ class TelemetryObservationImporter:
                 and run.strategy_analysis_scope == attempt.strategy_analysis_scope
                 and run.process_exit_code == attempt.process_exit_code
                 and run.engine_executable_sha256 == attempt.engine_executable_sha256
-                and all(settings.get(key) == value for key, value in expected_attempt_settings.items())
+                and self._attempt_settings_match(
+                    session,
+                    run,
+                    settings,
+                    expected_attempt_settings,
+                    attempt,
+                    idempotency_key,
+                )
                 and run.diagnostics_json == [dict(diagnostic) for diagnostic in attempt.diagnostics]
             )
             if not matches or replay is None:
@@ -462,17 +670,101 @@ class TelemetryObservationImporter:
             except (OSError, ValueError):
                 return False
             try:
+                expected_settings = _successful_attempt_settings(
+                    attempt,
+                    idempotency_key,
+                    normalized.bundle,
+                )
                 return (
-                    settings == _successful_attempt_settings(
+                    self._settings_match(
+                        session,
+                        run,
+                        settings,
+                        expected_settings,
                         attempt,
                         idempotency_key,
-                        normalized.bundle,
                     )
                     and run.trace_sha256
                     == (normalized.source_trace_sha256 or normalized.bundle.complete.payload.trace_sha256)
                 )
             finally:
                 shutil.rmtree(normalized.working_root, ignore_errors=True)
+
+    # TheSuperHackers @bugfix Leex 26/08/2026 Reuse versioned observation consumers only when both persisted job keys share the exact telemetry dependency edge. (#TBD)
+    def _attempt_settings_match(
+        self,
+        session: Session,
+        run: TelemetryRun,
+        settings: Mapping[str, object],
+        expected: Mapping[str, object],
+        attempt: TelemetryAttempt,
+        idempotency_key: str | None,
+    ) -> bool:
+        return all(
+            key == "import_observations_idempotency_key" or settings.get(key) == value
+            for key, value in expected.items()
+        ) and self._observation_owner_matches(session, run, settings, attempt, idempotency_key)
+
+    def _settings_match(
+        self,
+        session: Session,
+        run: TelemetryRun,
+        settings: Mapping[str, object],
+        expected: Mapping[str, object],
+        attempt: TelemetryAttempt,
+        idempotency_key: str | None,
+    ) -> bool:
+        actual_without_owner = {
+            key: value for key, value in settings.items() if key != "import_observations_idempotency_key"
+        }
+        expected_without_owner = {
+            key: value for key, value in expected.items() if key != "import_observations_idempotency_key"
+        }
+        return (
+            actual_without_owner == expected_without_owner
+            and self._observation_owner_matches(session, run, settings, attempt, idempotency_key)
+        )
+
+    @staticmethod
+    def _observation_owner_matches(
+        session: Session,
+        run: TelemetryRun,
+        settings: Mapping[str, object],
+        attempt: TelemetryAttempt,
+        idempotency_key: str | None,
+    ) -> bool:
+        prior_key = settings.get("import_observations_idempotency_key")
+        if prior_key == idempotency_key:
+            return True
+        if (
+            not isinstance(prior_key, str)
+            or not prior_key
+            or idempotency_key is None
+            or attempt.telemetry_dependency_public_id is None
+        ):
+            return False
+        owner = aliased(Job)
+        telemetry = aliased(Job)
+
+        def has_exact_dependency(observation_key: str) -> bool:
+            matching = tuple(
+                session.scalars(
+                    select(owner.id)
+                    .join(JobDependency, JobDependency.job_id == owner.id)
+                    .join(telemetry, telemetry.id == JobDependency.depends_on_job_id)
+                    .where(
+                        owner.stage == "import_observations",
+                        owner.idempotency_key == observation_key,
+                        owner.replay_id == run.replay_id,
+                        telemetry.stage == "telemetry",
+                        telemetry.public_id == attempt.telemetry_dependency_public_id,
+                        telemetry.replay_id == run.replay_id,
+                    )
+                )
+            )
+            return len(matching) == 1
+
+        return has_exact_dependency(prior_key) and has_exact_dependency(idempotency_key)
 
     # TheSuperHackers @bugfix Leex 23/08/2026 Reuse only telemetry graphs with canonical sequence citations. (#TBD)
     @staticmethod
@@ -547,7 +839,14 @@ class TelemetryObservationImporter:
                 and run.process_exit_code == attempt.process_exit_code
                 and run.engine_build == (attempt.engine_build or "unavailable")
                 and run.engine_executable_sha256 == attempt.engine_executable_sha256
-                and settings == _attempt_settings(attempt, idempotency_key)
+                and self._settings_match(
+                    session,
+                    run,
+                    settings,
+                    _attempt_settings(attempt, idempotency_key),
+                    attempt,
+                    idempotency_key,
+                )
             ):
                 return False
             assert replay is not None
@@ -919,8 +1218,7 @@ class TelemetryObservationImporter:
                     trace_path = destination
             if trace_path is None:
                 raise ValueError("missing telemetry trace")
-            source_trace_sha256, victim_templates = bridge_v2_damage_victim_template_name(trace_path)
-            bundle = load_validated_telemetry_bundle(trace_path, retain_records=False)
+            bundle, source_trace_sha256, victim_templates = _isolated_validation(root, trace_path)
             if str(bundle.manifest.run_id) != attempt.run_id:
                 raise ValueError("telemetry run ID differs from the selected artifact metadata")
             if attempt.engine_build is not None and bundle.manifest.payload.engine_build != attempt.engine_build:
@@ -1680,6 +1978,7 @@ class ObservationImportHandler:
                 attempt,
                 # TheSuperHackers @bugfix Leex 22/08/2026 Never treat a failed parser shell as player-mapping authority. (#TBD)
                 parser_run_id=parser_result.run_id if parser_result.status == "succeeded" else None,
+                telemetry_dependency_public_id=telemetry_dependency.job_public_id,
             )
             telemetry_result = self._import_telemetry(context, attempt)
             if telemetry_result.status != "succeeded":
@@ -1694,6 +1993,7 @@ class ObservationImportHandler:
             attempt = replace(
                 attempt,
                 parser_run_id=parser_result.run_id if parser_result.status == "succeeded" else None,
+                telemetry_dependency_public_id=telemetry_dependency.job_public_id,
             )
             telemetry_result = self._import_telemetry(context, attempt)
             if telemetry_result.status != "failed":

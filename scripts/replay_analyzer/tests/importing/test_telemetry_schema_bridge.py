@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from telemetry.test_combat_outcome_contract import RUN_ID, _valid_trace
 
 from generals_replay_analyzer.config import AnalyzerSettings
+from generals_replay_analyzer.importing import telemetry_import as telemetry_import_module
 from generals_replay_analyzer.importing.telemetry_import import (
     ManagedTelemetryArtifact,
     TelemetryAttempt,
@@ -95,24 +97,31 @@ def test_importer_bridges_known_damage_victim_template_name_without_losing_obser
     trace_root.mkdir()
     trace = _valid_trace(trace_root)
     source_trace_sha256 = _add_damage_field(trace, "victim_template_name", "ChinaTankBattleMaster")
+    immutable_source = trace.read_bytes()
 
     with pytest.raises(TelemetryTraceValidationError, match="victim_template_name.*unexpected"):
         load_validated_telemetry_bundle(trace)
 
     importer, verified, attempt = _normalized_importer(session_factory, settings, trace)
     normalized = importer._load_normalized_bundle(verified, attempt)
+    try:
+        damage = next(
+            record
+            for record in telemetry_import_module.iter_bundle_records(normalized.bundle)
+            if record.event_type == "damage_applied"
+        )
+        raw_record, damage_payload = telemetry_import_module._normalized_record_json(damage)
+        damage_payload["victim_template_name"] = normalized.victim_templates[damage.sequence]
+        raw_record["payload"] = damage_payload
 
-    damage_payload = next(
-        payload for record, payload in zip(normalized.bundle.records, normalized.payloads, strict=True)
-        if record.event_type == "damage_applied"
-    )
-    damage_raw_record = next(
-        raw_record for record, raw_record in zip(normalized.bundle.records, normalized.records, strict=True)
-        if record.event_type == "damage_applied"
-    )
-    assert damage_payload["victim_template_name"] == "ChinaTankBattleMaster"
-    assert damage_raw_record["payload"]["victim_template_name"] == "ChinaTankBattleMaster"
-    assert normalized.source_trace_sha256 == source_trace_sha256
+        assert normalized.bundle.records == ()
+        assert damage_payload["victim_template_name"] == "ChinaTankBattleMaster"
+        assert raw_record["payload"]["victim_template_name"] == "ChinaTankBattleMaster"
+        assert normalized.source_trace_sha256 == source_trace_sha256
+        assert trace.read_bytes() == immutable_source
+        assert normalized.bundle.trace_path != trace
+    finally:
+        shutil.rmtree(normalized.working_root)
 
 
 def test_importer_does_not_bridge_other_damage_payload_extensions(
