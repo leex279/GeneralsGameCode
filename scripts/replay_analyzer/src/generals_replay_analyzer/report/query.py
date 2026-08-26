@@ -159,9 +159,12 @@ _EVIDENCE_SOURCE_KINDS: dict[str, tuple[str, ...]] = {
     "inferred": ("llm",),
 }
 _SUPPORTED_ANALYSIS_STAGE_VERSIONS = {
-    DERIVE_FEATURES: frozenset({"1", DERIVE_FEATURES_VERSION}),
+    # TheSuperHackers @bugfix Leex 26/08/2026 Keep immutable version-two reports readable after the recovery-only version-three requeue. (#TBD)
+    DERIVE_FEATURES: frozenset({"1", "2", DERIVE_FEATURES_VERSION}),
     ASSESS_STRATEGIES: frozenset({"1", ASSESS_STRATEGIES_VERSION}),
 }
+# TheSuperHackers @bugfix Leex 26/08/2026 Preserve immutable observation branches across bounded-import requeue versions. (#TBD)
+_SUPPORTED_IMPORT_OBSERVATION_VERSIONS = frozenset({"1", "2", IMPORT_OBSERVATIONS_VERSION})
 
 
 # TheSuperHackers @fix Leex 25/08/2026 Keep immutable reports readable across closed assessment-stage upgrades. (#TBD)
@@ -1083,7 +1086,10 @@ class ReportQueryService:
         ):
             raise ReportGraphContractError("legacy assessment is not bound to one derive-features stage")
         observation = self._dependency(session, replay, derive)
-        if observation.stage != IMPORT_OBSERVATIONS or observation.component_version != IMPORT_OBSERVATIONS_VERSION:
+        if (
+            observation.stage != IMPORT_OBSERVATIONS
+            or observation.component_version not in _SUPPORTED_IMPORT_OBSERVATION_VERSIONS
+        ):
             raise ReportGraphContractError("legacy derive-features is not bound to one observation stage")
         for stage_job in (observation, derive, assess):
             stage_result = self._exact_result(session, stage_job)
@@ -1222,7 +1228,7 @@ class ReportQueryService:
         if (
             not isinstance(branch_recipe, Mapping)
             or set(branch_recipe) != {"import_observations_version", "import_mode", "parse", "telemetry"}
-            or branch_recipe.get("import_observations_version") != IMPORT_OBSERVATIONS_VERSION
+            or branch_recipe.get("import_observations_version") != observation.component_version
             or branch_recipe.get("import_mode") not in {"copy", "reference"}
         ):
             raise ReportGraphContractError("legacy observation branch recipe is invalid")
@@ -1251,7 +1257,7 @@ class ReportQueryService:
             raise ReportGraphContractError("legacy observation branch recipe is invalid")
         provisional_key = content_key(
             IMPORT_OBSERVATIONS,
-            IMPORT_OBSERVATIONS_VERSION,
+            observation.component_version,
             replay.sha256,
             dict(branch_recipe),
         )
@@ -1521,7 +1527,7 @@ class ReportQueryService:
             or observation.idempotency_key
             != content_key(
                 IMPORT_OBSERVATIONS,
-                IMPORT_OBSERVATIONS_VERSION,
+                observation.component_version,
                 replay.sha256,
                 selected_identity,
             )

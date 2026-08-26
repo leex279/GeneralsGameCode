@@ -736,6 +736,8 @@ def _add_legacy_report_claimant(
     *,
     label: str,
     poison: str | None = None,
+    legacy_analysis_version: str = "1",
+    legacy_observation_version: str = IMPORT_OBSERVATIONS_VERSION,
 ) -> Job:
     direct_id = session.scalar(select(JobDependency.depends_on_job_id).where(JobDependency.job_id == original.id))
     assert direct_id is not None
@@ -782,7 +784,7 @@ def _add_legacy_report_claimant(
     )
     branch_recipe = {
         "import_mode": import_mode,
-        "import_observations_version": IMPORT_OBSERVATIONS_VERSION,
+        "import_observations_version": legacy_observation_version,
         "parse": {
             "import_mode": import_mode,
             "parse_version": PARSE_VERSION,
@@ -1050,7 +1052,7 @@ def _add_legacy_report_claimant(
     selected_digest = input_digest(selected_identity)
     legacy_observation_idempotency_key = content_key(
         IMPORT_OBSERVATIONS,
-        IMPORT_OBSERVATIONS_VERSION,
+        legacy_observation_version,
         cast(str, replay_input["replay_sha256"]),
         selected_identity,
     )
@@ -1072,14 +1074,14 @@ def _add_legacy_report_claimant(
         replay_id=original.replay_id,  # type: ignore[arg-type]
         replay_sha256=cast(str, replay_input["replay_sha256"]),
         stage=IMPORT_OBSERVATIONS,
-        component_version=IMPORT_OBSERVATIONS_VERSION,
+        component_version=legacy_observation_version,
         input_json={
             **replay_input,
             "branch_recipe": branch_recipe,
             "dependency_identity_bound": True,
             "provisional_idempotency_key": content_key(
                 IMPORT_OBSERVATIONS,
-                IMPORT_OBSERVATIONS_VERSION,
+                legacy_observation_version,
                 cast(str, replay_input["replay_sha256"]),
                 branch_recipe,
             ),
@@ -1145,7 +1147,6 @@ def _add_legacy_report_claimant(
             completed_at=now,
         )
     # TheSuperHackers @fix Leex 25/08/2026 Keep synthetic legacy claimants internally version-consistent. (#TBD)
-    legacy_analysis_version = "1"
     legacy_derive = _job(
         public_id=stable_uuid(f"{label}-derive"),
         replay_id=original.replay_id,  # type: ignore[arg-type]
@@ -1258,15 +1259,25 @@ def _add_legacy_report_claimant(
         )
     if parse_is_new:
         session.add(_stage_result(legacy_parse, parse_output, now, f"{label}-parse-result"))
-    if legacy_telemetry is not None and telemetry_is_new:
-        assert telemetry_parent is not None
-        session.add_all(
-            (
-                JobDependency(job_id=legacy_observation.id, depends_on_job_id=legacy_telemetry.id, created_at=now),
-                JobDependency(job_id=legacy_telemetry.id, depends_on_job_id=telemetry_parent.id, created_at=now),
+    if legacy_telemetry is not None:
+        if observation_is_new:
+            session.add(
+                JobDependency(
+                    job_id=legacy_observation.id,
+                    depends_on_job_id=legacy_telemetry.id,
+                    created_at=now,
+                )
             )
-        )
-        if legacy_telemetry.status == "succeeded":
+        if telemetry_is_new:
+            assert telemetry_parent is not None
+            session.add(
+                JobDependency(
+                    job_id=legacy_telemetry.id,
+                    depends_on_job_id=telemetry_parent.id,
+                    created_at=now,
+                )
+            )
+        if telemetry_is_new and legacy_telemetry.status == "succeeded":
             assert isinstance(legacy_telemetry.output_json, dict)
             session.add(
                 _stage_result(
@@ -1317,6 +1328,7 @@ def test_fixed_query_verifies_assets_and_aggregates_replay_and_players_without_w
 
 def test_report_reader_accepts_only_closed_supported_analysis_stage_versions() -> None:
     assert report_query._supported_analysis_stage_version(DERIVE_FEATURES, "1")
+    assert report_query._supported_analysis_stage_version(DERIVE_FEATURES, "2")
     assert report_query._supported_analysis_stage_version(DERIVE_FEATURES, DERIVE_FEATURES_VERSION)
     assert report_query._supported_analysis_stage_version(ASSESS_STRATEGIES, "1")
     assert report_query._supported_analysis_stage_version(ASSESS_STRATEGIES, ASSESS_STRATEGIES_VERSION)
@@ -1821,6 +1833,37 @@ def test_legacy_report_uses_unique_derive_dependency_available_at_assess_complet
         published_graph.service.get_report(
             FixedReportQuery(published_graph.replay_public_id, published_graph.player_report_id)
         )
+
+
+def test_legacy_observation_authenticates_its_persisted_supported_version(
+    report_database: SeededReportDatabase,
+    published_graph: PublishedGraph,
+) -> None:
+    factory = report_database.session_factory  # type: ignore[assignment]
+    label = "query-production-observation-v2"
+    with factory.begin() as session:
+        original = session.scalar(select(Job).where(Job.stage == RENDER_REPORT, Job.status == "succeeded"))
+        assert original is not None
+        _add_legacy_report_claimant(
+            session,
+            original,
+            datetime(2026, 8, 23, 10, 4, tzinfo=UTC),
+            label=label,
+            poison="parser_only",
+            legacy_analysis_version="2",
+            legacy_observation_version="2",
+        )
+        replay = session.get(Replay, original.replay_id)
+        observation = session.scalar(
+            select(Job).where(Job.public_id == stable_uuid(f"{label}-observation"))
+        )
+        assert replay is not None and observation is not None
+        branch, telemetry_run_id = published_graph.service._validate_observation_authority(
+            session, replay, observation
+        )
+
+    assert branch["import_observations_version"] == "2"
+    assert telemetry_run_id is None
 
 
 @pytest.mark.parametrize(
