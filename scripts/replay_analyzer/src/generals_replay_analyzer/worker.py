@@ -250,17 +250,6 @@ def _private_protocol_diagnostics(exit_code: int, stdout: str, stderr: str) -> d
     }
 
 
-# TheSuperHackers @fix Leex 26/08/2026 Close timed-out protocol streams so Popen reader threads cannot retain inherited pipe handles. (#TBD)
-def _close_protocol_streams(process: subprocess.Popen[str]) -> None:
-    for name in ("stdout", "stderr"):
-        stream = getattr(process, name, None)
-        if stream is not None:
-            try:
-                stream.close()
-            except (OSError, ValueError):
-                pass
-
-
 class SubprocessSupervisor:
     """Own exactly one private stage subprocess and its process group."""
 
@@ -280,7 +269,6 @@ class SubprocessSupervisor:
         try:
             stdout, stderr = self._process.communicate(timeout=_PROTOCOL_DRAIN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            _close_protocol_streams(self._process)
             stdout, stderr = "", ""
         except (OSError, subprocess.SubprocessError, ValueError):
             stdout, stderr = "", ""

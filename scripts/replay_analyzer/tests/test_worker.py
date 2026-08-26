@@ -665,7 +665,7 @@ def test_subprocess_supervisor_fails_closed_when_protocol_pipe_drain_times_out()
             self.closed = False
 
         def close(self) -> None:
-            self.closed = True
+            raise AssertionError("timed-out protocol streams must not be closed synchronously")
 
     class _HungProcess(_Process):
         def __init__(self) -> None:
@@ -687,8 +687,6 @@ def test_subprocess_supervisor_fails_closed_when_protocol_pipe_drain_times_out()
     assert outcome is not None
     assert outcome.error_code == "supervisor_protocol_failed"
     assert outcome.error_details == {"exit_code": 9, "stdout_bytes": 0, "stderr_tail": ""}
-    assert supervisor._process.stdout.closed is True  # type: ignore[union-attr]
-    assert supervisor._process.stderr.closed is True  # type: ignore[union-attr]
 
 
 def test_windows_supervisor_requires_successful_taskkill_tree_result(monkeypatch: pytest.MonkeyPatch) -> None:
