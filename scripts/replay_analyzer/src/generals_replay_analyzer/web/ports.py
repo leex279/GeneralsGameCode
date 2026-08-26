@@ -418,6 +418,11 @@ class ReplayPlayerDisplayDTO(WebDTO):
     external_profile_source: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
+    def _safe_external_profile(self) -> Self:
+        normalize_external_profile(self.external_profile_url, self.external_profile_source)
+        return self
+
+    @model_validator(mode="after")
     def _validate_report_link(self) -> Self:
         if (self.replay_player_public_id is None) != (self.report_public_id is None):
             raise ValueError("player report navigation requires both public identities")

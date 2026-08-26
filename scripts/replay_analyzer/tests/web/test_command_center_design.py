@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
 from fastapi.testclient import TestClient
 
 from generals_replay_analyzer.web.app import create_app
@@ -348,6 +349,20 @@ def test_dashboard_recent_matches_link_verified_player_profiles_and_safe_externa
     assert "replay.player_profiles" in template
     assert 'target="_blank" rel="noopener noreferrer"' in template
     assert "External profile" in template
+
+
+def test_replay_player_display_rejects_unsafe_external_profile_url() -> None:
+    from pydantic import ValidationError
+
+    from generals_replay_analyzer.web.ports import ReplayPlayerDisplayDTO
+
+    with pytest.raises(ValidationError):
+        ReplayPlayerDisplayDTO(
+            display_name="player",
+            slot=1,
+            external_profile_url="http://localhost/private",
+            external_profile_source="tracker",
+        )
 
 
 def test_library_uses_a_desktop_filter_rail_and_preserves_mobile_labelled_rows() -> None:
