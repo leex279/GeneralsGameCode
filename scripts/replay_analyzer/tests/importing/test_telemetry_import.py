@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,7 +18,7 @@ from uuid import UUID
 
 import pytest
 from map_asset_support import write_test_map_asset
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from telemetry.test_combat_outcome_contract import _valid_trace as _valid_combat_trace
 from telemetry.test_economy_production_contract import _valid_trace as _valid_economy_trace
@@ -3648,6 +3650,90 @@ def test_large_valid_trace_is_persisted_in_bounded_batches(
     assert batch_sizes == [500, 500, 252]
 
 
+def test_high_cardinality_entities_keep_only_scalar_identity_across_batches(
+    session_factory: sessionmaker[Session],
+    settings: AnalyzerSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the object-ID index retaining every flushed Entity ORM instance until commit."""
+    replay_sha256 = _replay(session_factory, settings, "bounded-entity-identity")
+    run_id = "a43e4567-e89b-12d3-a456-426614174000"
+    records = [
+        _record(
+            1,
+            run_id,
+            0,
+            "manifest",
+            {
+                "engine_build": "historical-build",
+                "replay_version": "1.04",
+                "map_identity": "maps/historical.map",
+                "initial_seed": 1,
+                "exporter_settings": {"movement_sample_frames": 15},
+            },
+        )
+    ]
+    for sequence in range(1, 1_201):
+        records.append(
+            _record(
+                1,
+                run_id,
+                sequence,
+                "object_created",
+                {
+                    "object_id": sequence,
+                    "template_name": "SyntheticEntity",
+                    "owner_player_index": 0,
+                    "team_id": 0,
+                    "position": {"x": float(sequence), "y": 0.0, "z": 0.0},
+                    "orientation": 0.0,
+                    "kind_of_flags": ["VEHICLE"],
+                    "creation_source": "runtime",
+                },
+            )
+        )
+    records.append(
+        _record(
+            1,
+            run_id,
+            1_201,
+            "entity_sample",
+            {
+                "object_id": 1,
+                "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+                "orientation": 0.5,
+                "speed": 0.0,
+                "current_state": "IDLE",
+                "current_state_source": "direct_engine_state",
+                "sample_reason": "periodic",
+                "layer": 0,
+            },
+        )
+    )
+    records.append(_completion(1, run_id, records))
+    trace = _write_records(settings.data_root / "bounded-entities" / run_id / "trace.ndjson", records)
+    attempt = _attempt(session_factory, settings, trace, run_id)
+    identity_entity_counts: list[int] = []
+    monkeypatch.setattr(telemetry_import_module, "_ENTITY_ID_CACHE_SIZE", 128)
+
+    def record_entity_identity_count(session: Session, _flush_context: object) -> None:
+        identity_entity_counts.append(sum(isinstance(value, Entity) for value in session.identity_map.values()))
+
+    event.listen(session_factory.class_, "after_flush_postexec", record_entity_identity_count)
+    try:
+        result = _importer(session_factory, settings).import_replay(replay_sha256, attempt)
+    finally:
+        event.remove(session_factory.class_, "after_flush_postexec", record_entity_identity_count)
+
+    assert result.status == "succeeded" and result.event_count == 1_203, _run_diagnostics(session_factory, run_id)
+    assert max(identity_entity_counts) <= 500
+    with session_factory() as session:
+        entity = session.scalar(select(Entity).where(Entity.telemetry_run_id == select(TelemetryRun.id).where(TelemetryRun.run_id == run_id).scalar_subquery(), Entity.object_id == 1))
+        sample = session.scalar(select(EntitySample))
+        assert entity is not None and sample is not None and sample.entity_id == entity.id
+        assert session.scalar(select(func.count(Entity.id))) == 1_200
+
+
 def test_validation_subprocess_protocol_returns_bounded_metadata(tmp_path: Path) -> None:
     """Catch isolated validation returning the trace-sized record graph to its parent."""
     run_id = "b33e4567-e89b-12d3-a456-426614174000"
@@ -3708,37 +3794,190 @@ def test_validation_subprocess_rejects_trace_path_escape(tmp_path: Path) -> None
 def test_validation_protocol_limit_is_checked_before_parent_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catch an abnormal helper rebuilding an unbounded stdout allocation in the importer heap."""
+    """Catch an abnormal helper filling disk before its oversized stdout is rejected."""
     trace = tmp_path / "trace.ndjson"
     trace.touch()
+    completed_marker = tmp_path / "stdout-completed"
     monkeypatch.setattr(
         telemetry_import_module,
         "_validation_command",
         lambda _root, _trace: [
             sys.executable,
             "-c",
-            f"import sys; sys.stdout.write('x' * {telemetry_import_module._MAX_VALIDATION_PROTOCOL_BYTES + 1})",
+            (
+                "import pathlib,sys; "
+                f"sys.stdout.buffer.write(b'x' * {telemetry_import_module._MAX_VALIDATION_PROTOCOL_BYTES * 2}); "
+                "sys.stdout.buffer.flush(); "
+                f"pathlib.Path({str(completed_marker)!r}).write_text('completed')"
+            ),
         ],
     )
 
     with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="protocol is oversized"):
         telemetry_import_module._isolated_validation(tmp_path, trace)
+    assert not completed_marker.exists()
 
 
-def test_validation_process_does_not_swallow_parent_cancellation(
+def test_validation_error_limit_terminates_helper_before_unbounded_stderr_completes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catch the phase boundary converting worker cancellation into a durable validation failure."""
+    """Catch validator stderr filling disk before the parent notices the limit."""
     trace = tmp_path / "trace.ndjson"
     trace.touch()
+    completed_marker = tmp_path / "stderr-completed"
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys; "
+                f"sys.stderr.buffer.write(b'x' * {telemetry_import_module._MAX_VALIDATION_ERROR_BYTES * 4}); "
+                "sys.stderr.buffer.flush(); "
+                f"pathlib.Path({str(completed_marker)!r}).write_text('completed'); print('{{}}')"
+            ),
+        ],
+    )
 
-    def cancelled(*_args: object, **_kwargs: object) -> object:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(telemetry_import_module.subprocess, "run", cancelled)
-
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="error protocol is oversized"):
         telemetry_import_module._isolated_validation(tmp_path, trace)
+    assert not completed_marker.exists()
+
+
+def _process_exists(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _terminate_test_process(process_id: int) -> None:
+    if not _process_exists(process_id):
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process_id), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        os.kill(process_id, 9)
+
+
+def test_validation_timeout_cleans_helper_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch a hung validator or descendant surviving timeout and worker retry."""
+    trace = tmp_path / "trace.ndjson"
+    trace.touch()
+    pid_file = tmp_path / "validator-pids"
+    grandchild_code = "import time; time.sleep(20)"
+    helper_code = (
+        "import os,pathlib,subprocess,sys,time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid)); "
+        "time.sleep(2)"
+    )
+    monkeypatch.setattr(telemetry_import_module, "_VALIDATION_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [sys.executable, "-c", helper_code],
+    )
+
+    process_ids: tuple[int, ...] = ()
+    try:
+        with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="timed out"):
+            telemetry_import_module._isolated_validation(tmp_path, trace)
+        process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(_process_exists(process_id) for process_id in process_ids):
+            time.sleep(0.05)
+        assert all(not _process_exists(process_id) for process_id in process_ids)
+    finally:
+        if pid_file.exists() and not process_ids:
+            process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        for process_id in process_ids:
+            _terminate_test_process(process_id)
+
+
+def test_validation_parent_cancellation_cleans_helper_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch worker cancellation propagating while its validator descendants remain alive."""
+    trace = tmp_path / "trace.ndjson"
+    trace.touch()
+    pid_file = tmp_path / "cancelled-validator-pids"
+    grandchild_code = "import time; time.sleep(20)"
+    helper_code = (
+        "import os,pathlib,subprocess,sys,time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid)); "
+        "time.sleep(20)"
+    )
+    real_monotonic = time.monotonic
+
+    def interrupt_after_start() -> float:
+        if pid_file.exists():
+            raise KeyboardInterrupt
+        return real_monotonic()
+
+    monkeypatch.setattr(telemetry_import_module.time, "monotonic", interrupt_after_start)
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [sys.executable, "-c", helper_code],
+    )
+
+    process_ids: tuple[int, ...] = ()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            telemetry_import_module._isolated_validation(tmp_path, trace)
+        process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        deadline = real_monotonic() + 5
+        while real_monotonic() < deadline and any(_process_exists(process_id) for process_id in process_ids):
+            time.sleep(0.05)
+        assert all(not _process_exists(process_id) for process_id in process_ids)
+    finally:
+        if pid_file.exists() and not process_ids:
+            process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
+        for process_id in process_ids:
+            _terminate_test_process(process_id)
+
+
+def test_oversized_map_asset_sidecar_is_rejected_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch an attested helper sidecar bypassing the parent's raw-byte limit."""
+    run_id = "b53e4567-e89b-12d3-a456-426614174000"
+    trace = _write_v2_bundle(tmp_path / "bundle", run_id)
+    completed = subprocess.run(
+        telemetry_import_module._validation_command(trace.parent, trace),
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    protocol = json.loads(completed.stdout)
+    map_asset_relative_path = protocol["map_asset_relative_path"]
+    assert isinstance(map_asset_relative_path, str)
+    map_asset_path = trace.parent / Path(*map_asset_relative_path.split("/"))
+    map_asset_path.write_bytes(b"{}" + b" " * 2048)
+    monkeypatch.setattr(telemetry_import_module, "_MAX_MAP_ASSET_SIDECAR_BYTES", 1024, raising=False)
+    protocol_text = json.dumps(protocol, separators=(",", ":"))
+    monkeypatch.setattr(
+        telemetry_import_module,
+        "_validation_command",
+        lambda _root, _trace: [sys.executable, "-c", f"print({protocol_text!r})"],
+    )
+
+    with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="map asset sidecar is oversized"):
+        telemetry_import_module._isolated_validation(trace.parent, trace)
 
 
 @pytest.mark.parametrize(

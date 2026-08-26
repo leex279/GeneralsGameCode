@@ -7,13 +7,18 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BufferedReader
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -109,6 +114,10 @@ _VALIDATION_PROTOCOL_KEYS = frozenset(
 _MAX_VALIDATION_PROTOCOL_BYTES = 4 * 1024 * 1024
 _MAX_VALIDATION_ERROR_BYTES = 64 * 1024
 _MAX_BRIDGE_SIDECAR_BYTES = 16 * 1024 * 1024
+_MAX_MAP_ASSET_SIDECAR_BYTES = 64 * 1024 * 1024
+_VALIDATION_TIMEOUT_SECONDS = 10 * 60.0
+_VALIDATION_PIPE_CHUNK_BYTES = 64 * 1024
+_ENTITY_ID_CACHE_SIZE = 8 * 1024
 
 
 @dataclass(frozen=True)
@@ -182,6 +191,77 @@ class _NormalizedTelemetry:
     working_root: Path
 
 
+class _EntityIdIndex:
+    """Bounded scalar cache backed by the transaction's already-persisted entity rows."""
+
+    def __init__(self, session: Session, telemetry_run_id: int) -> None:
+        self._session = session
+        self._telemetry_run_id = telemetry_run_id
+        self._ids: OrderedDict[int, int] = OrderedDict()
+
+    def __contains__(self, object_id: int) -> bool:
+        return object_id in self._ids
+
+    def remember(self, object_id: int, entity_id: int) -> None:
+        self._ids[object_id] = entity_id
+        self._ids.move_to_end(object_id)
+        if len(self._ids) > _ENTITY_ID_CACHE_SIZE:
+            self._ids.popitem(last=False)
+
+    def resolve(self, value: object) -> int | None:
+        if value is None:
+            return None
+        if type(value) is not int:
+            raise ValueError("telemetry event references an unresolved required entity")
+        entity_id = self._ids.get(value)
+        if entity_id is None:
+            entity_id = self._session.scalar(
+                select(Entity.id).where(
+                    Entity.telemetry_run_id == self._telemetry_run_id,
+                    Entity.object_id == value,
+                )
+            )
+            if entity_id is None:
+                raise ValueError("telemetry event references an unresolved required entity")
+            self.remember(value, entity_id)
+        else:
+            self._ids.move_to_end(value)
+        return entity_id
+
+
+@dataclass(frozen=True)
+class _ValidationProcessResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+class _BoundedPipeCapture:
+    def __init__(self, maximum_bytes: int) -> None:
+        self._maximum_bytes = maximum_bytes
+        self._chunks: list[bytes] = []
+        self._size = 0
+        self.oversized = threading.Event()
+
+    def read(self, stream: BufferedReader) -> None:
+        try:
+            while chunk := stream.read(_VALIDATION_PIPE_CHUNK_BYTES):
+                remaining = self._maximum_bytes + 1 - self._size
+                if remaining > 0:
+                    self._chunks.append(chunk[:remaining])
+                self._size += len(chunk)
+                if self._size > self._maximum_bytes:
+                    self.oversized.set()
+                    return
+        except OSError:
+            return
+        finally:
+            stream.close()
+
+    def value(self) -> bytes:
+        return b"".join(self._chunks)
+
+
 def _validation_command(root: Path, trace_path: Path) -> list[str]:
     logical_trace = trace_path.relative_to(root).as_posix()
     return [
@@ -225,31 +305,122 @@ def _read_validation_sidecar(path: Path, maximum_bytes: int, label: str) -> obje
         raise _TelemetryValidationProcessError(f"telemetry validator {label} sidecar is invalid") from error
 
 
+def _terminate_validation_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the owned validator process group without escaping worker tree ownership."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.poll() is None:
+                process.kill()
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
+    # TheSuperHackers @performance Leex 26/08/2026 Bound validator lifetime and both protocol pipes while retaining worker-owned ancestry. (#TBD)
+    if sys.platform == "win32":
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+        )
+    assert process.stdout is not None and process.stderr is not None
+    protocol_capture = _BoundedPipeCapture(_MAX_VALIDATION_PROTOCOL_BYTES)
+    error_capture = _BoundedPipeCapture(_MAX_VALIDATION_ERROR_BYTES)
+    protocol_thread = threading.Thread(
+        target=protocol_capture.read,
+        args=(process.stdout,),
+        name="telemetry-validator-stdout",
+        daemon=True,
+    )
+    error_thread = threading.Thread(
+        target=error_capture.read,
+        args=(process.stderr,),
+        name="telemetry-validator-stderr",
+        daemon=True,
+    )
+    started_threads: list[threading.Thread] = []
+    failure: str | None = None
+    try:
+        protocol_thread.start()
+        started_threads.append(protocol_thread)
+        error_thread.start()
+        started_threads.append(error_thread)
+        deadline = time.monotonic() + _VALIDATION_TIMEOUT_SECONDS
+        while process.poll() is None:
+            if protocol_capture.oversized.is_set():
+                failure = "telemetry validator protocol is oversized"
+                break
+            if error_capture.oversized.is_set():
+                failure = "telemetry validator error protocol is oversized"
+                break
+            if time.monotonic() >= deadline:
+                failure = "telemetry validator timed out"
+                break
+            time.sleep(0.01)
+        if failure is not None:
+            _terminate_validation_process_tree(process)
+        else:
+            process.wait()
+    except BaseException:
+        _terminate_validation_process_tree(process)
+        raise
+    finally:
+        for thread in started_threads:
+            thread.join(timeout=10)
+        if any(thread.is_alive() for thread in started_threads):
+            _terminate_validation_process_tree(process)
+            raise _TelemetryValidationProcessError("telemetry validator pipe cleanup timed out")
+    if failure is None and protocol_capture.oversized.is_set():
+        failure = "telemetry validator protocol is oversized"
+    if failure is None and error_capture.oversized.is_set():
+        failure = "telemetry validator error protocol is oversized"
+    if failure is not None:
+        raise _TelemetryValidationProcessError(failure)
+    assert process.returncode is not None
+    return _ValidationProcessResult(process.returncode, protocol_capture.value(), error_capture.value())
+
+
 def _isolated_validation(
     root: Path,
     trace_path: Path,
 ) -> tuple[ValidatedTelemetryBundle, str | None, dict[int, str | None]]:
     # TheSuperHackers @performance Leex 26/08/2026 Release the strict validator heap before database publication. (#TBD)
-    # TheSuperHackers @performance Leex 26/08/2026 Spool helper output outside the importer heap and read it only after size checks. (#TBD)
-    with tempfile.TemporaryFile() as protocol_stream, tempfile.TemporaryFile() as error_stream:
-        completed = subprocess.run(
-            _validation_command(root, trace_path),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=protocol_stream,
-            stderr=error_stream,
-            close_fds=True,
-        )
-        protocol_size = protocol_stream.tell()
-        error_size = error_stream.tell()
-        if protocol_size > _MAX_VALIDATION_PROTOCOL_BYTES:
-            raise _TelemetryValidationProcessError("telemetry validator protocol is oversized")
-        protocol_stream.seek(0)
-        protocol_text = protocol_stream.read().decode("utf-8", errors="replace")
-        error_text = ""
-        if error_size <= _MAX_VALIDATION_ERROR_BYTES:
-            error_stream.seek(0)
-            error_text = error_stream.read().decode("utf-8", errors="replace")
+    completed = _run_validation_process(_validation_command(root, trace_path))
+    protocol_text = completed.stdout.decode("utf-8", errors="replace")
+    error_text = completed.stderr.decode("utf-8", errors="replace")
     if completed.returncode != 0:
         detail = ""
         validation_error: TelemetryTraceValidationError | None = None
@@ -311,8 +482,16 @@ def _isolated_validation(
     map_asset = None
     if map_asset_path is not None:
         try:
-            map_asset = MapAsset.model_validate(json.loads(map_asset_path.read_text(encoding="utf-8")))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            map_asset = MapAsset.model_validate(
+                _read_validation_sidecar(
+                    map_asset_path,
+                    _MAX_MAP_ASSET_SIDECAR_BYTES,
+                    "map asset",
+                )
+            )
+        except _TelemetryValidationProcessError:
+            raise
+        except ValueError as error:
             raise _TelemetryValidationProcessError("telemetry validator map asset sidecar is invalid") from error
     bridge_path = _validated_protocol_path(root, protocol["bridge_relative_path"], "compatibility bridge")
     victim_templates: dict[int, str | None] = {}
@@ -1305,7 +1484,7 @@ class TelemetryObservationImporter:
             run.completed_at = now
             session.flush()
 
-            entities: dict[int, Entity] = {}
+            entity_ids = _EntityIdIndex(session, run.id)
             player_map = self._parser_player_map(session, replay.id, attempt.parser_run_id, normalized.bundle)
             unavailable: list[dict[str, object]] = []
             event_count = 0
@@ -1352,11 +1531,12 @@ class TelemetryObservationImporter:
                 ]
                 session.add_all(events)
                 session.flush()
+                new_entities: dict[int, Entity] = {}
                 for record, _raw_record, payload in chunk:
                     if record.event_type != "object_created":
                         continue
                     object_id = cast(int, payload["object_id"])
-                    if object_id in entities:
+                    if object_id in entity_ids or object_id in new_entities:
                         raise ValueError("duplicate object_created identity")
                     entity = Entity(
                         public_id=str(self._uuid_factory()),
@@ -1374,25 +1554,29 @@ class TelemetryObservationImporter:
                         observed_json=payload,
                     )
                     session.add(entity)
-                    entities[object_id] = entity
+                    new_entities[object_id] = entity
                 session.flush()
+                # TheSuperHackers @performance Leex 26/08/2026 Retain only scalar entity keys after each bounded publication batch. (#TBD)
+                for object_id, entity in new_entities.items():
+                    entity_ids.remember(object_id, entity.id)
+                    session.expunge(entity)
                 for (record, _raw_record, payload), event in zip(chunk, events, strict=True):
                     if record.event_type == "entity_sample":
                         missing = [field for field in ("current_state_source", "sample_reason") if not isinstance(payload.get(field), str) or not payload.get(field)]
                         if missing:
                             unavailable.append({"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing})
                         else:
-                            self._add_sample(session, run, event, payload, entities)
+                            self._add_sample(session, run, event, payload, entity_ids)
                     elif record.event_type in _PRODUCTION_TYPES:
                         missing = [field for field in ("quantity", "state") if (type(payload.get(field)) is not int if field == "quantity" else not isinstance(payload.get(field), str))]
                         if missing:
                             unavailable.append({"sequence": record.sequence, "event_type": record.event_type, "missing_fields": missing})
                         else:
-                            self._add_production(session, replay, run, event, payload, entities, player_map)
+                            self._add_production(session, replay, run, event, payload, entity_ids, player_map)
                     elif record.event_type in _ECONOMY_TYPES:
-                        self._add_economy(session, replay, run, event, payload, entities, player_map)
+                        self._add_economy(session, replay, run, event, payload, entity_ids, player_map)
                     elif record.event_type in _COMBAT_TYPES:
-                        self._add_combat(session, replay, run, event, payload, entities, player_map)
+                        self._add_combat(session, replay, run, event, payload, entity_ids, player_map)
                 session.flush()
                 event_count += len(chunk)
                 for event in events:
@@ -1621,12 +1805,8 @@ class TelemetryObservationImporter:
         replay.lifecycle_state = next(state for state in precedence if state in candidates)
 
     @staticmethod
-    def _entity(entities: Mapping[int, Entity], value: object) -> Entity | None:
-        if value is None:
-            return None
-        if type(value) is not int or value not in entities:
-            raise ValueError("telemetry event references an unresolved required entity")
-        return entities[value]
+    def _entity_id(entity_ids: _EntityIdIndex, value: object) -> int | None:
+        return entity_ids.resolve(value)
 
     def _add_sample(
         self,
@@ -1634,10 +1814,10 @@ class TelemetryObservationImporter:
         run: TelemetryRun,
         event: TelemetryEvent,
         payload: Mapping[str, object],
-        entities: Mapping[int, Entity],
+        entity_ids: _EntityIdIndex,
     ) -> None:
-        entity = self._entity(entities, payload.get("object_id"))
-        assert entity is not None
+        entity_id = self._entity_id(entity_ids, payload.get("object_id"))
+        assert entity_id is not None
         x, y, z = _position(payload)
         if x is None or y is None or z is None:
             raise ValueError("entity sample has no direct XYZ position")
@@ -1648,7 +1828,7 @@ class TelemetryObservationImporter:
         session.add(
             EntitySample(
                 telemetry_run_id=run.id,
-                entity_id=entity.id,
+                entity_id=entity_id,
                 telemetry_event_id=event.id,
                 sequence=event.sequence,
                 frame=event.frame,
@@ -1677,7 +1857,7 @@ class TelemetryObservationImporter:
         run: TelemetryRun,
         event: TelemetryEvent,
         payload: Mapping[str, object],
-        entities: Mapping[int, Entity],
+        entity_ids: _EntityIdIndex,
         player_map: Mapping[int, ReplayPlayer],
     ) -> None:
         kind = "production"
@@ -1691,7 +1871,7 @@ class TelemetryObservationImporter:
         if not isinstance(name, str):
             raise TypeError("production event has no direct item name")
         producer_id = payload.get("producer_object_id", payload.get("source_object_id"))
-        producer = self._entity(entities, producer_id) if producer_id is not None else None
+        producer_entity_id = self._entity_id(entity_ids, producer_id) if producer_id is not None else None
         player_index = _optional_int(payload.get("player_index"))
         state = cast(str, payload["state"])
         session.add(
@@ -1702,7 +1882,7 @@ class TelemetryObservationImporter:
                 replay_player_id=player_map[player_index].id
                 if player_index is not None and player_index in player_map
                 else None,
-                producer_entity_id=producer.id if producer is not None else None,
+                producer_entity_id=producer_entity_id,
                 frame=event.frame,
                 event_type=event.event_type,
                 item_kind=kind,
@@ -1726,13 +1906,13 @@ class TelemetryObservationImporter:
         run: TelemetryRun,
         event: TelemetryEvent,
         payload: Mapping[str, object],
-        entities: Mapping[int, Entity],
+        entity_ids: _EntityIdIndex,
         player_map: Mapping[int, ReplayPlayer],
     ) -> None:
         player_index = _optional_int(payload.get("player_index"))
-        collector = self._entity(entities, payload.get("collector_object_id")) if payload.get("collector_object_id") is not None else None
-        source = self._entity(entities, payload.get("source_object_id")) if payload.get("source_object_id") is not None else None
-        dropoff = self._entity(entities, payload.get("dropoff_object_id")) if payload.get("dropoff_object_id") is not None else None
+        collector_entity_id = self._entity_id(entity_ids, payload.get("collector_object_id")) if payload.get("collector_object_id") is not None else None
+        source_entity_id = self._entity_id(entity_ids, payload.get("source_object_id")) if payload.get("source_object_id") is not None else None
+        dropoff_entity_id = self._entity_id(entity_ids, payload.get("dropoff_object_id")) if payload.get("dropoff_object_id") is not None else None
         x, y, z = _position(payload, "location")
         session.add(
             EconomyEvent(
@@ -1742,9 +1922,9 @@ class TelemetryObservationImporter:
                 replay_player_id=player_map[player_index].id
                 if player_index is not None and player_index in player_map
                 else None,
-                collector_entity_id=collector.id if collector is not None else None,
-                source_entity_id=source.id if source is not None else None,
-                dropoff_entity_id=dropoff.id if dropoff is not None else None,
+                collector_entity_id=collector_entity_id,
+                source_entity_id=source_entity_id,
+                dropoff_entity_id=dropoff_entity_id,
                 frame=event.frame,
                 event_type=event.event_type,
                 balance_before=_optional_float(payload.get("before")),
@@ -1766,13 +1946,13 @@ class TelemetryObservationImporter:
         run: TelemetryRun,
         event: TelemetryEvent,
         payload: Mapping[str, object],
-        entities: Mapping[int, Entity],
+        entity_ids: _EntityIdIndex,
         player_map: Mapping[int, ReplayPlayer],
     ) -> None:
         victim_id = payload.get("victim_object_id", payload.get("target_object_id"))
         attacker_id = payload.get("attacker_object_id", payload.get("source_object_id"))
-        victim = self._entity(entities, victim_id)
-        attacker = self._entity(entities, attacker_id) if attacker_id is not None else None
+        victim_entity_id = self._entity_id(entity_ids, victim_id)
+        attacker_entity_id = self._entity_id(entity_ids, attacker_id) if attacker_id is not None else None
         attacker_player = _optional_int(payload.get("source_player_index"))
         source_player_indices = payload.get("source_player_indices")
         if attacker_player is None and isinstance(source_player_indices, list) and len(source_player_indices) == 1:
@@ -1786,9 +1966,9 @@ class TelemetryObservationImporter:
                 replay_id=replay.id,
                 frame=event.frame,
                 event_type=event.event_type,
-                attacker_entity_id=attacker.id if attacker is not None else None,
-                victim_entity_id=victim.id if victim is not None else None,
-                source_entity_id=attacker.id if attacker is not None else None,
+                attacker_entity_id=attacker_entity_id,
+                victim_entity_id=victim_entity_id,
+                source_entity_id=attacker_entity_id,
                 attacker_replay_player_id=player_map[attacker_player].id
                 if attacker_player is not None and attacker_player in player_map
                 else None,
