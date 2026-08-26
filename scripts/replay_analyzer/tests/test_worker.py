@@ -571,7 +571,7 @@ class _Process:
     def poll(self) -> int | None:
         return None if self.running else self.return_code
 
-    def communicate(self) -> tuple[str, str]:
+    def communicate(self, *, timeout: float | None = None) -> tuple[str, str]:
         return self.stdout, self.stderr
 
     def wait(self, timeout: int) -> int:
@@ -657,6 +657,38 @@ def test_subprocess_supervisor_caps_utf8_safe_stderr_tail() -> None:
     assert isinstance(tail, str)
     assert len(tail.encode("utf-8")) <= 2048
     assert tail.endswith(chr(0x00E4))
+
+
+def test_subprocess_supervisor_fails_closed_when_protocol_pipe_drain_times_out() -> None:
+    class _Stream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _HungProcess(_Process):
+        def __init__(self) -> None:
+            super().__init__(running=False, return_code=9)
+            self.stdout = _Stream()
+            self.stderr = _Stream()
+
+        def communicate(self, *, timeout: float | None = None) -> tuple[str, str]:
+            assert timeout is not None
+            raise subprocess.TimeoutExpired("owned", timeout)
+
+    supervisor = SubprocessSupervisor(
+        _HungProcess(),  # type: ignore[arg-type]
+        EXECUTION,
+    )
+
+    outcome = supervisor.poll()
+
+    assert outcome is not None
+    assert outcome.error_code == "supervisor_protocol_failed"
+    assert outcome.error_details == {"exit_code": 9, "stdout_bytes": 0, "stderr_tail": ""}
+    assert supervisor._process.stdout.closed is True  # type: ignore[union-attr]
+    assert supervisor._process.stderr.closed is True  # type: ignore[union-attr]
 
 
 def test_windows_supervisor_requires_successful_taskkill_tree_result(monkeypatch: pytest.MonkeyPatch) -> None:

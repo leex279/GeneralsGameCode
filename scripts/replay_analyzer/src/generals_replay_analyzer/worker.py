@@ -233,6 +233,7 @@ class WorkerRuntime:
 
 _PRIVATE_STDERR_TAIL_BYTES = 2048
 _PRIVATE_STDOUT_COUNT_BYTES = 1_048_576
+_PROTOCOL_DRAIN_TIMEOUT_SECONDS = 1.0
 
 
 # TheSuperHackers @fix Leex 26/08/2026 Retain bounded private child protocol diagnostics without expanding public failure text. (#TBD)
@@ -247,6 +248,17 @@ def _private_protocol_diagnostics(exit_code: int, stdout: str, stderr: str) -> d
         "stdout_bytes": min(len(stdout.encode("utf-8", errors="replace")), _PRIVATE_STDOUT_COUNT_BYTES),
         "stderr_tail": stderr_tail,
     }
+
+
+# TheSuperHackers @fix Leex 26/08/2026 Close timed-out protocol streams so Popen reader threads cannot retain inherited pipe handles. (#TBD)
+def _close_protocol_streams(process: subprocess.Popen[str]) -> None:
+    for name in ("stdout", "stderr"):
+        stream = getattr(process, name, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
 
 
 class SubprocessSupervisor:
@@ -264,7 +276,14 @@ class SubprocessSupervisor:
         exit_code = self._process.poll()
         if exit_code is None:
             return None
-        stdout, stderr = self._process.communicate()
+        # TheSuperHackers @fix Leex 26/08/2026 Bound protocol-pipe draining after child exit so inherited handles cannot stall worker settlement. (#TBD)
+        try:
+            stdout, stderr = self._process.communicate(timeout=_PROTOCOL_DRAIN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _close_protocol_streams(self._process)
+            stdout, stderr = "", ""
+        except (OSError, subprocess.SubprocessError, ValueError):
+            stdout, stderr = "", ""
         try:
             # TheSuperHackers @fix Leex 22/08/2026 Reject crashed supervisors even when stdout resembles a valid result. (#TBD)
             if exit_code != 0:
