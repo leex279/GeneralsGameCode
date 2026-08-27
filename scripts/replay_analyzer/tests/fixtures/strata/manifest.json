@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-08-27",
+  "fixtures": [
+    {
+      "filename": "player-17945.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/17945",
+      "sha256": "48574A6D9CB6654807FDD9946C6E621B13F7346C67E45E3F2E0A20F69AFA5CBA",
+      "terms": ["profile title", "Known Names", "fish count 8", "source order"]
+    },
+    {
+      "filename": "player-6522.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/6522",
+      "sha256": "1D8901C6C28B1E3D8F61673E1C2A5DEE338379D58AE8E463D61D0EAA8E8093DD",
+      "terms": ["profile title", "fish count 3"]
+    },
+    {
+      "filename": "player-30124.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/30124",
+      "sha256": "E4626D6C1848166A662F20A8195B360882D784F9EAEA3F00FA8DC2825AF6B730",
+      "terms": ["profile title", "fish count 2"]
+    },
+    {
+      "filename": "player-30427.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/30427",
+      "sha256": "FF83EFCAD46B1FD3DD5710D02A1F1803C7BFF2609D795F3851196B7706ECD71F",
+      "terms": ["profile title", "Fish count 149"]
+    },
+    {
+      "filename": "player-52866.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/52866",
+      "sha256": "76DDAD4491DF404EDF207172B6DF2508A4FB447624A02950DBDD158196D2F3A5",
+      "terms": ["profile title", "Fish count 8"]
+    },
+    {
+      "filename": "match-3133811.html",
+      "source_url": "https://strata.gamereplays.org/zh/match/3133811",
+      "sha256": "3F3BCE74327FA3762579C60AD066D645351C5DAFE8219B21ACA2B44E7EFA017D",
+      "terms": ["match metadata", "player IDs 27965 and 102894", "replay URLs"]
+    },
+    {
+      "filename": "malformed-profile.html",
+      "source_url": null,
+      "sha256": "5F36C724AC01216B6F40EF4AD676C671C819A2A91DE9DA40D8DB44C9E9BE1612",
+      "terms": ["negative source-contract fixture"]
+    }
+  ],
+  "sanitization": "Scripts, cookies, CSRF data, analytics identifiers, and unrelated presentation markup removed."
+}

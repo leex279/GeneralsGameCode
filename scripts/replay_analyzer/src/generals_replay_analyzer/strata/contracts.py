@@ -283,3 +283,101 @@ class ReplayContext:
             "slots": [slot.to_dict() for slot in self.slots],
             "completion_status": self.completion_status,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileAliasDocument:
+    """One Known Names chip extracted from a server-rendered profile page."""
+
+    name_raw: str
+    name_nfc: str
+    name_casefold: str
+    occurrence_count: int
+    source_rank: int
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "name_raw": self.name_raw,
+            "name_nfc": self.name_nfc,
+            "name_casefold": self.name_casefold,
+            "occurrence_count": self.occurrence_count,
+            "source_rank": self.source_rank,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileDocument:
+    """Validated player profile facts extracted from Strata HTML."""
+
+    player_id: int
+    profile_url: str
+    most_known_name: str
+    aliases: tuple[ProfileAliasDocument, ...]
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "player_id": self.player_id,
+            "profile_url": self.profile_url,
+            "most_known_name": self.most_known_name,
+            "aliases": [alias.to_dict() for alias in self.aliases],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MatchParticipantDocument:
+    """One player row extracted from a Strata match page."""
+
+    source_rank: int
+    player_id: int
+    displayed_name: str
+    faction: str
+    result: str
+    replay_url: str | None
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "source_rank": self.source_rank,
+            "player_id": self.player_id,
+            "displayed_name": self.displayed_name,
+            "faction": self.faction,
+            "result": self.result,
+            "replay_url": self.replay_url,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MatchDocument:
+    """Validated shared match context extracted from a Strata match page."""
+
+    match_id: int
+    match_url: str
+    played_start_utc: datetime
+    played_end_utc: datetime
+    map_id: int | None
+    map_name: str
+    match_type: str
+    duration_seconds: int
+    starting_cash: int | None
+    game_version: str | None
+    data_pack: str | None
+    participants: tuple[MatchParticipantDocument, ...]
+
+    def __post_init__(self) -> None:
+        _utc_timestamp(self.played_start_utc)
+        _utc_timestamp(self.played_end_utc)
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "match_id": self.match_id,
+            "match_url": self.match_url,
+            "played_start_utc": _utc_timestamp(self.played_start_utc),
+            "played_end_utc": _utc_timestamp(self.played_end_utc),
+            "map_id": self.map_id,
+            "map_name": self.map_name,
+            "match_type": self.match_type,
+            "duration_seconds": self.duration_seconds,
+            "starting_cash": self.starting_cash,
+            "game_version": self.game_version,
+            "data_pack": self.data_pack,
+            "participants": [participant.to_dict() for participant in self.participants],
+        }
