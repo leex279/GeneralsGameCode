@@ -42,6 +42,36 @@
       "source_url": null,
       "sha256": "5F36C724AC01216B6F40EF4AD676C671C819A2A91DE9DA40D8DB44C9E9BE1612",
       "terms": ["negative source-contract fixture"]
+    },
+    {
+      "filename": "player-search-fish-page-1.html",
+      "source_url": "https://strata.gamereplays.org/zh/players?search=fish&amount=100",
+      "sha256": "E4BBED14F25CA735FFE5D4E682B5B160B40FCFFD0E6966145A04ECF06185BE9D",
+      "terms": ["numeric player links", "deduplication", "Next pagination"]
+    },
+    {
+      "filename": "player-search-fish-page-2.html",
+      "source_url": "https://strata.gamereplays.org/zh/players?search=fish&amount=100&page=2",
+      "sha256": "D9330E7B7D7585A6472021C4FA7A628D7197C4AD7EE5A8CFBE6DD5B957C37143",
+      "terms": ["remaining candidate links", "disabled Next"]
+    },
+    {
+      "filename": "player-search-empty.html",
+      "source_url": null,
+      "sha256": "B5C494CF57273B8ADB2BBDFC9F366B042D2A74C63F78D54B66D0BE7C4F39328C",
+      "terms": ["verified empty player state"]
+    },
+    {
+      "filename": "player-search-skeleton.html",
+      "source_url": null,
+      "sha256": "3164B420F59C615B90B10D6B7261C5C667CD8298A1F685F1A937BA309D80C06F",
+      "terms": ["unresolved Livewire skeleton"]
+    },
+    {
+      "filename": "player-17945-matches-page-1.html",
+      "source_url": "https://strata.gamereplays.org/zh/player/17945?tab=matches",
+      "sha256": "27F4C9B2060217ABF47232B74970BBE090DCA6272934C9C2D83F974F98E2A77A",
+      "terms": ["numeric match links", "deduplication", "disabled Next"]
     }
   ],
   "sanitization": "Scripts, cookies, CSRF data, analytics identifiers, and unrelated presentation markup removed."
