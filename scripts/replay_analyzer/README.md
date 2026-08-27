@@ -98,6 +98,13 @@ or `cache purge`, and `doctor` to verify cache, Chromium, and HTTPS access.
 Source requests use bounded pagination, two HTTP workers, a 500 ms host interval,
 three attempts, allowlisted HTTPS URLs, and a 20 MiB replay-download limit.
 
+The deterministic test suite never crawls Strata. Maintainers can explicitly
+validate the current public markup and browser path with:
+
+```powershell
+uv run --project . pytest tests/strata/test_live.py -q -m strata_live
+```
+
 ## Development
 
 Run the package checks from the repository root:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -14,6 +15,7 @@ from .normalization import InvalidQueryNameError, normalize_query_name
 _PLAYER_PATH = re.compile(r"^/zh/player/(\d+)$")
 _MAP_PATH = re.compile(r"^/zh/map/(\d+)$")
 _DURATION = re.compile(r"^(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?$")
+_OCCURRENCE_COUNT = re.compile(r"^(?:\d+|\d{1,3}(?:,\d{3})+)$")
 _PLAYED = re.compile(
     r"Played\s+([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+(\d{2}:\d{2})\s+[–-]\s+(\d{2}:\d{2})\s+GMT"
 )
@@ -68,30 +70,36 @@ def extract_profile(html: str, expected_player_id: int) -> ProfileDocument:
     suffix = " | Strata"
     if not title.endswith(suffix) or title.startswith("Match #"):
         raise _contract("profile title does not match the Strata profile contract")
-    most_known_name = title[: -len(suffix)]
-    if not most_known_name:
+    title_name = title[: -len(suffix)]
+    if not title_name:
         raise _contract("profile title has no player name")
     heading = _exact_text_tag(soup, "Known Names", ("p",))
     if heading is None or heading.parent is None:
         raise _contract("Known Names section is missing")
     aliases: list[ProfileAliasDocument] = []
-    seen: set[str] = set()
+    alias_positions: dict[str, int] = {}
     for chip in heading.parent.find_all("div"):
         spans = chip.find_all("span", recursive=False)
         if len(spans) != 2:
             continue
         name = spans[0].get_text(" ", strip=True)
         count_text = spans[1].get_text(" ", strip=True)
-        if not name or not count_text.isdecimal():
+        if not name or _OCCURRENCE_COUNT.fullmatch(count_text) is None:
             continue
-        count = int(count_text)
-        if name in seen:
-            raise _contract("Known Names contains a duplicate raw alias")
+        count = int(count_text.replace(",", ""))
         try:
             normalized = normalize_query_name(name)
         except InvalidQueryNameError as error:
             raise _contract("Known Names contains an invalid alias") from error
-        seen.add(name)
+        existing_position = alias_positions.get(name)
+        if existing_position is not None:
+            existing = aliases[existing_position]
+            aliases[existing_position] = replace(
+                existing,
+                occurrence_count=existing.occurrence_count + count,
+            )
+            continue
+        alias_positions[name] = len(aliases)
         aliases.append(
             ProfileAliasDocument(
                 name_raw=normalized.raw,
@@ -103,10 +111,9 @@ def extract_profile(html: str, expected_player_id: int) -> ProfileDocument:
         )
     if not aliases:
         raise _contract("Known Names section has no valid alias chips")
-    if aliases[0].name_raw != most_known_name or aliases[0].occurrence_count != max(
-        alias.occurrence_count for alias in aliases
-    ):
-        raise _contract("profile title and highest-count Known Name disagree")
+    if title_name not in alias_positions:
+        raise _contract("profile title is not present in Known Names")
+    most_known_name = max(aliases, key=lambda alias: alias.occurrence_count).name_raw
     return ProfileDocument(
         player_id=expected_player_id,
         profile_url=f"https://strata.gamereplays.org/zh/player/{expected_player_id}",
@@ -120,7 +127,7 @@ def _duration_seconds(value: str) -> int:
     if matched is None or not any(matched.groups()):
         raise _contract("match duration is invalid")
     hours, minutes, seconds = (int(item or 0) for item in matched.groups())
-    if minutes >= 60 or seconds >= 60:
+    if seconds >= 60:
         raise _contract("match duration is outside valid bounds")
     return hours * 3600 + minutes * 60 + seconds
 

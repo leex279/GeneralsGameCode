@@ -143,4 +143,5 @@ markers = [
     "browser: launches the installed local web app and pinned Chromium against isolated fixtures",
     "engine: launches the modern Zero Hour executable for authoritative parser parity",
     "ollama: opt-in live loopback Ollama integration",
+    "strata_live: performs a bounded read-only check against public Strata pages",
 ]

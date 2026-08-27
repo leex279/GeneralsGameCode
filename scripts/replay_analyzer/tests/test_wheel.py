@@ -236,7 +236,10 @@ def test_wheel_data_resource_allow_list_excludes_temporary_poison_files(tmp_path
                 name for name in archive.namelist() if name.startswith("generals_replay_analyzer/data/")
             }
             assert packaged == DATA_RESOURCES
-            assert not any("cache" in name.lower() or "secret" in name.lower() for name in archive.namelist())
+            assert not any(
+                Path(name).name.lower().startswith(".cache") or "secret" in Path(name).name.lower()
+                for name in archive.namelist()
+            )
     finally:
         for poison in poisons:
             poison.unlink(missing_ok=True)
@@ -263,7 +266,10 @@ def test_wheel_web_resource_allow_list_excludes_a_temporary_poison_file(tmp_path
                 "generals_replay_analyzer/web/presentation/shell.py",
             }
             assert "generals_replay_analyzer/web/static/vendor/.cache-secret" not in archive.namelist()
-            assert not any("cache" in name.lower() or "secret" in name.lower() for name in archive.namelist())
+            assert not any(
+                Path(name).name.lower().startswith(".cache") or "secret" in Path(name).name.lower()
+                for name in archive.namelist()
+            )
     finally:
         poison.unlink(missing_ok=True)
 

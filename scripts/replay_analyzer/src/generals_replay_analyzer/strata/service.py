@@ -239,18 +239,21 @@ class StrataResolver:
 
         hinted_resolution = rank_match_evidence(tuple(evidence_by_id.values()))
         if hinted_resolution.status is not ResolutionStatus.RESOLVED:
-            match_ids: set[int] = set()
+            matches_by_slot: list[set[int]] = []
             for result in name_results:
+                slot_match_ids: set[int] = set()
                 for candidate in _candidates(result):
                     discovery = self.acquirer.candidate_matches(
                         candidate.player_id,
                         refresh=refresh,
                         offline=offline,
                     )
-                    match_ids.update(discovery.match_ids)
+                    slot_match_ids.update(discovery.match_ids)
                     if not discovery.complete:
                         acquisition_complete = False
                         reasons.extend(discovery.reason_codes)
+                matches_by_slot.append(slot_match_ids)
+            match_ids = set.intersection(*matches_by_slot) if matches_by_slot else set()
             for match_id in sorted(match_ids):
                 if match_id in evidence_by_id:
                     continue

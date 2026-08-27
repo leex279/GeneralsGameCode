@@ -49,7 +49,7 @@ class FixtureBrowser:
 
     def player_matches(self, player_id, caps):  # type: ignore[no-untyped-def]
         self.match_calls.append(player_id)
-        return MatchListDiscovery((3133811,), True, 1, ())
+        return MatchListDiscovery((3133811, 3_000_000 + player_id), True, 1, ())
 
 
 class FixtureHttp:

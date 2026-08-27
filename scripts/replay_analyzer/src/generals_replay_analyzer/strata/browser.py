@@ -118,7 +118,7 @@ class _PlaywrightPage:
         if control is None or not self.next_enabled():
             return False
         previous = self._page.locator("body").inner_text()
-        control.click()
+        control.click(force=True)
         try:
             self._page.wait_for_function(
                 "previous => document.body.innerText !== previous", arg=previous, timeout=timeout_ms
@@ -156,7 +156,12 @@ class PlaywrightListingBrowser:
             self._browser = browser_type.launch(headless=True, channel="chrome")
         else:
             self._browser = browser_type.launch(headless=True)
-        self._page = _PlaywrightPage(self._browser.new_page())
+        page = self._browser.new_page()
+        # TheSuperHackers @fix Leex 28/08/2026 Keep the optional cookie banner from intercepting pagination controls.
+        page.add_init_script(
+            "try { localStorage.setItem('cookie_consent', 'denied'); } catch (_) {}"
+        )
+        self._page = _PlaywrightPage(page)
         return self
 
     def __exit__(

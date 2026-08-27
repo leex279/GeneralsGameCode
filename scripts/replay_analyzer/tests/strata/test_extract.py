@@ -26,7 +26,7 @@ def test_sanitized_fixture_manifest_pins_every_source_contract() -> None:
         assert entry["terms"]
 
 
-def test_profile_17945_uses_title_and_preserves_known_name_order() -> None:
+def test_profile_17945_uses_highest_count_and_preserves_known_name_order() -> None:
     profile = extract_profile(_html("player-17945.html"), 17945)
 
     assert profile.player_id == 17945
@@ -37,6 +37,31 @@ def test_profile_17945_uses_title_and_preserves_known_name_order() -> None:
     assert profile.aliases[15].name_raw == "fish"
     assert profile.aliases[15].occurrence_count == 8
     assert profile.aliases[15].source_rank == 15
+
+
+def test_profile_accepts_grouped_counts_and_uses_highest_alias_instead_of_title() -> None:
+    html = """<html><head><title>Current | Strata</title></head><body><section><p>Known Names</p>
+    <div><span>Historical</span><span>1,646</span></div>
+    <div><span>Current</span><span>169</span></div></section></body></html>"""
+
+    profile = extract_profile(html, 10)
+
+    assert profile.most_known_name == "Historical"
+    assert profile.aliases[0].occurrence_count == 1646
+
+
+def test_profile_aggregates_duplicate_raw_alias_chips_at_first_source_rank() -> None:
+    html = """<html><head><title>DrGoldFish | Strata</title></head><body><section><p>Known Names</p>
+    <div><span>DrGoldFish</span><span>453</span></div>
+    <div><span>DrGoldFish</span><span>299</span></div>
+    <div><span>Other</span><span>10</span></div></section></body></html>"""
+
+    profile = extract_profile(html, 3116)
+
+    assert [(alias.name_raw, alias.occurrence_count, alias.source_rank) for alias in profile.aliases] == [
+        ("DrGoldFish", 752, 0),
+        ("Other", 10, 1),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -80,12 +105,19 @@ def test_match_3133811_extracts_shared_context_and_participant_ids() -> None:
     assert all(item.replay_url and item.replay_url.endswith("_replay.rep") for item in match.participants)
 
 
+def test_match_duration_accepts_site_total_minutes_above_fifty_nine() -> None:
+    match = extract_match(_html("match-3133811.html").replace("15m 42s", "61m 42s"), 3133811)
+
+    assert match.duration_seconds == 3702
+
+
 @pytest.mark.parametrize(
     ("function", "html", "expected_id"),
     [
         (extract_profile, "<html><title>fish | Strata</title></html>", 17945),
         (extract_profile, "<html><title>-DoMiNaToR- | Strata</title><p>Known Names</p></html>", 17945),
         (extract_profile, "<html><title>-DoMiNaToR- | Strata</title><p>Known Names</p><div><span>fish</span><span>-1</span></div></html>", 17945),
+        (extract_profile, "<html><title>other | Strata</title><p>Known Names</p><div><span>fish</span><span>1</span></div></html>", 17945),
         (extract_match, "<html><title>Match #99 | Strata</title></html>", 3133811),
         (extract_match, "<html><title>Match #3133811 | Strata</title></html>", 3133811),
     ],
