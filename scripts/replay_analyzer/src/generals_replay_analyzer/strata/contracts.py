@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import TypeAlias
 
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -172,4 +173,113 @@ class NameResolution:
             "search_complete": self.search_complete,
             "checked_at": _utc_timestamp(self.checked_at),
             "reason_codes": list(self.reason_codes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayParticipant:
+    """One replay slot with local identifiers and exact embedded name values."""
+
+    slot_index: int
+    player_index: int | None
+    kind: str
+    name_raw: str | None
+    name_nfc: str | None
+    name_casefold: str | None
+    player_template: int | None
+    team: int | None
+    color: int | None
+    start_position: int | None
+    ai_difficulty: str | None
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "slot_index": self.slot_index,
+            "player_index": self.player_index,
+            "kind": self.kind,
+            "name_raw": self.name_raw,
+            "name_nfc": self.name_nfc,
+            "name_casefold": self.name_casefold,
+            "player_template": self.player_template,
+            "team": self.team,
+            "color": self.color,
+            "start_position": self.start_position,
+            "ai_difficulty": self.ai_difficulty,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayFingerprints:
+    """Exact and semantic replay fingerprints kept as separate evidence."""
+
+    raw_replay_sha256: str
+    command_stream_sha256: str | None
+    match_signature_sha256: str
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "raw_replay_sha256": self.raw_replay_sha256,
+            "command_stream_sha256": self.command_stream_sha256,
+            "match_signature_sha256": self.match_signature_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayContext:
+    """Strict-parser replay metadata used for Strata match correlation."""
+
+    path: Path
+    replay_sha256: str
+    command_stream_sha256: str | None
+    match_signature_sha256: str
+    hinted_strata_match_id: int | None
+    version_string: str
+    version_number: int
+    start_time: int
+    end_time: int
+    frame_count: int
+    header_duration_seconds: int
+    logic_duration_seconds: float | None
+    map_path: str
+    map_crc: int
+    map_size: int
+    seed: int
+    starting_cash: int | None
+    local_player_index: int
+    slots: tuple[ReplayParticipant, ...]
+    completion_status: str
+
+    @property
+    def human_players(self) -> tuple[ReplayParticipant, ...]:
+        return tuple(slot for slot in self.slots if slot.kind == "human")
+
+    @property
+    def fingerprints(self) -> ReplayFingerprints:
+        return ReplayFingerprints(
+            raw_replay_sha256=self.replay_sha256,
+            command_stream_sha256=self.command_stream_sha256,
+            match_signature_sha256=self.match_signature_sha256,
+        )
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "schema_version": "strata-replay-context-v1",
+            "source_filename": self.path.name,
+            "fingerprints": self.fingerprints.to_dict(),
+            "hinted_strata_match_id": self.hinted_strata_match_id,
+            "version_string": self.version_string,
+            "version_number": self.version_number,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "frame_count": self.frame_count,
+            "header_duration_seconds": self.header_duration_seconds,
+            "logic_duration_seconds": self.logic_duration_seconds,
+            "map_path": self.map_path,
+            "map_crc": self.map_crc,
+            "map_size": self.map_size,
+            "seed": self.seed,
+            "starting_cash": self.starting_cash,
+            "local_player_index": self.local_player_index,
+            "slots": [slot.to_dict() for slot in self.slots],
+            "completion_status": self.completion_status,
         }

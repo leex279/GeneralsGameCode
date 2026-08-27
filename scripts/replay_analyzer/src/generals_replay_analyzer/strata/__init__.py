@@ -8,9 +8,13 @@ from .contracts import (
     NameResolution,
     PlayerCandidate,
     QueryName,
+    ReplayContext,
+    ReplayFingerprints,
+    ReplayParticipant,
     ResolutionStatus,
 )
 from .normalization import InvalidQueryNameError, normalize_query_name
+from .replay_context import build_replay_context
 
 __all__ = [
     "AliasRecord",
@@ -21,6 +25,10 @@ __all__ = [
     "NameResolution",
     "PlayerCandidate",
     "QueryName",
+    "ReplayContext",
+    "ReplayFingerprints",
+    "ReplayParticipant",
     "ResolutionStatus",
+    "build_replay_context",
     "normalize_query_name",
 ]
