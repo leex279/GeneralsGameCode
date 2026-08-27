@@ -84,6 +84,7 @@ class AliasRecord:
     alias_casefold: str
     occurrence_count: int
     source_rank: int
+    replay_context_score: int = 0
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -96,6 +97,7 @@ class AliasRecord:
             "alias_casefold": self.alias_casefold,
             "occurrence_count": self.occurrence_count,
             "source_rank": self.source_rank,
+            "replay_context_score": self.replay_context_score,
         }
 
 
@@ -380,4 +382,96 @@ class MatchDocument:
             "game_version": self.game_version,
             "data_pack": self.data_pack,
             "participants": [participant.to_dict() for participant in self.participants],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedReplayEvidence:
+    """Fingerprints derived by parsing one untrusted downloaded replay."""
+
+    replay_url: str
+    replay_sha256: str
+    command_stream_sha256: str | None
+    match_signature_sha256: str | None
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "replay_url": self.replay_url,
+            "replay_sha256": self.replay_sha256,
+            "command_stream_sha256": self.command_stream_sha256,
+            "match_signature_sha256": self.match_signature_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MatchFact:
+    """One labelled replay-versus-Strata comparison fact."""
+
+    label: str
+    observed: JsonValue
+    expected: JsonValue
+    agreement: bool | None
+    weight_class: str
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "label": self.label,
+            "observed": self.observed,
+            "expected": self.expected,
+            "agreement": self.agreement,
+            "weight_class": self.weight_class,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MatchEvidence:
+    """All facts and the unique slot assignment for one candidate match."""
+
+    match_id: int
+    match_url: str
+    viable: bool
+    confidence: Confidence
+    facts: tuple[MatchFact, ...]
+    assignments: tuple[tuple[int, int], ...]
+    reason_codes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "match_id": self.match_id,
+            "match_url": self.match_url,
+            "viable": self.viable,
+            "confidence": self.confidence.value,
+            "facts": [fact.to_dict() for fact in self.facts],
+            "assignments": [
+                {"slot_index": slot_index, "player_id": player_id}
+                for slot_index, player_id in self.assignments
+            ],
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MatchResolution:
+    """Selection across every discovered shared Strata match candidate."""
+
+    status: ResolutionStatus
+    confidence: Confidence
+    selected_match_id: int | None
+    selected_match_url: str | None
+    alternatives: tuple[int, ...]
+    evidence: tuple[MatchEvidence, ...]
+    assignments: tuple[tuple[int, int], ...]
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "status": self.status.value,
+            "confidence": self.confidence.value,
+            "selected_match_id": self.selected_match_id,
+            "selected_match_url": self.selected_match_url,
+            "alternatives": list(self.alternatives),
+            "evidence": [item.to_dict() for item in self.evidence],
+            "assignments": [
+                {"slot_index": slot_index, "player_id": player_id}
+                for slot_index, player_id in self.assignments
+            ],
         }
