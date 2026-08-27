@@ -66,6 +66,38 @@ An authoritative telemetry probe can be run independently of the Web app:
 uv run --project . replay-analyzer export-telemetry "C:\path\match.rep" --engine "C:\path\generalszh.exe"
 ```
 
+## Resolve replay players against Strata
+
+The standalone resolver does not require the Web server or Replay Analyzer
+database. Install its listing browser once:
+
+```powershell
+uv run --project . playwright install chromium
+```
+
+Inspect replay-local metadata without using the network, return every owner of
+an exact historical name, or resolve every human slot through shared Strata
+match evidence:
+
+```powershell
+uv run --project . strata-resolver inspect-replay "C:\path\match.rep" --pretty
+uv run --project . strata-resolver resolve-name fish --pretty
+uv run --project . strata-resolver resolve-replay "C:\path\match.rep" --pretty
+```
+
+The JSON keeps exact alternatives, case-insensitive suggestions, replay-local
+indices, and external Strata IDs separate. Name-only ambiguity is never hidden.
+Exit codes are 0 for resolved/success, 2 for invalid input, 3 for
+ambiguous/not-found, 4 for incomplete source acquisition, and 5 for local
+runtime failure. Diagnostics go to stderr.
+
+Cached profiles, aliases, match pages, and immutable resolution audit records
+live in the platform data directory by default. Use `--cache <absolute-path>`
+for an isolated database, `--offline` for cache-only resolution, `cache status`
+or `cache purge`, and `doctor` to verify cache, Chromium, and HTTPS access.
+Source requests use bounded pagination, two HTTP workers, a 500 ms host interval,
+three attempts, allowlisted HTTPS URLs, and a 20 MiB replay-download limit.
+
 ## Development
 
 Run the package checks from the repository root:

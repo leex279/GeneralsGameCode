@@ -586,6 +586,15 @@ class ResolverCache:
             pages = connection.execute("DELETE FROM strata_player_match_pages WHERE expires_at <= ?", (now,)).rowcount
         return PurgeResult(players=players, searches=searches, matches=matches, match_pages=pages)
 
+    def purge_all(self) -> PurgeResult:
+        """Purge mutable source cache rows while retaining append-only resolution audit."""
+        with self._write() as connection:
+            searches = connection.execute("DELETE FROM strata_searches").rowcount
+            pages = connection.execute("DELETE FROM strata_player_match_pages").rowcount
+            players = connection.execute("DELETE FROM strata_players").rowcount
+            matches = connection.execute("DELETE FROM strata_matches").rowcount
+        return PurgeResult(players=players, searches=searches, matches=matches, match_pages=pages)
+
     def status(self) -> CacheStatus:
         connection = self._db()
         counts = {

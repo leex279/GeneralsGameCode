@@ -177,7 +177,9 @@ class PlaywrightListingBrowser:
         if self._page_factory is not None:
             return self._page_factory()
         if self._page is None:
-            raise RuntimeError("Playwright listing browser is not open")
+            self.__enter__()
+        if self._page is None:
+            raise RuntimeError("Playwright listing browser failed to open")
         return self._page
 
     def search_players(self, query: QueryName, caps: AcquisitionCaps) -> PlayerSearchDiscovery:

@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 replay-analyzer = "generals_replay_analyzer.cli:main"
+strata-resolver = "generals_replay_analyzer.strata.cli:main"
 
 [build-system]
 requires = ["hatchling"]

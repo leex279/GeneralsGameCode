@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from generals_replay_analyzer.errors import ReplayParseError
+
 from .acquisition import AcquisitionIncompleteError, StrataAcquirer
 from .cache import SOURCE, ResolverCache
 from .contracts import (
@@ -156,7 +158,7 @@ class StrataResolver:
                     path = root / f"candidate-{index}.rep"
                     path.write_bytes(data)
                     context = build_replay_context(path)
-                except (OSError, RuntimeError, ValueError):
+                except (OSError, ReplayParseError, RuntimeError, ValueError):
                     continue
                 evidence.append(
                     DownloadedReplayEvidence(

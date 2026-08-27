@@ -762,3 +762,46 @@ def test_installed_wheel_loads_catalog_for_symbolic_lookup_and_inspection(tmp_pa
     )
     telemetry = _run([str(environment_python), "-c", telemetry_script], tmp_path, wheel_environment)
     assert telemetry.returncode == 0
+
+
+def test_installed_wheel_exposes_standalone_strata_inspection(tmp_path: Path) -> None:
+    """Prove the second console script parses a copied replay without checkout imports or Chromium."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    distribution_directory = tmp_path / "dist"
+    _run([uv, "build", "--wheel", "--out-dir", str(distribution_directory)], PROJECT_ROOT)
+    wheel = next(distribution_directory.glob("generals_replay_analyzer-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        entry_points = archive.read(
+            next(name for name in archive.namelist() if name.endswith(".dist-info/entry_points.txt"))
+        ).decode("utf-8")
+        metadata = archive.read(
+            next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+        ).decode("utf-8")
+    assert "strata-resolver = generals_replay_analyzer.strata.cli:main" in entry_points
+    assert "Requires-Dist: beautifulsoup4" in metadata
+    assert "Requires-Dist: playwright" in metadata
+
+    environment_directory = tmp_path / "strata-wheel-environment"
+    _run([sys.executable, "-m", "venv", str(environment_directory)], tmp_path)
+    environment_python = environment_directory / "Scripts" / "python.exe"
+    _run([str(environment_python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], tmp_path)
+    copied_replay = tmp_path / "copied.rep"
+    shutil.copyfile(FIXTURE_PATH, copied_replay)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(PROJECT_ROOT / ".venv" / "Lib" / "site-packages")
+    executable = environment_directory / "Scripts" / "strata-resolver.exe"
+    result = _run(
+        [
+            str(executable),
+            "inspect-replay",
+            str(copied_replay),
+            "--cache",
+            str(tmp_path / "resolver.sqlite3"),
+        ],
+        tmp_path,
+        environment,
+    )
+    document = json.loads(result.stdout)
+    assert document["fingerprints"]["raw_replay_sha256"] == hashlib.sha256(copied_replay.read_bytes()).hexdigest().upper()
+    assert [slot["name_raw"] for slot in document["slots"] if slot["kind"] == "human"] == ["leex279", "FOX27"]
