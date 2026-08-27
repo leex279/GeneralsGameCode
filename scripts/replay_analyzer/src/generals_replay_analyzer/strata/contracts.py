@@ -475,3 +475,69 @@ class MatchResolution:
                 for slot_index, player_id in self.assignments
             ],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayPlayerResolution:
+    """One replay-local player enriched with auditable Strata identity evidence."""
+
+    slot_index: int
+    player_index: int | None
+    query: QueryName
+    status: ResolutionStatus
+    selected: PlayerCandidate | None
+    alternatives: tuple[PlayerCandidate, ...]
+    case_insensitive_suggestions: tuple[PlayerCandidate, ...]
+    fuzzy_suggestions: tuple[PlayerCandidate, ...]
+    confidence: Confidence
+    name_resolution: NameResolution
+    match_evidence: MatchEvidence | None = None
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "slot_index": self.slot_index,
+            "player_index": self.player_index,
+            "query_name": self.query.raw,
+            "query_name_nfc": self.query.nfc,
+            "status": self.status.value,
+            "selected": None if self.selected is None else self.selected.to_dict(),
+            "alternatives": [item.to_dict() for item in self.alternatives],
+            "case_insensitive_suggestions": [
+                item.to_dict() for item in self.case_insensitive_suggestions
+            ],
+            "fuzzy_suggestions": [item.to_dict() for item in self.fuzzy_suggestions],
+            "confidence": self.confidence.value,
+            "name_resolution": self.name_resolution.to_dict(),
+            "match_evidence": None if self.match_evidence is None else self.match_evidence.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayResolution:
+    """Whole-replay identity result preserving local metadata and shared-match proof."""
+
+    replay: ReplayContext
+    match_resolution: MatchResolution
+    players: tuple[ReplayPlayerResolution, ...]
+    acquisition_complete: bool
+    checked_at: datetime
+    reason_codes: tuple[str, ...] = ()
+    audit_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _utc_timestamp(self.checked_at)
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        # TheSuperHackers @feature Leex 27/08/2026 Keep replay-local identifiers separate from externally resolved Strata IDs.
+        return {
+            "schema_version": "strata-replay-resolution-v1",
+            "replay": self.replay.to_dict(),
+            "match_resolution": self.match_resolution.to_dict(),
+            "players": [player.to_dict() for player in self.players],
+            "acquisition": {
+                "complete": self.acquisition_complete,
+                "reason_codes": list(self.reason_codes),
+                "checked_at": _utc_timestamp(self.checked_at),
+            },
+            "audit_ids": list(self.audit_ids),
+        }
