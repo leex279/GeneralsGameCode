@@ -312,6 +312,14 @@ def _validation_process_ownership(platform: str) -> tuple[int, bool]:
     return 0, False
 
 
+def _validation_guard_command(command: list[str], platform: str) -> list[str]:
+    if platform == "win32" or platform.startswith("linux"):
+        return [sys.executable, "-m", "generals_replay_analyzer.telemetry.validation_guard", *command]
+    raise _TelemetryValidationProcessError(
+        f"unsupported validator process-tree ownership platform: {platform}"
+    )
+
+
 def _descendant_process_ids(root_process_id: int, parent_by_process: Mapping[int, int]) -> tuple[int, ...]:
     children_by_parent: dict[int, list[int]] = {}
     for process_id, parent_id in parent_by_process.items():
@@ -455,6 +463,15 @@ def _terminate_validation_process_tree(
     descendants = set(known_descendants or ())
     descendants.update(_validation_descendants(process.pid))
     leader_running = process.poll() is None
+    if sys.platform != "win32" and leader_running:
+        # The Linux guardian is a scoped subreaper; SIGTERM makes it stop its leader,
+        # adopt every orphan, and reap the complete private tree before it exits.
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            descendants.update(_validation_descendants(process.pid))
     tree_terminated = sys.platform == "win32" and leader_running and _terminate_process_id(process.pid)
     if not tree_terminated:
         live_processes = _process_parents()
@@ -473,9 +490,10 @@ def _terminate_validation_process_tree(
 def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
     # TheSuperHackers @performance Leex 26/08/2026 Bound validator lifetime and both protocol pipes while retaining worker-owned ancestry. (#TBD)
     creation_flags, start_new_session = _validation_process_ownership(sys.platform)
+    guarded_command = _validation_guard_command(command, sys.platform)
     # TheSuperHackers @bugfix Leex 26/08/2026 Keep POSIX validation inside the worker group so outer cancellation owns every stage process. (#TBD)
     process = subprocess.Popen(
-        command,
+        guarded_command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -499,7 +517,6 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
         daemon=True,
     )
     started_threads: list[threading.Thread] = []
-    known_descendants: set[int] = set()
     failure: str | None = None
     try:
         protocol_thread.start()
@@ -508,7 +525,6 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
         started_threads.append(error_thread)
         deadline = time.monotonic() + _VALIDATION_TIMEOUT_SECONDS
         while True:
-            known_descendants.update(_validation_descendants(process.pid))
             if process.poll() is not None:
                 break
             if protocol_capture.oversized.is_set():
@@ -522,21 +538,17 @@ def _run_validation_process(command: list[str]) -> _ValidationProcessResult:
                 break
             time.sleep(_VALIDATION_PROCESS_SCAN_SECONDS)
         if failure is not None:
-            _terminate_validation_process_tree(process, known_descendants)
+            _terminate_validation_process_tree(process)
         else:
-            # A completed validator must not leave a pipe-holding descendant behind.
-            known_descendants.update(_validation_descendants(process.pid))
-            if known_descendants:
-                _terminate_validation_process_tree(process, known_descendants)
             process.wait()
     except BaseException:
-        _terminate_validation_process_tree(process, known_descendants)
+        _terminate_validation_process_tree(process)
         raise
     finally:
         for thread in started_threads:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in started_threads):
-            _terminate_validation_process_tree(process, known_descendants)
+            _terminate_validation_process_tree(process)
             raise _TelemetryValidationProcessError("telemetry validator pipe cleanup timed out")
     if failure is None and protocol_capture.oversized.is_set():
         failure = "telemetry validator protocol is oversized"

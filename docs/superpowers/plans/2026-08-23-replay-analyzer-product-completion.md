@@ -507,11 +507,11 @@ Run: uv run --project . ruff check src tests
 
 Run: uv run --project . mypy --strict src
 
-- [ ] **Step 3: Run grouped subsystem gates**
+- [x] **Step 3: Run grouped subsystem gates**
 
 Run parser, telemetry, parity, SQLite, worker, report, strategy, longitudinal, spatial, CLI, security, and packaging commands already recorded in release-status.md. Preserve exact counts/output.
 
-- [ ] **Step 4: Verify non-interference and available engine builds**
+- [x] **Step 4: Verify non-interference and available engine builds**
 
 Run telemetry-off/on non-interference and available Win32 Release/Debug targets. Record VC6/MinGW unverified if absent; never present static exclusion as retail replay execution.
 

@@ -75,6 +75,7 @@ from generals_replay_analyzer.importing.telemetry_import import (
 from generals_replay_analyzer.parser import ParsedReplay, parse_replay
 from generals_replay_analyzer.storage import ContentAddressedStore, ContentStorageError, StoredContent
 from generals_replay_analyzer.telemetry import load_validated_telemetry_bundle
+from generals_replay_analyzer.telemetry import validation_guard as validation_guard_module
 from generals_replay_analyzer.telemetry.map_asset import BridgeFeature, Position3, WaypointFeature
 from generals_replay_analyzer.telemetry.order_coverage import canonical_order_coverage
 
@@ -3880,9 +3881,9 @@ def test_validation_timeout_cleans_helper_process_tree(
         "import os,pathlib,subprocess,sys,time; "
         f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
         f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid)); "
-        "time.sleep(2)"
+        "time.sleep(5)"
     )
-    monkeypatch.setattr(telemetry_import_module, "_VALIDATION_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(telemetry_import_module, "_VALIDATION_TIMEOUT_SECONDS", 1.0, raising=False)
     monkeypatch.setattr(
         telemetry_import_module,
         "_validation_command",
@@ -3960,6 +3961,15 @@ def test_posix_validator_inherits_outer_worker_process_group() -> None:
     assert windows_start_new_session is False
 
 
+def test_unsupported_posix_validator_tree_ownership_fails_closed() -> None:
+    """Catch an unsupported POSIX host silently running without bounded subtree cleanup."""
+    with pytest.raises(
+        telemetry_import_module._TelemetryValidationProcessError,
+        match="unsupported validator process-tree ownership platform",
+    ):
+        telemetry_import_module._validation_guard_command(["python", "validator"], "darwin")
+
+
 def test_validation_descendant_metadata_excludes_parent_and_siblings() -> None:
     """Catch explicit cleanup broadening from the validator subtree into worker siblings."""
     parent_by_process = {
@@ -3974,6 +3984,39 @@ def test_validation_descendant_metadata_excludes_parent_and_siblings() -> None:
     assert telemetry_import_module._descendant_process_ids(100, parent_by_process) == (101, 102, 103)
 
 
+def test_linux_guard_rechecks_descendants_adopted_after_parent_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a validator child forked after the first cleanup scan surviving its exited parent."""
+    snapshots = iter(((61,), (62,), ()))
+    reaped = iter(((61, 0), (62, 0)))
+    killed: list[int] = []
+
+    monkeypatch.setattr(validation_guard_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(
+        validation_guard_module,
+        "_linux_child_process_ids",
+        lambda _root_process_id: next(snapshots),
+    )
+    monkeypatch.setattr(
+        validation_guard_module.os,
+        "kill",
+        lambda process_id, _signal_number: killed.append(process_id),
+    )
+
+    def waitpid(_process_id: int, _options: int) -> tuple[int, int]:
+        try:
+            return next(reaped)
+        except StopIteration as error:
+            raise ChildProcessError from error
+
+    monkeypatch.setattr(validation_guard_module.os, "waitpid", waitpid)
+
+    validation_guard_module._kill_and_reap_linux_children(60)
+
+    assert killed == [61, 62]
+
+
 def test_exited_validation_leader_cleans_descendant_holding_protocol_pipes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3983,12 +4026,12 @@ def test_exited_validation_leader_cleans_descendant_holding_protocol_pipes(
     pid_file = tmp_path / "exited-validator-pids"
     grandchild_code = "import time; time.sleep(3)"
     helper_code = (
-        "import os,pathlib,subprocess,sys,time; "
+        "import os,pathlib,subprocess,sys; "
         f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
-        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid)); "
-        "time.sleep(0.2)"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()) + ',' + str(child.pid))"
     )
     monkeypatch.setattr(telemetry_import_module, "_VALIDATION_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(telemetry_import_module, "_VALIDATION_PROCESS_SCAN_SECONDS", 1.0)
     monkeypatch.setattr(
         telemetry_import_module,
         "_validation_command",
@@ -3996,6 +4039,7 @@ def test_exited_validation_leader_cleans_descendant_holding_protocol_pipes(
     )
 
     process_ids: tuple[int, ...] = ()
+    sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
     started = time.monotonic()
     try:
         with pytest.raises(telemetry_import_module._TelemetryValidationProcessError, match="invalid JSON"):
@@ -4004,11 +4048,14 @@ def test_exited_validation_leader_cleans_descendant_holding_protocol_pipes(
         process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
         assert elapsed < 1.5
         assert all(not _process_exists(process_id) for process_id in process_ids)
+        assert sibling.poll() is None
     finally:
         if pid_file.exists() and not process_ids:
             process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split(","))
         for process_id in process_ids:
             _terminate_test_process(process_id)
+        _terminate_test_process(sibling.pid)
+        sibling.wait(timeout=5)
 
 
 def test_oversized_map_asset_sidecar_is_rejected_before_read(

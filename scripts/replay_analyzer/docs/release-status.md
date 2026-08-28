@@ -2,8 +2,8 @@
 
 <!-- TheSuperHackers @info Leex 25/08/2026 Record reproducible product evidence and explicit verification limits. (#TBD) -->
 
-Date: 2026-08-25
-Tested product head: `747b7dd38`
+Date: 2026-08-28
+Tested product head: `1cc86793c`
 
 ## Player-visible outcome
 

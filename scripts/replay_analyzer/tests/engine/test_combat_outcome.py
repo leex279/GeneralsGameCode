@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from generals_replay_analyzer.importing.telemetry_import import bridge_v2_damage_victim_template_name
+from generals_replay_analyzer.telemetry.compatibility import bridge_v2_damage_victim_template_name
 from generals_replay_analyzer.parser import parse_replay
 from generals_replay_analyzer.telemetry.reader import iter_validated_trace
 
