@@ -34,9 +34,10 @@ def _profile_html(name: str) -> str:
 
 
 class FixtureBrowser:
-    def __init__(self) -> None:
+    def __init__(self, match_discoveries: dict[int, MatchListDiscovery] | None = None) -> None:
         self.search_calls: list[str] = []
         self.match_calls: list[int] = []
+        self.match_discoveries = match_discoveries
 
     def search_players(self, query, caps):  # type: ignore[no-untyped-def]
         self.search_calls.append(query.raw)
@@ -49,6 +50,10 @@ class FixtureBrowser:
 
     def player_matches(self, player_id, caps):  # type: ignore[no-untyped-def]
         self.match_calls.append(player_id)
+        if self.match_discoveries is not None:
+            if player_id not in self.match_discoveries:
+                raise AssertionError(f"player match history must not be requested: {player_id}")
+            return self.match_discoveries[player_id]
         return MatchListDiscovery((3133811, 3_000_000 + player_id), True, 1, ())
 
 
@@ -78,11 +83,16 @@ class FixtureHttp:
         return PINNED_REPLAY.read_bytes()
 
 
-def _resolver(tmp_path: Path, *, fail_profile: int | None = None):  # type: ignore[no-untyped-def]
+def _resolver(
+    tmp_path: Path,
+    *,
+    fail_profile: int | None = None,
+    match_discoveries: dict[int, MatchListDiscovery] | None = None,
+):  # type: ignore[no-untyped-def]
     settings = ResolverSettings.from_sources({"cache_path": tmp_path / "resolver.sqlite3"}, {})
     cache = ResolverCache(settings.cache_path, clock=FrozenClock())
     cache.__enter__()
-    browser = FixtureBrowser()
+    browser = FixtureBrowser(match_discoveries)
     http = FixtureHttp(fail_profile=fail_profile)
     acquirer = StrataAcquirer(cache, browser, http, settings, FrozenClock())
     return StrataResolver(acquirer, cache, http, FrozenClock()), cache, browser, http
@@ -118,7 +128,10 @@ def test_profile_failure_marks_name_result_incomplete_without_leaking_html(tmp_p
 
 
 def test_pinned_replay_resolves_shared_match_and_both_player_ids(tmp_path: Path) -> None:
-    resolver, cache, browser, http = _resolver(tmp_path)
+    resolver, cache, browser, http = _resolver(
+        tmp_path,
+        match_discoveries={27965: MatchListDiscovery((3133811,), True, 1, ())},
+    )
     try:
         result = resolver.resolve_replay(PINNED_REPLAY, refresh=False, offline=False, include_fuzzy=False)
 
@@ -129,10 +142,31 @@ def test_pinned_replay_resolves_shared_match_and_both_player_ids(tmp_path: Path)
             (1, "FOX27", 102894),
         ]
         assert all(item.confidence in {Confidence.HIGH, Confidence.MEDIUM} for item in result.players)
-        assert browser.match_calls == [27965, 102894]
+        assert result.acquisition_complete is True
+        assert browser.match_calls == [27965]
         assert http.match_calls == [3133811]
         assert len(http.download_calls) == 2
         assert cache.status().audit_rows == 2
+    finally:
+        cache.__exit__(None, None, None)
+
+
+def test_replay_uses_later_complete_slot_when_first_slot_history_is_incomplete(tmp_path: Path) -> None:
+    resolver, cache, browser, _ = _resolver(
+        tmp_path,
+        match_discoveries={
+            27965: MatchListDiscovery((3133811,), False, 1, ("player_match_page_cap",)),
+            102894: MatchListDiscovery((3133811,), True, 1, ()),
+        },
+    )
+    try:
+        result = resolver.resolve_replay(PINNED_REPLAY, refresh=False, offline=False, include_fuzzy=False)
+
+        assert result.match_resolution.status is ResolutionStatus.RESOLVED
+        assert result.match_resolution.selected_match_id == 3133811
+        assert result.acquisition_complete is True
+        assert "player_match_page_cap" not in result.reason_codes
+        assert browser.match_calls == [27965, 102894]
     finally:
         cache.__exit__(None, None, None)
 

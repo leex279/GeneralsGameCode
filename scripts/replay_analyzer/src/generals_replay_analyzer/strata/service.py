@@ -240,8 +240,14 @@ class StrataResolver:
         hinted_resolution = rank_match_evidence(tuple(evidence_by_id.values()))
         if hinted_resolution.status is not ResolutionStatus.RESOLVED:
             matches_by_slot: list[set[int]] = []
+            match_history_reasons: list[str] = []
+            match_ids: set[int] = set()
+            match_universe_complete = False
+            # TheSuperHackers @performance Leex 28/08/2026 Bound shared-match discovery by the first complete replay-slot history union.
             for result in name_results:
                 slot_match_ids: set[int] = set()
+                slot_complete = result.search_complete
+                slot_reasons: list[str] = []
                 for candidate in _candidates(result):
                     discovery = self.acquirer.candidate_matches(
                         candidate.player_id,
@@ -250,10 +256,18 @@ class StrataResolver:
                     )
                     slot_match_ids.update(discovery.match_ids)
                     if not discovery.complete:
-                        acquisition_complete = False
-                        reasons.extend(discovery.reason_codes)
+                        slot_complete = False
+                        slot_reasons.extend(discovery.reason_codes)
                 matches_by_slot.append(slot_match_ids)
-            match_ids = set.intersection(*matches_by_slot) if matches_by_slot else set()
+                if slot_complete:
+                    match_ids = slot_match_ids
+                    match_universe_complete = True
+                    break
+                match_history_reasons.extend(slot_reasons)
+            if not match_universe_complete and matches_by_slot:
+                acquisition_complete = False
+                reasons.extend(match_history_reasons)
+                match_ids = set.intersection(*matches_by_slot)
             for match_id in sorted(match_ids):
                 if match_id in evidence_by_id:
                     continue
